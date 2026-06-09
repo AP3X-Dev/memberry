@@ -1,0 +1,16 @@
+---
+id: hMzfAFmGR8I84jrc4mzSa
+session_id: session-20260609-ag3ntic-morph
+agent_id: mcp
+task: Fix test-teardown hang at process exit in tests/test_shim_transport.py (Stage F T9 mounted stateless StreamableHTTP MCP shim)
+outcome: approved
+created_at: "2026-06-09T07:47:41.703Z"
+---
+
+ROOT CAUSE of the shim_transport test-exit hang: the module-global async engine in apps/api/platform_core/db.py (engine = create_async_engine, line 25) is NEVER disposed by the app lifespan in apps/api/main.py. Under sqlite+aiosqlite, EACH pooled connection runs on a NON-DAEMON worker thread (aiosqlite 0.x Connection.__init__ creates Thread(target=_connection_worker_thread) WITHOUT daemon=True — aiosqlite/core.py:90). That worker only exits when the connection is closed (it parks on tx.get() at aiosqlite/core.py:59 otherwise). The shim tests enter app.router.lifespan_context(app) inside asyncio.run() PER TEST (fresh loop each time); init_db()/bootstrap open a pooled aiosqlite connection on a non-daemon worker bound to that run's loop, and since the engine pool is never disposed on lifespan exit, the worker thread survives the loop. At interpreter shutdown threading._shutdown (threading.py:1624) blocks forever joining that non-daemon thread → process hangs at exit even though all 5 tests print "passed". Diagnostic faulthandler.dump_traceback_later confirmed main thread stuck in _shutdown and worker parked in _connection_worker_thread; NON-DAEMON live thread = 'Thread-2 (_connection_worker_thread)'.
+
+FIX (source-level, in production lifespan): added `from platform_core.db import engine; await engine.dispose()` at the END of the lifespan in apps/api/main.py (after shim_http_client.aclose()). engine.dispose() closes pooled connections → sends _STOP_RUNNING_SENTINEL → joins each aiosqlite worker thread. This is also correct for production graceful shutdown (release DB pool on SIGTERM). NOT a mask: it's where the engine pool resource is owned relative to the lifespan. The shim tests pass unchanged; the 5 assertions + security behavior unchanged.
+
+GENERAL RULE for this codebase: any test harness that enters app.router.lifespan_context across multiple asyncio.run() loops under sqlite+aiosqlite MUST cause engine.dispose() on lifespan exit, or it leaks a non-daemon aiosqlite worker thread and hangs the process at exit. Other tests don't hit this because they use the session-scoped TestClient `client` fixture (one persistent loop, engine disposed at session end) or dispose their own per-test engines.
+
+ALSO folded the 2 untracked adversarial probe tests (test_deny_and_approval_do_not_dispatch_backing, test_inner_recheck_is_authoritative_even_if_precheck_skipped) from tests/test_shim_transport_probe.py INTO tests/test_shim_transport.py (now 7 tests, one T9 file), deleted the untracked probe file. Verified: shim slice COMPLETED-CLEAN 7 passed; full suite COMPLETED-CLEAN 411 passed (404 non-shim + 7 shim) 0 failed; cleanliness_gate.sh M12 = PASS. Amended T9 commit d90c730 -> 3ead4c7 (parent still 8bf1293) on branch morph/opt-hardening.

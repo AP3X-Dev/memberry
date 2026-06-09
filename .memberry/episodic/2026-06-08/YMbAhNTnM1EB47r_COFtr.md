@@ -1,0 +1,17 @@
+---
+id: YMbAhNTnM1EB47r_COFtr
+session_id: session-20260608-ag3ntic-morph
+agent_id: mcp
+task: [project:ag3ntic] P2.1 architectural decision: extend CapabilityManifest model to spec's richer types + build MCP Gateway shim (Option B)
+created_at: "2026-06-08T23:48:53.751Z"
+---
+
+GOLDEN-PATH P2.1 DECISION (this session, branch morph/opt-hardening, HEAD 8230fd1, baseline 290 green).
+
+CONFLICT FOUND: The implemented validator apps/api/platform_core/capabilities/manifest.py is a discriminated union over only FOUR M5-unified types {mcp_stdio, mcp_streamable_http, computer, builtin} (its docstring: "the four M5 unified types — not the seven internal PRP §12.2 backend variants"). But sec-30.1/sec-12.2 assign the 8 seed capabilities types that DO NOT EXIST in the validator: browser→browser_worker, filesystem→mcp_stdio_container, web_research/crm_mock/helpdesk_generic/knowledge_base→internal_api, gmail/google_calendar→hosted_api. register_capability() calls validate_manifest(), so verbatim sec-30.4 manifests FAIL to load. The spec's "MCP Gateway shim" (§12.4.4) that would broker non-MCP backings (internal_api/hosted_api/browser_worker) into the runtime toolset is NOT implemented either — so those types have no execution path.
+
+USER DECISION = Option B (chose over "map onto 4 types" and "catalog-only"): EXTEND manifest.py to add the spec's richer runtime types (internal_api, hosted_api, browser_worker — the 3 the 8 seeds need; memory_service/mcp_custom_container deferrable) WITH their §12.4 runtime sub-models + §12.3 cross-field rules, AND build the MCP Gateway shim execution layer that brokers internal_api(core REST)/hosted_api(SaaS via stored CredentialConnection)/browser_worker(shared pool) calls into the runtime toolset. THEN author the 8 manifests verbatim from sec-30.4 with REST mock services.
+
+CONSTRAINTS: (1) ADD types, never rename/drop existing mcp_stdio/builtin/computer/streamable_http — 290 tests + computer/schema_validate seeds depend on them (CLAUDE.md confirm-before-replace). Keep mcp_stdio == spec's mcp_stdio_container semantically (same thing, M5 name); use mcp_stdio for filesystem. (2) Launcher already routes 4 types (mcp_stdio/computer=container, streamable_http=remote, builtin=in-process) — extend for the 3 new. (3) Golden-path execution priority: internal_api (crm_mock+web_research, zero external deps) FIRST, then hosted_api (gmail, has crm_mock fallback), browser_worker optional.
+
+NEW P2.1 SHAPE (Option B), dependency-ordered + finely decomposed: A) extend manifest.py (+tests); B) MCP Gateway shim for internal_api (then hosted_api, browser_worker); C) first-party REST mocks crm-mock (/crm/v1/* + Acme Roofing seed, sec-30.4.3.1) + web-research (/research/v1/search|fetch_page + SSRF guard, sec-30.4.6); D) author 8 capability YAMLs + YAML-loader refactor of seed.py; E) 3 templates; F) seeders + bootstrap wiring + alembic 0004 (migration head currently 20260608_0003; 0004 then 0005-constraints); G) tests + idempotency. Recon briefs persisted at platform/docs/superpowers/plans/briefs/p2.1-*.md (note: they were SPEC-grounded and assumed the 4-type schema was the obsolete one — re-ground gateway/runtime execution against real code before implementing A+B).

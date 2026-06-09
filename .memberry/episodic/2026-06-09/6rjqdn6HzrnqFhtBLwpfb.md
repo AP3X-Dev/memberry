@@ -1,0 +1,18 @@
+---
+id: 6rjqdn6HzrnqFhtBLwpfb
+session_id: session-20260609-rebrand-handles
+agent_id: default
+task: [project:amp] Complete the AMP -> MemBerry handle/identifier cutover (Parts A-H) on branch rebrand/memberry-handles
+outcome: approved
+created_at: "2026-06-09T08:08:32.645Z"
+---
+
+[project:amp] Finished the AMP->MemBerry handle cutover (the rebrand had deferred handle/identifier renames). Branch rebrand/memberry-handles, committed (not pushed/merged). Renamed everything a human or host invokes: marketplace.json (name amp-memory->memberry, plugin amp->memberry, skills ./skills/amp->./skills/memberry, version 1.0.0->2.0.0 breaking); 5 skill dirs (skills/amp, .claude/skills/{amp,amp-setup,amp-wiki}, .codex/skills/amp) -> memberry/-setup/-wiki with name: frontmatter; packages/research/amp-researcher.md -> memberry-researcher.md; .augment/rules/amp.md -> memberry.md; cross-refs in .cursorrules/GEMINI.md.example/.codex SKILL/memory-ops (/amp remember -> /memberry remember); dropped the dead "amp" CLI bin from packages/core/package.json (kept memberry) + rebranded the cli.ts usage banner; git mv .amp -> .memberry (786 tracked files, no content rewrite) + dual-read default via new defaultExportPath() (./.memberry then ./.amp) in settings.ts, wired into services-factory/bootstrap/cli; dual-read ~/.config/memberry then ~/.config/amp in getSettingsPath.
+
+KEY DECISIONS / GOTCHAS:
+1. Deferred Part H (project folder rename ~/projects/amp -> memberry): cannot guarantee atomicity across machines — the user's Windows workstation git-sync remote and the live ~/.bashrc MEMBERRY_API_TOKEN load are deps I can't touch. Emitted exact commands instead. So projects/amp paths in deploy/systemd units, CLAUDE.md.example, and code test-fixture mock paths are intentionally LEFT.
+2. Quarantined data tokens kept (firewall held): Redis amp: prefix (confirmed 154 live amp:* keys in cerebro-redis @127.0.0.1:6379 incl amp:block/signals/proposals/episodic-buffer/consolidation-queue, 0 memberry:*) — NOT touched; project:amp scope tag; agent_id:'amp-researcher' (persisted on ExperimentNodes); _amp HookGroup marker; wiki anchors; amp:// scheme (URI_PREFIXES=['memberry://','amp://'] canonical-first); NEO4J_PASSWORD ?? 'amp-memory-2026' (live DB credential in test helpers).
+3. Live ops (Part G) done carefully: materialized /etc/memberry/env (was a SYMLINK -> /etc/amp/env) via cp --remove-destination so it survives /etc/amp removal; removed 6 leftover amp-* systemd units + amp-mcp.service.d/readyz.conf drop-in; updated live memberry-mcp MEMBERRY_EXPORT_PATH and memberry-snapshot --path to .memberry; restarted memberry-mcp+memberry-wiki; removed /etc/amp (backup at /tmp/etc-amp-backup). Verified: /healthz+/readyz=ready (readyz needs Bearer token since MEMBERRY_API_TOKEN set), wiki :3200 -> /wiki/_index 200, berry_* tools register.
+4. TEST BASELINE GOTCHA: this shell exports MEMBERRY_API_TOKEN (from ~/.bashrc), which leaks into vitest and makes 3 mcp server.test.ts auth tests fail (expect 200 get 401). Always run tests with `env -u MEMBERRY_API_TOKEN npm test`. Clean green baseline = 1436 passed / 14 skipped, unchanged after the cutover.
+5. The dead "amp" bin pointed at dist/cli.js which crashes under node (ERR_MODULE_NOT_FOUND, the known core<->neo4j circular dep) — services run via npx tsx src, so the bin runtime is a pre-existing limitation; the rename of the bin declaration is the deliverable.
+6. Started from a clean baseline only after the operator chose to commit the prior wiki batch to master first (pre-flight gate forbade me committing it).

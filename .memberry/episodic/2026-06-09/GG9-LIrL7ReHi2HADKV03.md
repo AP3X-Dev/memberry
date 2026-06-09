@@ -1,0 +1,18 @@
+---
+id: GG9-LIrL7ReHi2HADKV03
+session_id: session-20260608-ag3ntic-stagef
+agent_id: default
+task: Stage F Part 2 deploy — config-drift gotchas found deploying to Cerebro ag3ntic stack
+outcome: revised
+created_at: "2026-06-09T08:32:10.781Z"
+---
+
+Deploying Stage F (branch morph/opt-hardening, HEAD 6c73a9a after adding the mcp dep) to the live Cerebro ag3ntic stack surfaced THREE environment/config gaps (none in the Stage F code; all 'readiness illusion' config drift — the live deployment config was never committed):
+
+1. MISSING PROD DEP: shim_transport.py imports `mcp` but it was not in apps/api/requirements.txt (the Docker build's install source) — only in the dev env. A rebuilt api crashes ModuleNotFoundError. Fixed: added `mcp>=1.25,<2` to requirements.txt + pyproject.toml (commit 6c73a9a). LESSON: any new third-party import in apps/api MUST be added to apps/api/requirements.txt (that's what the image installs), not just be present in the dev venv — unit tests pass either way and hide it.
+
+2. DEPLOY MECHANISM: the live ag3ntic stack runs from a NON-GIT source tree at ~/projects/ag3ntic-morph (compose project `ag3ntic`, file infra/docker-compose.yml). api/worker BIND-MOUNT ../apps/api:/app (so host source is served directly; only `mcp`-style image-installed deps need a rebuild). The git-based deploy: git init the live tree with an unborn HEAD (git symbolic-ref HEAD refs/heads/_predeploy) so `git checkout -f morph/opt-hardening` overwrites stale code but does NOT delete server-local untracked files (.env, .bootstrap-credentials.json, .codex-provider/, .tool-capsules/ — all gitignored so they don't even show in status). Add local remote: git remote add cerebro cerebro@192.168.0.25:/home/cerebro/projects/ag3ntic-morph; git push cerebro morph/opt-hardening. Rollback safety: docker tag ag3ntic-{api,worker,web}:latest :pre-stagef BEFORE rebuild; tar the server-local config.
+
+3. COMPOSE PORT COLLISION (broke the deploy): infra/docker-compose.yml interpolates ${AG3NTIC_MINIO_PORT:-9100}/${AG3NTIC_API_PORT:-8000}/${AG3NTIC_WEB_PORT:-3000}, and the server .env sets the right values (MINIO 9110/9111, API 8096, WEB 8095). BUT `docker compose -f infra/docker-compose.yml ...` loads its interpolation .env from the COMPOSE-FILE's directory (infra/), where there is NO .env — so it fell back to the :-9100 defaults, and 9100/9101 are held by the NIMBUS stack's minio (cloud-computer-platform-minio-1). The deploy script's datastores step recreated ag3ntic-minio onto 9100 and failed ('port already allocated'), taking minio down. The `env_file: [../.env]` directives only set CONTAINER env, NOT compose-file ${} interpolation. FIX: invoke compose with `--env-file .env` (from CWD ~/projects/ag3ntic-morph): `docker compose --env-file .env -f infra/docker-compose.yml ...` → resolves 8096/9110/9111/8095. Verified via `docker compose ... config | grep published`. Restored minio with the --env-file invocation.
+
+ALSO BROKEN IN deploy_cerebro_release.py (committed, needs a repo fix): (a) COMPOSE constant lacks --env-file .env (causes the 9100 collision above); (b) health_gate polls http://127.0.0.1:8000 but the api host port is ${AG3NTIC_API_PORT}=8096 (8000 is only the container-internal port) → the health gate would false-FAIL even on a good deploy; (c) DEFAULT_PATH is ~/projects/ag3ntic but the live tree is ~/projects/ag3ntic-morph. Recommend fixing the script to load --env-file and curl the api on its mapped host port (or `docker compose exec api curl localhost:8000`).
