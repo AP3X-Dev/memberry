@@ -1,0 +1,18 @@
+---
+id: 4Vz9_OXHWjxux5hyHpThj
+session_id: session-20260609-103000
+agent_id: default
+task: First-principles 10x rebuild analysis for CIC Assistant (16-agent workflow: 7 subsystem maps, 3 architecture proposals, 6 adversarial critiques)
+outcome: approved
+created_at: "2026-06-09T19:15:12.438Z"
+---
+
+Ran full rebuild-from-first-principles analysis. Convergent verdict across 3 independent architect lenses (latency/accuracy/resilience) + 6 critics:
+
+CORE ARCHITECTURE (unanimous): (1) Single-writer per-call append-only event journal (fsync group-commit) replacing SessionManager RLock + AssistStateStore.locked_update + SOPRegistry 3-lock + root-mirror shims; precedence as one declarative lattice (agent ⊐ LLM≥0.5 ⊐ regex 0.4) in a pure reducer — makes agent-correction protection a property-testable invariant; journal doubles as rescue-from-second-zero, audit log, cost ledger, crash-resume snapshot, and replay/eval fixture. (2) WebSocket push + bidirectional heartbeats replacing 1s/2s polling; staleness as first-class UI state — kills frozen-"Listening…" by construction. (3) Supervisor respawn with NO idle-gating + journal replay = MTTR infinite→~10s (the only true 10x metric per critics). (4) SOP compile-at-launch into SHA-keyed artifacts: pre-rendered markdown (stable prompt-cache keys), closed candidate sets, stable source_path enums (kills hallucinated-citation class), compiled must-book predicates. (5) Event-driven extraction on utterance finals WITH fallback cadence floor (endpointing alone fails on hold music/noise).
+
+HONEST NUMBERS (critic-corrected): speech→form-field only improves ~2-3x (3.5-6.5s → 1.5-3s); bottleneck moves to Deepgram endpointing + LLM decode. TRUE 10x metrics: MTTR ∞→~10s; call-end→interactive form 10-60s→~1s (needs explicit submit gate on form review or accuracy inverts); transport leg 600-1000ms→<50ms; crash data loss full-call→≤250ms; regression detection never→pre-merge CI.
+
+REJECTED BY ADVERSARIAL REVIEW: delta-only LLM outputs (not expressible in strict structured outputs; loses self-healing full re-extraction); per-tick dynamic enums in strict schemas (schema recompile penalty, breaks caching); full Python→Node rewrite (30k LOC + 44k test LOC port, regex dialect drift in must-book code); getUserMedia/desktopCapturer audio (default-device-only loopback, DSP mangling, breaks CIC Harness WASAPI injection — keep WASAPI); 3s heartbeat-kill (false positives under AV/fsync stalls — needs out-of-band probe + grace); speculation on interims (adoption gate vs smart_format finals near-never fires); hard-drop verbatim quote verification (guts recall); "compile free-text must-book customConditions automatically" (they're natural language — human-curated pattern authoring validated by eval corpus); submit racing form review.
+
+PHASING: Phase 0 = instrumentation + golden corpus + replay eval runner against CURRENT system (Stage 2 error taxonomy + agent-edit-rate baseline — nothing accuracy-related is decidable without it). Phase 1 = resilience slice (journal+supervisor+heartbeat+push, ~20% of work, delivers the 10x). Phase 2 = single-writer core inside Python engine. Phase 3 = SOP compiler + closed-set Stage 2 + evidence chains; trade is table-shaped, job_type stays LLM. Phase 4 = flagged experiments (interim painting, speculation). Spec must cover: multi-job event vocabulary, notes/reconstructor/SOP-chat homes, event schema versioning, journal PII retention (DPAPI), submit-gate semantics.

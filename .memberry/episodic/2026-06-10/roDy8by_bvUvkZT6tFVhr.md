@@ -1,0 +1,10 @@
+---
+id: roDy8by_bvUvkZT6tFVhr
+session_id: session-20260609-ag3ntic-s2
+agent_id: default
+task: Sprint S2 — Golden-path ship gate (E2E-GOLD-01)
+outcome: approved
+created_at: "2026-06-10T04:29:11.622Z"
+---
+
+Sprint S2 complete on branch morph/sprint-s2 (worktree wt-s2, cut from dd695c1). E2E-GOLD-01 ships as one Playwright journey (apps/web/e2e/gold.spec.ts) covering the sec-31 22-step golden path; UI-less steps are API-driven with fixme annotations. Determinism strategy: an in-repo OpenAI-compatible stub model server (scripts/e2e/stub_model_server.py) behind the seeded provider base_url exercises the real credential vault + provider transport; runs execute on the inline executor spine; the suite plays the employee through the per-employee MCP shim for tool legs; crm_mock stands in for the spec's mock Gmail (the gmail manifest points at the real Google API). Entry points: scripts/e2e_gold.sh (isolated compose project, remapped ports api 18096/web 18095, project-scoped runtime network override, ephemeral volumes, psql audit assertion, trap teardown — NOT yet executed on a Docker host) and scripts/e2e_gold_local.sh (no-Docker smoke: SQLite uvicorn + next dev + stub; verified GREEN locally end-to-end in 34.7s). Key fixes: /auth/me 500 (User.role doesn't exist — resolve role from workspace_members); decide_approval MissingGreenlet (snapshot ids before best-effort rollback expires instances); §5.4 task edges through approval park/resolution (inherited, completed); compose env_file parameterized AG3NTIC_ENV_FILE (quoted — unquoted ${} in YAML flow seq is a parse error breaking yaml.safe_load tests). Gotchas learned: Next 16 dev blocks /_next/* cross-origin so browse via localhost not 127.0.0.1 or hydration silently fails (forms do native GET submits); on this Windows host, background-task subshell services get reaped mid-run — only single foreground bash calls are reliable for multi-process local stacks. Suite 561 green, gate M12 PASS, ruff clean. Open: compose-gate execution on a Docker host; fixme-tagged UI steps (1, 6, 8/9, 11+, 17, 20-resume, 22).

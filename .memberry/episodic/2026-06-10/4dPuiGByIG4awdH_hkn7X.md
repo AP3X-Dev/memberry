@@ -1,0 +1,10 @@
+---
+id: 4dPuiGByIG4awdH_hkn7X
+session_id: session-20260609-consolidation
+agent_id: default
+task: Consolidate all DealerBot.AI planning docs + codebase state into a single production plan; assess AG3NT suitability
+outcome: approved
+created_at: "2026-06-10T02:44:06.139Z"
+---
+
+Wrote docs/CONSOLIDATED-PRODUCTION-PLAN.md as the single active plan for DealerBot.AI (supersedes ROADMAP/hardening-plan/06-04-spec/BLOCKERS-F for planning; PRODUCTION_READINESS.md + pnpm readiness:roadmap stay live). Method: 49-agent workflow — 12 doc readers, 10 subsystem audits, 24 adversarial claim verifications (12 true / 12 partial / 0 false), synthesis + completeness critique. Plan: M0 security/tenancy (40 handlers trust body.dealerId; portal env-fallback mints platform scope → unauthenticated cross-tenant billing leak) → M1 integrity (withTransaction, workflow-state CAS, RLS last) → M2 stranded scraper branch (34 commits; HEAD reads fields only it writes) + widget-lab→prod bridge + consent-record-at-lead-capture → M3 Cerebro deploy + self-pilot → M4 compliance live verification → M5 scale/polish; Track X owner items. ~10-12 wk; self-pilot at ~7-8 wk. Four criticals in no prior doc: unsalted SHA-256 dealer-admin passwords; no consent record created at lead capture (all shopper SMS silently blocks); worker logger never attaches; inventory persistence fake-BEGIN over pool. Off-course diagnosis: docs lied in both directions after in-place edits; scope silently re-cut post-06-04-lock; unplanned building (portal_records) resolved a product decision by fiat; scraper branch stranded. AG3NT decision: REJECTED for self-pilot (docs/research/ag3nt-suitability-assessment.md) — ACP stdio-only/serial/no-routine-trigger, StateStore-over-MCP is a category error, tenant-naive runtime during tenant-isolation work; build the 3 deliverables natively in TS (~1-1.5 wk) and port AG3NT routines run-policy semantics as the spec.

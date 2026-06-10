@@ -1,0 +1,9 @@
+---
+id: LYXhDtz8RY863aKOunlu6
+session_id: session-20260609-dealerid-sweep
+agent_id: default
+task: Plan M0 body.dealerId tenancy sweep on merged HEAD
+created_at: "2026-06-10T05:37:54.003Z"
+---
+
+M0 dealerId tenancy sweep — design decision (plan: docs/superpowers/plans/2026-06-09-dealerid-tenancy-sweep.md). KEY FINDING that reshapes the doc's framing: the cross-dealer write vector for DEALER-SCOPED keys is ALREADY closed globally — assertApiKeyDealerScope runs in the auth preHandler (server.ts:1343) and 403s a dealer-scoped key naming a different dealer (existing API_KEY_DEALER_SCOPE_VIOLATION test). The real residual hole is narrower: a TENANT-WIDE key (api_keys.dealer_id IS NULL) — assertApiKeyDealerScope early-returns for it, so it can name any dealerId incl. another tenant's. Owner chose strictness = scope-match + tenant-membership lookup. DECISION: centralize the membership check in the SAME preHandler (one await after assertApiKeyDealerScope), gated to tenant-wide keys that supply a dealerId; query `SELECT 1 FROM dealers WHERE tenant_id=$1 AND id=$2` via the in-scope apiAuthExecutor; throw ApiAuthenticationError DEALER_NOT_IN_TENANT (403). This covers all 42 body-reads AND 16 query-reads (readRequestDealerId reads both) AND future routes — instead of the doc's 58 per-handler edits, which would be redundant for the dealer-scoped case. Denominator on merged HEAD bec7aa2: 42 readRequiredBodyString(body.dealerId) (doc said 46/~40), 3 sites already on readOptionalBodyDealerIdForRequest, +16 readRequiredQueryString dealerId reads. Portal: 18 proxy files (not 23); 10 prefer client dealerId over verified session — Phase 2 sweeps them to appointment-proxy.ts's resolveAuthenticatedDealerScope (extracted to shared apps/portal/src/app/api/dealer-scope.ts). dealers table = id uuid PK, tenant_id uuid NOT NULL FK (one-to-one). Plan deferred re documented mechanism per §F.4. NOT yet implemented — awaiting execution-mode choice.

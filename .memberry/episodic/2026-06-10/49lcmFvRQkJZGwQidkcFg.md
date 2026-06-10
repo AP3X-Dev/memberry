@@ -1,0 +1,10 @@
+---
+id: 49lcmFvRQkJZGwQidkcFg
+session_id: session-20260609-dealerid-sweep
+agent_id: default
+task: Implement M0 body.dealerId tenancy sweep (subagent-driven)
+outcome: approved
+created_at: "2026-06-10T06:34:21.942Z"
+---
+
+M0 dealerId tenancy sweep COMPLETE on feature/productionization-self-pilot (kept as-is, unpushed). 5 commits: d5dddf8 feat(api) tenant-membership for tenant-wide keys; cc83db3 refactor(api) dedupe readDbRows + validate ALL query+body dealer sources; b9d9d07 refactor(portal) shared resolveAuthenticatedDealerScope (apps/portal/src/app/api/dealer-scope.ts); 5bd44fb fix(portal) 10 proxies forward verified-session dealer; 89213a9 docs reconcile + plan. Mechanism = CENTRALIZED in auth preHandler (server.ts:~1344) not 58 per-handler edits: assertRequestedDealerBelongsToTenant runs only for tenant-wide keys (credential.dealerId==null), validates every supplied query+body dealerId via SELECT 1 FROM dealers WHERE tenant_id=$1 AND id=$2, throws ApiAuthenticationError DEALER_NOT_IN_TENANT 403 (added to api-auth.ts code union). Dealer-scoped keys still covered by pre-existing assertApiKeyDealerScope. Fail-closed (DB error/empty-shape → deny). Full pnpm verify GREEN 1618 tests/212 files. Two-stage review per task + final adversarial review = READY TO MERGE. Non-blocking fast-follows (tracked in plan doc, all backstopped by the membership check, none are bypasses): (1) scrape-jobs-proxy platform-scope fallback still forwards client dealerId — maybe intentional (platform admins target any in-tenant dealer); (2) readRequestedDealerIds covers query+body only, not x-dealer-id header / :dealerId path param (the 2 handlers using those self-scope by tenant in SQL); (3) platform-scope portal sessions can no longer drive the 10 swept proxies (intended hardening). NEXT M0: T8 sibling kill switches (DEALERBOT_EXPOSE_PLANNED_SQL boot-refusal mirror commit 4842a94 + debug-config token strength), then apiKeyKind least-privilege default (portal-auth.ts:116).

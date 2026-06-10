@@ -1,0 +1,10 @@
+---
+id: 61coLm45G-jhN4KfsgSQc
+session_id: session-20260609-fence-polling
+agent_id: default
+task: Chesterton's-fence audit of HTTP polling transport (polling.js) vs rebuild's WebSocket push proposal
+outcome: approved
+created_at: "2026-06-09T19:44:09.985Z"
+---
+
+Fence analysis of renderer HTTP polling (src/electron/polling.js): polling was inherited from the original app's first commit (16b8d73) and preserved by the rewrite solely because ADR 0001 forbade renderer edits and ADR 0007 found "no gain" in SSE while the poll path already existed. SSE was documented as a deprioritized Medium-impact item (optimization-roadmap.md:61, absent from priority matrix). No WS/SSE attempt ever existed in 364 commits. The repo's own rebuild triage (clean-room/IMPROVEMENTS.md #7 + Rejected list) already rejects keeping polling — premise changed, supersede is correct. MUST PRESERVE under push: (1) pollEpoch stale-repaint suppression (8ce8ffc, May 28 2026 race fix); (2) SOP context = snapshot emitted on ALL state changes, content-hash deduped — NOT coupled to alert versioning (bug 14c6bf5: service-area banner starved); (3) restart transparency — engine restarts mid-shift (token rotation, memory recovery, crash respawn); equality-based dirty-check self-heals where since=seq must explicitly handle seq reset; (4) keep GET endpoints — CIC Harness driver (cic-assistant.js:309-337) and Electron supervisor memory watchdog consume them directly; (5) delivery must continue through drain/awaiting-submit (2b1b429) incl. main.js's 3 extra ad-hoc polls (drain status, late-notes, form-review); (6) backpressure/coalescing (setTimeout chain rationale). Strongest pro-rebuild evidence: frozen-UI-on-backend-death defect — poll swallows unreachable + Electron-local status = no liveness signal; heartbeats + first-class staleness fix the documented root cause.
