@@ -1,0 +1,10 @@
+---
+id: 4XCScbelKHpYwsHEGlkgk
+session_id: session-20260610-ag3ntic-morph
+agent_id: default
+task: [project:ag3ntic] Design-review decisions (deployment posture, D1, basePath, capability deferrals, LinkedIn stance)
+outcome: approved
+created_at: "2026-06-10T19:00:36.663Z"
+---
+
+[project:ag3ntic] Grill-me design review 2026-06-10 resolved every open §4 decision. DEPLOYMENT POSTURE: stay private/LAN single-tenant beta on Cerebro for now; go-public is one deliberate later push — this defers the entire BLOCKERS §1 go-live chain (TLS, HTTPS origins, vault secrets, pre-provisioned operator credential, prod smoke) and §2 host hardening. Cascade: third-party OAuth providers (4.4/4.5) deferred with go-live; Computer/desktop capability (3.2) deferred; Incus/KVM (3.3) skip indefinitely (moot); Slack approval channel (4.2) deferred (console inbox suffices). FIRST-WAVE PRODUCT = compliant cold-outreach employees (lead data via licensed provider APIs like Apollo/ZoomInfo + compliant email via SendGrid/SES), NOT browser-driven LinkedIn automation. IMPORTANT STANCE: automated LinkedIn navigation/messaging via a stealth/evasion browser (the legacy CloakBrowser in runtimes/docker-desktop/Dockerfile) is OUT OF SCOPE and will not be built — it's detection-evasion to defeat LinkedIn's anti-bot controls, breaches LinkedIn ToS §8.2, and is ban-prone. If the Computer capability is built later it uses plain Chromium for legitimate API-less targets only; that Dockerfile is also stale (references deleted packages/sdk-python, agent_runner, cloud_computer SDK) and must be repaired before any build. OTHER DECISIONS: D1 chat eviction = idle timeout ~2h with transparent re-open (LOW build priority); console basePath = root subdomain (zero code change, image path-agnostic); DEK rotation = defer to go-live; seeded console password = owner rotates in console (must rotate before go-live). ONE NEW WORK ITEM: WQ-13 — validate the Hermes session/load cross-process resume live on Cerebro (user chose "validate now"); current fresh-prompt-turn resume works and stays the fallback. Head commit 50dbad8.

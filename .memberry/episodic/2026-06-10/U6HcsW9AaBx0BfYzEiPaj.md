@@ -1,0 +1,10 @@
+---
+id: U6HcsW9AaBx0BfYzEiPaj
+session_id: session-20260610-ag3ntic-tachi-ui
+agent_id: default
+task: Implement the Tachi design handoff (Teams-shaped minimalist chat UI) across the AG3NTIC console
+outcome: approved
+created_at: "2026-06-10T10:24:07.269Z"
+---
+
+Adopted the "Tachi" design system as the AG3NTIC console's visual language (user-supplied claude.ai/design handoff bundle; user iterated heavily on it and wants high fidelity, ESPECIALLY the chat-area layout). Tokens: one sage accent #7cc4a4, three dark surfaces (#0b0b0c/#101012/#161618), three text tiers (#ececec/#9a9a9c/#5a5a5c), hairline borders (white 6%/10%), Inter Tight (display) + DM Sans (body) + JetBrains Mono — no glows, no gradients, flat everything. Implemented at commit dd497a3 on morph/opt-hardening: new flagship /chat route (collapsible per-employee DM sidebar, Ctrl/Cmd+B, Teams-spaced transcript: right-aligned dark user bubbles, sender-grouped employee messages w/ circular avatars, plain centered date dividers, tool calls as collapsible terminal blocks whose title bar is the closed state, inline approval cards, autosize composer with ↑ send), 60px nav-rail shell (replaced sidebar+topbar; sign-out in rail, control-plane/workspace chips moved to Settings), EmployeeChat logic (SSE/sessions/approvals) untouched. Constraints honored: gold-spec e2e selectors preserved (placeholder /Type a message/, button accessible names Send/Approve/Deny/Launch/Overview, .field/.row/.card/.chip/pre.mono); cleanliness gate forbids localStorage in apps/web — sidebar collapse persisted via plain UI cookie instead. Design bundle archived at C:\Users\Guerr\Documents\AG3NTIC\design-tachi-2-0 (outside the git repo). Deferred: design's WEB/FILES right-rail panels (no live browser surface until the Computer capability lands); right rail ships with RUNS only.

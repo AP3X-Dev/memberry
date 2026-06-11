@@ -1,0 +1,10 @@
+---
+id: elR03tUww_oesuh1x8_xj
+session_id: session-20260610-ag3ntic-phase2
+agent_id: default
+task: Design the S15/WQ-17 MCP-over-Docker capability library (Phase 2 Platform track)
+outcome: approved
+created_at: "2026-06-11T00:20:02.761Z"
+---
+
+S15 design approved + committed (platform@7f575d1: docs/superpowers/specs+plans 2026-06-10-mcp-over-docker-capability-library). Key decisions: (D1) sidecars are shared per-(workspace, capability) — matches mcp-<ws_slug>-<slug> naming, credential-grant tenancy, and the computer capability shape; per-employee gating stays at the shim/gateway. (D2) sidecar wire = Streamable HTTP only (type mcp_custom_container); stdio MCP servers run behind a first-party in-image bridge (capability_sdk.bridge); binding type mcp_stdio is rejected fail-closed (capability_transport_unsupported). (D3) sidecars on ag3ntic_capability_<ws> network; api container connects at ensure time; network reaped last-out (WQ-15 class). (D4) manifest stays source of truth — permissions ∩ tool_filter advertised, optional runtime.tool_map (action→MCP tool name), tools/list discovery can only narrow/enrich (persisted to capabilities.discovered_tools), never widen. (D5) per-call MCP session in shim execute_tool; isError→failed ToolCall. (D6) ensure-at-launch + ensure-at-attach, reap last-out, tracked in container_resources kind='mcp'. (D7) packages/capability_sdk (minimal /mcp server framework + stdio bridge) + scripts/scaffold_capability.py. (D8) demo seed notes_mcp (list/get allow, add_note approval_required, delete deny/excluded), image runtimes/mcp-notes pinned via NOTES_MCP_IMAGE_DIGEST env. Key discovery driving the design: manifest union, MCPClient, and launch_capability already existed but had ZERO production callers — orchestrator docstring confirms 'MCP sidecars deferred; hooks present'. S15 wires the hooks rather than inventing new seams. Computer (S14) rides the same sidecar lifecycle generically — its live launch needs no extra code post-S15.

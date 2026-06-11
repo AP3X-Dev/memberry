@@ -1,0 +1,10 @@
+---
+id: EocDF-LvpgXRgCWE72WFM
+session_id: session-20260610-ag3ntic-morph
+agent_id: default
+task: [project:ag3ntic] AUTONOMOUS ROADMAP COMPLETE — S9/S10/S11 + two live-found bugs fixed; only human/external items remain
+outcome: approved
+created_at: "2026-06-10T12:15:00.712Z"
+---
+
+[project:ag3ntic] Overnight run finished 2026-06-10: the entire autonomous work queue is COMPLETE. Final state: suite 846 green, gate M12 PASS, Alembic head 20260610_0401 live, E2E-GOLD-01 ship gate GREEN on Cerebro post-everything. S9 (guardrails: 5× §17.6 auto-cancel + dry-run/owner-override, redaction profiles + AES-GCM held-args for re-issue fidelity, §33 error.meta, per-IP auth throttle), S10 (capability test-task/versions/manifest-registration, Computer 11 actions code-complete, operator streaming/diagnose/handoff), S11 (Qdrant workspace filter + async indexing, support bundle, seccomp/tmpfs/nofile hardening via one shared profile, socket-proxy isolated network, digest-pinned images in infra/images.lock.env). TWO BUGS FOUND LIVE AND CLASS-FIXED: (1) runtime teardown (deleting/deleted) rolled employee.status into terminal `archived` — wipe-relaunch bricked the demo employee's status for a day; mapping removed, verbs own archival, live row repaired, test pinned; (2) S11 async indexing broke read-your-writes memory recall — caught by the gate's teach-then-ask step; QdrantBackend.query now drains the index queue first, test pinned. CAUTION RECORD: a SECOND agent session (Codex) was writing a console UI redesign (NavRail/AppContent/chat page) as uncommitted changes in the main checkout mid-run; its chat page used localStorage which trips the M12 gate; it later reverted/cleaned its own work; coordinator gate checks were routed through clean detached worktrees to stay isolated. Remaining work is ONLY: PLAN.md §4 human decisions (D1 eviction, basePath, DEK rotation deferral, session/load resume) + BLOCKERS.md externals (TLS/prod secrets/operator credential, OAuth app registrations, Computer image, Slack channel, Incus host) + minor non-blocking flagged residue listed in the WQ-10 row.

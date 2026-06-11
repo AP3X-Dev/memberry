@@ -1,0 +1,10 @@
+---
+id: UNtU3CqyT9SiQdA3gEX5z
+session_id: session-20260610-ag3ntic-phase2-wave2
+agent_id: default
+task: Design S16 shared skill library + S17 budget governance (Phase 2 second wave)
+outcome: approved
+created_at: "2026-06-11T02:42:28.583Z"
+---
+
+S16+S17 designs committed (af2f085, 4aae18e) before executor dispatch, per the S15 precedent. S16 key decisions: skills are a first-class catalog (new `skills` table seeded like templates, NOT riding employee_templates); attachment = versioned EmployeeSpec field `skills` via the §11.8 mint path (NO binding table — no per-call enforcement exists for skills); pinned capabilities auto-bind at skill-attach (reusing bind_capability + sidecar hooks), detach never auto-detaches; delivery = server-side prompt preamble on first prompt of a NEW ACP session — NOT an unprobed Hermes config key (the /v1/runs lesson; a timeboxed read-only probe records native options in hermes-contract-findings.md). CRITICAL FINDING: employee instructions/SOUL.md were NEVER delivered to Hermes at all (only config.yaml mcp_servers+model is written into containers) — S16 closes this gap via the same preamble. Skills carry NO permissions (can never loosen a verdict). S17 key decisions: `budgets` + `cost_events` tables (integer cents, round-UP, basis measured|estimated recorded per row); Hermes ACP surfaces NO token usage (usage metering demolished at M1) so employee runs book estimated costs (base + per-tool-call) at finalize_acp_run, operator jobs book measured costs from model_client usage × ModelProvider.config pricing; enforcement = ONE evaluator at run start (403 budget_exceeded) + gateway intercept (force deny after PDP verdict, before standing-grant fast-path, never park) + hard auto-pause through the EXISTING pause path (§17.6 employee_paused sibling caller, no second cancel path); no auto-resume; no budget rows = unlimited (gold gate inert). Executors: worktrees wt-s16/wt-s17, migrations 20260610_0601/_0701 both parented on 0501, coordinator re-parents second at merge. Fenced shared files: models.py, tasks/runs.py (S16 prompt seam / S17 start+finalize seams), Sidebar.tsx.
