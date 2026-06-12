@@ -1,0 +1,10 @@
+---
+id: iq2d9hj-0L2zMnWwOEzqX
+session_id: session-20260611-093000
+agent_id: default
+task: Hardening loop cycle 8: AI-key rotation verify-first — stage runners never see rotated OpenAI keys (OPT-7 → Blocked B-1)
+outcome: approved
+created_at: "2026-06-11T11:58:51.100Z"
+---
+
+Cycle 8 (evidence-only, no commit): mid-shift AI-key rotation chain verified end-to-end. WORKS: Deepgram — 401 → on_auth_error → AiKeyRefresher → settings.update (secrets are in _EDITABLE_FIELDS, applied in-memory, secrets-only changes skip the disk write entirely) → _swap_config rebuilds the websocket factory with an explicit key, and live clients reconnect through _LiveWebsocketFactory which reads the manager's CURRENT factory at dial time. WORKS: drain agents (notes/reconstructor/form-review) — _rebuild_drain_agents passes config.openai_api_key explicitly. BROKEN (Blocked B-1, user decision pending): all pydantic-ai agents — stage runners 1/2/3 + probing filter + SOP analyzer/chat — are Agent("openai:<model>") with no explicit provider; pydantic-ai (1.64.0, empirically probed) binds OPENAI_API_KEY from the process env AT AGENT CONSTRUCTION, and nothing in the engine ever writes os.environ (Electron sets it once at spawn). So after an OpenAI rotation, extraction stays on the dead key for ALL sessions (pipelines are even rebuilt by the swap — but rebuilt Agents re-read the same stale env) until engine restart. The streaming_coordinator comment "the next tick runs with the new key" is wrong for stage runners. Fix options filed: (a) refresher/swap writes os.environ (5 lines, env stays the sanctioned transport, in-flight session stale until end); (b) explicit provider/key from Config into all 6 agent constructors (removes env dependency, swap fully effective). Also: the earlier architecture-audit claim of an "in-memory PUT currently unwired" comment at engine.py:286 is stale — no such comment exists; third stale audit claim corrected by this loop.
