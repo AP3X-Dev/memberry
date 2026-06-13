@@ -1,0 +1,10 @@
+---
+id: 0S6l725TR6Te-uSYFVB2I
+session_id: session-20260612-ag3ntic-wq23
+agent_id: default
+task: WQ-23 task 1: infrastructure data model + Alembic migration
+outcome: approved
+created_at: "2026-06-13T04:59:19.522Z"
+---
+
+Implemented WQ-23 task 1 (infra schema foundation) on branch spec/docker-mcp-catalog-sync, commit e2cca1a. Extended ContainerResource (live table) via additive ALTER: resource_type (server_default 'container'), project_label, image_ref, image_digest, exposed_ports (JSON server_default '{}'), health, owner_proposal_id, owner_execution_id, deleted_at. Added 3 new models/tables in models.py section 10.15.4: InfrastructureResource (resource_type values resource_network|named_volume; partial unique uq_infra_resource_slug on (workspace_id, resource_slug) WHERE deleted_at IS NULL), InfrastructureChangeProposal (section 8 JSON fields; partial unique uq_infra_proposal_executing on (workspace_id, resource_slug) WHERE execution_status='executing' to serialize concurrent executions per section 11; execution_status in pending|executing|completed|failed), InfrastructureCredential (D10 minted secrets: ciphertext/nonce LargeBinary, dek_version, resource_id FK -> infrastructure_resources SET NULL, rotated_from_id; deliberately separate from ModelCredential). Migration 20260612_1101_infrastructure.py chains onto 20260612_1001 (single head). Key judgment calls: owner_proposal_id/owner_execution_id are plain nullable String (NO DB FK) on both container_resources and infrastructure_resources to avoid coupling the live-table ALTER to new-table create order; the only real cross-table FK is infrastructure_credentials.resource_id. JSON server_default convention is sa.text(\"'{}'\"). New id prefixes: ires (INFRA_RESOURCE), icp (INFRA_CHANGE_PROPOSAL), icr (INFRA_CREDENTIAL). Full-chain alembic upgrade is NOT SQLite-replayable (baseline uses create_unique_constraint) so round-trip verification is a deploy-step on real Postgres. 7 new tests green, budgets+infra together 12 green, ruff clean.

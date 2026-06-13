@@ -1,0 +1,11 @@
+---
+id: 6xxNFOiFIjg9Z22YKBVhA
+session_id: session-20260612-ag3ntic-morph
+agent_id: default
+task: Build infrastructure resource registry + ownership resolution (WQ-23 task 5, spec section 13.5) [project:ag3ntic]
+outcome: approved
+created_at: "2026-06-13T06:40:26.607Z"
+---
+
+[project:ag3ntic] Created apps/api/platform_core/infrastructure/registry.py (WQ-23 task 5, spec section 13.5). The registry is the trust anchor for infra ops. API: compute_labels() builds the ag3ntic.* label set SERVER-SIDE (managed=true, workspace_id, resource_id, resource_type, created_at always; project_id/proposal_id/tier/kind only when set) mirroring orchestrator._base_labels; create_infrastructure_resource() (ires prefix) + create_container_resource() (cres prefix) mint id, compute labels server-side, flush -- NO labels= param so callers cannot inject; get_resource() looks in both container_resources + infrastructure_resources (ids are prefix-disjoint); soft_delete() sets deleted_at (preserves row for audit/retention, section 13.2), returns False for unknown/already-deleted; resolve_owned(session, workspace_id, resource_id) is THE TRUST ANCHOR -- selects WHERE id==resource_id AND workspace_id==workspace_id AND deleted_at IS NULL across both tables, returns None for unknown id / cross-tenant / soft-deleted; verify_labels_match(row, observed) cross-check returns True only when observed ag3ntic.resource_id/workspace_id == row.id/workspace_id (never the trust anchor). Tests in tests/test_infra_registry.py (11, all green) including the forgery test: a forged ag3ntic.workspace_id label with NO registry row is not actionable via resolve_owned, and verify_labels_match against a real row from another workspace is False. Test idiom mirrors test_infra_models.py: per-test create_async_engine + async_sessionmaker against the conftest SQLite DB, _seed_workspace helper, asyncio.run. Gate: 11 passed, ruff clean, full infra group 50 passed. Commit 0818fe7 on branch spec/docker-mcp-catalog-sync.</content>
+<parameter name="tags">["project:ag3ntic", "infrastructure", "security", "database", "backend"]

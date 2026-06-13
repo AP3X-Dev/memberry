@@ -1,0 +1,10 @@
+---
+id: IWI6AwjIpq7ftsNrOJOPx
+session_id: session-20260612-120442
+agent_id: default
+task: Add Docker-style MCP Library cards, icons, and detail pages to AG3NTIC
+outcome: approved
+created_at: "2026-06-13T00:22:57.867Z"
+---
+
+Completed approved UI follow-up for Docker MCP Library on branch spec/docker-mcp-catalog-sync. Commit 189218e52d9d6bdc86f273b9e3591c6419fcc473 pushed to cerebro/main and deployed on Cerebro. Changes: MCP Library API now serializes icon_url, tags, image, remote_url, long_lived, and allow_hosts from existing McpLibraryEntry rows; /tools/library now uses compact Docker-style catalog cards with icons, category, name, publisher, short description, tool count, install state, compatibility; added /tools/library/[entryId] detail page with icon header, overview table, install review, available tools table, and create proposal action; simplified main /tools cards so individual action names live on /tools/[slug] detail instead of the card. Visual inspection used Playwright screenshots saved locally under apps/web/.next/mcp-library-list.png and apps/web/.next/mcp-library-detail.png. Local verification: tests/test_mcp_library.py tests/test_mcp_library_sync.py tests/test_mcp_library_live_fetch.py -> 12 passed; selected ruff passed; npm run typecheck passed; npm run build passed with /tools/library/[entryId] route; Playwright e2e/tools-library.spec.ts e2e/tools-custom.spec.ts e2e/tools-detail.spec.ts -> 3 passed. Cerebro deploy: pushed to cerebro main, server checkout clean at 189218e, rebuilt/restarted api and web, health ready. Authenticated live API smoke returned count 328, list icon_url present, detail icon_url present, image field present; temporary smoke key revoked. URL: http://192.168.0.25:8095/tools/library, detail routes like /tools/library/context7 behind auth.
