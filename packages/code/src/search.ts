@@ -41,12 +41,20 @@ export class CodeSearch {
     const limit = options?.limit ?? 20;
     const includeSemantics = options?.include_semantics ?? true;
 
+    // OPT-49: embed the query ONCE and share the vector across the two dense
+    // channels (symbol + semantic), which each used to embed it separately. The
+    // promise is created here (before the fan-out) so the embed still overlaps
+    // fulltext/lexical; both dense channels await this SAME promise instead of
+    // issuing a second embed. Deterministic embed → byte-identical query vector.
+    const queryVectorPromise: Promise<number[] | null> =
+      this.embedding.available === false ? Promise.resolve(null) : this.embedding.embed(query);
+
     // 4-way parallel: fulltext + dense vector + lexical vector + semantic
     const [fulltextResults, vectorResults, lexicalResults, semanticResults] = await Promise.all([
       this.fulltextSearch(options?.expandedTokens?.join(' ') ?? query, limit, options),
-      this.vectorSearch(query, limit, options),
+      this.vectorSearch(query, limit, options, queryVectorPromise),
       this.lexicalVectorSearch(query, limit, options),
-      includeSemantics ? this.semanticVectorSearch(query, limit, options?.as_of) : Promise.resolve([]),
+      includeSemantics ? this.semanticVectorSearch(query, limit, options?.as_of, queryVectorPromise) : Promise.resolve([]),
     ]);
 
     // RRF fusion across all result lists (source_type already set per list)
@@ -192,12 +200,16 @@ export class CodeSearch {
     query: string,
     limit: number,
     options?: { language?: string; file_path?: string; kind?: string },
+    queryVectorPromise?: Promise<number[] | null>,
   ): Promise<CodeSearchResult[]> {
     // No usable embeddings → skip dense vector search; fulltext + deterministic
     // lexical-vector search still run and carry the fused result.
     if (this.embedding.available === false) return [];
     try {
-      const queryEmbedding = await this.embedding.embed(query);
+      // OPT-49: reuse the query vector search() embedded once; fall back to
+      // embedding here for any direct caller that didn't pass one.
+      const queryEmbedding = queryVectorPromise ? await queryVectorPromise : await this.embedding.embed(query);
+      if (!queryEmbedding) return [];
       const candidateLimit = candidateLimitForPostFilters(limit, options);
       const session = this.driver.session();
       try {
@@ -290,10 +302,14 @@ export class CodeSearch {
     query: string,
     limit: number,
     asOf?: string,
+    queryVectorPromise?: Promise<number[] | null>,
   ): Promise<CodeSearchResult[]> {
     if (this.embedding.available === false) return [];
     try {
-      const queryEmbedding = await this.embedding.embed(query);
+      // OPT-49: reuse the query vector search() embedded once (shared with the
+      // symbol dense channel); fall back to embedding for direct callers.
+      const queryEmbedding = queryVectorPromise ? await queryVectorPromise : await this.embedding.embed(query);
+      if (!queryEmbedding) return [];
       const semanticLimit = Math.min(limit, 10);
       const candidateLimit = candidateLimitForTemporalFilter(semanticLimit, Boolean(asOf));
       const session = this.driver.session();
