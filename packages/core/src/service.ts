@@ -85,6 +85,13 @@ export interface FactLayer {
 export interface Neo4jLayer {
   episodic: {
     create(node: EpisodicNode): Promise<string>;
+    /** OPT-53: atomically create the episode + its structural edges (agent /
+     *  entities / model) in one tx. Optional — store() falls back to
+     *  create()+individual linkTo* calls when a layer/mock doesn't implement it. */
+    createWithLinks?(
+      node: EpisodicNode,
+      links: { agentId?: string; entityIds?: string[]; modelId?: string },
+    ): Promise<string>;
     linkToAgent(episodicId: string, agentId: string): Promise<void>;
     linkToEntity(episodicId: string, entityId: string): Promise<void>;
     linkToModel(episodicId: string, modelId: string): Promise<void>;
@@ -526,23 +533,35 @@ export class AMPService {
       ...(scope !== undefined && { scope }),
       ...(tags !== undefined && { tags }),
     };
-    await this.neo4j.episodic.create(node);
-
-    // 4. Link relationships — all independent of one another once the
-    // episodic node exists, so fan them out concurrently. Previously the
-    // entity links ran in a sequential loop (N entities = N serial round-trips).
-    const linkPromises: Promise<unknown>[] = [
-      this.neo4j.episodic.linkToAgent(id, input.agent_id),
-    ];
-    if (input.entities) {
-      for (const entityId of input.entities) {
-        linkPromises.push(this.neo4j.episodic.linkToEntity(id, entityId));
+    // 4. Persist the episode + its structural graph edges (agent / entities /
+    // model). OPT-53: when the layer supports it, do this in ONE atomic tx
+    // (createWithLinks) so a mid-failure can't leave a partially-linked episode
+    // (the previous CREATE-then-fan-out-links path orphaned the episode with
+    // missing edges on a link failure, and the caller's retry minted a fresh
+    // duplicate). Fall back to create()+concurrent links for layers/mocks without
+    // it (behavior preserved). Signals stay a separate step (5) — they carry
+    // Redis side-effects that can't join the Neo4j transaction.
+    if (this.neo4j.episodic.createWithLinks) {
+      await this.neo4j.episodic.createWithLinks(node, {
+        agentId: input.agent_id,
+        ...(input.entities ? { entityIds: input.entities } : {}),
+        ...(input.model_id ? { modelId: input.model_id } : {}),
+      });
+    } else {
+      await this.neo4j.episodic.create(node);
+      const linkPromises: Promise<unknown>[] = [
+        this.neo4j.episodic.linkToAgent(id, input.agent_id),
+      ];
+      if (input.entities) {
+        for (const entityId of input.entities) {
+          linkPromises.push(this.neo4j.episodic.linkToEntity(id, entityId));
+        }
       }
+      if (input.model_id) {
+        linkPromises.push(this.neo4j.episodic.linkToModel(id, input.model_id));
+      }
+      await Promise.all(linkPromises);
     }
-    if (input.model_id) {
-      linkPromises.push(this.neo4j.episodic.linkToModel(id, input.model_id));
-    }
-    await Promise.all(linkPromises);
 
     await this.invalidateContextScopes([scope, ...(tags ?? []), ...(input.entities ?? [])], tenantId);
 

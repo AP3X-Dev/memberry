@@ -6,45 +6,105 @@ import { temporalSetClause } from './temporal-edges.js';
 export class EpisodicStore {
   constructor(private driver: Driver) {}
 
+  /**
+   * Shared CREATE query + params so create() and createWithLinks() (OPT-53) build
+   * the Episodic node IDENTICALLY — single source of truth, no drift.
+   * OPT-44: the conditional embedding SET keeps the property ABSENT when none is
+   * given, so the persisted node matches the previous two-step (CREATE then SET) path.
+   */
+  private buildCreate(node: EpisodicNode): { query: string; params: Record<string, unknown> } {
+    const query = `
+      CREATE (e:Episodic {
+        id: $id,
+        session_id: $session_id,
+        agent_id: $agent_id,
+        task: $task,
+        content: $content,
+        outcome: $outcome,
+        created_at: $created_at,
+        ttl: $ttl,
+        scope: $scope,
+        tags: $tags,
+        tenant_id: $tenant_id
+      })
+      ${node.embedding ? 'SET e.embedding = $embedding' : ''}
+      RETURN e.id AS id`;
+    const params: Record<string, unknown> = {
+      id: node.id,
+      session_id: node.session_id,
+      agent_id: node.agent_id,
+      task: node.task,
+      content: node.content,
+      outcome: node.outcome ?? null,
+      created_at: node.created_at,
+      ttl: node.ttl ?? null,
+      scope: node.scope ?? null,
+      tags: node.tags ?? [],
+      tenant_id: node.tenant_id ?? null,
+      ...(node.embedding ? { embedding: node.embedding } : {}),
+    };
+    return { query, params };
+  }
+
   async create(node: EpisodicNode): Promise<string> {
     const session = this.driver.session();
     try {
-      // OPT-44: inline the embedding SET into the CREATE (one round-trip),
-      // mirroring SemanticStore — was a CREATE followed by a separate MATCH+SET.
-      // The conditional SET keeps the embedding property ABSENT when none is
-      // given, so the persisted node is identical to the previous two-step path.
-      const query = `
-        CREATE (e:Episodic {
-          id: $id,
-          session_id: $session_id,
-          agent_id: $agent_id,
-          task: $task,
-          content: $content,
-          outcome: $outcome,
-          created_at: $created_at,
-          ttl: $ttl,
-          scope: $scope,
-          tags: $tags,
-          tenant_id: $tenant_id
-        })
-        ${node.embedding ? 'SET e.embedding = $embedding' : ''}
-        RETURN e.id AS id`;
-      const result = await session.run(query, {
-        id: node.id,
-        session_id: node.session_id,
-        agent_id: node.agent_id,
-        task: node.task,
-        content: node.content,
-        outcome: node.outcome ?? null,
-        created_at: node.created_at,
-        ttl: node.ttl ?? null,
-        scope: node.scope ?? null,
-        tags: node.tags ?? [],
-        tenant_id: node.tenant_id ?? null,
-        ...(node.embedding ? { embedding: node.embedding } : {}),
-      });
-
+      const { query, params } = this.buildCreate(node);
+      const result = await session.run(query, params);
       return result.records[0].get('id') as string;
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * OPT-53: create the episode AND its structural graph edges (agent / entities /
+   * model) in ONE managed write transaction, so a mid-failure can't leave a
+   * partially-linked episode. The prior path did CREATE then fanned the links out
+   * as SEPARATE un-transacted round-trips: a link failure orphaned the episode
+   * with missing edges, and the caller's retry minted a fresh duplicate. Each
+   * statement reuses the exact same Cypher as create()/linkTo* (so the resulting
+   * graph is identical); the links are best-effort MATCH→MERGE (a missing
+   * Agent/Entity/Model target is skipped, exactly as the per-edge methods do).
+   * Signal links and their Redis side-effects stay OUT of this tx (Redis can't
+   * share a Neo4j transaction) and remain a separate post-commit step.
+   */
+  async createWithLinks(
+    node: EpisodicNode,
+    links: { agentId?: string; entityIds?: string[]; modelId?: string },
+  ): Promise<string> {
+    const session = this.driver.session();
+    try {
+      return await session.executeWrite(async (tx) => {
+        const { query, params } = this.buildCreate(node);
+        await tx.run(query, params);
+
+        if (links.agentId) {
+          await tx.run(
+            `MATCH (e:Episodic {id: $episodicId}), (a:Agent {id: $agentId})
+             MERGE (e)-[:GENERATED_BY]->(a)`,
+            { episodicId: node.id, agentId: links.agentId },
+          );
+        }
+        if (links.entityIds && links.entityIds.length > 0) {
+          await tx.run(
+            `MATCH (e:Episodic {id: $episodicId})
+             UNWIND $entityIds AS entityId
+             MATCH (ent:Entity {id: entityId})
+             MERGE (e)-[r:REFERENCES]->(ent)
+             ${temporalSetClause('r')}`,
+            { episodicId: node.id, entityIds: links.entityIds, now: new Date().toISOString() },
+          );
+        }
+        if (links.modelId) {
+          await tx.run(
+            `MATCH (e:Episodic {id: $episodicId}), (m:Model {id: $modelId})
+             MERGE (e)-[:USED_MODEL]->(m)`,
+            { episodicId: node.id, modelId: links.modelId },
+          );
+        }
+        return node.id;
+      });
     } finally {
       await session.close();
     }

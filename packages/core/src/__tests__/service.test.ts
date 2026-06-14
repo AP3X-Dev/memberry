@@ -444,6 +444,47 @@ describe('AMPService.store', () => {
   });
 });
 
+// ─── OPT-53: atomic episode persistence (create + structural edges in one tx) ──
+describe('AMPService.store — atomic episode persistence (OPT-53)', () => {
+  it('prefers episodic.createWithLinks (atomic) and skips the separate linkTo* calls', async () => {
+    const createWithLinks = vi.fn().mockResolvedValue('ep-atomic');
+    const neo4j = makeNeo4j();
+    (neo4j.episodic as Record<string, unknown>).createWithLinks = createWithLinks;
+    const service = new AMPService(makeRedis(), neo4j, makeEmbedding(), makeConfig());
+
+    await service.store({
+      session_id: 's', agent_id: 'agent-1', task: 't', content: 'c',
+      entities: ['ent-1', 'ent-2'], model_id: 'model-9',
+    });
+
+    // One atomic call with the node + all structural links.
+    expect(createWithLinks).toHaveBeenCalledTimes(1);
+    const [node, links] = createWithLinks.mock.calls[0];
+    expect((node as { agent_id: string }).agent_id).toBe('agent-1');
+    expect(links).toEqual({ agentId: 'agent-1', entityIds: ['ent-1', 'ent-2'], modelId: 'model-9' });
+    // The non-atomic path must NOT run when the atomic one is available.
+    expect(neo4j.episodic.create).not.toHaveBeenCalled();
+    expect(neo4j.episodic.linkToAgent).not.toHaveBeenCalled();
+    expect(neo4j.episodic.linkToEntity).not.toHaveBeenCalled();
+    expect(neo4j.episodic.linkToModel).not.toHaveBeenCalled();
+  });
+
+  it('falls back to create()+individual links when createWithLinks is absent (back-compat)', async () => {
+    const neo4j = makeNeo4j(); // default mock has no createWithLinks
+    const service = new AMPService(makeRedis(), neo4j, makeEmbedding(), makeConfig());
+
+    await service.store({
+      session_id: 's', agent_id: 'agent-1', task: 't', content: 'c',
+      entities: ['ent-1'], model_id: 'model-9',
+    });
+
+    expect(neo4j.episodic.create).toHaveBeenCalledTimes(1);
+    expect(neo4j.episodic.linkToAgent).toHaveBeenCalledWith(expect.any(String), 'agent-1');
+    expect(neo4j.episodic.linkToEntity).toHaveBeenCalledWith(expect.any(String), 'ent-1');
+    expect(neo4j.episodic.linkToModel).toHaveBeenCalledWith(expect.any(String), 'model-9');
+  });
+});
+
 // ─── OPT-19: dedup key rollback on persistence failure ──────────────────────
 // The dedup key is MARKED (checkAndMark, SET NX) before persistence. If
 // persistence then throws, the key must be RELEASED (unmark) before the error

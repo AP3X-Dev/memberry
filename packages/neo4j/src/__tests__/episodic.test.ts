@@ -283,6 +283,55 @@ describe('EpisodicStore', () => {
     }
   });
 
+  it('OPT-53: createWithLinks persists the episode AND all structural edges in one tx', async () => {
+    if (!neo4jAvailable) return;
+    const OPT53_ID = 'test-episodic-opt53';
+    const node: EpisodicNode = {
+      id: OPT53_ID,
+      session_id: 'sess-opt53',
+      agent_id: TEST_AGENT_ID,
+      task: 'atomic create',
+      content: 'created with links in one transaction',
+      created_at: new Date().toISOString(),
+    };
+
+    const returnedId = await store.createWithLinks(node, {
+      agentId: TEST_AGENT_ID,
+      entityIds: [TEST_ENTITY_ID],
+      modelId: TEST_MODEL_ID,
+    });
+    expect(returnedId).toBe(OPT53_ID);
+
+    const session = driver.session();
+    try {
+      // The node and all three structural edges must exist after the single call.
+      const result = await session.run(
+        `MATCH (e:Episodic {id: $id})
+         OPTIONAL MATCH (e)-[ga:GENERATED_BY]->(:Agent {id: $agentId})
+         OPTIONAL MATCH (e)-[rf:REFERENCES]->(:Entity {id: $entityId})
+         OPTIONAL MATCH (e)-[um:USED_MODEL]->(:Model {id: $modelId})
+         RETURN e.task AS task, count(DISTINCT ga) AS ga, count(DISTINCT rf) AS rf, count(DISTINCT um) AS um`,
+        { id: OPT53_ID, agentId: TEST_AGENT_ID, entityId: TEST_ENTITY_ID, modelId: TEST_MODEL_ID },
+      );
+      const rec = result.records[0];
+      expect(rec.get('task')).toBe('atomic create');
+      const toNum = (v: { low?: number } | number) => (typeof v === 'number' ? v : v.low ?? 0);
+      expect(toNum(rec.get('ga'))).toBe(1);
+      expect(toNum(rec.get('rf'))).toBe(1);
+      expect(toNum(rec.get('um'))).toBe(1);
+    } finally {
+      await session.close();
+    }
+
+    // Clean up this test's dedicated node (afterAll only removes TEST_EPISODIC_ID).
+    const cleanup = driver.session();
+    try {
+      await cleanup.run(`MATCH (e:Episodic {id: $id}) DETACH DELETE e`, { id: OPT53_ID });
+    } finally {
+      await cleanup.close();
+    }
+  });
+
   it('should link a reinforcement signal via REINFORCES', async () => {
     if (!neo4jAvailable) return;
 
