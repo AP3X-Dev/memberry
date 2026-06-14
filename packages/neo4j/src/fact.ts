@@ -487,6 +487,27 @@ export class FactStore {
   }
 
   /**
+   * OPT-42: apply many confidence updates in ONE round-trip (UNWIND SET),
+   * instead of one updateConfidence query per fact. End-state is identical to
+   * calling updateConfidence for each {id, confidence} (same SET of confidence +
+   * updated_at); all rows just share one updated_at timestamp. No-op on empty.
+   */
+  async updateConfidenceBatch(updates: Array<{ id: string; confidence: number }>): Promise<void> {
+    if (updates.length === 0) return;
+    const session = this.driver.session();
+    try {
+      await session.run(
+        `UNWIND $updates AS u
+         MATCH (f:Fact {id: u.id})
+         SET f.confidence = u.confidence, f.updated_at = $now`,
+        { updates, now: new Date().toISOString() },
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
    * Promote a tentative/abductive fact that explicit evidence has now corroborated:
    * mark it active + deductive and raise its confidence. Used when a real episode
    * yields the same subject/predicate/object a dream hypothesis had guessed.

@@ -287,6 +287,30 @@ describe('FactStore', () => {
     expect(await store.getActiveBatch([])).toEqual([]);
   });
 
+  // ─── updateConfidenceBatch (OPT-42) ──────────────────────────────────────────
+
+  it('updateConfidenceBatch sets all confidences in one call', async () => {
+    if (!neo4jAvailable) return;
+    const a = makeFactNode('ucb-a', { confidence: 0.8 });
+    const b = makeFactNode('ucb-b', { confidence: 0.6 });
+    await store.create(a);
+    await store.create(b);
+    createdIds.push(a.id, b.id);
+
+    await store.updateConfidenceBatch([
+      { id: a.id, confidence: 0.45 },
+      { id: b.id, confidence: 0.2 },
+    ]);
+
+    expect((await store.getById(a.id))!.confidence).toBe(0.45);
+    expect((await store.getById(b.id))!.confidence).toBe(0.2);
+  });
+
+  it('updateConfidenceBatch is a no-op on empty input', async () => {
+    if (!neo4jAvailable) return;
+    await expect(store.updateConfidenceBatch([])).resolves.toBeUndefined();
+  });
+
   // ─── invalidate ────────────────────────────────────────────────────────────
 
   it('should invalidate a fact and set invalid_at', async () => {

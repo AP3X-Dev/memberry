@@ -73,6 +73,9 @@ export interface FactLayer {
   linkCoExtracted?(factId1: string, factId2: string, episodeId: string): Promise<void>;
   /** Update confidence score of a fact (optional — used by staleness detection) */
   updateConfidence?(id: string, confidence: number): Promise<void>;
+  /** OPT-42: batch confidence updates in one round-trip (optional — staleness
+   *  decay falls back to per-fact updateConfidence when absent). */
+  updateConfidenceBatch?(updates: Array<{ id: string; confidence: number }>): Promise<void>;
   /** Promote a corroborated tentative/abductive fact to active+deductive (optional) */
   corroborate?(id: string, confidence: number): Promise<void>;
 }
@@ -741,6 +744,10 @@ export class AMPService {
         // Feature 3: Staleness detection for unmentioned facts
         if (factLayer.updateConfidence && factInputs.length > 0) {
           const mentionedEntities = new Set(factInputs.map(f => f.subject));
+          // OPT-42: accumulate every stale-fact decay across all entities, then
+          // write them in ONE batched UNWIND SET (was one updateConfidence write
+          // per stale fact = N+1). Same per-fact decay formula → same end-state.
+          const staleUpdates: Array<{ id: string; confidence: number }> = [];
           for (const entityName of mentionedEntities) {
             const factsAboutEntity = factInputs.filter(f => f.subject === entityName);
             // Only apply staleness decay when the episode had thorough coverage
@@ -759,9 +766,17 @@ export class AMPService {
               // Facts with predicates NOT mentioned in this episode — potential staleness
               if (!mentionedPredicates.has(normalizedPred) && fact.confidence > 0.1) {
                 const newConfidence = Math.max(0.1, fact.confidence * 0.9); // 10% decay
-                await factLayer.updateConfidence!(fact.id, newConfidence);
+                staleUpdates.push({ id: fact.id, confidence: newConfidence });
                 changedFactScopes.add(entityName);
               }
+            }
+          }
+
+          if (staleUpdates.length > 0) {
+            if (factLayer.updateConfidenceBatch) {
+              await factLayer.updateConfidenceBatch(staleUpdates);
+            } else {
+              for (const u of staleUpdates) await factLayer.updateConfidence!(u.id, u.confidence);
             }
           }
         }

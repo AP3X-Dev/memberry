@@ -880,6 +880,49 @@ describe('AMPService.store — real-time fact extraction', () => {
     expect(factLayer.create).not.toHaveBeenCalled(); // reinforcing → no new fact
   });
 
+  // OPT-42: staleness decay writes are batched into ONE updateConfidenceBatch call.
+  it('OPT-42: batches staleness decay into one updateConfidenceBatch call', async () => {
+    const factLayer = makeFactLayer();
+    const updateConfidenceBatch = vi.fn().mockResolvedValue(undefined);
+    (factLayer as FactLayer).updateConfidenceBatch = updateConfidenceBatch;
+    // Active facts for the entity: 'uses' IS mentioned by the episode (not stale);
+    // 'deprecated_by' is NOT mentioned → decays 0.5 → 0.45.
+    (factLayer.getActive as ReturnType<typeof vi.fn>).mockResolvedValue([
+      makeFactNode({ id: 'mentioned', predicate: 'uses', confidence: 0.8 }),
+      makeFactNode({ id: 'stale', predicate: 'deprecated_by', confidence: 0.5 }),
+    ]);
+    // ≥2 facts about the entity → the staleness pass triggers.
+    mockExtractFacts.mockResolvedValue([
+      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+      { subject: 'auth-module', predicate: 'runs_on', object: 'node', source_episode_ids: [] },
+    ]);
+
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    await service.store({ session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT and runs on node' });
+    await flushAsync();
+
+    expect(updateConfidenceBatch).toHaveBeenCalledTimes(1);
+    expect(updateConfidenceBatch).toHaveBeenCalledWith([{ id: 'stale', confidence: 0.45 }]);
+    expect(factLayer.updateConfidence).not.toHaveBeenCalled(); // batch preferred over per-fact
+  });
+
+  it('OPT-42: falls back to per-fact updateConfidence when no batch method', async () => {
+    const factLayer = makeFactLayer(); // has updateConfidence, NOT updateConfidenceBatch
+    (factLayer.getActive as ReturnType<typeof vi.fn>).mockResolvedValue([
+      makeFactNode({ id: 'stale', predicate: 'deprecated_by', confidence: 0.5 }),
+    ]);
+    mockExtractFacts.mockResolvedValue([
+      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+      { subject: 'auth-module', predicate: 'runs_on', object: 'node', source_episode_ids: [] },
+    ]);
+
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    await service.store({ session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT and runs on node' });
+    await flushAsync();
+
+    expect(factLayer.updateConfidence).toHaveBeenCalledWith('stale', 0.45);
+  });
+
   it('does NOT promote an INDUCTIVE (consolidation) fact on reinforcement — provenance stays inductive', async () => {
     const existing = makeFactNode({ id: 'fact-ind', object: 'JWT', status: 'tentative', inference_type: 'inductive', confidence: 0.5 });
     const factLayer = makeFactLayer();
