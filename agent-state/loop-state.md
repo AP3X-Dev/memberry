@@ -117,7 +117,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 | ID | Task | Cycle | Commit | Result |
 |----|------|-------|--------|--------|
-| OPT-01 | Gate ranked code channel on default tenant (close cross-tenant code leak) | 1 | `5223f3c` | gate green 1463 passed / 0 failed; security-reviewer PASS |
+| OPT-01 | Gate ranked code channel on default tenant (close cross-tenant code leak) | 1 | `11d703c` | gate green 1463 passed / 0 failed; security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -154,7 +154,7 @@ Start cycle 2 at **OPT-02** (HIGH — multi-tenant SSE/Streamable sessions not b
 ## Session History
 
 ### Cycle 1 — 2026-06-13
-- Commit: `5223f3c` OPT-01: gate ranked code channel on default tenant (close cross-tenant code leak)
+- Commit: `11d703c` OPT-01: gate ranked code channel on default tenant (close cross-tenant code leak)
 - Item: OPT-01 — COMPLETED
 - Mode B: 1 discovery (DeterministicAssembler entity queries not tenant-filtered — defense-in-depth, not a live leak) → added as OPT-67
 - Verifier: PASS (1463 passed, 0 failed, build exit 0; retrieval 138) | Security-reviewer: PASS (single chokepoint; satellite code tools withheld from tenant sessions; no new hazard)
