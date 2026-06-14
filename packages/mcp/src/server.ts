@@ -30,6 +30,14 @@ export interface SSEHandle {
   streamableTransports: Map<string, StreamableHTTPServerTransport>;
   /** Per-session Streamable HTTP MCP servers keyed by MCP session ID. */
   streamableServers: Map<string, McpServer>;
+  /**
+   * Identity (tenant + actor) bound to each session at creation time, keyed by
+   * the SAME session ID used in the transport maps (both SSE and Streamable).
+   * Follow-up requests must re-present a token resolving to this identity, or
+   * they are rejected — this prevents one valid token from driving another
+   * tenant's session.
+   */
+  sessionIdentity: Map<string, { tenant: string; actor: string }>;
 }
 
 export interface AMPMCPServer {
@@ -70,6 +78,7 @@ export async function closeSSEHandle(
   handle.servers.clear();
   handle.streamableTransports.clear();
   handle.streamableServers.clear();
+  handle.sessionIdentity.clear();
 
   if (!handle.httpServer.listening) return;
 
@@ -183,6 +192,9 @@ export function createAMPServer(): AMPMCPServer {
     const servers = new Map<string, McpServer>();
     const streamableTransports = new Map<string, StreamableHTTPServerTransport>();
     const streamableServers = new Map<string, McpServer>();
+    // sessionId → identity bound at creation time. Follow-up requests on an
+    // existing session must re-present a token resolving to this same identity.
+    const sessionIdentity = new Map<string, { tenant: string; actor: string }>();
 
     // ── Security helpers ───────────────────────────────────────────────────
     const ALLOWED_ORIGINS = new Set([
@@ -311,6 +323,22 @@ export function createAMPServer(): AMPMCPServer {
         `[memberry] multi-tenant mode ON (${tokenToTenant.size} tenant token(s)) — ` +
         `tenant sessions get the default-deny core tool set (${'berry_load, berry_store, berry_tools'}).`,
       );
+    }
+
+    /**
+     * For a follow-up request resolving an existing session, verify the token
+     * presented now resolves to the SAME identity bound when the session was
+     * created. Returns true if the request may proceed (no bound identity yet,
+     * or identity matches). Returns false on a tenant/actor mismatch — the
+     * caller must reject with 403 and NOT forward to the transport. This blocks
+     * one valid token from driving another tenant's session via session id.
+     */
+    function sessionIdentityMatches(sessionId: string, req: IncomingMessage): boolean {
+      const bound = sessionIdentity.get(sessionId);
+      if (!bound) return true; // no recorded identity → nothing to enforce
+      const tenant = tenantFor(req);
+      const actor = actorFor(req) ?? 'mcp';
+      return bound.tenant === tenant && bound.actor === actor;
     }
 
     /** Require a matching Bearer token (any configured actor) unless auth is off. */
@@ -463,8 +491,10 @@ export function createAMPServer(): AMPMCPServer {
                 return;
               }
 
+              const tenant = tenantFor(req);
+              const actor = actorFor(req) ?? 'mcp';
               const perSessionServer = new McpServer({ name: 'memberry-mcp', version: '0.1.0' });
-              registerAllTools(perSessionServer, { tenantId: tenantFor(req), actor: actorFor(req) ?? 'mcp', multiTenant: multiTenantMode });
+              registerAllTools(perSessionServer, { tenantId: tenant, actor, multiTenant: multiTenantMode });
 
               let nextTransport: StreamableHTTPServerTransport | undefined;
               nextTransport = new StreamableHTTPServerTransport({
@@ -474,6 +504,9 @@ export function createAMPServer(): AMPMCPServer {
                   if (!nextTransport) return;
                   streamableTransports.set(newSessionId, nextTransport);
                   streamableServers.set(newSessionId, perSessionServer);
+                  // Bind the creating identity to the freshly minted session id so
+                  // follow-up /mcp requests must re-present a matching token.
+                  sessionIdentity.set(newSessionId, { tenant, actor });
                 },
               });
 
@@ -482,10 +515,17 @@ export function createAMPServer(): AMPMCPServer {
                 if (!sid) return;
                 streamableTransports.delete(sid);
                 streamableServers.delete(sid);
+                sessionIdentity.delete(sid);
               };
 
               await perSessionServer.connect(nextTransport);
               streamableTransport = nextTransport;
+            } else if (sessionId && !sessionIdentityMatches(sessionId, req)) {
+              // Existing session resolved by id: the presented token must map to
+              // the identity that created it, otherwise this is a cross-tenant
+              // hijack attempt. Reject before forwarding to the transport.
+              sendMcpJsonError(res, 403, 'Forbidden: session/token mismatch');
+              return;
             }
 
             await streamableTransport.handleRequest(req, res, parsedBody);
@@ -494,16 +534,22 @@ export function createAMPServer(): AMPMCPServer {
 
           if (req.method === 'GET' && pathname === '/sse') {
             // Create a fresh McpServer per connection (SDK limitation: one transport per server)
+            const tenant = tenantFor(req);
+            const actor = actorFor(req) ?? 'mcp';
             const perSessionServer = new McpServer({ name: 'memberry-mcp', version: '0.1.0' });
-            registerAllTools(perSessionServer, { tenantId: tenantFor(req), actor: actorFor(req) ?? 'mcp', multiTenant: multiTenantMode });
+            registerAllTools(perSessionServer, { tenantId: tenant, actor, multiTenant: multiTenantMode });
 
             const transport = new SSEServerTransport('/messages', res);
             transports.set(transport.sessionId, transport);
             servers.set(transport.sessionId, perSessionServer);
+            // Bind the creating identity so follow-up /messages requests must
+            // re-present a token resolving to this same tenant/actor.
+            sessionIdentity.set(transport.sessionId, { tenant, actor });
 
             transport.onclose = () => {
               transports.delete(transport.sessionId);
               servers.delete(transport.sessionId);
+              sessionIdentity.delete(transport.sessionId);
             };
 
             await perSessionServer.connect(transport);
@@ -515,9 +561,18 @@ export function createAMPServer(): AMPMCPServer {
             const sessionId = requestUrl.searchParams.get('sessionId');
             const transport = sessionId ? transports.get(sessionId) : undefined;
 
-            if (!transport) {
+            if (!sessionId || !transport) {
               res.writeHead(404);
               res.end('Session not found');
+              return;
+            }
+
+            // The presented token must resolve to the identity that created this
+            // SSE session; otherwise reject before forwarding to the transport so
+            // a valid token cannot drive another tenant's session.
+            if (!sessionIdentityMatches(sessionId, req)) {
+              res.writeHead(403);
+              res.end('Forbidden: session/token mismatch');
               return;
             }
 
@@ -544,7 +599,7 @@ export function createAMPServer(): AMPMCPServer {
 
     console.error(`[memberry-mcp] SSE server listening on http://localhost:${port}/sse`);
 
-    return { httpServer, transports, servers, streamableTransports, streamableServers };
+    return { httpServer, transports, servers, streamableTransports, streamableServers, sessionIdentity };
   }
 
   // ─── Stdio transport ──────────────────────────────────────────────────────

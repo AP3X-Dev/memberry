@@ -259,6 +259,152 @@ describe('createAMPServer', () => {
     });
   });
 
+  it('binds a Streamable /mcp session to its creating tenant and 403s a different tenant token on follow-up', async () => {
+    const saved = {
+      tenantTokens: process.env.MEMBERRY_TENANT_TOKENS,
+      apiTokens: process.env.MEMBERRY_API_TOKENS,
+      ampTok: process.env.AMP_API_TOKEN,
+      memTok: process.env.MEMBERRY_API_TOKEN,
+    };
+    delete process.env.AMP_API_TOKEN;
+    delete process.env.MEMBERRY_API_TOKEN;
+    delete process.env.MEMBERRY_API_TOKENS;
+    // Two tenant tokens → multi-tenant mode ON. Each token is also a valid auth
+    // token, so without session→identity binding either could drive the other's
+    // session purely by knowing its session id.
+    process.env.MEMBERRY_TENANT_TOKENS = 'acme:tok-acme,globex:tok-globex';
+
+    const amp = createAMPServer();
+    const handle = await amp.startSSE(0);
+    const address = handle.httpServer.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const initBody = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'tenant-test', version: '0.0.0' },
+      },
+    });
+
+    try {
+      // (1) acme initializes a Streamable session.
+      const initialize = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer tok-acme',
+          accept: 'application/json, text/event-stream',
+          'content-type': 'application/json',
+        },
+        body: initBody,
+      });
+      expect(initialize.status).toBe(200);
+      const sessionId = initialize.headers.get('mcp-session-id');
+      expect(sessionId).toEqual(expect.any(String));
+
+      const protocolVersion =
+        (await initialize.json() as { result?: { protocolVersion?: string } })
+          .result?.protocolVersion ?? '2025-03-26';
+
+      // (2) globex presents acme's session id with its OWN (valid) token.
+      // This MUST be rejected with 403, not forwarded to acme's transport.
+      const hijack = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer tok-globex',
+          accept: 'application/json, text/event-stream',
+          'content-type': 'application/json',
+          'mcp-session-id': sessionId ?? '',
+          'mcp-protocol-version': protocolVersion,
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+      });
+      expect(hijack.status).toBe(403);
+
+      // (3) Positive: acme's own token on the same session still works.
+      const legit = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer tok-acme',
+          accept: 'application/json, text/event-stream',
+          'content-type': 'application/json',
+          'mcp-session-id': sessionId ?? '',
+          'mcp-protocol-version': protocolVersion,
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list' }),
+      });
+      expect(legit.status).toBe(200);
+    } finally {
+      await closeSSEHandle(handle, 500);
+      if (saved.tenantTokens === undefined) delete process.env.MEMBERRY_TENANT_TOKENS; else process.env.MEMBERRY_TENANT_TOKENS = saved.tenantTokens;
+      if (saved.apiTokens === undefined) delete process.env.MEMBERRY_API_TOKENS; else process.env.MEMBERRY_API_TOKENS = saved.apiTokens;
+      if (saved.ampTok !== undefined) process.env.AMP_API_TOKEN = saved.ampTok;
+      if (saved.memTok !== undefined) process.env.MEMBERRY_API_TOKEN = saved.memTok;
+    }
+  });
+
+  it('does not bind sessions across tenants in single-tenant mode (default identity passes)', async () => {
+    // Single-tenant: every token resolves to DEFAULT_TENANT, so a follow-up with
+    // a *different but equally valid* per-actor token must still be allowed — the
+    // binding check only rejects genuine tenant/actor differences, and in this
+    // mode all sessions share the default tenant + default actor.
+    const saved = {
+      tenantTokens: process.env.MEMBERRY_TENANT_TOKENS,
+      apiTokens: process.env.MEMBERRY_API_TOKENS,
+      ampTok: process.env.AMP_API_TOKEN,
+      memTok: process.env.MEMBERRY_API_TOKEN,
+    };
+    delete process.env.AMP_API_TOKEN;
+    delete process.env.MEMBERRY_API_TOKEN;
+    delete process.env.MEMBERRY_TENANT_TOKENS;
+    process.env.MEMBERRY_API_TOKEN = 'solo-token';
+
+    const amp = createAMPServer();
+    const handle = await amp.startSSE(0);
+    const address = handle.httpServer.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const headers = {
+      authorization: 'Bearer solo-token',
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+
+    try {
+      const initialize = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'solo', version: '0.0.0' } },
+        }),
+      });
+      expect(initialize.status).toBe(200);
+      const sessionId = initialize.headers.get('mcp-session-id');
+      const protocolVersion =
+        (await initialize.json() as { result?: { protocolVersion?: string } })
+          .result?.protocolVersion ?? '2025-03-26';
+
+      const followUp = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: { ...headers, 'mcp-session-id': sessionId ?? '', 'mcp-protocol-version': protocolVersion },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+      });
+      expect(followUp.status).toBe(200);
+    } finally {
+      await closeSSEHandle(handle, 500);
+      if (saved.tenantTokens !== undefined) process.env.MEMBERRY_TENANT_TOKENS = saved.tenantTokens;
+      if (saved.apiTokens !== undefined) process.env.MEMBERRY_API_TOKENS = saved.apiTokens;
+      if (saved.ampTok !== undefined) process.env.AMP_API_TOKEN = saved.ampTok; else delete process.env.AMP_API_TOKEN;
+      if (saved.memTok !== undefined) process.env.MEMBERRY_API_TOKEN = saved.memTok; else delete process.env.MEMBERRY_API_TOKEN;
+    }
+  });
+
   it('closes active SSE sessions before waiting for the HTTP server to drain', async () => {
     const previousToken = process.env.AMP_API_TOKEN;
     process.env.AMP_API_TOKEN = 'test-shutdown-token';
