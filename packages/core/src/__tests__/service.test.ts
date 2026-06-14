@@ -1086,8 +1086,12 @@ describe('AMPService.store — real-time fact extraction', () => {
     expect(created.supersedes_fact_id).toBeNull();
   });
 
-  it('auto-invalidates conflicting fact and creates replacement with supersedes_fact_id', async () => {
-    const existingFact = makeFactNode({ id: 'fact-old', object: 'session-cookies' });
+  it('OPT-70b: a first-sight conflicting extraction creates a TENTATIVE contender and does NOT invalidate the established fact', async () => {
+    // Untrusted content with a DIFFERENT object than an established active fact
+    // must not overwrite it on a single store — the contender is held tentative
+    // and the established fact stays active until an independent episode confirms
+    // the contender (see the promotion-time supersession test below).
+    const existingFact = makeFactNode({ id: 'fact-old', object: 'session-cookies' }); // active by default
     const factLayer = makeFactLayer();
     (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([existingFact]);
 
@@ -1095,42 +1099,68 @@ describe('AMPService.store — real-time fact extraction', () => {
       { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
     ]);
 
-    const redis = makeRedis();
-    const neo4j = makeNeo4j({ fact: factLayer });
-    const embedding = makeEmbedding();
-    const service = new AMPService(redis, neo4j, embedding, makeConfig());
-
-    const input: EpisodeInput = {
-      session_id: 'sess-fact-2',
-      agent_id: 'agent-1',
-      task: 'refactor auth',
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    const result = await service.store({
+      session_id: 'sess-fact-2', agent_id: 'agent-1', task: 'refactor auth',
       content: 'Migrated auth module to use JWT instead of session cookies',
-    };
-
-    const result = await service.store(input);
+    });
     await flushAsync(); // Wait for fire-and-forget extraction
 
     expect(result.duplicate).toBe(false);
-    // Old fact should be invalidated
-    expect(factLayer.invalidate).toHaveBeenCalledOnce();
-    const invalidateArgs = (factLayer.invalidate as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(invalidateArgs[0]).toBe('fact-old');
-    // New fact should be created with supersedes_fact_id
+    expect(factLayer.invalidate).not.toHaveBeenCalled(); // established fact NOT superseded on first sight
     expect(factLayer.create).toHaveBeenCalledOnce();
     const createdFact = (factLayer.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as FactNode;
     expect(createdFact.object).toBe('JWT');
-    expect(createdFact.supersedes_fact_id).toBe('fact-old');
-    // Invalidate receives the new fact's ID
-    expect(invalidateArgs[2]).toBe(createdFact.id);
+    expect(createdFact.status).toBe('tentative');
+    expect(createdFact.supersedes_fact_id).toBeNull();
   });
 
-  it('OPT-21: create-before-invalidate — a mid-failure leaves the replacement PERSISTED (no truth lost)', async () => {
-    // Supersession is two separate transactions. If invalidate fails AFTER
-    // create, the replacement must already exist (recoverable: both active),
-    // never "old invalidated with no successor" (permanent data loss).
-    const existingFact = makeFactNode({ id: 'fact-old', object: 'session-cookies' });
+  it('OPT-70b: an INDEPENDENT episode promotes the tentative contender AND supersedes the conflicting active fact', async () => {
+    // An established active fact (session-cookies) plus a tentative deductive
+    // contender (JWT) minted by a prior independent episode. A new, distinct
+    // episode extracts JWT → corroborate the contender to active, THEN supersede
+    // the established fact (corroborate-before-invalidate).
+    const established = makeFactNode({ id: 'fact-old', object: 'session-cookies', status: 'active' });
+    const contender = makeFactNode({
+      id: 'fact-jwt', object: 'JWT', status: 'tentative',
+      inference_type: 'deductive', confidence: 0.5, source_episode_ids: ['ep-old'],
+    });
     const factLayer = makeFactLayer();
-    (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([existingFact]);
+    (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([established, contender]);
+    mockExtractFacts.mockResolvedValue([
+      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+    ]);
+
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    await service.processExtraction('auth uses JWT', 'ep-new', 'default'); // independent of 'ep-old'
+
+    // Contender promoted...
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-jwt', expect.any(Number));
+    // ...and the established conflicting fact superseded BY it.
+    expect(factLayer.invalidate).toHaveBeenCalledOnce();
+    const invalidateArgs = (factLayer.invalidate as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(invalidateArgs[0]).toBe('fact-old');
+    expect(invalidateArgs[2]).toBe('fact-jwt');
+    expect(factLayer.create).not.toHaveBeenCalled(); // reinforcing → no new fact
+    // Corroborate-before-invalidate ordering (promotion-time data-loss safety).
+    const corroborateOrder = (factLayer.corroborate as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const invalidateOrder = (factLayer.invalidate as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(corroborateOrder).toBeLessThan(invalidateOrder);
+  });
+
+  it('OPT-21/70b: promotion-time corroborate-before-invalidate — a mid-failure leaves the contender PROMOTED (no truth lost)', async () => {
+    // Supersession now happens at corroboration-time (OPT-70b) and is two writes.
+    // If the invalidate of the old fact fails AFTER the contender is corroborated,
+    // the contender is already active (persisted since its earlier creation) →
+    // both facts active (recoverable), never "old invalidated with no successor"
+    // (permanent data loss). OPT-21's data-loss invariant, relocated + strengthened.
+    const established = makeFactNode({ id: 'fact-old', object: 'session-cookies', status: 'active' });
+    const contender = makeFactNode({
+      id: 'fact-jwt', object: 'JWT', status: 'tentative',
+      inference_type: 'deductive', confidence: 0.5, source_episode_ids: ['ep-old'],
+    });
+    const factLayer = makeFactLayer();
+    (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([established, contender]);
     // Simulate the SECOND step (invalidate) failing.
     (factLayer.invalidate as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('neo4j tx aborted mid-supersession'));
 
@@ -1138,53 +1168,47 @@ describe('AMPService.store — real-time fact extraction', () => {
       { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
     ]);
 
-    const redis = makeRedis();
-    const neo4j = makeNeo4j({ fact: factLayer });
-    const embedding = makeEmbedding();
-    const service = new AMPService(redis, neo4j, embedding, makeConfig());
-
-    const input: EpisodeInput = {
-      session_id: 'sess-fact-2b',
-      agent_id: 'agent-1',
-      task: 'refactor auth',
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    // store()'s random episodeId is independent of the contender's 'ep-old';
+    // the background extraction swallows the invalidate rejection.
+    await service.store({
+      session_id: 'sess-fact-2b', agent_id: 'agent-1', task: 'refactor auth',
       content: 'Migrated auth module to use JWT instead of session cookies',
-    };
-
-    await service.store(input);
+    });
     await flushAsync(); // Wait for fire-and-forget extraction (it will reject internally)
 
-    // The replacement MUST have been created before invalidate was attempted,
-    // so the new truth survives even though invalidate failed.
-    expect(factLayer.create).toHaveBeenCalledOnce();
-    const createdFact = (factLayer.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as FactNode;
-    expect(createdFact.object).toBe('JWT');
-    expect(createdFact.supersedes_fact_id).toBe('fact-old');
-    // invalidate was attempted (and failed) — proving create ran first.
+    // The contender was corroborated (promoted, already persisted) BEFORE the
+    // invalidate that failed — so the new truth survives.
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-jwt', expect.any(Number));
+    expect(factLayer.create).not.toHaveBeenCalled(); // reinforcing → no new fact
     expect(factLayer.invalidate).toHaveBeenCalledOnce();
-    const invalidateArgs = (factLayer.invalidate as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(invalidateArgs[0]).toBe('fact-old');
+    expect((factLayer.invalidate as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('fact-old');
 
-    // Ordering assertion: create's invocation precedes invalidate's.
-    const createOrder = (factLayer.create as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    // Ordering assertion: corroborate's invocation precedes invalidate's.
+    const corroborateOrder = (factLayer.corroborate as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     const invalidateOrder = (factLayer.invalidate as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
-    expect(createOrder).toBeLessThan(invalidateOrder);
+    expect(corroborateOrder).toBeLessThan(invalidateOrder);
   });
 
-  it('OPT-21: happy-path supersession ends in the SAME state (old invalidated + new active + supersedes linkage)', async () => {
-    // Guards against the create-before-invalidate reorder changing end-state
-    // semantics: both writes must still happen with identical linkage.
-    const existingFact = makeFactNode({ id: 'fact-old', object: 'session-cookies' });
+  it('OPT-21/70b: happy-path promotion-time supersession ends in the SAME state (old invalidated + contender active + supersedes linkage)', async () => {
+    // The supersession end-state is preserved, just relocated to corroboration-
+    // time: a pre-existing tentative contender, confirmed by an independent
+    // episode, is promoted to active and the conflicting old fact is invalidated
+    // with the SUPERSEDES_FACT linkage pointing at the (now-active) contender.
+    const established = makeFactNode({ id: 'fact-old', object: 'session-cookies', status: 'active' });
+    const contender = makeFactNode({
+      id: 'fact-jwt', object: 'JWT', status: 'tentative',
+      inference_type: 'deductive', confidence: 0.5, source_episode_ids: ['ep-old'],
+    });
     const factLayer = makeFactLayer();
-    (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([existingFact]);
+    (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([established, contender]);
 
     mockExtractFacts.mockResolvedValue([
       { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
     ]);
 
     const redis = makeRedis();
-    const neo4j = makeNeo4j({ fact: factLayer });
-    const embedding = makeEmbedding();
-    const service = new AMPService(redis, neo4j, embedding, makeConfig());
+    const service = new AMPService(redis, makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
 
     await service.store({
       session_id: 'sess-fact-2c',
@@ -1194,17 +1218,13 @@ describe('AMPService.store — real-time fact extraction', () => {
     });
     await flushAsync();
 
-    // New active fact created with supersedes linkage to the old one.
-    expect(factLayer.create).toHaveBeenCalledOnce();
-    const createdFact = (factLayer.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as FactNode;
-    expect(createdFact.status).toBe('active');
-    expect(createdFact.object).toBe('JWT');
-    expect(createdFact.supersedes_fact_id).toBe('fact-old');
-    // Old fact invalidated, superseded-by the new fact's id.
+    // Contender promoted (not a new create), old fact invalidated + superseded by it.
+    expect(factLayer.create).not.toHaveBeenCalled();
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-jwt', expect.any(Number));
     expect(factLayer.invalidate).toHaveBeenCalledOnce();
     const invalidateArgs = (factLayer.invalidate as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(invalidateArgs[0]).toBe('fact-old');
-    expect(invalidateArgs[2]).toBe(createdFact.id);
+    expect(invalidateArgs[2]).toBe('fact-jwt');
     // Cache invalidated for the affected scope.
     expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('auth-module', 'default');
   });

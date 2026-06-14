@@ -709,7 +709,16 @@ export class AMPService {
             // Inductive (consolidation-generalized) facts keep their provenance:
             // an explicit example must not rewrite them to deductive. An already
             // ACTIVE fact is known: skip (consolidation boosts confidence later).
-            const independent = !reinforcing.source_episode_ids.includes(episodeId);
+            //
+            // OPT-70b: "independent" means a DISTINCT episode — episodeId not
+            // already in the contender's provenance, AND that provenance is
+            // non-empty (F2c: a tentative deductive fact with no source episode is
+            // never promotable). It is NOT independent-ACTOR: two distinct episodes
+            // from the same actor can still corroborate, which raises the poisoning
+            // cost from one store to two but does not eliminate it (accepted residual).
+            const independent =
+              reinforcing.source_episode_ids.length > 0 &&
+              !reinforcing.source_episode_ids.includes(episodeId);
             const promotable =
               reinforcing.status === 'tentative' &&
               (reinforcing.inference_type === 'abductive' ||
@@ -717,6 +726,17 @@ export class AMPService {
             if (promotable && factLayer.corroborate) {
               const boosted = Math.min(1, Math.max(reinforcing.confidence, 0.5) + 0.1);
               await factLayer.corroborate(reinforcing.id, boosted);
+              // OPT-70b: the contender is now CONFIRMED (active). Only NOW may it
+              // supersede an ESTABLISHED active fact it conflicts with — supersession
+              // is deferred from first-sight to corroboration-time so unconfirmed
+              // untrusted content can't overwrite known-good knowledge on a single
+              // store. Corroborate-before-invalidate: the replacement is already
+              // persisted (and now active) before the old fact is invalidated, so a
+              // mid-failure leaves BOTH active (recoverable) — never the only fact
+              // lost. (OPT-21 data-loss safety preserved, in fact strengthened.)
+              if (conflicting) {
+                await factLayer.invalidate(conflicting.id, now, reinforcing.id);
+              }
               changedFactScopes.add(fi.subject);
             }
             continue;
@@ -738,15 +758,16 @@ export class AMPService {
             valid_at: now,
             invalid_at: null,
             confidence: fi.confidence ?? 0.5,
-            // OPT-70: a brand-new extraction-origin fact is UNCONFIRMED — created
-            // `tentative` so a single untrusted episode can't mint an authoritative
-            // active/deductive fact; an independent corroborating episode promotes
-            // it (reinforcing branch above). A fact that supersedes an EXISTING
-            // active fact stays active — a deliberate update, OPT-21 supersession
-            // unchanged. (Hardening untrusted-content supersession → OPT-70b.)
-            status: conflicting ? 'active' : 'tentative',
+            // OPT-70/70b: a brand-new extraction-origin fact is UNCONFIRMED — ALWAYS
+            // created `tentative` (even when it conflicts with an existing active
+            // fact) so a single untrusted episode can neither mint an authoritative
+            // fact NOR overwrite an established one. An independent corroborating
+            // episode promotes it, and only THEN does it supersede a conflicting
+            // active fact (reinforcing branch above). supersedes_fact_id is set via
+            // the SUPERSEDES_FACT edge at that promotion-time invalidate, not here.
+            status: 'tentative',
             inference_type: 'deductive',
-            supersedes_fact_id: conflicting?.id ?? null,
+            supersedes_fact_id: null,
             scope: fi.scope ?? 'project',
             tenant_id: factTenant,
             tags: fi.tags ?? [],
@@ -754,25 +775,14 @@ export class AMPService {
             updated_at: now,
           };
 
-          // Create-before-invalidate: persist the replacement FIRST, then
-          // invalidate the conflicting fact. The new fact already carries
-          // supersedes_fact_id → conflicting.id (set above), and invalidate()
-          // re-asserts the SUPERSEDES_FACT edge with the same linkage, so the
-          // successful end-state is identical to the previous ordering.
-          //
-          // The two writes are still separate transactions. By creating first,
-          // a mid-failure (create succeeds, invalidate throws) leaves BOTH facts
-          // active — recoverable: a later contradiction/consolidation re-resolves
-          // it, and no truth is lost. The previous invalidate-first ordering
-          // could invalidate the old fact with no successor → permanent data loss.
-          // A transient two-active window for the same subject+predicate is
-          // acceptable; on success it collapses to exactly one active fact.
+          // OPT-70b: the contender is persisted as `tentative` and does NOT
+          // invalidate any conflicting established fact here — supersession is
+          // deferred to corroboration-time (reinforcing branch above) so unconfirmed
+          // untrusted content can't overwrite known-good knowledge on first sight.
+          // The established active fact and this tentative contender coexist until
+          // an independent episode confirms the contender (then it supersedes).
           await factLayer.create(newFact);
           createdFactIds.push(newFactId);
-
-          if (conflicting) {
-            await factLayer.invalidate(conflicting.id, now, newFactId);
-          }
         }
 
         // Feature 1: Link co-extracted facts with SAME_EPISODE edges
