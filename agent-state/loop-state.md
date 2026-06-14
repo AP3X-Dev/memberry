@@ -141,7 +141,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `b2f45d6` | gate green 1504 passed / 0 failed (retrieval 141); security-reviewer PASS |
 | OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `c5f871d` | gate green 1508 passed / 0 failed (core 327); security-reviewer PASS |
 | OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green 1513 passed / 0 failed (wiki 287); security-reviewer PASS |
-| OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `<c13-sha>` | gate green 1514 passed / 0 failed (redis 69); reliability item (no sec-review) |
+| OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `490c3d3` | gate green 1514 passed / 0 failed (redis 69); reliability item (no sec-review) |
 
 ## Failed Attempts
 
@@ -274,7 +274,7 @@ Start cycle 14 at **OPT-15** (MED, security-tagged — berry_ingest_codebase pat
 - Next: OPT-14 (optimization tier)
 
 ### Cycle 13 — 2026-06-14
-- Commit: `<c13-sha>` OPT-14: bound amp:signals Redis stream with approximate MAXLEN on XADD (closes OPT-18)
+- Commit: `490c3d3` OPT-14: bound amp:signals Redis stream with approximate MAXLEN on XADD (closes OPT-18)
 - Item: OPT-14 — COMPLETED; OPT-18 marked DONE (no-op dup)
 - Mode B: 1 discovery → OPT-79 (LOW: episodic-buffer stream MAXLEN cap + readEnv consistency for SIGNALS_STREAM_MAXLEN)
 - Verifier: PASS (1514 passed, 0 failed, build exit 0; redis 68→69; RED-confirmed) | reliability item — no security-reviewer needed
