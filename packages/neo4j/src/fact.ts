@@ -63,12 +63,16 @@ export class FactStore {
         },
       );
 
-      // Link SOURCED_FROM → Episodic for each source episode
-      for (const episodeId of fact.source_episode_ids) {
+      // Link SOURCED_FROM → Episodic for each source episode. OPT-43: one batched
+      // UNWIND MERGE instead of a MERGE round-trip per episode. Graph-identical —
+      // each episodeId still does MATCH (f),(e:Episodic{id}) + MERGE the edge, so
+      // a missing Episodic is skipped exactly as the per-row loop skipped it.
+      if (fact.source_episode_ids.length > 0) {
         await tx.run(
-          `MATCH (f:Fact {id: $factId}), (e:Episodic {id: $episodeId})
+          `UNWIND $episodeIds AS episodeId
+           MATCH (f:Fact {id: $factId}), (e:Episodic {id: episodeId})
            MERGE (f)-[:SOURCED_FROM]->(e)`,
-          { factId: fact.id, episodeId },
+          { factId: fact.id, episodeIds: fact.source_episode_ids },
         );
       }
 

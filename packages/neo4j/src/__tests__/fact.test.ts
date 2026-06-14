@@ -483,6 +483,40 @@ describe('FactStore', () => {
     expect(fetched!.source_episode_ids).toEqual([]);
   });
 
+  // ─── OPT-43: batched SOURCED_FROM links (graph-identical) ─────────────────────
+
+  it('create links SOURCED_FROM to every existing source episode and skips missing ones', async () => {
+    if (!neo4jAvailable) return;
+    const ep1 = `${TEST_PREFIX}-ep1`;
+    const ep2 = `${TEST_PREFIX}-ep2`;
+    const session = driver.session();
+    try {
+      // Seed two real Episodic nodes; a third id is intentionally absent.
+      await session.run(
+        `UNWIND $ids AS id MERGE (e:Episodic {id: id}) ON CREATE SET e.created_at = $now`,
+        { ids: [ep1, ep2], now: new Date().toISOString() },
+      );
+
+      const fact = makeFactNode('sourced-batch', {
+        source_episode_ids: [ep1, ep2, `${TEST_PREFIX}-missing`],
+      });
+      const id = await store.create(fact);
+      createdIds.push(id);
+
+      const linked = await session.run(
+        `MATCH (f:Fact {id: $id})-[:SOURCED_FROM]->(e:Episodic) RETURN e.id AS eid ORDER BY eid`,
+        { id },
+      );
+      const eids = linked.records.map((r) => r.get('eid') as string);
+      // Exactly the two existing episodes are linked; the missing id is skipped.
+      expect(eids).toEqual([ep1, ep2].sort());
+    } finally {
+      // afterAll only sweeps Entity nodes, so clean up the seeded Episodic nodes here.
+      await session.run('MATCH (e:Episodic) WHERE e.id IN $ids DETACH DELETE e', { ids: [ep1, ep2] }).catch(() => {});
+      await session.close();
+    }
+  });
+
   // ─── edge cases: diff with no changes ────────────────────────────────────
 
   it('diff() with same state at both timestamps returns empty diff', async () => {
