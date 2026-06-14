@@ -24,7 +24,6 @@ import {
   fetchEntitiesModifiedByProject,
   fetchSemanticsForEntity,
   fetchEpisodicsForProject,
-  fetchEpisodicsForEntity,
   fetchEpisodicsForEntities,
   fetchHierarchy,
   fetchBacklinks,
@@ -282,6 +281,14 @@ export class WikiCompiler {
     // Build full project list: entity-based + episodic-only (virtual)
     let allProjectData: ProjectData[] = [];
 
+    // OPT-58: accumulate every entity's episodics fetched in Phase 1 (the OPT-22
+    // batched fetchEpisodicsForEntities scan) into a global name→episodics map, so
+    // Phase 2 can REUSE it instead of re-running fetchEpisodicsForEntity per entity
+    // (the per-entity result is identical — same predicate/ORDER/LIMIT, proven in
+    // queries.test.ts). Keyed by entity NAME, which is project-independent, so it
+    // stays correct across canonicalizeHumanProjects' project merges.
+    const entityEpisodicsByName = new Map<string, EpisodicEntry[]>();
+
     // Entity-based projects
     for (const projectEntity of projectEntities) {
       const projectName = projectEntity.name;
@@ -322,6 +329,8 @@ export class WikiCompiler {
         this.driver,
         entities.map((e) => e.name),
       );
+      // OPT-58: feed the global map so Phase 2 reuses these results.
+      for (const [name, eps] of entityEpisodicMap) entityEpisodicsByName.set(name, eps);
 
       for (const entity of entities) {
         const key = entity.name.toLowerCase();
@@ -397,7 +406,10 @@ export class WikiCompiler {
 
       // Build articles for substantive entities
       for (const entity of project.substantive_entities) {
-        const [entitySemantics, hierarchy, backlinks, seeAlso, sources, inboundCount, entityEpisodics] =
+        // OPT-58: reuse the Phase-1 batched episodics (identical per-entity result)
+        // instead of re-fetching per entity — one fewer DB round-trip per article.
+        const entityEpisodics = entityEpisodicsByName.get(entity.name) ?? [];
+        const [entitySemantics, hierarchy, backlinks, seeAlso, sources, inboundCount] =
           await Promise.all([
             fetchSemanticsForEntity(this.driver, entity.name),
             fetchHierarchy(this.driver, entity.name),
@@ -405,7 +417,6 @@ export class WikiCompiler {
             fetchRelatedEntities(this.driver, entity.name),
             fetchSourcesForEntity(this.driver, entity.name),
             fetchInboundLinkCount(this.driver, entity.name),
-            fetchEpisodicsForEntity(this.driver, entity.name),
           ]);
         const semantics = entitySemantics.filter((sem) => semanticMatchesScope(sem, projectScope));
 
