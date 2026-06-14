@@ -127,16 +127,12 @@ describe('WikiViewer', () => {
     const html = await page.text();
     expect(html).toContain('src="/assets/memberry-logo.png"');
     expect(html).toContain('<span class="title-mem">MEM</span><span class="title-berry">BERRY</span>');
-    expect(html).toContain('--accent: #9b35ff;');
-    expect(html).toContain('.hero-aurora {');
-    expect(html).toContain('--hero-legacy-bg:');
-    expect(html).toContain('--hero-left-scrim:');
-    expect(html).toContain('.graph .node-logo');
-    expect(html).toContain('.graph svg { display: block; width: 100%; height: 676px;');
-    expect(html).toContain('body.graph-modal-open { overflow: hidden; }');
-    expect(html).toContain('.graph-wrap[open] {');
-    expect(html).toContain('position: fixed;');
-    expect(html).toContain('.graph-wrap[open] .graph svg { height: calc(100vh - 56px); }');
+
+    // OPT-60: the shared CSS is now LINKED (cacheable stylesheet), not inlined into
+    // every page. The page links /assets/wiki.css and no longer embeds the big CSS.
+    expect(html).toMatch(/<link rel="stylesheet" href="\/assets\/wiki\.css\?v=[a-f0-9]+">/);
+    expect(html).not.toContain('--hero-legacy-bg:'); // CSS not inlined any more
+    expect(html).not.toContain('.hero-aurora {');
 
     const logo = await fetch(`http://localhost:${TEST_PORT}/assets/memberry-logo.png`);
     expect(logo.status).toBe(200);
@@ -147,6 +143,27 @@ describe('WikiViewer', () => {
     const logoHead = await fetch(`http://localhost:${TEST_PORT}/assets/memberry-logo.png`, { method: 'HEAD' });
     expect(logoHead.status).toBe(200);
     expect(logoHead.headers.get('content-type')).toContain('image/png');
+  });
+
+  it('OPT-60: serves the shared CSS once from a cacheable /assets/wiki.css stylesheet', async () => {
+    const css = await fetch(`http://localhost:${TEST_PORT}/assets/wiki.css`);
+    expect(css.status).toBe(200);
+    expect(css.headers.get('content-type')).toContain('text/css');
+    // Cacheable far-future + immutable (the page links it with a ?v=<hash> bust).
+    expect(css.headers.get('cache-control')).toContain('max-age=31536000');
+    expect(css.headers.get('cache-control')).toContain('immutable');
+    const body = await css.text();
+    // The CSS content lives here now (relocated from the inline page <style>).
+    expect(body).toContain('--accent: #9b35ff;');
+    expect(body).toContain('.hero-aurora {');
+    expect(body).toContain('--hero-legacy-bg:');
+    expect(body).toContain('.graph svg { display: block; width: 100%; height: 676px;');
+    expect(body).toContain('.graph-wrap[open] .graph svg { height: calc(100vh - 56px); }');
+
+    // HEAD works too (no body), mirroring the logo asset route.
+    const head = await fetch(`http://localhost:${TEST_PORT}/assets/wiki.css`, { method: 'HEAD' });
+    expect(head.status).toBe(200);
+    expect(head.headers.get('content-type')).toContain('text/css');
   });
 
   it('renders ops graph nodes with the MemBerry logo asset', async () => {

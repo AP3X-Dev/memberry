@@ -6,6 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { watch, type FSWatcher } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { Marked } from 'marked';
 import { readEnv, isRealpathWithinBase } from '@memberry/core';
 import type { Driver } from 'neo4j-driver';
@@ -213,7 +214,7 @@ function htmlPage(title: string, body: string, sidebar: string = '', opts: PageO
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escapeHtml(title)} — MemBerry Wiki</title>
-  <style>${CSS}</style>
+  <link rel="stylesheet" href="${WIKI_CSS_PATH}?v=${CSS_VERSION}">
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script>mermaid.initialize({ startOnLoad: true, theme: 'dark' });</script>
 </head>
@@ -1478,6 +1479,13 @@ a { color: var(--fg); text-decoration: none; }
 .mermaid { background: var(--surface); padding: 16px; border: 1px solid var(--border); margin: 12px 0; text-align: center; }
 `;
 
+// OPT-60: the ~650-line CSS above was inlined into EVERY page response. Serve it
+// once from a cacheable /assets/wiki.css route instead (htmlPage links it). The
+// version is a content hash so the immutable cache busts automatically when the
+// CSS changes (no manual cache-bust needed).
+const CSS_VERSION = createHash('sha256').update(CSS).digest('hex').slice(0, 12);
+export const WIKI_CSS_PATH = `/assets/wiki.css`;
+
 // ─── Recursive file discovery ───────────────────────────────────────────────
 
 interface FileEntry {
@@ -2206,6 +2214,22 @@ export function startWikiViewer(config: ViewerConfig): Promise<ReturnType<typeof
           return;
         }
         res.end(logo);
+      } else if (path === WIKI_CSS_PATH && (req.method === 'GET' || req.method === 'HEAD')) {
+        // OPT-60: serve the shared stylesheet once (cacheable) instead of inlining
+        // it into every page. Static in-memory string — no path/param input, so no
+        // traversal surface. Immutable + far-future cache; the ?v=<hash> on the
+        // link busts it whenever the CSS changes.
+        const cssBuf = Buffer.from(CSS, 'utf-8');
+        res.writeHead(200, {
+          'Content-Type': 'text/css; charset=utf-8',
+          'Cache-Control': 'public, max-age=31536000, immutable',
+          'Content-Length': String(cssBuf.byteLength),
+        });
+        if (req.method === 'HEAD') {
+          res.end();
+          return;
+        }
+        res.end(cssBuf);
       } else if (path === '/api/refresh' && req.method === 'POST') {
         // Manual cache refresh endpoint
         try {
