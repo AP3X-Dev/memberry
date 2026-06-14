@@ -23,4 +23,4 @@
 | OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `4c3853d` | gate green: 1526 passed / 0 failed (core 330), build 0; reliability (no sec-review) |
 | OPT-20 (+OPT-65) | Read-through embedding cache wired into hot paths | 18 | `3c82078` | gate green: 1532 passed / 0 failed (core 336), build 0; perf — behavior-identical on miss |
 | OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `c071375` | gate green: 1534 passed / 0 failed (core 338), build 0; reliability (no sec-review) |
-| OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `<c20-sha>` | gate green: 1537 passed / 0 failed (wiki 290), build 0; perf — result-identical |
+| OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `a39fcfe` | gate green: 1537 passed / 0 failed (wiki 290), build 0; perf — result-identical |

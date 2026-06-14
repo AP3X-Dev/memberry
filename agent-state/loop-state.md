@@ -150,7 +150,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `4c3853d` | gate green 1526 passed / 0 failed (core 330); reliability (no sec-review) |
 | OPT-20 (+OPT-65) | Read-through embedding cache wired into hot paths | 18 | `3c82078` | gate green 1532 passed / 0 failed (core 336); perf — behavior-identical on miss |
 | OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `c071375` | gate green 1534 passed / 0 failed (core 338); reliability (no sec-review) |
-| OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `<c20-sha>` | gate green 1537 passed / 0 failed (wiki 290); perf — result-identical |
+| OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `a39fcfe` | gate green 1537 passed / 0 failed (wiki 290); perf — result-identical |
 
 ## Failed Attempts
 
@@ -339,7 +339,7 @@ Start cycle 21 at **OPT-23** (MED, perf — code indexer indexFile issues one Ne
 - Next: OPT-22
 
 ### Cycle 20 — 2026-06-14
-- Commit: `<c20-sha>` OPT-22: batch wiki episodic fetch into one UNWIND scan
+- Commit: `a39fcfe` OPT-22: batch wiki episodic fetch into one UNWIND scan
 - Item: OPT-22 — COMPLETED
 - Mode B: clean sweep (Phase-2 double-call already tracked in OPT-58)
 - Verifier: PASS (1537 passed, 0 failed, build exit 0; wiki 287→290; result-identity verified — same predicate + per-name CALL{} LIMIT; RED-confirmed) | perf item — no security-reviewer
