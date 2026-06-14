@@ -124,7 +124,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-01 | Gate ranked code channel on default tenant (close cross-tenant code leak) | 1 | `11d703c` | gate green 1463 passed / 0 failed; security-reviewer PASS |
 | OPT-02 | Bind SSE/Streamable sessions to creating tenant+actor; 403 on token mismatch | 2 | `20c7819` | gate green 1465 passed / 0 failed (mcp 126); security-reviewer PASS |
 | OPT-03 | Confine post-store re-index paths to ingest base (block arbitrary file read) | 3 | `9b0b029` | gate green 1472 passed / 0 failed (code 114); security-reviewer PASS |
-| OPT-04 | Validate extracted-fact predicate shape + value bounds (block graph poisoning) | 4 | `<c4-sha>` | gate green 1480 passed / 0 failed (core 321); security-reviewer PASS |
+| OPT-04 | Validate extracted-fact predicate shape + value bounds (block graph poisoning) | 4 | `a47b124` | gate green 1480 passed / 0 failed (core 321); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -185,7 +185,7 @@ Start cycle 5 at **OPT-05** (HIGH — redactSecrets misses JSON-quoted credentia
 - Next: OPT-04
 
 ### Cycle 4 — 2026-06-13
-- Commit: `<c4-sha>` OPT-04: validate extracted-fact predicate shape + value bounds (block graph poisoning)
+- Commit: `a47b124` OPT-04: validate extracted-fact predicate shape + value bounds (block graph poisoning)
 - Item: OPT-04 — COMPLETED (format-validation chosen over brittle allowlist; covers all 3 extractFacts sites incl. consolidation, so OPT-31's predicate half is done)
 - Mode B: 3 discoveries → OPT-69 (normalize-before-shape-check, LOW), OPT-70 (provenance/tentative clamp for in-shape poisoning, MED), OPT-71 (dream-hypothesis predicate validation, LOW)
 - Verifier: PASS (1480 passed, 0 failed, build exit 0; core 313→321) | Security-reviewer: PASS (instruction-smuggling predicates + oversized values dropped, no false-drops; residuals → OPT-70/71)
