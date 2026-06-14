@@ -146,7 +146,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `b815f48` | gate green 1518 passed / 0 failed (mcp 140); security-reviewer PASS |
 | OPT-16 | Batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical) | 15 | `3855d00` | gate green 1519 passed / 0 failed (retrieval 142); perf — output-identity verified |
 | OPT-17 | Collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query | 16 | `5b3127f` | gate green 1523 passed / 0 failed (neo4j 197); perf — precedence preserved |
-| OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `<c17-sha>` | gate green 1526 passed / 0 failed (core 330); reliability (no sec-review) |
+| OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `4c3853d` | gate green 1526 passed / 0 failed (core 330); reliability (no sec-review) |
 
 ## Failed Attempts
 
@@ -311,7 +311,7 @@ Start cycle 18 at **OPT-20** (MED, perf — retrieval/code/intent hot paths use 
 - Next: OPT-19
 
 ### Cycle 17 — 2026-06-14
-- Commit: `<c17-sha>` OPT-19: release dedup key on failed store() so retries aren't swallowed
+- Commit: `4c3853d` OPT-19: release dedup key on failed store() so retries aren't swallowed
 - Item: OPT-19 — COMPLETED
 - Mode B: clean sweep
 - Verifier: PASS (1526 passed, 0 failed, build exit 0; core 327→330; RED-confirmed: reverting service.ts+dedup.ts fails the 2 behavioral tests; BUG-0020 TOCTOU regression intact; mark stays before persist) | reliability item — no security-reviewer
