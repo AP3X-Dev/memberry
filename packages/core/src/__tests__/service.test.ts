@@ -776,6 +776,43 @@ describe('AMPService.load with memory blocks', () => {
 
     expect(entered).toBe(EXPECTED);
   });
+
+  it('OPT-47: coalesces two concurrent identical cache-miss loads into ONE assembly', async () => {
+    // Hold byScope open so the first load's assembly is in flight when the second
+    // load() arrives — the second must attach to the SAME in-flight assembly
+    // rather than starting its own (byScope is called exactly once).
+    let releaseByScope!: () => void;
+    const byScopeGate = new Promise<void>((r) => { releaseByScope = r; });
+    const byScope = vi.fn().mockImplementation(async () => { await byScopeGate; return []; });
+    const neo4j = makeNeo4j({ query: { byScope, byVector: vi.fn().mockResolvedValue([]) } });
+    const service = new AMPService(makeRedis(), neo4j, makeEmbedding(), makeConfig());
+
+    const scope: LoadScope = { task: 'stampede', tags: ['project:x'] };
+    const p1 = service.load(scope);
+    const p2 = service.load(scope);
+    releaseByScope();
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    expect(byScope).toHaveBeenCalledTimes(1); // coalesced — one assembly, not two
+    expect(r1).toEqual(r2);
+  });
+
+  it('OPT-47: a failed assembly clears the in-flight key so the next load retries', async () => {
+    // First assembly throws (byScope rejects); the in-flight entry must be cleared
+    // in finally so a subsequent identical load re-attempts rather than returning
+    // a poisoned rejected promise forever.
+    const byScope = vi.fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue([]);
+    const neo4j = makeNeo4j({ query: { byScope, byVector: vi.fn().mockResolvedValue([]) } });
+    const service = new AMPService(makeRedis(), neo4j, makeEmbedding(), makeConfig());
+
+    const scope: LoadScope = { task: 'retry-after-fail', tags: ['project:x'] };
+    await expect(service.load(scope)).rejects.toThrow('boom');
+    const result = await service.load(scope); // key cleared → fresh assembly
+    expect(result).toBeDefined();
+    expect(byScope).toHaveBeenCalledTimes(2);
+  });
 });
 
 // ─── Real-time fact extraction in store ─────────────────────────────────────

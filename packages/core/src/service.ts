@@ -141,6 +141,10 @@ export class AMPService {
   private blocks?: BlocksLayer;
   /** 60s in-memory cache of known project tags (lowercased), used by resolveProjectTag(). */
   private knownProjectsCache: { tags: Set<string>; expiresAt: number } | null = null;
+  // OPT-47: single-flight map — concurrent identical load() cache-misses share
+  // one in-flight assembly instead of each re-running the full fan-out + re-embed.
+  // Keyed by scopeHash (which already encodes the normalized tenant + scope).
+  private readonly inFlightLoads = new Map<string, Promise<MemoryContext>>();
 
   constructor(
     private redis: RedisLayer,
@@ -232,13 +236,30 @@ export class AMPService {
 
   async load(scope: LoadScope): Promise<MemoryContext> {
     const scopeHash = hashScope(scope);
-    const maxTokens = scope.max_tokens ?? 4096;
 
     // 1. Cache hit (tenant-scoped: A's cache must never satisfy B's load)
     const cached = await this.redis.cache.get(scopeHash, scope.tenantId);
     if (cached) return cached;
 
-    // 2. Cache miss → fetch all independent layers CONCURRENTLY.
+    // 2. Cache miss → single-flight (OPT-47): coalesce concurrent identical
+    // misses onto ONE in-flight assembly so a thundering herd doesn't re-run the
+    // full fan-out + re-embed N times. scopeHash already encodes tenant + scope,
+    // so identical hashes are genuinely identical loads. The entry is cleared in
+    // finally, so a failed assembly never poisons the key — it rejects only the
+    // current waiters (who would each have failed identically anyway).
+    const inFlight = this.inFlightLoads.get(scopeHash);
+    if (inFlight) return inFlight;
+    const flight = this._assembleLoad(scope, scopeHash)
+      .finally(() => this.inFlightLoads.delete(scopeHash));
+    this.inFlightLoads.set(scopeHash, flight);
+    return flight;
+  }
+
+  /** Cache-miss assembly path for load(), wrapped by the single-flight guard above. */
+  private async _assembleLoad(scope: LoadScope, scopeHash: string): Promise<MemoryContext> {
+    const maxTokens = scope.max_tokens ?? 4096;
+
+    // Fetch all independent layers CONCURRENTLY.
     // Blocks (core/working), semantics+vector, and facts are mutually
     // independent; only graph expansion (below) depends on their results.
     // Launching them together collapses three sequential round-trip phases
