@@ -58,6 +58,24 @@ export class SemanticStore {
     }
   }
 
+  /** Shared Semantic-node mapping so getById and getByIds (OPT-54) build the
+   *  node IDENTICALLY — single source of truth, no drift. */
+  private mapSemantic(props: Record<string, unknown>): SemanticNode {
+    return {
+      id: props.id as string,
+      content: props.content as string,
+      confidence: props.confidence as number,
+      signal_count: props.signal_count as number,
+      created_at: props.created_at as string,
+      updated_at: props.updated_at as string,
+      decay_class: props.decay_class as SemanticNode['decay_class'],
+      tags: props.tags as string[],
+      ...(props.scope != null && { scope: props.scope as string }),
+      tenant_id: (props.tenant_id as string | undefined) ?? DEFAULT_TENANT,
+      ...(props.embedding !== undefined && { embedding: props.embedding as number[] }),
+    };
+  }
+
   async getById(id: string): Promise<SemanticNode | null> {
     const session = this.driver.session();
     try {
@@ -66,20 +84,29 @@ export class SemanticStore {
         { id }
       );
       if (result.records.length === 0) return null;
-      const props = result.records[0].get('s').properties as Record<string, unknown>;
-      return {
-        id: props.id as string,
-        content: props.content as string,
-        confidence: props.confidence as number,
-        signal_count: props.signal_count as number,
-        created_at: props.created_at as string,
-        updated_at: props.updated_at as string,
-        decay_class: props.decay_class as SemanticNode['decay_class'],
-        tags: props.tags as string[],
-        ...(props.scope != null && { scope: props.scope as string }),
-        tenant_id: (props.tenant_id as string | undefined) ?? DEFAULT_TENANT,
-        ...(props.embedding !== undefined && { embedding: props.embedding as number[] }),
-      };
+      return this.mapSemantic(result.records[0].get('s').properties as Record<string, unknown>);
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * OPT-54: fetch many Semantic nodes in ONE round-trip (was N sequential
+   * getById calls on the consolidation proposal path). Returns one entry per
+   * FOUND id (missing ids omitted); callers map by id and skip misses, exactly
+   * as the per-id getById loop did. Each node is mapped identically to getById.
+   */
+  async getByIds(ids: string[]): Promise<SemanticNode[]> {
+    if (ids.length === 0) return [];
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        'MATCH (s:Semantic) WHERE s.id IN $ids RETURN s',
+        { ids },
+      );
+      return result.records.map((r) =>
+        this.mapSemantic(r.get('s').properties as Record<string, unknown>),
+      );
     } finally {
       await session.close();
     }

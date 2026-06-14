@@ -123,6 +123,27 @@ describe('SemanticStore', () => {
     expect(fetched!.tenant_id).toBe('acme');
   });
 
+  it('OPT-54: getByIds fetches many nodes in one round-trip and omits missing ids', async () => {
+    if (!neo4jAvailable) return;
+    const a = makeSemanticNode('byids-a');
+    const b = makeSemanticNode('byids-b');
+    const idA = await store.create(a);
+    const idB = await store.create(b);
+    createdIds.push(idA, idB);
+
+    const fetched = await store.getByIds([idA, idB, `${TEST_PREFIX}-byids-missing`]);
+    // Exactly the two existing nodes, missing id omitted.
+    expect(fetched.map((n) => n.id).sort()).toEqual([idA, idB].sort());
+    // Mapping matches getById (content + defaulted tenant).
+    const fa = fetched.find((n) => n.id === idA)!;
+    expect(fa.content).toBe(a.content);
+    expect(fa.confidence).toBe(a.confidence);
+    expect(fa.tenant_id).toBe('default');
+
+    // Empty input → empty result, no query.
+    expect(await store.getByIds([])).toEqual([]);
+  });
+
   it('should carry the tenant_id forward when superseding', async () => {
     if (!neo4jAvailable) return;
     const oldNode = { ...makeSemanticNode('supersede-tenant-old'), tenant_id: 'acme' };

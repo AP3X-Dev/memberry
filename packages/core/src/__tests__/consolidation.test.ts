@@ -185,6 +185,69 @@ describe('ConsolidationEngine.run', () => {
     expect(afterConfidence).toBeLessThanOrEqual(1); // bounded
   });
 
+  it('OPT-54: batches semantic fetch via getByIds (one call) instead of per-id getById', async () => {
+    // Two distinct clusters each above threshold → the proposal pass must fetch
+    // BOTH nodes in ONE getByIds call, not two sequential getById calls.
+    const nodeA = makeSemanticNode('sem-a');
+    const nodeB = makeSemanticNode('sem-b');
+    const signals: StreamSignal[] = [
+      makeStreamSignal('sem-a', 'correction'),
+      makeStreamSignal('sem-a', 'correction'),
+      makeStreamSignal('sem-a', 'correction'),
+      makeStreamSignal('sem-b', 'correction'),
+      makeStreamSignal('sem-b', 'correction'),
+      makeStreamSignal('sem-b', 'correction'),
+    ];
+
+    const getById = vi.fn(); // must NOT be called when getByIds is present
+    const getByIds = vi.fn().mockResolvedValue([nodeA, nodeB]);
+    const redis = makeRedis({ signals: { consume: vi.fn().mockResolvedValue(signals) } });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById,
+        getByIds,
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('new-id'),
+      },
+    });
+
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+    const result = await engine.run('batch-scope');
+
+    expect(getByIds).toHaveBeenCalledTimes(1);
+    const fetchedIds = (getByIds.mock.calls[0][0] as string[]).slice().sort();
+    expect(fetchedIds).toEqual(['sem-a', 'sem-b']);
+    expect(getById).not.toHaveBeenCalled(); // batched path preferred over per-id
+    // Same proposals as the per-id path would have produced (one per cluster).
+    const ids = result.proposals.flatMap((p) => p.affected_ids);
+    expect(ids).toContain('sem-a');
+    expect(ids).toContain('sem-b');
+  });
+
+  it('OPT-54: falls back to per-id getById when getByIds is absent', async () => {
+    const node = makeSemanticNode('sem-fallback');
+    const signals: StreamSignal[] = [
+      makeStreamSignal('sem-fallback', 'correction'),
+      makeStreamSignal('sem-fallback', 'correction'),
+      makeStreamSignal('sem-fallback', 'correction'),
+    ];
+    const getById = vi.fn().mockResolvedValue(node);
+    const redis = makeRedis({ signals: { consume: vi.fn().mockResolvedValue(signals) } });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById, // no getByIds → fallback path
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('new-id'),
+      },
+    });
+
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+    const result = await engine.run('fallback-scope');
+
+    expect(getById).toHaveBeenCalledWith('sem-fallback');
+    expect(result.proposals.some((p) => p.affected_ids.includes('sem-fallback'))).toBe(true);
+  });
+
   it('auto-applies proposals when autoApply is true', async () => {
     const node = makeSemanticNode('sem-auto');
 

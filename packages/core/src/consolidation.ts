@@ -169,6 +169,10 @@ export interface ConsolidationFactLayer {
 export interface ConsolidationNeo4jLayer {
   semantic: {
     getById(id: string): Promise<SemanticNode | null>;
+    /** OPT-54: batch-fetch many Semantic nodes in one round-trip. Optional —
+     *  _generateProposals falls back to per-id getById when absent. Returns one
+     *  entry per FOUND id (missing ids omitted). */
+    getByIds?(ids: string[]): Promise<SemanticNode[]>;
     updateConfidence(id: string, confidence: number): Promise<void>;
     supersede(oldId: string, newNode: SemanticNode): Promise<string>;
     /**
@@ -331,28 +335,56 @@ export class ConsolidationEngine {
       clusters.set(signal.target_id, existing);
     }
 
-    // Also factor in queue entries (high score = needs consolidation)
+    // Also factor in queue entries (high score = needs consolidation): boost an
+    // existing cluster's weight, or remember a queue-only member (score above
+    // threshold) as a decay candidate. (No fetch yet — OPT-54 batches below.)
+    const queueOnlyCandidates: Array<{ member: string; score: number }> = [];
     for (const entry of queueEntries) {
       const existing = clusters.get(entry.member);
       if (existing) {
         // Already have signal data — boost score
         existing.totalWeight += entry.score;
+      } else if (entry.score >= this.config.consolidation.signalThreshold) {
+        queueOnlyCandidates.push(entry);
+      }
+    }
+
+    // Signal clusters that meet threshold (evaluated AFTER queue-weight boosts).
+    const clustersToProcess = [...clusters.entries()].filter(
+      ([, cluster]) => cluster.totalWeight >= this.config.consolidation.signalThreshold,
+    );
+
+    // OPT-54: fetch every needed Semantic node in ONE round-trip instead of N
+    // sequential getById calls. Queue-only candidates and cluster targets are
+    // disjoint (queue-only = not in clusters). Missing ids are simply omitted —
+    // the proposal loops below skip them exactly as the original `if (!node)` did.
+    // Optional getByIds with a per-id getById fallback (mocks/layers without it).
+    const neededIds = [
+      ...queueOnlyCandidates.map((c) => c.member),
+      ...clustersToProcess.map(([id]) => id),
+    ];
+    const nodeById = new Map<string, SemanticNode>();
+    if (neededIds.length > 0) {
+      const semantic = this.neo4j.semantic;
+      if (semantic.getByIds) {
+        for (const n of await semantic.getByIds(neededIds)) nodeById.set(n.id, n);
       } else {
-        // Queue-only entry: create a decay proposal if score is high enough
-        if (entry.score >= this.config.consolidation.signalThreshold) {
-          const node = await this.neo4j.semantic.getById(entry.member);
-          if (node) {
-            proposals.push(buildDecayProposal(scope, node, entry.score));
-          }
+        for (const id of neededIds) {
+          const n = await semantic.getById(id);
+          if (n) nodeById.set(n.id, n);
         }
       }
     }
 
-    // Generate proposals from signal clusters that meet threshold
-    for (const [targetId, cluster] of clusters.entries()) {
-      if (cluster.totalWeight < this.config.consolidation.signalThreshold) continue;
+    // Queue-only decay proposals (preserve original order: before cluster proposals).
+    for (const { member, score } of queueOnlyCandidates) {
+      const node = nodeById.get(member);
+      if (node) proposals.push(buildDecayProposal(scope, node, score));
+    }
 
-      const node = await this.neo4j.semantic.getById(targetId);
+    // Generate proposals from signal clusters that meet threshold (clusters Map order).
+    for (const [targetId, cluster] of clustersToProcess) {
+      const node = nodeById.get(targetId);
       if (!node) continue;
 
       const contradictions = cluster.signals.filter((s) => s.type === 'contradiction');
