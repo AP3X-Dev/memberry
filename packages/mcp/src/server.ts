@@ -53,6 +53,27 @@ export interface AMPMCPServer {
 
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 
+/**
+ * Default cap on the number of bytes read from a POST request body. MCP
+ * JSON-RPC bodies are tiny (tool args), so 1 MB is generous while still
+ * preventing an attacker from exhausting memory with an unbounded body.
+ * Overridable via MEMBERRY_MAX_BODY_BYTES (falls back to AMP_MAX_BODY_BYTES).
+ */
+export const DEFAULT_MAX_REQUEST_BODY_BYTES = 1_000_000;
+
+/**
+ * Thrown by readJsonBody when the request body exceeds the configured cap,
+ * either from the Content-Length header (early reject) or the streaming
+ * backstop. The /mcp handler distinguishes this from a JSON parse error to
+ * surface HTTP 413 (Payload Too Large) instead of 400.
+ */
+export class RequestBodyTooLargeError extends Error {
+  constructor(message = 'Request body too large') {
+    super(message);
+    this.name = 'RequestBodyTooLargeError';
+  }
+}
+
 export async function closeSSEHandle(
   handle: SSEHandle,
   timeoutMs: number = DEFAULT_SHUTDOWN_TIMEOUT_MS,
@@ -218,6 +239,17 @@ export function createAMPServer(): AMPMCPServer {
         return false;
       }
     }
+
+    // ── Request body cap ─────────────────────────────────────────────────
+    // Cap the bytes read from a POST body to prevent memory-exhaustion DoS.
+    // Overridable via MEMBERRY_MAX_BODY_BYTES (legacy AMP_MAX_BODY_BYTES);
+    // a non-positive/unparseable value falls back to the default.
+    const maxBodyBytes = (() => {
+      const raw = readEnv('MEMBERRY_MAX_BODY_BYTES');
+      if (raw === undefined) return DEFAULT_MAX_REQUEST_BODY_BYTES;
+      const parsed = Number.parseInt(raw, 10);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_REQUEST_BODY_BYTES;
+    })();
 
     // ── Auth token resolution ────────────────────────────────────────────
     // Priority: MEMBERRY_API_TOKEN env var → unauthenticated opt-out → generated session token
@@ -397,9 +429,31 @@ export function createAMPServer(): AMPMCPServer {
     }
 
     async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+      // Early reject: if Content-Length is present and already over the cap,
+      // refuse before reading any of the body. (req is drained/destroyed by the
+      // caller after the 413 response is written, so the upload is halted.)
+      const contentLengthHeader = getSingleHeader(req.headers['content-length']);
+      if (contentLengthHeader !== undefined) {
+        const declared = Number.parseInt(contentLengthHeader, 10);
+        if (Number.isFinite(declared) && declared > maxBodyBytes) {
+          throw new RequestBodyTooLargeError();
+        }
+      }
+
+      // Streaming backstop: track accumulated bytes and stop consuming as soon
+      // as the cap is exceeded. Stop BEFORE buffering the offending chunk so we
+      // never hold more than the cap in memory. This catches chunked /
+      // no-Content-Length bodies and bodies whose actual size exceeds a lying
+      // (smaller) Content-Length header.
       const chunks: Buffer[] = [];
+      let total = 0;
       for await (const chunk of req) {
-        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+        const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+        total += buf.length;
+        if (total > maxBodyBytes) {
+          throw new RequestBodyTooLargeError();
+        }
+        chunks.push(buf);
       }
 
       const raw = Buffer.concat(chunks).toString('utf8');
@@ -467,8 +521,17 @@ export function createAMPServer(): AMPMCPServer {
             if (req.method === 'POST') {
               try {
                 parsedBody = await readJsonBody(req);
-              } catch {
-                sendMcpJsonError(res, 400, 'Parse error: Invalid JSON', -32700);
+              } catch (err) {
+                if (err instanceof RequestBodyTooLargeError) {
+                  // Write the 413 first, THEN tear down the request socket so any
+                  // still-uploading client stops sending without us buffering the
+                  // rest of the body. Order matters: destroying before writing
+                  // would race the response off the wire.
+                  sendMcpJsonError(res, 413, 'Payload too large', -32600);
+                  req.destroy();
+                } else {
+                  sendMcpJsonError(res, 400, 'Parse error: Invalid JSON', -32700);
+                }
                 return;
               }
             }

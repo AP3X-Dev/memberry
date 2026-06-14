@@ -405,6 +405,115 @@ describe('createAMPServer', () => {
     }
   });
 
+  it('OPT-08: rejects a /mcp POST body over the cap with HTTP 413 (Content-Length early reject)', async () => {
+    // Lower the cap via env so the test stays small/fast. readEnv resolves
+    // AMP_MAX_BODY_BYTES via its MEMBERRY_* legacy fallback.
+    const saved = { cap: process.env.AMP_MAX_BODY_BYTES, capCanon: process.env.MEMBERRY_MAX_BODY_BYTES };
+    process.env.AMP_MAX_BODY_BYTES = '1024'; // 1 KB cap
+    delete process.env.MEMBERRY_MAX_BODY_BYTES;
+
+    await withSseServer(async (baseUrl) => {
+      const headers = {
+        authorization: 'Bearer test-health-token',
+        accept: 'application/json, text/event-stream',
+        'content-type': 'application/json',
+      };
+
+      // Body comfortably over the 1 KB cap → real Content-Length over cap.
+      const oversized = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-03-26',
+          capabilities: {},
+          clientInfo: { name: 'dos-test', version: '0.0.0', pad: 'x'.repeat(4096) },
+        },
+      });
+      expect(oversized.length).toBeGreaterThan(1024);
+
+      const tooLarge = await fetch(`${baseUrl}/mcp`, { method: 'POST', headers, body: oversized });
+      // Without the cap this would be parsed (200) or at worst 400; the cap pins 413.
+      expect(tooLarge.status).toBe(413);
+      const errBody = await tooLarge.json() as { error?: { code?: number; message?: string } };
+      expect(errBody.error?.message).toBe('Payload too large');
+    });
+
+    if (saved.cap === undefined) delete process.env.AMP_MAX_BODY_BYTES; else process.env.AMP_MAX_BODY_BYTES = saved.cap;
+    if (saved.capCanon !== undefined) process.env.MEMBERRY_MAX_BODY_BYTES = saved.capCanon;
+  });
+
+  it('OPT-08: catches an over-cap chunked body with no Content-Length (streaming backstop)', async () => {
+    // The Content-Length early check cannot fire when the client uses
+    // Transfer-Encoding: chunked (no declared length). Only the streaming
+    // backstop can catch this — the real no-Content-Length DoS vector. Use the
+    // low-level http client and omit content-length so Node sends chunked.
+    const saved = { cap: process.env.AMP_MAX_BODY_BYTES, capCanon: process.env.MEMBERRY_MAX_BODY_BYTES };
+    process.env.AMP_MAX_BODY_BYTES = '1024'; // 1 KB cap
+    delete process.env.MEMBERRY_MAX_BODY_BYTES;
+
+    await withSseServer(async (baseUrl) => {
+      const { request } = await import('node:http');
+      const url = new URL(`${baseUrl}/mcp`);
+
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = request(
+          {
+            hostname: url.hostname,
+            port: url.port,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer test-health-token',
+              accept: 'application/json, text/event-stream',
+              'content-type': 'application/json',
+              // No content-length → Node uses chunked transfer encoding.
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          },
+        );
+        req.on('error', reject);
+        // Stream several chunks totalling well over the 1 KB cap.
+        for (let i = 0; i < 8; i++) req.write('x'.repeat(512));
+        req.end();
+      });
+
+      expect(status).toBe(413);
+    });
+
+    if (saved.cap === undefined) delete process.env.AMP_MAX_BODY_BYTES; else process.env.AMP_MAX_BODY_BYTES = saved.cap;
+    if (saved.capCanon !== undefined) process.env.MEMBERRY_MAX_BODY_BYTES = saved.capCanon;
+  });
+
+  it('OPT-08: a normal small /mcp body is not over-rejected by the cap (happy path)', async () => {
+    // Default cap (1 MB) — an ordinary initialize must still succeed with 200.
+    await withSseServer(async (baseUrl) => {
+      const initialize = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer test-health-token',
+          accept: 'application/json, text/event-stream',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            clientInfo: { name: 'small-body-test', version: '0.0.0' },
+          },
+        }),
+      });
+      expect(initialize.status).toBe(200);
+      expect(initialize.headers.get('mcp-session-id')).toEqual(expect.any(String));
+    });
+  });
+
   it('closes active SSE sessions before waiting for the HTTP server to drain', async () => {
     const previousToken = process.env.AMP_API_TOKEN;
     process.env.AMP_API_TOKEN = 'test-shutdown-token';
