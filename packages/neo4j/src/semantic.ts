@@ -3,6 +3,17 @@ import { type Driver } from 'neo4j-driver';
 import { type SemanticNode, DEFAULT_TENANT } from '@memberry/core';
 import { temporalSetClause } from './temporal-edges.js';
 
+/**
+ * Canonical project scope for a semantic node: the explicit scope when set,
+ * otherwise derived from the first project:* tag. Null only for genuinely
+ * project-unaffiliated knowledge (excluded from project-scoped loads).
+ */
+function semanticScope(node: Pick<SemanticNode, 'scope' | 'tags'>): string | null {
+  if (node.scope) return node.scope.toLowerCase();
+  const fromTags = (node.tags ?? []).find((t) => /^project:/i.test(t));
+  return fromTags ? fromTags.toLowerCase() : null;
+}
+
 export class SemanticStore {
   constructor(private driver: Driver) {}
 
@@ -19,6 +30,7 @@ export class SemanticStore {
           updated_at: $updated_at,
           decay_class: $decay_class,
           tags: $tags,
+          scope: $scope,
           tenant_id: $tenant_id
         })
         ${node.embedding ? 'SET s.embedding = $embedding' : ''}
@@ -33,6 +45,7 @@ export class SemanticStore {
         updated_at: node.updated_at,
         decay_class: node.decay_class,
         tags: node.tags,
+        scope: semanticScope(node),
         tenant_id: node.tenant_id ?? DEFAULT_TENANT,
       };
       if (node.embedding) {
@@ -63,6 +76,7 @@ export class SemanticStore {
         updated_at: props.updated_at as string,
         decay_class: props.decay_class as SemanticNode['decay_class'],
         tags: props.tags as string[],
+        ...(props.scope != null && { scope: props.scope as string }),
         tenant_id: (props.tenant_id as string | undefined) ?? DEFAULT_TENANT,
         ...(props.embedding !== undefined && { embedding: props.embedding as number[] }),
       };
@@ -98,11 +112,15 @@ export class SemanticStore {
           updated_at: $updated_at,
           decay_class: $decay_class,
           tags: $tags,
+          scope: $scope,
           tenant_id: $tenant_id
         })
         WITH new
         MATCH (old:Semantic {id: $oldId})
         CREATE (new)-[:SUPERSEDES]->(old)
+        WITH new, old
+        // The successor inherits the project scope when the caller didn't set one
+        SET new.scope = coalesce(new.scope, old.scope)
         WITH new, old
         // Invalidate the old node's ABOUT relationships
         OPTIONAL MATCH (old)-[oldR:ABOUT]->(e:Entity)
@@ -119,6 +137,7 @@ export class SemanticStore {
         updated_at: newNode.updated_at,
         decay_class: newNode.decay_class,
         tags: newNode.tags,
+        scope: semanticScope(newNode),
         tenant_id: newNode.tenant_id ?? DEFAULT_TENANT,
         oldId,
         now,
@@ -146,11 +165,15 @@ export class SemanticStore {
           updated_at: $updated_at,
           decay_class: $decay_class,
           tags: $tags,
+          scope: $scope,
           tenant_id: $tenant_id
         })
         WITH s
         MATCH (ep:Episodic {id: $episodicId})
         CREATE (s)-[:PROMOTED_FROM]->(ep)
+        WITH s, ep
+        // Promotions inherit the source episode's project scope when unset
+        SET s.scope = coalesce(s.scope, ep.scope)
         RETURN s.id AS id
       `;
       const result = await session.run(query, {
@@ -162,6 +185,7 @@ export class SemanticStore {
         updated_at: newNode.updated_at,
         decay_class: newNode.decay_class,
         tags: newNode.tags,
+        scope: semanticScope(newNode),
         tenant_id: tenantId ?? newNode.tenant_id ?? DEFAULT_TENANT,
         episodicId,
       });

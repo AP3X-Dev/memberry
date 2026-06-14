@@ -81,8 +81,8 @@ export interface Neo4jLayer {
     linkSignal(episodicId: string, signal: Signal): Promise<void>;
   };
   query: {
-    byScope(scope: { entities?: string[]; tags?: string[]; limit: number; asOf?: string; tenantId?: string }): Promise<SemanticNode[]>;
-    byVector(embedding: number[], limit: number, tenantId?: string): Promise<Array<SemanticNode & { score: number }>>;
+    byScope(scope: { entities?: string[]; tags?: string[]; limit: number; asOf?: string; tenantId?: string; projectScope?: string }): Promise<SemanticNode[]>;
+    byVector(embedding: number[], limit: number, tenantId?: string, projectScope?: string): Promise<Array<SemanticNode & { score: number }>>;
     /** Graph-structural retrieval: expand from seed entities via ABOUT and SAME_EPISODE edges (optional) */
     expandByGraph?(entityNames: string[], depth?: number, maxPerHop?: number, asOf?: string): Promise<SemanticNode[]>;
   };
@@ -92,6 +92,35 @@ export interface Neo4jLayer {
     listProjectNames(): Promise<string[]>;
     upsertProject(name: string, description?: string): Promise<void>;
   };
+}
+
+// ─── Structural tenancy (project scope) ──────────────────────────────────────
+
+/**
+ * The project scope a load is pinned to: the first project:* tag, lowercased.
+ * The explicit wildcard "project:*" (or no project tag at all) means a
+ * deliberate cross-project read — no scope filter applies.
+ */
+export function requestedProjectScope(tags?: string[]): string | undefined {
+  const tag = tags?.find((t) => /^project:/i.test(t))?.toLowerCase();
+  return tag && tag !== 'project:*' ? tag : undefined;
+}
+
+/**
+ * Whether a node belongs to the requested project scope. The scope property
+ * is authoritative; nodes predating the scope backfill fall back to their
+ * project:* tags. Nodes with no project affiliation are excluded from
+ * project-scoped loads — a wrong memory is worse than no memory.
+ */
+export function inProjectScope(
+  node: Pick<SemanticNode, 'tags'> & { scope?: string },
+  projectScope: string | undefined,
+): boolean {
+  if (!projectScope) return true;
+  const nodeScope = node.scope?.toLowerCase();
+  if (nodeScope) return nodeScope === projectScope;
+  const projectTags = (node.tags ?? []).filter((t) => /^project:/i.test(t)).map((t) => t.toLowerCase());
+  return projectTags.includes(projectScope);
 }
 
 // ─── AMPService ──────────────────────────────────────────────────────────────
@@ -212,6 +241,11 @@ export class AMPService {
     const FACT_BUDGET_RATIO = 0.15;
 
     const projectTag = scope.tags?.find((t) => t.startsWith('project:')) ?? scope.tags?.[0];
+    // Structural tenancy: a load carrying a project:* tag is HARD-scoped to
+    // that project across every retrieval channel. Enforced both in the Cypher
+    // (byScope/byVector) and again here as a guard over all merged candidates,
+    // so no channel — present or future — can bleed another project in.
+    const projectScope = requestedProjectScope(scope.tags);
     // Pass asOf from temporal options so semantic queries filter inactive ABOUT edges consistently
     const asOf = scope.temporal?.as_of;
 
@@ -232,8 +266,9 @@ export class AMPService {
         limit: 50,
         asOf,
         tenantId: scope.tenantId,
+        projectScope,
       }),
-      this._vectorSearch(scope.task, 20, scope.tenantId),
+      this._vectorSearch(scope.task, 20, scope.tenantId, projectScope),
     ]);
 
     const factsPromise: Promise<FactNode[][]> =
@@ -282,17 +317,19 @@ export class AMPService {
       facts = rankFacts(facts);
     }
 
-    // Merge and de-duplicate semantics by id
+    // Merge and de-duplicate semantics by id. Every channel passes through the
+    // project-scope guard — the Cypher already filters, but the guard makes the
+    // invariant hold even for channels (or mocks) that don't.
     const seen = new Set<string>();
     const merged: Array<SemanticNode & { relevanceScore?: number }> = [];
     for (const node of byScope) {
-      if (!seen.has(node.id)) {
+      if (!seen.has(node.id) && inProjectScope(node, projectScope)) {
         seen.add(node.id);
         merged.push(node);
       }
     }
     for (const node of byVector) {
-      if (!seen.has(node.id)) {
+      if (!seen.has(node.id) && inProjectScope(node, projectScope)) {
         seen.add(node.id);
         merged.push({ ...node, relevanceScore: node.score });
       }
@@ -305,7 +342,7 @@ export class AMPService {
         try {
           const expanded = await this.neo4j.query.expandByGraph(seedEntities, 1, 5, asOf);
           for (const node of expanded) {
-            if (!seen.has(node.id)) {
+            if (!seen.has(node.id) && inProjectScope(node, projectScope)) {
               seen.add(node.id);
               merged.push({ ...node, relevanceScore: 0.3 });
             }
@@ -699,6 +736,7 @@ export class AMPService {
     text: string,
     limit: number,
     tenantId?: string,
+    projectScope?: string,
   ): Promise<Array<SemanticNode & { score: number }>> {
     // Skip vector search when embeddings are unavailable (no API key): querying
     // the index with zero vectors yields uniform cosine scores and arbitrary
@@ -706,7 +744,7 @@ export class AMPService {
     if (this.embedding.available === false) return [];
     try {
       const emb = await this._getEmbedding(text);
-      return await this.neo4j.query.byVector(emb, limit, tenantId);
+      return await this.neo4j.query.byVector(emb, limit, tenantId, projectScope);
     } catch (err: unknown) {
       console.error("[service] Suppressed error:", err);
       return [];

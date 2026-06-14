@@ -279,7 +279,8 @@ export class BootstrapGraphService {
         created_at: $now,
         updated_at: $now,
         decay_class: 'stable',
-        tags: $tags
+        tags: $tags,
+        scope: $scope
       })`,
       {
         id,
@@ -287,6 +288,7 @@ export class BootstrapGraphService {
         confidence: seed.confidence ?? 0.3,
         now,
         tags,
+        scope: projectTag.toLowerCase(),
       },
     );
     result.semantics_created++;

@@ -110,6 +110,70 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    id: '0005-injection-log',
+    description:
+      'Injection telemetry: unique id constraint + lookup indexes for :InjectionLog ' +
+      'nodes (session, time, scope, usage). Schema lands before any writer so later ' +
+      'phases ship against a stable shape.',
+    up: async (driver) => {
+      const session = driver.session();
+      try {
+        for (const stmt of [
+          'CREATE CONSTRAINT injection_id IF NOT EXISTS FOR (i:InjectionLog) REQUIRE i.id IS UNIQUE',
+          'CREATE INDEX injection_session IF NOT EXISTS FOR (i:InjectionLog) ON (i.session_id)',
+          'CREATE INDEX injection_at IF NOT EXISTS FOR (i:InjectionLog) ON (i.injected_at)',
+          'CREATE INDEX injection_scope IF NOT EXISTS FOR (i:InjectionLog) ON (i.scope)',
+          'CREATE INDEX injection_usage IF NOT EXISTS FOR (i:InjectionLog) ON (i.usage)',
+        ]) {
+          await session.run(stmt);
+        }
+      } finally {
+        await session.close();
+      }
+    },
+  },
+  {
+    id: '0006-structural-scope',
+    description:
+      'Structural tenancy: backfill Semantic.scope (and null Episodic.scope) from the ' +
+      'first project:* tag, lowercased, and index scope on both labels. After this, ' +
+      'project scope is an enforced storage column, not an advisory tag.',
+    up: async (driver) => {
+      const session = driver.session();
+      try {
+        // Backfill from tags. Nodes with no project:* tag keep scope NULL —
+        // they are project-unaffiliated and excluded from project-scoped loads.
+        await session.run(
+          `MATCH (s:Semantic) WHERE s.scope IS NULL
+           WITH s, [t IN coalesce(s.tags, []) WHERE toLower(t) STARTS WITH 'project:' AND toLower(t) <> 'project:*'] AS ptags
+           WHERE size(ptags) > 0
+           SET s.scope = toLower(ptags[0])`,
+        );
+        await session.run(
+          `MATCH (e:Episodic) WHERE e.scope IS NULL
+           WITH e, [t IN coalesce(e.tags, []) WHERE toLower(t) STARTS WITH 'project:' AND toLower(t) <> 'project:*'] AS ptags
+           WHERE size(ptags) > 0
+           SET e.scope = toLower(ptags[0])`,
+        );
+        // Normalize any pre-existing mixed-case scopes so equality filters hold.
+        await session.run(
+          'MATCH (s:Semantic) WHERE s.scope IS NOT NULL AND s.scope <> toLower(s.scope) SET s.scope = toLower(s.scope)',
+        );
+        await session.run(
+          'MATCH (e:Episodic) WHERE e.scope IS NOT NULL AND e.scope <> toLower(e.scope) SET e.scope = toLower(e.scope)',
+        );
+        for (const stmt of [
+          'CREATE INDEX semantic_scope IF NOT EXISTS FOR (s:Semantic) ON (s.scope)',
+          'CREATE INDEX episodic_scope IF NOT EXISTS FOR (e:Episodic) ON (e.scope)',
+        ]) {
+          await session.run(stmt);
+        }
+      } finally {
+        await session.close();
+      }
+    },
+  },
 ];
 
 export interface MigrationResult {

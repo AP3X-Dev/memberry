@@ -27,6 +27,8 @@ export interface SemanticNode {
   updated_at: string;
   decay_class: 'volatile' | 'stable' | 'permanent';
   tags: string[];
+  /** Canonical project scope (e.g. "project:amp"). Structural tenancy — enforced in read paths, not advisory. */
+  scope?: string;
   /** Tenant this node belongs to (defaults to DEFAULT_TENANT). */
   tenant_id?: string;
 }
@@ -188,6 +190,50 @@ export interface AuditEntry {
 /** Append-only audit sink. Implementations must never throw into the caller's path. */
 export interface AuditSink {
   append(entry: AuditEntry): Promise<void>;
+}
+
+// === Injection telemetry ===
+//
+// Every context injection (load/context/ask/hook) gets logged so retrieval can
+// later be judged by observed outcomes instead of voluntary feedback. Phase 0
+// of the rebuild ships the schema; Phase 3 wires writes + usage detection.
+
+/** Usage label for an injection, observed after the fact from transcripts. */
+export type InjectionUsage = 'unknown' | 'used' | 'ignored' | 'contradicted';
+
+/** One context injection: which memory was handed to an agent, when, for what. */
+export interface InjectionLogEntry {
+  /** Session the context was injected into, when known. */
+  session_id?: string;
+  /** Project scope of the load (e.g. "project:amp"). */
+  scope?: string;
+  /** Task text the context was assembled for. Truncate at the call site. */
+  task?: string;
+  /** Injected node ids, in rank order (rank = array position). */
+  source_ids: string[];
+  /** Ranked scores parallel to source_ids, when the channel produces them. */
+  scores?: number[];
+  /** Total tokens of the injected context. */
+  tokens?: number;
+  /** Channel that produced the injection: load | context | ask | grep | hook. */
+  channel?: string;
+  /** Tenant the injection was served under (defaults to DEFAULT_TENANT). */
+  tenant_id?: string;
+}
+
+/** A persisted injection record, including observed-usage fields. */
+export interface InjectionRecord extends InjectionLogEntry {
+  id: string;
+  injected_at: string;
+  usage: InjectionUsage;
+  usage_detail?: string;
+  usage_observed_at?: string;
+}
+
+/** Injection sink. Append is best-effort: never throws into the caller's path. */
+export interface InjectionSink {
+  /** Returns the new record id, or null when the append failed (best-effort). */
+  append(entry: InjectionLogEntry): Promise<string | null>;
 }
 
 export interface ExtractionProvider {

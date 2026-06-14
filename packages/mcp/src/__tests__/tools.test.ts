@@ -689,12 +689,12 @@ describe('berry_grep handler', () => {
 
   it('filters by scope', async () => {
     vi.mocked(mockScopedQuery.rawCypher).mockImplementation(async (cypher: string, _limit: number, params?: Record<string, unknown>) => {
-      // Episodic scope filter via task CONTAINS
-      if (cypher.includes('Episodic') && cypher.includes('task CONTAINS $grepScope') && params?.grepScope === 'project:amp') {
+      // Episodic scope filter via the structural scope column (tag fallback for legacy rows)
+      if (cypher.includes('Episodic') && cypher.includes('(e.scope = $grepScope OR $grepScope IN e.tags)') && params?.grepScope === 'project:amp') {
         return [{ e: { id: 'ep-1', content: 'JWT auth decision', task: '[project:amp] auth', created_at: '2026-04-05' } }];
       }
-      // Semantic scope filter via tags
-      if (cypher.includes('Semantic') && cypher.includes('$grepScope IN s.tags') && params?.grepScope === 'project:amp') {
+      // Semantic scope filter via the structural scope column (tag fallback for legacy rows)
+      if (cypher.includes('Semantic') && cypher.includes('(s.scope = $grepScope OR $grepScope IN s.tags)') && params?.grepScope === 'project:amp') {
         return [{ s: { id: 'sem-1', content: 'JWT pattern used', confidence: 0.8 } }];
       }
       // Fact scope filter via f.scope

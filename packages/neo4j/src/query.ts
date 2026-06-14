@@ -12,6 +12,21 @@ export interface QueryScope {
   asOf?: string;
   /** Tenant to scope results to (defaults to the single default tenant). */
   tenantId?: string;
+  /**
+   * Canonical project scope (e.g. "project:amp"). When set, results are HARD
+   * filtered to nodes whose scope property or project:* tag matches — unlike
+   * `tags`, which is an advisory ANY-match. Cross-project reads omit this.
+   */
+  projectScope?: string;
+}
+
+/**
+ * WHERE fragment enforcing project scope on a node alias. Matches the node's
+ * scope property, or (legacy nodes predating the scope backfill) a project:*
+ * tag. Callers must bind $projectScope.
+ */
+function projectScopeWhere(alias: string): string {
+  return `(${alias}.scope = $projectScope OR $projectScope IN ${alias}.tags)`;
 }
 
 // ─── Cypher read-only validation ─────────────────────────────────────────────
@@ -175,13 +190,20 @@ export class ScopedQuery {
       const relFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
       const tFilter = tenantWhere('s', tenantId); // mandatory tenant isolation
 
+      // Structural tenancy: project scope is a hard predicate, never advisory.
+      let pFilter = '';
+      if (scope.projectScope) {
+        params.projectScope = scope.projectScope.toLowerCase();
+        pFilter = ` AND ${projectScopeWhere('s')}`;
+      }
+
       if (entities.length > 0 && tags.length > 0) {
         params.entities = entities;
         params.tags = tags;
         cypher = `
           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
           WHERE e.name IN $entities AND ANY(t IN $tags WHERE t IN s.tags)
-            AND ${relFilter} AND ${tFilter}
+            AND ${relFilter} AND ${tFilter}${pFilter}
           RETURN DISTINCT s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
@@ -190,7 +212,7 @@ export class ScopedQuery {
         cypher = `
           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
           WHERE e.name IN $entities
-            AND ${relFilter} AND ${tFilter}
+            AND ${relFilter} AND ${tFilter}${pFilter}
           RETURN DISTINCT s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
@@ -198,7 +220,7 @@ export class ScopedQuery {
         params.tags = tags;
         cypher = `
           MATCH (s:Semantic)
-          WHERE ANY(t IN $tags WHERE t IN s.tags) AND ${tFilter}
+          WHERE ANY(t IN $tags WHERE t IN s.tags) AND ${tFilter}${pFilter}
           RETURN DISTINCT s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
@@ -206,7 +228,7 @@ export class ScopedQuery {
         // No filters — return most-confident semantics (still tenant-scoped)
         cypher = `
           MATCH (s:Semantic)
-          WHERE ${tFilter}
+          WHERE ${tFilter}${pFilter}
           RETURN s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
@@ -223,21 +245,34 @@ export class ScopedQuery {
     embedding: number[],
     limit: number,
     tenantId?: string,
+    projectScope?: string,
   ): Promise<Array<SemanticNode & { score: number }>> {
     const session = this.driver.session();
     try {
       const tenant = resolveTenant(tenantId);
-      // The vector index returns the K nearest BEFORE filtering, so for a
-      // non-default tenant we over-fetch and then tenant-filter, otherwise a
-      // tenant could be starved by another tenant's nearer neighbours.
-      const fetch = isDefaultTenant(tenant) ? limit : Math.min(limit * 5, 200);
+      // The vector index returns the K nearest BEFORE filtering, so whenever a
+      // post-filter applies (non-default tenant, or a project scope) we
+      // over-fetch and then filter, otherwise the scope could be starved by
+      // another project's nearer neighbours.
+      const filtered = !isDefaultTenant(tenant) || !!projectScope;
+      const fetch = filtered ? Math.min(limit * 5, 200) : limit;
+      const params: Record<string, unknown> = {
+        fetch: neo4j.int(fetch), limit: neo4j.int(limit), embedding, [TENANT_PARAM]: tenant,
+      };
+      // Structural tenancy: the vector channel enforces project scope too —
+      // similarity alone must never cross a project boundary.
+      let pFilter = '';
+      if (projectScope) {
+        params.projectScope = projectScope.toLowerCase();
+        pFilter = ` AND ${projectScopeWhere('node')}`;
+      }
       const result = await session.run(
         `CALL db.index.vector.queryNodes('semantic_embedding', $fetch, $embedding)
          YIELD node, score
-         WHERE ${tenantWhere('node', tenant)}
+         WHERE ${tenantWhere('node', tenant)}${pFilter}
          RETURN node, score
          LIMIT $limit`,
-        { fetch: neo4j.int(fetch), limit: neo4j.int(limit), embedding, [TENANT_PARAM]: tenant },
+        params,
       );
       return result.records.map((r) => ({
         ...mapSemanticNode(r.get('node').properties),
@@ -511,6 +546,7 @@ function mapSemanticNode(props: Record<string, unknown>): SemanticNode {
     updated_at: props.updated_at as string,
     decay_class: props.decay_class as SemanticNode['decay_class'],
     tags: (props.tags as string[]) ?? [],
+    ...(props.scope != null && { scope: props.scope as string }),
     embedding: props.embedding != null ? (props.embedding as number[]) : undefined,
   };
 }

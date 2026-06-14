@@ -27,6 +27,7 @@ export type { ResolvedEntity } from './entity-resolver.js';
 export { EntityStore } from './entity.js';
 export { AuditLogStore } from './audit.js';
 export type { AuditRecord } from './audit.js';
+export { InjectionLogStore } from './injection-log.js';
 export type { SimilarPair, RankedNode, CommunityNode } from './gds.js';
 export {
   temporalSetClause,
