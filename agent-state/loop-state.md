@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1513 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1514 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -58,11 +58,11 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-11 | MED | Dream project_card written verbatim into a core block injected into every session (second-order prompt injection) | ✅ DONE (c11) | packages/core/src/dream.ts:242-269 | DONE: fenced+guarded BOTH dream prompts (hypothesis+card) + stripFactFences anti-forgery + sanitizeCard (strips fences + neutralizes injection-openers) BEFORE core-block persist +4 tests. Verifier REJECT→test-mock fix (non-gap entity fires 1 chat call; respond-by-content mock)→PASS 1508/0 (core 327); security-reviewer PASS. Residual undelimited block-injection→OPT-76, extract.ts unfenced→OPT-77. |  |
 | OPT-12 | MED | berry_ingest/berry_braindump persist untrusted content verbatim, bypassing MEMBERRY_REDACT_ON_INGEST | ✅ DONE (c12) | packages/wiki/src/ingest.ts:41-196,282-300 | DONE: IngestionService.redactOnIngest flag (default MEMBERRY_REDACT_ON_INGEST==='true', mirrors service.ts/factory) redacts verbatim body (before extraction) + each claim.content; exported redactSecrets from core index +5 tests. (Source nodes persist no body.) Verifier PASS 1513/0 (wiki 287; .env doesn't set flag→no interaction); security-reviewer PASS. Residual structural fields→OPT-78. |  |
 | OPT-13 | MED | (≡OPT-08) MCP /mcp POST body reader buffers entire request, no cap | ✅ DONE (c8, no-op) | packages/mcp/src/server.ts:371-380,439-446 | COVERED by OPT-08: /mcp POST reads its body through the now-capped readJsonBody before the SDK is invoked, so the /mcp Streamable path is bounded. (Only /messages SDK-read path remains → OPT-73.) |  |
-| OPT-14 | MED | Redis amp:signals stream grows unbounded — XADD no MAXLEN, consumer only XACKs | pending | packages/redis/src/streams.ts:29-42,53-98 | MAXLEN ~ cap on publish or XDEL after XACK; test asserts bounded growth; suite green |  |
+| OPT-14 | MED | Redis amp:signals stream grows unbounded — XADD no MAXLEN, consumer only XACKs | ✅ DONE (c13) | packages/redis/src/streams.ts:29-42,53-98 | DONE: approximate MAXLEN ~ SIGNALS_STREAM_MAXLEN (10_000, env-overridable) on the signals XADD; MAXLEN-alone (no XDEL-after-XACK — multi-consumer-group-unsafe); consumer/ack semantics unchanged +1 test. Verifier PASS 1514/0 (redis 69). Nit: raw process.env vs readEnv (non-blocking). Episodic-buffer cap→OPT-79. |  |
 | OPT-15 | MED | berry_ingest_codebase path arg has no confinement, unlike sibling code tools | pending | packages/mcp/src/tools.ts:951-960 | resolve+confine args.path like berry_code_index; new test rejects outside-root path; suite green |  |
 | OPT-16 | MED | DeterministicAssembler ~6 sequential queries per target entity, each own session (N+1) | pending | packages/retrieval/src/deterministic.ts:50-155,220-347 | collapse per-target steps into UNWIND-driven single queries; suite green; no behavior change |  |
 | OPT-17 | MED | EntityResolver.resolveExisting 3 sequential round-trips per call on every fact hot path | pending | packages/neo4j/src/entity-resolver.ts:60-118 | persisted name_lower + index, collapse CI/alias to one indexed query; suite green |  |
-| OPT-18 | MED | (≡OPT-14) amp:signals stream never trimmed | pending | packages/redis/src/streams.ts:29-42,53-98 | covered by OPT-14; mark no-op if already done | confirm-before-removing |
+| OPT-18 | MED | (≡OPT-14) amp:signals stream never trimmed | ✅ DONE (c13, no-op) | packages/redis/src/streams.ts:29-42,53-98 | COVERED by OPT-14 (MAXLEN ~ on the signals XADD bounds the stream). | confirm-before-removing |
 | OPT-19 | MED | Dedup key set before persistence with no rollback — failed store() swallows the memory for 24h | pending | packages/core/src/service.ts:435-484 | unmark dedup key on store failure (try/catch + DedupChecker.unmark); new test proves retry possible after failure; suite green | confirm-before-removing |
 | OPT-20 | MED | Retrieval/code/intent embed via raw OpenAIEmbedding — Redis EmbeddingCache exists but never wired in | pending | packages/core/src/services-factory.ts:132,174,235,302 | wrap OpenAIEmbedding in a read-through caching provider using EmbeddingCache; inject it; test asserts cache hit on repeat; suite green |  |
 | OPT-21 | MED | Fact invalidate + create-replacement are two transactions — mid-failure leaves a fact with no successor (data loss) | pending | packages/core/src/service.ts:680-686 | create-before-invalidate ordering (or one tx); new test proves no fact lost on mid-failure; suite green |  |
@@ -122,6 +122,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-75 | LOW | berry_ask returns the raw LLM answer unfiltered — no output-side check that a (jailbroken-through-the-fence) answer didn't leak other evidence or echo injected instructions. OPT-10 fenced the INPUT; this is the OUTPUT-side residual. | pending | packages/retrieval/src/assembler.ts (ask → parseAskResponse ~193) | add a lightweight output sanity/leak check on the synthesized answer (e.g. flag/strip if it echoes the system-prompt guard text or content not present in cited evidence); test pins it; suite green. Defense-in-depth only (jailbreak can't be fully prevented at prompt level). Source: security-reviewing OPT-10. |  |
 | OPT-76 | MED | Core memory blocks (incl. the dream project_card) are injected into every agent session via renderBlocksMarkdown as `### name\n<content>` with NO untrusted-data delimiter — the full fix for the OPT-11 second-order channel (OPT-11 mitigates at generation+sanitize, not at injection). | pending | packages/core/src/service.ts:811-837 (renderBlocksMarkdown), 291-302 | wrap auto-generated/untrusted-derived core blocks in a session-level untrusted-data fence + guard so the agent treats injected block content as data, not directions; test pins the fence; suite green. Source: security-reviewing OPT-11. |  |
 | OPT-77 | LOW | extract.ts FACT_EXTRACTION_PROMPT feeds untrusted content.slice(0,4000) into the LLM user message with NO fence/guard (lower risk: JSON-mode structured-triple output + OPT-04 validateFactResponse downstream, so worst case is a malicious triple that gets dropped). Consistency gap vs OPT-10/OPT-11. | pending | packages/core/src/extract.ts:127-136 | mirror the untrusted-data fence + guard on the extraction prompt (the content is data to extract triples from, never instructions); test pins it; suite green. Source: security-reviewing OPT-11. |  |
+| OPT-79 | LOW | amp:episodic-buffer Redis stream has no MAXLEN on add — partially self-bounding via flush() XDEL, but events for never-flushed sessions accumulate unbounded. Also: SIGNALS_STREAM_MAXLEN uses raw process.env not the readEnv helper (minor consistency). | pending | packages/redis/src/streams.ts (EpisodicBuffer.add ~; SIGNALS_STREAM_MAXLEN ~24) | add a matching MAXLEN ~ safety cap to the episodic-buffer XADD; optionally route SIGNALS_STREAM_MAXLEN through readEnv for consistency; test pins bounded growth; suite green. Source: implementing/verifying OPT-14. |  |
 | OPT-78 | LOW | Redaction (store + ingest paths) only covers content/task fields — structural free-text fields (title, tags, entity/claim names) persist verbatim, so a secret pasted into a title/tag/entity name is not masked even with MEMBERRY_REDACT_ON_INGEST on. | pending | packages/wiki/src/ingest.ts (title/tags/about); packages/core/src/service.ts:421-430 | when redactOnIngest, also redactSecrets the title (at minimum) + tags on both ingest and store paths; test pins a secret in a title is masked; suite green. Source: security-reviewing OPT-12. |  |
 
 ## Completed Tasks
@@ -140,6 +141,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `b2f45d6` | gate green 1504 passed / 0 failed (retrieval 141); security-reviewer PASS |
 | OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `c5f871d` | gate green 1508 passed / 0 failed (core 327); security-reviewer PASS |
 | OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green 1513 passed / 0 failed (wiki 287); security-reviewer PASS |
+| OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `<c13-sha>` | gate green 1514 passed / 0 failed (redis 69); reliability item (no sec-review) |
 
 ## Failed Attempts
 
@@ -171,7 +173,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 13 at **OPT-14** (MED, OPTIMIZATION tier begins — Redis `amp:signals` stream grows unbounded; XADD MAXLEN ~ cap on publish or XDEL after XACK, `packages/redis/src/streams.ts:29-42,53-98`). This also satisfies its duplicate OPT-18 (mark COMPLETED no-op when done). (OPT-13 already done in c8.) Then OPT-15 (ingest_codebase path confinement), OPT-16 (deterministic N+1), … down the table. NOTE: all SECURITY items (OPT-01..12) are now DONE; remaining backlog is optimization/reliability + the OPT-67..78 review follow-ups. SEE Blocked B-01 (re2 — needs your approval). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 14 at **OPT-15** (MED, security-tagged — berry_ingest_codebase path arg has no confinement, unlike sibling code tools; resolve+confine args.path like berry_code_index, `packages/mcp/src/tools.ts:951-960`). This IS a security item → run the security-reviewer too. Then OPT-16 (deterministic N+1), OPT-17 (EntityResolver round-trips), … down the table. (OPT-13/OPT-18 done as no-op dups; all OPT-01..12 security done.) SEE Blocked B-01 (re2 — needs your approval). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -270,3 +272,11 @@ Start cycle 13 at **OPT-14** (MED, OPTIMIZATION tier begins — Redis `amp:signa
 - Verifier: PASS (1513 passed, 0 failed, build exit 0; wiki 282→287; prod .env doesn't set the flag → no env interaction) | Security-reviewer: PASS (all persisted untrusted content covered: body redacted before extraction + per-claim; Source persists no body; consistent with store path; default-off preserved)
 - Metrics: passing 1508→1513 (floor 1513); skipped 16
 - Next: OPT-14 (optimization tier)
+
+### Cycle 13 — 2026-06-14
+- Commit: `<c13-sha>` OPT-14: bound amp:signals Redis stream with approximate MAXLEN on XADD (closes OPT-18)
+- Item: OPT-14 — COMPLETED; OPT-18 marked DONE (no-op dup)
+- Mode B: 1 discovery → OPT-79 (LOW: episodic-buffer stream MAXLEN cap + readEnv consistency for SIGNALS_STREAM_MAXLEN)
+- Verifier: PASS (1514 passed, 0 failed, build exit 0; redis 68→69; RED-confirmed) | reliability item — no security-reviewer needed
+- Metrics: passing 1513→1514 (floor 1514); skipped 16
+- Next: OPT-15

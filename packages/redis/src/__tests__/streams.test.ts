@@ -1,5 +1,6 @@
 // packages/redis/src/__tests__/streams.test.ts
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import type { Redis } from 'ioredis';
 import { createRedisClient } from '../client.js';
 import { SignalStream, EpisodicBuffer } from '../streams.js';
 import type { BufferEvent } from '../streams.js';
@@ -22,6 +23,49 @@ async function isRedisReachable(url: string): Promise<boolean> {
     await probe.quit().catch(() => {});
   }
 }
+
+describe('SignalStream.publish — XADD bounding (mocked redis)', () => {
+  it('should XADD with an approximate MAXLEN cap while preserving the payload', async () => {
+    const xadd = vi.fn().mockResolvedValue('1-0');
+    const fakeRedis = { xadd } as unknown as Redis;
+    const stream = new SignalStream(fakeRedis);
+
+    const signal: StreamSignal = {
+      type: 'reinforcement',
+      target_id: 'node-001',
+      detail: 'Great answer',
+      source_session: 'session-abc',
+      agent_id: 'agent-1',
+      timestamp: '2026-06-14T00:00:00.000Z',
+    };
+
+    const id = await stream.publish(signal);
+    expect(id).toBe('1-0');
+    expect(xadd).toHaveBeenCalledTimes(1);
+
+    const args = xadd.mock.calls[0];
+    // Bound the stream: MAXLEN ~ <cap> must appear before the '*' auto-id,
+    // and the cap must be applied approximately (the '~' modifier).
+    expect(args[0]).toBe('amp:signals');
+    expect(args[1]).toBe('MAXLEN');
+    expect(args[2]).toBe('~');
+    expect(args[3]).toBe(10_000);
+
+    // The '*' auto-id and the original field/value payload must still follow
+    // the MAXLEN clause, unchanged and in order.
+    const starIdx = args.indexOf('*');
+    expect(starIdx).toBe(4);
+    expect(args.slice(starIdx)).toEqual([
+      '*',
+      'type', 'reinforcement',
+      'target_id', 'node-001',
+      'detail', 'Great answer',
+      'source_session', 'session-abc',
+      'agent_id', 'agent-1',
+      'timestamp', '2026-06-14T00:00:00.000Z',
+    ]);
+  });
+});
 
 describe('SignalStream', () => {
   const redis = createRedisClient(REDIS_URL);

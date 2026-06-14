@@ -16,3 +16,4 @@
 | OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `b2f45d6` | gate green: 1504 passed / 0 failed (retrieval 141), build 0; security-reviewer PASS |
 | OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `c5f871d` | gate green: 1508 passed / 0 failed (core 327), build 0; security-reviewer PASS |
 | OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green: 1513 passed / 0 failed (wiki 287), build 0; security-reviewer PASS |
+| OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `<c13-sha>` | gate green: 1514 passed / 0 failed (redis 69), build 0; reliability (no sec-review) |

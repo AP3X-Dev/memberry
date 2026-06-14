@@ -10,6 +10,19 @@ export interface BufferEvent {
 const SIGNALS_STREAM = 'amp:signals';
 const EPISODIC_BUFFER_STREAM = 'amp:episodic-buffer';
 
+/**
+ * Safety cap on the amp:signals stream length. Applied as an *approximate*
+ * MAXLEN (`~`) on every XADD so Redis trims old entries cheaply (amortized,
+ * radix-node-aligned). XACK only clears the consumer-group PEL — it never
+ * removes entries from the stream itself — so without this bound the stream
+ * would grow without limit and consume ever-increasing Redis memory.
+ *
+ * 10_000 is a generous safety ceiling, not a queue-depth limit: signals are
+ * consumed quickly, so the live backlog is normally tiny. Override via the
+ * SIGNALS_STREAM_MAXLEN env var if a deployment needs a different cap.
+ */
+const SIGNALS_STREAM_MAXLEN = Number(process.env.SIGNALS_STREAM_MAXLEN) || 10_000;
+
 /** Parse a flat [key, value, key, value, ...] array into a plain object. */
 function parseFields(fields: string[]): Record<string, string> {
   const obj: Record<string, string> = {};
@@ -29,6 +42,7 @@ export class SignalStream {
   async publish(signal: StreamSignal): Promise<string> {
     const id = await this.redis.xadd(
       SIGNALS_STREAM,
+      'MAXLEN', '~', SIGNALS_STREAM_MAXLEN,
       '*',
       'type', signal.type,
       'target_id', signal.target_id,
