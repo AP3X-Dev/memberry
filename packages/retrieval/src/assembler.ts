@@ -19,7 +19,7 @@ import { computeQueryStats, lexicalTextScore, adaptiveWeights, inferSourceTypeBo
 import { classifyIntent } from './intent.js';
 import type { QueryIntent } from './intent.js';
 import type { EmbeddingProvider, LlmClient, ChatMessage } from '@memberry/core';
-import { tenantWhere, resolveTenant, TENANT_PARAM } from '@memberry/neo4j';
+import { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from '@memberry/neo4j';
 
 // Tenant-scoped options: RetrievalOptions lives in ./types.js (shared shape), but
 // the assembler threads an optional tenantId through every direct memory/graph
@@ -298,7 +298,13 @@ export class UnifiedAssembler {
       );
     }
 
-    if (opts.include_code && this.codeLayer) {
+    // Tenant safety: the code-search channel queries Symbol nodes, which are NOT
+    // tenant-stamped in the shared graph. For a non-default tenant this would leak
+    // every other tenant's indexed code (file paths, signatures, doc comments).
+    // Force the channel OFF for non-default tenants — mirrors the deterministic
+    // strategy's tenant guard in tools.ts. Default tenant owns the shared/legacy
+    // graph, so it keeps the channel.
+    if (opts.include_code && this.codeLayer && isDefaultTenant(tenant)) {
       promises.push(
         this.codeLayer.search(task, {
           limit: 20,

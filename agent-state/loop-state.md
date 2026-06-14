@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1461 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1463 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -45,7 +45,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 | ID | Sev | Task | Status | Files | Acceptance (exits 0) | Evidence-req |
 |----|-----|------|--------|-------|----------------------|----|
-| OPT-01 | CRIT | berry_ask/berry_context (ranked) leak another tenant's indexed code via the un-tenant-filtered code-search channel | pending | packages/retrieval/src/assembler.ts:301-321; packages/code/src/search.ts | force include_code=false when tenantId!==DEFAULT_TENANT in assembleRanked (interim), or thread tenantId into code search + tenant predicate; new test proves a tenant cannot see another tenant's Symbol hits; full suite green |  |
+| OPT-01 | CRIT | berry_ask/berry_context (ranked) leak another tenant's indexed code via the un-tenant-filtered code-search channel | ✅ DONE (c1) | packages/retrieval/src/assembler.ts:301-321; packages/code/src/search.ts | DONE: gated channel on isDefaultTenant(tenant) in assembleRanked + 2 tests. Verifier PASS 1463/0; security-reviewer PASS (single chokepoint, satellite code tools withheld from tenants). |  |
 | OPT-02 | HIGH | Multi-tenant SSE/Streamable sessions not bound to the authenticating token — any valid token can drive another tenant's session | pending | packages/mcp/src/server.ts:435-525 | record {tenant,actor} per session at creation; on every /messages and /mcp follow-up recompute from the token and 403 on mismatch; new test proves cross-token reuse is rejected; suite green |  |
 | OPT-03 | HIGH | Untrusted stored episode content triggers arbitrary source-file reads into the graph (post-store re-index hook, no path confinement) | pending | packages/mcp/src/bootstrap.ts:238-253; packages/code/src/watcher.ts; packages/code/src/indexer.ts | confine each extracted path to the project root/allow-dir (reject abs + ../ + non-prefix; realpath for symlinks) before queueReindex; new test proves a traversal path is rejected; suite green | confirm-before-removing |
 | OPT-04 | HIGH | extractFacts trusts LLM predicates/values — injected content mints arbitrary active/deductive facts (graph poisoning) | pending | packages/core/src/extract.ts:35-57,61-71,90-119 | hard canonical-predicate allowlist in validateFactResponse (drop/quarantine non-allowed); clamp injected-origin facts to tentative; new test proves a bogus predicate is dropped; suite green | confirm-before-removing |
@@ -111,12 +111,13 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-64 | LOW | Dockerfile HEALTHCHECK start-period (20s) shorter than cold DB warm-up + serial bootstrap | pending | Dockerfile:70-72; docker-compose.yml | raise start-period to 60-90s or split liveness/readiness; suite green |  |
 | OPT-65 | INFO | Query embeddings in code search + intent classification bypass EmbeddingCache | pending | packages/code/src/search.ts:200,296 | inject EmbeddingCache into code search + intent (subsumed by OPT-20); suite green |  |
 | OPT-66 | INFO | Intent classifier recomputes exemplar L2 norms every query despite caching vectors | pending | packages/retrieval/src/intent.ts:216-235,247-251 | precompute+cache exemplar norms alongside vectors; suite green |  |
+| OPT-67 | LOW | DeterministicAssembler entity/aspect/semantic queries are NOT tenant-filtered — rely on tools.ts:147 routing guard, not data-layer isolation (defense-in-depth gap; not a live leak). Mirrors the query.ts byEntity/byTag/expandByGraph unscoped-read class. | pending | packages/retrieval/src/assembler.ts:402-412; packages/retrieval/src/deterministic.ts; packages/neo4j/src/query.ts:142,163,356,418 | thread tenantId into DeterministicAssembler + add tenantWhere to its queries (and to byEntity/byTag/byEntityWithFacts/expandByGraph); test proves a tenant can't read another tenant's entities even if routed to deterministic; suite green. Source: found verifying OPT-01. |  |
 
 ## Completed Tasks
 
 | ID | Task | Cycle | Commit | Result |
 |----|------|-------|--------|--------|
-| (none yet) | | | | |
+| OPT-01 | Gate ranked code channel on default tenant (close cross-tenant code leak) | 1 | `5223f3c` | gate green 1463 passed / 0 failed; security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -148,8 +149,14 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Continue from the highest-priority `pending`/`IN PROGRESS` item in Open Tasks (top of table first). If IN PROGRESS, recover partial work or revert to the last gate-green commit first. When Open Tasks has no actionable items, run a Mode-B discovery sweep, append findings here (Medium+ only), then evaluate termination (CONVERGED/STALLED/DIVERGING per the driver).
+Start cycle 2 at **OPT-02** (HIGH — multi-tenant SSE/Streamable sessions not bound to the authenticating token, `packages/mcp/src/server.ts:435-525`). Then OPT-03, OPT-04, … down the table. If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
-<!-- one entry per cycle, appended by the driver's state-update step -->
+### Cycle 1 — 2026-06-13
+- Commit: `5223f3c` OPT-01: gate ranked code channel on default tenant (close cross-tenant code leak)
+- Item: OPT-01 — COMPLETED
+- Mode B: 1 discovery (DeterministicAssembler entity queries not tenant-filtered — defense-in-depth, not a live leak) → added as OPT-67
+- Verifier: PASS (1463 passed, 0 failed, build exit 0; retrieval 138) | Security-reviewer: PASS (single chokepoint; satellite code tools withheld from tenant sessions; no new hazard)
+- Metrics: passing 1461→1463 (floor 1463); skipped 16
+- Next: OPT-02

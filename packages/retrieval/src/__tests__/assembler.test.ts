@@ -557,6 +557,31 @@ describe('UnifiedAssembler', () => {
       expect(codeLayer.search).not.toHaveBeenCalled();
     });
 
+    it('skips the code-search channel for a non-default tenant (no cross-tenant leak)', async () => {
+      // Symbol nodes are not tenant-stamped, so the code-search channel is not
+      // tenant-filtered. A non-default tenant must NOT receive code-search hits.
+      const ctx = await assembler.assemble('find auth code', {
+        strategy: 'ranked',
+        tenantId: 'acme',
+      });
+
+      // The un-tenant-filtered code layer must not be queried at all.
+      expect(codeLayer.search).not.toHaveBeenCalled();
+      // And no symbol (code) results should appear in the assembled context.
+      expect(ctx.sections.find((s) => s.source_type === 'symbol')).toBeUndefined();
+    });
+
+    it('still runs the code-search channel for the default tenant', async () => {
+      const ctx = await assembler.assemble('find auth code', {
+        strategy: 'ranked',
+        tenantId: 'default',
+      });
+
+      // Default tenant owns the shared/legacy graph — code channel stays on.
+      expect(codeLayer.search).toHaveBeenCalled();
+      expect(ctx.sections.find((s) => s.source_type === 'symbol')).toBeDefined();
+    });
+
     it('respects include_memory = false', async () => {
       await assembler.assemble('test', {
         strategy: 'ranked',
