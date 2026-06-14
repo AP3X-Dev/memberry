@@ -3,6 +3,7 @@
 // Same graph state always produces the same output — no ranking heuristics.
 
 import { type Driver } from 'neo4j-driver';
+import { tenantWhere, resolveTenant, TENANT_PARAM } from '@memberry/neo4j';
 import type { ContextSection, ContextItem } from './types.js';
 
 /**
@@ -19,16 +20,28 @@ import type { ContextSection, ContextItem } from './types.js';
  * 5. Include semantic memories scoped to target entities
  *
  * Token budgeting fills from most-specific to least-specific.
+ *
+ * Tenant scoping (OPT-67): Entity and Aspect are SHARED architecture nodes — by
+ * design they carry no `tenant_id` (they are absent from TENANT_LABELS), so their
+ * reads here are intentionally NOT tenant-filtered (a strict `tenant_id = $t`
+ * match would return zero arch nodes for a named tenant). Semantic IS a
+ * tenant-scoped memory node, so the semantic read (step 6) ANDs
+ * `tenantWhere('s', tenantId)` for defense-in-depth: the default tenant matches
+ * legacy/null-tenant nodes (output-identical in single-tenant) and, in a
+ * multi-tenant deployment, no longer surfaces a named tenant's semantics about a
+ * shared entity. Named tenants are additionally routed away from this path
+ * entirely by the tools.ts strategy guard; this is the data-layer backstop.
  */
 export class DeterministicAssembler {
   constructor(private driver: Driver) {}
 
   async assemble(
     task: string,
-    options?: { entity_scope?: string[]; project_name?: string; max_tokens?: number; as_of?: string },
+    options?: { entity_scope?: string[]; project_name?: string; max_tokens?: number; as_of?: string; tenantId?: string },
   ): Promise<ContextSection[]> {
     const maxTokens = options?.max_tokens ?? 8000;
     const asOf = options?.as_of;
+    const tenant = resolveTenant(options?.tenantId);
     const sections: ContextSection[] = [];
     let tokenBudget = maxTokens;
 
@@ -142,8 +155,8 @@ export class DeterministicAssembler {
       tokenBudget -= section.tokens;
     }
 
-    // Step 6: Semantic memories scoped to target entities
-    const semanticsByTarget = await this.getScopedSemanticsBatch(targets, asOf);
+    // Step 6: Semantic memories scoped to target entities (and to the tenant)
+    const semanticsByTarget = await this.getScopedSemanticsBatch(targets, asOf, tenant);
     const semanticItems: ContextItem[] = [];
     for (const target of targets) {
       const memories = semanticsByTarget.get(target) ?? [];
@@ -399,25 +412,30 @@ export class DeterministicAssembler {
 
   private async getScopedSemanticsBatch(
     names: string[],
-    asOf?: string,
+    asOf: string | undefined,
+    tenantId: string,
   ): Promise<Map<string, Array<{ id: string; content: string; confidence: number; tags: string[] }>>> {
     const session = this.driver.session();
     try {
       // When as_of is provided, filter to semantics created before that timestamp.
       // The per-target LIMIT 10 is preserved via a subquery scoped to each target.
+      // Semantic is a tenant-scoped node, so AND tenantWhere('s', tenantId): for the
+      // default tenant this matches legacy/null-tenant nodes (output-identical in
+      // single-tenant), and bars a named tenant's semantics in multi-tenant. The
+      // $tenantId value is a bound parameter (injection-safe).
       const temporalFilter = asOf ? ' AND s.created_at <= $asOf' : '';
       const result = await session.run(
         `UNWIND $names AS targetName
          CALL {
            WITH targetName
            MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: targetName})
-           WHERE true${temporalFilter}
+           WHERE ${tenantWhere('s', tenantId)}${temporalFilter}
            RETURN s.id AS id, s.content AS content, s.confidence AS confidence, s.tags AS tags
            ORDER BY s.confidence DESC
            LIMIT 10
          }
          RETURN targetName AS targetName, id, content, confidence, tags`,
-        { names, ...(asOf ? { asOf } : {}) },
+        { names, [TENANT_PARAM]: tenantId, ...(asOf ? { asOf } : {}) },
       );
       return this.groupByTarget(result.records, (r) => ({
         target: r.get('targetName') as string,

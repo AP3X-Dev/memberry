@@ -457,15 +457,15 @@ export class UnifiedAssembler {
   // ─── Deterministic assembly ────────────────────────────────────────────
 
   private async assembleDeterministic(task: string, opts: TenantRetrievalOptions): Promise<UnifiedContext> {
-    // NOTE: DeterministicAssembler (deterministic.ts) owns its own Neo4j queries
-    // and is out of scope for this change. Its entity/aspect/semantic queries are
-    // NOT yet tenant-filtered. Tenant is resolved here and intended to be threaded
-    // into DeterministicAssembler.assemble when that file is made tenant-aware.
+    // Tenant is threaded into the DeterministicAssembler's semantic read
+    // (Semantic is tenant-scoped); its Entity/Aspect reads stay shared by design.
+    // Named tenants are also routed away from this path by the tools.ts guard.
     const sections = await this.deterministic.assemble(task, {
       entity_scope: opts.entity_scope,
       project_name: opts.project_name,
       max_tokens: opts.max_tokens,
       as_of: opts.as_of,
+      tenantId: opts.tenantId,
     });
 
     const tokenCount = sections.reduce(
