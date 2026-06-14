@@ -695,13 +695,25 @@ export class AMPService {
             updated_at: now,
           };
 
-          // Auto-invalidate conflicting fact before creating replacement
+          // Create-before-invalidate: persist the replacement FIRST, then
+          // invalidate the conflicting fact. The new fact already carries
+          // supersedes_fact_id → conflicting.id (set above), and invalidate()
+          // re-asserts the SUPERSEDES_FACT edge with the same linkage, so the
+          // successful end-state is identical to the previous ordering.
+          //
+          // The two writes are still separate transactions. By creating first,
+          // a mid-failure (create succeeds, invalidate throws) leaves BOTH facts
+          // active — recoverable: a later contradiction/consolidation re-resolves
+          // it, and no truth is lost. The previous invalidate-first ordering
+          // could invalidate the old fact with no successor → permanent data loss.
+          // A transient two-active window for the same subject+predicate is
+          // acceptable; on success it collapses to exactly one active fact.
+          await factLayer.create(newFact);
+          createdFactIds.push(newFactId);
+
           if (conflicting) {
             await factLayer.invalidate(conflicting.id, now, newFactId);
           }
-
-          await factLayer.create(newFact);
-          createdFactIds.push(newFactId);
         }
 
         // Feature 1: Link co-extracted facts with SAME_EPISODE edges

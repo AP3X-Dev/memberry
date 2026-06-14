@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1532 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1534 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -65,7 +65,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-18 | MED | (≡OPT-14) amp:signals stream never trimmed | ✅ DONE (c13, no-op) | packages/redis/src/streams.ts:29-42,53-98 | COVERED by OPT-14 (MAXLEN ~ on the signals XADD bounds the stream). | confirm-before-removing |
 | OPT-19 | MED | Dedup key set before persistence with no rollback — a failed store() permanently swallows the memory for 24h | ✅ DONE (c17) | packages/core/src/service.ts:435-484 | DONE: DedupChecker.unmark releases the key; store() wraps persistence in try/catch → unmark-then-rethrow original error (mark stays before persist → TOCTOU/BUG-0020 intact); +3 tests. Verifier PASS 1526/0 (core 330; RED-confirmed). Reliability (no sec-review). |  |
 | OPT-20 | MED | Retrieval/code/intent embed via raw OpenAIEmbedding — Redis EmbeddingCache exists but never wired in | ✅ DONE (c18) | packages/core/src/services-factory.ts:132,174,235,302 | DONE: CachingEmbeddingProvider (read-through embed + batch-misses-only + cache-error fallthrough) wraps OpenAIEmbedding with the existing EmbeddingCache; injected into shared core.embedding (all 4 consumers) +6 tests. Subsumes OPT-65. Verifier PASS 1532/0 (core 336; behavior-identical on miss). Perf (no sec-review). |  |
-| OPT-21 | MED | Fact invalidate + create-replacement are two transactions — mid-failure leaves a fact with no successor (data loss) | pending | packages/core/src/service.ts:680-686 | create-before-invalidate ordering (or one tx); new test proves no fact lost on mid-failure; suite green |  |
+| OPT-21 | MED | Fact invalidate + create-replacement is two separate transactions; a failure between them invalidates a fact with no successor (data loss) | ✅ DONE (c19) | packages/core/src/service.ts:680-686 | DONE: reordered create-before-invalidate (replacement w/ supersedes_fact_id created first, then old invalidated) → mid-failure leaves BOTH active (recoverable) instead of losing the only fact; end-state identical +2 tests. Verifier PASS 1534/0 (core 338). Single-tx atomic supersession→OPT-81. Reliability (no sec-review). |  |
 | OPT-22 | MED | fetchEpisodicsForEntity unindexed full :Episodic substring scan, once/twice per entity on compile | pending | packages/wiki/src/queries.ts:215-240 | prefer indexed :MODIFIED, gate CONTAINS behind it, or one UNWIND batch; suite green |  |
 | OPT-23 | MED | indexFile one round-trip per changed symbol (sequential findByCompositeKey + create/update) | pending | packages/code/src/indexer.ts:144-214 | batch per-file symbol upserts into one UNWIND MERGE/SET; suite green |  |
 | OPT-24 | MED | docker-compose mcp omits MEMBERRY_TENANT_TOKENS/_DATASTORES/_INGEST_ALLOW_DIR — isolation can't be enabled via shipped compose | pending | docker-compose.yml:72-89; .env.example | pass the three env vars through compose with `${VAR:-}` defaults + document in .env.example; suite green |  |
@@ -124,6 +124,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-77 | LOW | extract.ts FACT_EXTRACTION_PROMPT feeds untrusted content.slice(0,4000) into the LLM user message with NO fence/guard (lower risk: JSON-mode structured-triple output + OPT-04 validateFactResponse downstream, so worst case is a malicious triple that gets dropped). Consistency gap vs OPT-10/OPT-11. | pending | packages/core/src/extract.ts:127-136 | mirror the untrusted-data fence + guard on the extraction prompt (the content is data to extract triples from, never instructions); test pins it; suite green. Source: security-reviewing OPT-11. |  |
 | OPT-79 | LOW | amp:episodic-buffer Redis stream has no MAXLEN on add — partially self-bounding via flush() XDEL, but events for never-flushed sessions accumulate unbounded. Also: SIGNALS_STREAM_MAXLEN uses raw process.env not the readEnv helper (minor consistency). | pending | packages/redis/src/streams.ts (EpisodicBuffer.add ~; SIGNALS_STREAM_MAXLEN ~24) | add a matching MAXLEN ~ safety cap to the episodic-buffer XADD; optionally route SIGNALS_STREAM_MAXLEN through readEnv for consistency; test pins bounded growth; suite green. Source: implementing/verifying OPT-14. |  |
 | OPT-80 | LOW | (deferred enhancement, needs approval) EntityResolver CI/alias resolution still does a toLower(e.name) scan + alias-array scan unservable by the entity_name index — make it index-backed. | pending | packages/neo4j/src/entity-resolver.ts; packages/neo4j/src/schema.ts + migrations.ts | add persisted :Entity.name_lower property + index (and lowercased-alias index), rewrite resolveExisting to equality-match name_lower; REQUIRES a schema migration + backfill of name_lower on existing nodes → HUMAN APPROVAL before running. Source: implementing OPT-17. |  |
+| OPT-81 | LOW | Fact supersession is now create-before-invalidate (OPT-21) but still TWO transactions — a benign transient two-active window exists until both commit; a single Neo4j tx would make it fully atomic. | pending | packages/neo4j/src/fact.ts; packages/core/src/service.ts | add FactStore.createAndInvalidate(newFact, oldId, invalidAt) doing both writes in one tx+session; service uses it on the contradiction path; test pins atomicity (no two-active window); suite green. Source: implementing OPT-21. |  |
 | OPT-78 | LOW | Redaction (store + ingest paths) only covers content/task fields — structural free-text fields (title, tags, entity/claim names) persist verbatim, so a secret pasted into a title/tag/entity name is not masked even with MEMBERRY_REDACT_ON_INGEST on. | pending | packages/wiki/src/ingest.ts (title/tags/about); packages/core/src/service.ts:421-430 | when redactOnIngest, also redactSecrets the title (at minimum) + tags on both ingest and store paths; test pins a secret in a title is masked; suite green. Source: security-reviewing OPT-12. |  |
 
 ## Completed Tasks
@@ -148,6 +149,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-17 | Collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query | 16 | `5b3127f` | gate green 1523 passed / 0 failed (neo4j 197); perf — precedence preserved |
 | OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `4c3853d` | gate green 1526 passed / 0 failed (core 330); reliability (no sec-review) |
 | OPT-20 (+OPT-65) | Read-through embedding cache wired into hot paths | 18 | `3c82078` | gate green 1532 passed / 0 failed (core 336); perf — behavior-identical on miss |
+| OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `<c19-sha>` | gate green 1534 passed / 0 failed (core 338); reliability (no sec-review) |
 
 ## Failed Attempts
 
@@ -179,7 +181,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 19 at **OPT-21** (MED, reliability — fact invalidate + create-replacement is two separate transactions; a failure between them invalidates a fact with NO successor (data loss); reorder to create-before-invalidate so a mid-failure leaves BOTH active (recoverable), or wrap in one tx, `packages/core/src/service.ts:680-686`). Then OPT-22 (wiki episodic scan), OPT-23 (indexFile batch), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 20 at **OPT-22** (MED, perf — fetchEpisodicsForEntity does an unindexed full :Episodic substring scan, once/twice per entity during wiki compile; prefer the indexed :MODIFIED relationship and gate the CONTAINS branch behind it, or batch entity names into one UNWIND scan, `packages/wiki/src/queries.ts:215-240`). Then OPT-23 (indexFile batch), OPT-25 (invalidateRelationship allowlist), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -326,3 +328,11 @@ Start cycle 19 at **OPT-21** (MED, reliability — fact invalidate + create-repl
 - Verifier: PASS (1532 passed, 0 failed, build exit 0; core 330→336; RED-confirmed; behavior-identical on cache miss; cache errors fall through to inner) | perf item — no security-reviewer
 - Metrics: passing 1526→1532 (floor 1532); skipped 16
 - Next: OPT-21
+
+### Cycle 19 — 2026-06-14
+- Commit: `<c19-sha>` OPT-21: create-before-invalidate fact supersession (no data loss on mid-failure)
+- Item: OPT-21 — COMPLETED
+- Mode B: 1 discovery → OPT-81 (LOW: single-tx atomic supersession to remove the benign transient two-active window)
+- Verifier: PASS (1534 passed, 0 failed, build exit 0; core 336→338; RED-confirmed; end-state contract intact; error still propagates via non-fatal handler) | reliability item — no security-reviewer
+- Metrics: passing 1532→1534 (floor 1534); skipped 16
+- Next: OPT-22

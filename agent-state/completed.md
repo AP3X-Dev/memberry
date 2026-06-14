@@ -22,3 +22,4 @@
 | OPT-17 | Collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query | 16 | `5b3127f` | gate green: 1523 passed / 0 failed (neo4j 197), build 0; perf — precedence preserved |
 | OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `4c3853d` | gate green: 1526 passed / 0 failed (core 330), build 0; reliability (no sec-review) |
 | OPT-20 (+OPT-65) | Read-through embedding cache wired into hot paths | 18 | `3c82078` | gate green: 1532 passed / 0 failed (core 336), build 0; perf — behavior-identical on miss |
+| OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `<c19-sha>` | gate green: 1534 passed / 0 failed (core 338), build 0; reliability (no sec-review) |
