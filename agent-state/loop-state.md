@@ -128,7 +128,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-04 | Validate extracted-fact predicate shape + value bounds (block graph poisoning) | 4 | `a47b124` | gate green 1480 passed / 0 failed (core 321); security-reviewer PASS |
 | OPT-05 | Redact JSON-quoted credentials in SECRET_ASSIGNMENT (core + graph allowlist) | 5 | `21c3462` | gate green 1483 passed / 0 failed (core 323, graph 53); security-reviewer PASS |
 | OPT-06 | No-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim; re2→B-01) | 6 | `7ce8c69` | gate green 1488 passed / 0 failed (mcp 131); security-reviewer PASS |
-| OPT-07 | Bounded tx timeout on grep =~ rawCypher path (Neo4j-side ReDoS backstop) | 7 | `<c7-sha>` | gate green 1492 passed / 0 failed (neo4j 193); security-reviewer PASS |
+| OPT-07 | Bounded tx timeout on grep =~ rawCypher path (Neo4j-side ReDoS backstop) | 7 | `7374e7a` | gate green 1492 passed / 0 failed (neo4j 193); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -213,7 +213,7 @@ Start cycle 8 at **OPT-08** (MED — readJsonBody buffers the entire request bod
 - Next: OPT-07
 
 ### Cycle 7 — 2026-06-14
-- Commit: `<c7-sha>` OPT-07: bounded tx timeout on grep =~ rawCypher path (Neo4j-side ReDoS backstop)
+- Commit: `7374e7a` OPT-07: bounded tx timeout on grep =~ rawCypher path (Neo4j-side ReDoS backstop)
 - Item: OPT-07 — COMPLETED
 - Mode B: 1 discovery → OPT-72 (MED: berry_query =~ still unbounded; default-timeout-on-all-rawCypher + tighten grep to 2s)
 - Verifier: REJECT then PASS — first run found a pre-existing mcp test (tools.test.ts:826/835) asserting the exact 3-arg shape of the non-regex grep rawCypher call; updated those two assertions to expect the new 4th arg (undefined) — a signature update, not a weakening — re-ran gate GREEN (1492 passed, 0 failed; neo4j 191→193, mcp 132→134) | Security-reviewer: PASS (5s timeout bounds server-side ReDoS, READ-only preserved, clean error surface; residuals→OPT-72/B-01)
