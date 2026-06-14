@@ -48,7 +48,7 @@ export type {
 export { initCodeSchema } from './schema.js';
 
 // Watcher
-export { CodeWatcher, extractFilePaths } from './watcher.js';
+export { CodeWatcher, extractFilePaths, confineReindexPath, getReindexBaseDir } from './watcher.js';
 export type { CodeWatcherOptions, IFileIndexer, ISymbolDeleter } from './watcher.js';
 
 // MCP tools

@@ -1,6 +1,9 @@
 // packages/code/src/__tests__/watcher.test.ts
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { CodeWatcher, extractFilePaths } from '../watcher.js';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'fs';
+import { tmpdir } from 'os';
+import { join, resolve } from 'path';
+import { CodeWatcher, extractFilePaths, confineReindexPath } from '../watcher.js';
 import type { IFileIndexer, ISymbolDeleter } from '../watcher.js';
 
 // ─── extractFilePaths ───────────────────────────────────────────────────────
@@ -57,6 +60,72 @@ describe('extractFilePaths', () => {
     const paths = extractFilePaths(content);
     expect(paths).toContain('components/App.tsx');
     expect(paths).toContain('views/Home.jsx');
+  });
+});
+
+// ─── confineReindexPath (path-traversal confinement) ─────────────────────────
+
+describe('confineReindexPath', () => {
+  // realpathSync normalizes macOS /var -> /private/var etc., so the base used in
+  // assertions must match what the helper sees after its internal realpath.
+  let base: string;
+
+  beforeEach(() => {
+    base = realpathSync(mkdtempSync(join(tmpdir(), 'amp-confine-')));
+  });
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('accepts an in-base relative path and returns its resolved absolute form', () => {
+    const out = confineReindexPath('src/service.ts', base);
+    expect(out).toBe(resolve(base, 'src/service.ts'));
+  });
+
+  it('accepts an in-base absolute path', () => {
+    const inside = resolve(base, 'pkg/index.ts');
+    expect(confineReindexPath(inside, base)).toBe(inside);
+  });
+
+  it('drops a relative `..` traversal escape', () => {
+    expect(confineReindexPath('../../etc/passwd', base)).toBeNull();
+  });
+
+  it('drops a relative path that climbs out then back to a sibling', () => {
+    expect(confineReindexPath('../sibling/secret.ts', base)).toBeNull();
+  });
+
+  it('drops an absolute path outside the base', () => {
+    // Use a path that resolves outside base on every platform.
+    const outside = resolve(base, '..', 'totally-outside', 'secrets.py');
+    expect(confineReindexPath(outside, base)).toBeNull();
+  });
+
+  it('drops a sibling directory that shares the base as a string prefix', () => {
+    // `${base}EVIL` starts with `base` lexically but is NOT inside `base + sep`.
+    expect(confineReindexPath(base + 'EVIL/secret.ts', base)).toBeNull();
+  });
+
+  it('drops a symlink inside the base that points to a file outside it', () => {
+    // Create a secret file OUTSIDE the base and a symlink INSIDE the base to it.
+    const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), 'amp-outside-')));
+    try {
+      const secret = join(outsideRoot, 'secret.ts');
+      writeFileSync(secret, 'export const KEY = "leak";');
+      mkdirSync(join(base, 'src'), { recursive: true });
+      const link = join(base, 'src', 'link.ts');
+      try {
+        symlinkSync(secret, link);
+      } catch {
+        // Symlink creation can fail without privileges (e.g. Windows). Skip.
+        return;
+      }
+      // Lexically inside base, but realpath escapes -> must be dropped.
+      expect(confineReindexPath(link, base)).toBeNull();
+    } finally {
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
   });
 });
 

@@ -32,6 +32,7 @@ import {
   CodeSearch,
   CodeWatcher,
   extractFilePaths,
+  confineReindexPath,
   setCodeServiceInstances,
 } from '@memberry/code';
 import {
@@ -235,7 +236,13 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   const codeSearchService = new CodeSearch(driver, embedding);
   const codeWatcherService = new CodeWatcher(codeIndexerService, symbolStoreService);
 
-  // Wire post-store hook: re-index files mentioned in stored episode content
+  // Wire post-store hook: re-index files mentioned in stored episode content.
+  // SECURITY: stored content is fully UNTRUSTED. An agent (or ingested content)
+  // can put a traversal/absolute path in it (e.g. `../../../../etc/secrets/x.py`)
+  // to coax the re-indexer into reading arbitrary source files into the queryable
+  // graph. Confine every extracted path to the ingest base BEFORE it reaches
+  // queueReindex; confinement failures are silently dropped (this is a background
+  // hook — they must never throw into the store() caller path).
   const originalStore = ampService.store.bind(ampService);
   ampService.store = async (input) => {
     const result = await originalStore(input);
@@ -243,7 +250,12 @@ export async function bootstrap(): Promise<BootstrapHandles> {
       try {
         const filePaths = extractFilePaths(input.content);
         for (const fp of filePaths) {
-          codeWatcherService.queueReindex(fp);
+          const confined = confineReindexPath(fp);
+          if (confined === null) {
+            console.error(`[memberry-mcp] dropped out-of-base re-index path from stored content: ${fp}`);
+            continue;
+          }
+          codeWatcherService.queueReindex(confined);
         }
       } catch (err: unknown) {
         // Post-store hook failures are non-fatal

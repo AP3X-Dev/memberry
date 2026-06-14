@@ -1,9 +1,10 @@
 // packages/code/src/watcher.ts
 // Background file watcher that keeps the symbol graph fresh as source files change.
 
-import { watch, stat } from 'fs';
-import { extname, resolve } from 'path';
+import { watch, stat, realpathSync } from 'fs';
+import { extname, resolve, sep } from 'path';
 import type { FSWatcher } from 'fs';
+import { readEnv } from '@memberry/core';
 import { LANGUAGE_EXTENSIONS } from './types.js';
 
 // ─── Injected interfaces ───────────────────────────────────────────────────
@@ -59,6 +60,68 @@ export function extractFilePaths(content: string): string[] {
     paths.add(match[1]);
   }
   return [...paths];
+}
+
+// ─── Path confinement ─────────────────────────────────────────────────────────
+
+/**
+ * Returns the base directory that re-index paths must be confined to.
+ * Mirrors the wiki ingest confinement base: MEMBERRY_INGEST_ALLOW_DIR if set,
+ * otherwise the process working directory (the same root the code MCP tools
+ * confine to via process.cwd()).
+ */
+export function getReindexBaseDir(): string {
+  return resolve(readEnv('MEMBERRY_INGEST_ALLOW_DIR') ?? process.cwd());
+}
+
+/**
+ * Confine an extracted (untrusted) file path to `base`.
+ *
+ * Stored episode content is fully untrusted, so paths it mentions must not be
+ * allowed to escape the project root and pull arbitrary source files (e.g.
+ * `../../../../etc/secrets/config.py`, `/home/user/.ssh/known.py`) into the
+ * queryable symbol graph.
+ *
+ * Returns the resolved absolute path if it is within `base`, or `null` if the
+ * path escapes (lexically or via symlink). Callers must drop `null` results.
+ *
+ * Confinement layers:
+ *   1. Lexical: `resolve(base, p)` must equal `base` or start with `base + sep`
+ *      (trailing-sep prefix check so a sibling like `${base}EVIL` cannot pass).
+ *      This rejects `..` escapes and absolute paths outside the base.
+ *   2. Symlink: if the resolved path exists, its realpath (and the base's
+ *      realpath) must still satisfy the same prefix check, defeating a symlink
+ *      inside the base that points outside it.
+ */
+export function confineReindexPath(p: string, base?: string): string | null {
+  const baseDir = base ?? getReindexBaseDir();
+  const resolved = resolve(baseDir, p);
+
+  // Layer 1: lexical confinement.
+  if (resolved !== baseDir && !resolved.startsWith(baseDir + sep)) {
+    return null;
+  }
+
+  // Layer 2: symlink confinement (best-effort; only when the target exists).
+  try {
+    const realResolved = realpathSync(resolved);
+    // realpath the base too, so a base reached through a symlink still matches.
+    let realBase: string;
+    try {
+      realBase = realpathSync(baseDir);
+    } catch {
+      realBase = baseDir;
+    }
+    if (realResolved !== realBase && !realResolved.startsWith(realBase + sep)) {
+      return null;
+    }
+  } catch {
+    // ENOENT (or any stat error): nothing to realpath. The lexical check above
+    // already confirmed the resolved path is inside the base, so allow it
+    // (a not-yet-existing in-project file is fine — reindexFile re-checks).
+  }
+
+  return resolved;
 }
 
 // ─── CodeWatcher ────────────────────────────────────────────────────────────
