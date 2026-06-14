@@ -437,15 +437,26 @@ export class ScopedQuery {
     depth: number = 1,
     maxPerHop: number = 5,
     asOf?: string,
+    tenantId?: string,
   ): Promise<SemanticNode[]> {
     if (entityNames.length === 0) return [];
 
+    // Scope the RETURNED Semantic nodes to the caller's tenant (Semantic is a
+    // tenant-scoped node). Without this, a tenant's berry_load graph expansion
+    // could surface another tenant's semantics about a shared entity — the
+    // downstream inProjectScope guard filters by project scope, NOT tenant_id.
+    // Default tenant matches legacy/null-tenant nodes → output-identical in
+    // single-tenant. The bridge/seed nodes are traversal-only (never returned),
+    // so scoping the returned node is both necessary and sufficient to stop the
+    // content leak. $tenantId is a bound parameter (injection-safe).
+    const tenant = resolveTenant(tenantId);
     const session = this.driver.session();
     try {
       const relFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
       const params: Record<string, unknown> = {
         entityNames,
         maxPerHop: neo4j.int(maxPerHop),
+        [TENANT_PARAM]: tenant,
       };
       if (asOf) params.asOf = asOf;
 
@@ -458,6 +469,7 @@ export class ScopedQuery {
              AND r2.invalid_at IS NULL
              AND r3.invalid_at IS NULL
              AND NOT toLower(e2.name) IN $lowerNames
+             AND ${tenantWhere('s2', tenant)}
            RETURN DISTINCT s2 AS node, 0.2 AS hopScore
            ORDER BY s2.confidence DESC
            LIMIT $maxPerHop`
@@ -467,6 +479,7 @@ export class ScopedQuery {
              AND r2.invalid_at IS NULL
              AND r3.invalid_at IS NULL
              AND NOT toLower(e2.name) IN $lowerNames
+             AND ${tenantWhere('s2', tenant)}
            RETURN DISTINCT s2 AS node, 0.3 AS hopScore
            ORDER BY s2.confidence DESC
            LIMIT $maxPerHop`;
@@ -477,6 +490,7 @@ export class ScopedQuery {
          WHERE toLower(e.name) IN $lowerNames
            AND NOT toLower(e2.name) IN $lowerNames
            AND ${relFilter}
+           AND ${tenantWhere('s', tenant)}
          RETURN DISTINCT s AS node, 0.25 AS hopScore
          ORDER BY s.confidence DESC
          LIMIT $maxPerHop`;

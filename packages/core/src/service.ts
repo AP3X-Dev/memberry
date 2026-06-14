@@ -101,7 +101,7 @@ export interface Neo4jLayer {
     byScope(scope: { entities?: string[]; tags?: string[]; limit: number; asOf?: string; tenantId?: string; projectScope?: string }): Promise<SemanticNode[]>;
     byVector(embedding: number[], limit: number, tenantId?: string, projectScope?: string): Promise<Array<SemanticNode & { score: number }>>;
     /** Graph-structural retrieval: expand from seed entities via ABOUT and SAME_EPISODE edges (optional) */
-    expandByGraph?(entityNames: string[], depth?: number, maxPerHop?: number, asOf?: string): Promise<SemanticNode[]>;
+    expandByGraph?(entityNames: string[], depth?: number, maxPerHop?: number, asOf?: string, tenantId?: string): Promise<SemanticNode[]>;
   };
   fact?: FactLayer;
   /** Minimal entity ops used by project-tag enforcement (Bucket B). Optional for backwards compat. */
@@ -384,7 +384,7 @@ export class AMPService {
       const seedEntities = extractEntityNames(merged);
       if (seedEntities.length > 0) {
         try {
-          const expanded = await this.neo4j.query.expandByGraph(seedEntities, 1, 5, asOf);
+          const expanded = await this.neo4j.query.expandByGraph(seedEntities, 1, 5, asOf, scope.tenantId);
           for (const node of expanded) {
             if (!seen.has(node.id) && inProjectScope(node, projectScope)) {
               seen.add(node.id);
