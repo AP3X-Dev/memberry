@@ -145,7 +145,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `490c3d3` | gate green 1514 passed / 0 failed (redis 69); reliability item (no sec-review) |
 | OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `b815f48` | gate green 1518 passed / 0 failed (mcp 140); security-reviewer PASS |
 | OPT-16 | Batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical) | 15 | `3855d00` | gate green 1519 passed / 0 failed (retrieval 142); perf — output-identity verified |
-| OPT-17 | Collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query | 16 | `<c16-sha>` | gate green 1523 passed / 0 failed (neo4j 197); perf — precedence preserved |
+| OPT-17 | Collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query | 16 | `5b3127f` | gate green 1523 passed / 0 failed (neo4j 197); perf — precedence preserved |
 
 ## Failed Attempts
 
@@ -302,7 +302,7 @@ Start cycle 17 at **OPT-19** (MED, reliability — dedup key is set BEFORE persi
 - Next: OPT-17
 
 ### Cycle 16 — 2026-06-14
-- Commit: `<c16-sha>` OPT-17: collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query
+- Commit: `5b3127f` OPT-17: collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query
 - Item: OPT-17 — COMPLETED (safe non-migration 3→1 collapse)
 - Mode B: 1 discovery → OPT-80 (LOW, deferred/needs-approval: indexed name_lower migration for index-backed CI/alias resolution)
 - Verifier: PASS (1523 passed, 0 failed, build exit 0; neo4j 193→197; precedence exact>CI>alias preserved via CASE rank; existing entity-resolver contract tests held) | perf item — no security-reviewer
