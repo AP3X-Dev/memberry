@@ -31,3 +31,4 @@
 | OPT-27 | Namespace context-cache keys by tenant (+block-invalidation path) | 25 | `5f5b026` | gate green: 1557 passed / 0 failed, build 0; security-reviewer PASS |
 | OPT-28 | Set HTTP slowloris timeouts (headers/request/keepAlive) | 26 | `5dfd81d` | gate green: 1560 passed / 0 failed (mcp 143), build 0; security-reviewer PASS |
 | OPT-29 | Fail-closed multi-tenant binding: reject non-tenant tokens (MEMBERRY_ALLOW_DEFAULT_TENANT opt-out) | 27 | `fd8046d` | gate green: 1561 passed / 0 failed (mcp 144), build 0; security-reviewer PASS |
+| OPT-30 (+OPT-38) | Validate token-pair parsing (length 4..4096) + warn on skipped/empty/zero-pair entries | 28 | `760254c` | gate green: 1571 passed / 0 failed (mcp 154), build 0; security-reviewer PASS |
