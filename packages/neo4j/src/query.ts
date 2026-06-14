@@ -156,16 +156,21 @@ function normalizeRawCypherLimit(limit: number): number {
 export class ScopedQuery {
   constructor(private driver: Driver) {}
 
-  async byEntity(entityName: string, limit: number, asOf?: string): Promise<SemanticNode[]> {
+  async byEntity(entityName: string, limit: number, asOf?: string, tenantId?: string): Promise<SemanticNode[]> {
     const session = this.driver.session();
     try {
       const relFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
-      const params: Record<string, unknown> = { entityName, limit: neo4j.int(limit) };
+      // Semantic is tenant-scoped — AND tenantWhere so this read can't surface
+      // another tenant's semantics (default tenant matches legacy/null-tenant →
+      // output-identical single-tenant). $tenantId is a bound parameter.
+      const tenant = resolveTenant(tenantId);
+      const params: Record<string, unknown> = { entityName, limit: neo4j.int(limit), [TENANT_PARAM]: tenant };
       if (asOf) params.asOf = asOf;
 
       const result = await session.run(
         `MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {name: $entityName})
          WHERE ${relFilter}
+           AND ${tenantWhere('s', tenant)}
          RETURN s
          ORDER BY s.confidence DESC, s.updated_at DESC
          LIMIT $limit`,
@@ -177,16 +182,20 @@ export class ScopedQuery {
     }
   }
 
-  async byTag(tag: string, limit: number): Promise<SemanticNode[]> {
+  async byTag(tag: string, limit: number, tenantId?: string): Promise<SemanticNode[]> {
     const session = this.driver.session();
     try {
+      // Semantic is tenant-scoped — AND tenantWhere (bound $tenantId); default
+      // tenant matches legacy/null-tenant nodes → output-identical single-tenant.
+      const tenant = resolveTenant(tenantId);
       const result = await session.run(
         `MATCH (s:Semantic)
          WHERE $tag IN s.tags
+           AND ${tenantWhere('s', tenant)}
          RETURN s
          ORDER BY s.confidence DESC, s.updated_at DESC
          LIMIT $limit`,
-        { tag, limit: neo4j.int(limit) },
+        { tag, limit: neo4j.int(limit), [TENANT_PARAM]: tenant },
       );
       return result.records.map((r) => mapSemanticNode(r.get('s').properties));
     } finally {
@@ -379,17 +388,23 @@ export class ScopedQuery {
     let episodes: EpisodicNode[];
 
     const asOf = options?.as_of;
+    // Semantic and Episodic are tenant-scoped nodes — scope both reads with
+    // tenantWhere (the Fact half already delegates to the tenant-scoped byFacts).
+    // Default tenant matches legacy/null-tenant nodes → output-identical
+    // single-tenant. $tenantId is a bound parameter.
+    const tenant = resolveTenant(tenantId);
 
     // Query semantics and episodes in one session
     const session = this.driver.session();
     try {
       const aboutFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
-      const semParams: Record<string, unknown> = { entityName };
+      const semParams: Record<string, unknown> = { entityName, [TENANT_PARAM]: tenant };
       if (asOf) semParams.asOf = asOf;
 
       const semanticResult = await session.run(
         `MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {name: $entityName})
          WHERE ${aboutFilter}
+           AND ${tenantWhere('s', tenant)}
          RETURN s
          ORDER BY s.confidence DESC, s.updated_at DESC`,
         semParams,
@@ -399,12 +414,13 @@ export class ScopedQuery {
       );
 
       const refFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
-      const epParams: Record<string, unknown> = { entityName };
+      const epParams: Record<string, unknown> = { entityName, [TENANT_PARAM]: tenant };
       if (asOf) epParams.asOf = asOf;
 
       const episodeResult = await session.run(
         `MATCH (ep:Episodic)-[r:REFERENCES]->(e:Entity {name: $entityName})
          WHERE ${refFilter}
+           AND ${tenantWhere('ep', tenant)}
          RETURN ep
          ORDER BY ep.created_at DESC`,
         epParams,
