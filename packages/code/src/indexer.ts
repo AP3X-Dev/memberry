@@ -141,6 +141,10 @@ export class CodeIndexer {
     // Check which symbols already exist with same content_hash (unchanged)
     const existingHashes = await this.symbolStore.getHashesByFile(filePath);
 
+    // Collect changed symbols (content-hash skip preserved), generating vectors,
+    // then upsert them in ONE batched round-trip instead of findByCompositeKey +
+    // create/update per symbol (was O(N) round-trips for N changed symbols).
+    const changed: SymbolNode[] = [];
     for (const symbol of parsed.symbols) {
       if (existingHashes.has(symbol.content_hash)) {
         // Symbol unchanged --- skip
@@ -158,17 +162,15 @@ export class CodeIndexer {
         symbol.mini_vector = generateMiniVector(symbol.embedding);
       }
 
-      // Check if symbol exists by composite key (name+file+kind+parent) or is new
-      const existing = await this.symbolStore.findByCompositeKey(
-        symbol.name, filePath, symbol.kind, symbol.parent_symbol,
-      );
-      if (existing) {
-        await this.symbolStore.update(existing.id, symbol);
-        updated++;
-      } else {
-        await this.symbolStore.create(symbol);
-        created++;
-      }
+      changed.push(symbol);
+    }
+
+    // Single batched UNWIND MERGE: identical composite-key identity, property set,
+    // and create-vs-update outcome as the prior per-symbol loop.
+    if (changed.length > 0) {
+      const upsert = await this.symbolStore.upsertSymbols(changed);
+      created += upsert.created;
+      updated += upsert.updated;
     }
 
     // Create intra-file relationships. Parser IDs are transient, so include stable

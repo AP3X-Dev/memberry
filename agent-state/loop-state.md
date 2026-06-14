@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1537 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1540 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -67,7 +67,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-20 | MED | Retrieval/code/intent embed via raw OpenAIEmbedding — Redis EmbeddingCache exists but never wired in | ✅ DONE (c18) | packages/core/src/services-factory.ts:132,174,235,302 | DONE: CachingEmbeddingProvider (read-through embed + batch-misses-only + cache-error fallthrough) wraps OpenAIEmbedding with the existing EmbeddingCache; injected into shared core.embedding (all 4 consumers) +6 tests. Subsumes OPT-65. Verifier PASS 1532/0 (core 336; behavior-identical on miss). Perf (no sec-review). |  |
 | OPT-21 | MED | Fact invalidate + create-replacement is two separate transactions; a failure between them invalidates a fact with no successor (data loss) | ✅ DONE (c19) | packages/core/src/service.ts:680-686 | DONE: reordered create-before-invalidate (replacement w/ supersedes_fact_id created first, then old invalidated) → mid-failure leaves BOTH active (recoverable) instead of losing the only fact; end-state identical +2 tests. Verifier PASS 1534/0 (core 338). Single-tx atomic supersession→OPT-81. Reliability (no sec-review). |  |
 | OPT-22 | MED | fetchEpisodicsForEntity unindexed full :Episodic substring scan, once/twice per entity on compile | ✅ DONE (c20) | packages/wiki/src/queries.ts:215-240 | DONE: batched fetchEpisodicsForEntities (one UNWIND :Episodic scan + per-name CALL{} preserving CONTAINS-OR-:MODIFIED predicate, DISTINCT, ORDER created_at DESC, LIMIT 20); compile Phase-1 E scans→1 (result-identical) +3 tests. Verifier PASS 1537/0 (wiki 290). Phase-2 double-call→OPT-58. Perf (no sec-review). |  |
-| OPT-23 | MED | indexFile one round-trip per changed symbol (sequential findByCompositeKey + create/update) | pending | packages/code/src/indexer.ts:144-214 | batch per-file symbol upserts into one UNWIND MERGE/SET; suite green |  |
+| OPT-23 | MED | indexFile one round-trip per changed symbol (sequential findByCompositeKey + create/update) | ✅ DONE (c21) | packages/code/src/indexer.ts:144-214 | DONE: SymbolStore.upsertSymbols — one UNWIND MERGE (ON CREATE=create props incl vectors, ON MATCH=update subset, transient __upsert_created removed before RETURN → graph-identical); indexFile collects changed→1 batched upsert (N→1); content-hash skip preserved +3 tests. Verifier PASS 1540/0 (code 117). Relation-edge N+1→OPT-82. Perf (no sec-review). |  |
 | OPT-24 | MED | docker-compose mcp omits MEMBERRY_TENANT_TOKENS/_DATASTORES/_INGEST_ALLOW_DIR — isolation can't be enabled via shipped compose | pending | docker-compose.yml:72-89; .env.example | pass the three env vars through compose with `${VAR:-}` defaults + document in .env.example; suite green |  |
 | OPT-25 | LOW | invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink) | pending | packages/neo4j/src/temporal-edges.ts:53-68 | add in-function VALID_REL_TYPES allowlist (throw on miss); new test asserts a bad relType throws; suite green |  |
 | OPT-26 | LOW | Global feedback boost keys mix tenant entity names — one tenant skews another's ranking | pending | packages/retrieval/src/feedback.ts:18-21,31-46,52-82 | namespace feedback keys by tenant + thread tenantId; suite green |  |
@@ -125,6 +125,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-79 | LOW | amp:episodic-buffer Redis stream has no MAXLEN on add — partially self-bounding via flush() XDEL, but events for never-flushed sessions accumulate unbounded. Also: SIGNALS_STREAM_MAXLEN uses raw process.env not the readEnv helper (minor consistency). | pending | packages/redis/src/streams.ts (EpisodicBuffer.add ~; SIGNALS_STREAM_MAXLEN ~24) | add a matching MAXLEN ~ safety cap to the episodic-buffer XADD; optionally route SIGNALS_STREAM_MAXLEN through readEnv for consistency; test pins bounded growth; suite green. Source: implementing/verifying OPT-14. |  |
 | OPT-80 | LOW | (deferred enhancement, needs approval) EntityResolver CI/alias resolution still does a toLower(e.name) scan + alias-array scan unservable by the entity_name index — make it index-backed. | pending | packages/neo4j/src/entity-resolver.ts; packages/neo4j/src/schema.ts + migrations.ts | add persisted :Entity.name_lower property + index (and lowercased-alias index), rewrite resolveExisting to equality-match name_lower; REQUIRES a schema migration + backfill of name_lower on existing nodes → HUMAN APPROVAL before running. Source: implementing OPT-17. |  |
 | OPT-81 | LOW | Fact supersession is now create-before-invalidate (OPT-21) but still TWO transactions — a benign transient two-active window exists until both commit; a single Neo4j tx would make it fully atomic. | pending | packages/neo4j/src/fact.ts; packages/core/src/service.ts | add FactStore.createAndInvalidate(newFact, oldId, invalidAt) doing both writes in one tx+session; service uses it on the contradiction path; test pins atomicity (no two-active window); suite green. Source: implementing OPT-21. |  |
+| OPT-82 | LOW | CodeIndexer relation resolution (resolveRelation per SYMBOL_CALLS/IMPORTS/INHERITS edge) is still per-edge N+1 — each does an ordered OPTIONAL MATCH fallback with the rel-type interpolated. | pending | packages/code/src/indexer.ts:176-191; packages/code/src/resolver.ts | batch relation resolution per rel-type (UNWIND $edges grouped by type, or apoc.merge.relationship) without changing edge-resolution results; test pins identical edges + fewer round-trips; suite green. Source: implementing OPT-23. |  |
 | OPT-78 | LOW | Redaction (store + ingest paths) only covers content/task fields — structural free-text fields (title, tags, entity/claim names) persist verbatim, so a secret pasted into a title/tag/entity name is not masked even with MEMBERRY_REDACT_ON_INGEST on. | pending | packages/wiki/src/ingest.ts (title/tags/about); packages/core/src/service.ts:421-430 | when redactOnIngest, also redactSecrets the title (at minimum) + tags on both ingest and store paths; test pins a secret in a title is masked; suite green. Source: security-reviewing OPT-12. |  |
 
 ## Completed Tasks
@@ -151,6 +152,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-20 (+OPT-65) | Read-through embedding cache wired into hot paths | 18 | `3c82078` | gate green 1532 passed / 0 failed (core 336); perf — behavior-identical on miss |
 | OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `c071375` | gate green 1534 passed / 0 failed (core 338); reliability (no sec-review) |
 | OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `a39fcfe` | gate green 1537 passed / 0 failed (wiki 290); perf — result-identical |
+| OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `<c21-sha>` | gate green 1540 passed / 0 failed (code 117); perf — graph-identical |
 
 ## Failed Attempts
 
@@ -182,7 +184,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 21 at **OPT-23** (MED, perf — code indexer indexFile issues one Neo4j round-trip per changed symbol; batch per-file symbol upserts into a single UNWIND MERGE/SET, `packages/code/src/indexer.ts:144-214`; behavior-preserving — existing indexer tests pin the symbol/edge results). Then OPT-25 (invalidateRelationship allowlist), OPT-26/27 (tenant feedback/cache namespacing), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 22 at **OPT-24** (MED, ops — docker-compose mcp service omits MEMBERRY_TENANT_TOKENS/_TENANT_DATASTORES/_INGEST_ALLOW_DIR so multi-tenant isolation + ingest confinement can't be enabled via the shipped compose; pass them through with `${VAR:-}` defaults + document in .env.example, `docker-compose.yml:72-89`). This is config (acceptance = vars present + documented; suite still green). Then the LOW tier: OPT-25 (invalidateRelationship in-function allowlist), OPT-26/27 (tenant feedback/cache key namespacing), OPT-28 (slowloris timeouts), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -345,3 +347,11 @@ Start cycle 21 at **OPT-23** (MED, perf — code indexer indexFile issues one Ne
 - Verifier: PASS (1537 passed, 0 failed, build exit 0; wiki 287→290; result-identity verified — same predicate + per-name CALL{} LIMIT; RED-confirmed) | perf item — no security-reviewer
 - Metrics: passing 1534→1537 (floor 1537); skipped 16
 - Next: OPT-23
+
+### Cycle 21 — 2026-06-14
+- Commit: `<c21-sha>` OPT-23: batch per-file symbol upserts into one UNWIND MERGE
+- Item: OPT-23 — COMPLETED
+- Mode B: 1 discovery → OPT-82 (LOW: batch relation-edge resolution N+1)
+- Verifier: PASS (1540 passed, 0 failed, build exit 0; code 114→117; graph-identity verified — ON CREATE=create props, ON MATCH=update subset, marker removed before RETURN, content-hash skip preserved; RED-confirmed) | perf item — no security-reviewer
+- Metrics: passing 1537→1540 (floor 1540); skipped 16
+- Next: OPT-24

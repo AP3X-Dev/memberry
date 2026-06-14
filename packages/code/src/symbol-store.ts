@@ -194,6 +194,114 @@ export class SymbolStore {
     }
   }
 
+  /**
+   * Batched upsert for all of a file's symbols in ONE Neo4j round-trip.
+   *
+   * Reproduces the exact semantics of the prior per-symbol
+   * findByCompositeKey -> create/update loop:
+   *  - Composite-key identity: MERGE on (name, file_path, kind, parent_symbol).
+   *    Neo4j MERGE matches null property values, so this is equivalent to the
+   *    `parent_symbol IS NULL` clause used by findByCompositeKey.
+   *  - ON CREATE: writes the full property set (incl. id, created_at, updated_at)
+   *    plus vector props -- identical to create().
+   *  - ON MATCH: writes only the update() field subset plus updated_at = now,
+   *    leaving the existing node's id and created_at untouched -- identical to
+   *    update(existing.id, node). Vector props are NOT rewritten on match, matching
+   *    update()'s behavior.
+   *
+   * Returns counts so the caller can preserve indexFile's created/updated tallies.
+   */
+  async upsertSymbols(
+    nodes: SymbolNode[],
+  ): Promise<{ created: number; updated: number }> {
+    if (nodes.length === 0) return { created: 0, updated: 0 };
+
+    const now = new Date().toISOString();
+    const rows = nodes.map((node) => {
+      // Vector props applied on create only (mirrors create()'s separate SET).
+      const vectorProps: Record<string, unknown> = {};
+      if (node.embedding) vectorProps.embedding = node.embedding;
+      if (node.lexical_vector) vectorProps.lexical_vector = node.lexical_vector;
+      if (node.mini_vector) vectorProps.mini_vector = node.mini_vector;
+      if (node.sparse_indices) vectorProps.sparse_indices = node.sparse_indices;
+      if (node.sparse_values) vectorProps.sparse_values = node.sparse_values;
+
+      return {
+        // Composite-key fields (MERGE pattern).
+        name: node.name,
+        kind: node.kind,
+        file_path: node.file_path,
+        parent_symbol: node.parent_symbol,
+        // ON CREATE scalar props.
+        id: node.id,
+        language: node.language,
+        start_line: neo4j.int(node.start_line),
+        end_line: neo4j.int(node.end_line),
+        signature: node.signature,
+        doc_comment: node.doc_comment,
+        content_hash: node.content_hash,
+        created_at: node.created_at,
+        updated_at: node.updated_at,
+        vectorProps,
+      };
+    });
+
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `UNWIND $rows AS row
+         MERGE (s:Symbol {
+           name: row.name,
+           file_path: row.file_path,
+           kind: row.kind,
+           parent_symbol: row.parent_symbol
+         })
+         ON CREATE SET
+           s.id = row.id,
+           s.name = row.name,
+           s.kind = row.kind,
+           s.language = row.language,
+           s.file_path = row.file_path,
+           s.start_line = row.start_line,
+           s.end_line = row.end_line,
+           s.signature = row.signature,
+           s.doc_comment = row.doc_comment,
+           s.content_hash = row.content_hash,
+           s.parent_symbol = row.parent_symbol,
+           s.created_at = row.created_at,
+           s.updated_at = row.updated_at,
+           s += row.vectorProps,
+           s.\`__upsert_created\` = true
+         ON MATCH SET
+           s.name = row.name,
+           s.kind = row.kind,
+           s.language = row.language,
+           s.file_path = row.file_path,
+           s.start_line = row.start_line,
+           s.end_line = row.end_line,
+           s.signature = row.signature,
+           s.doc_comment = row.doc_comment,
+           s.content_hash = row.content_hash,
+           s.parent_symbol = row.parent_symbol,
+           s.updated_at = $now,
+           s.\`__upsert_created\` = false
+         WITH s, s.\`__upsert_created\` AS wasCreated
+         REMOVE s.\`__upsert_created\`
+         RETURN
+           sum(CASE WHEN wasCreated THEN 1 ELSE 0 END) AS created,
+           count(*) AS total`,
+        { rows, now },
+      );
+
+      const record = result.records[0];
+      const total = toNum(record?.get('total'));
+      const created = toNum(record?.get('created'));
+      return { created, updated: total - created };
+    } finally {
+      await session.close();
+    }
+  }
+
   async getHashesByFile(filePath: string): Promise<Set<string>> {
     const session = this.driver.session();
     try {
