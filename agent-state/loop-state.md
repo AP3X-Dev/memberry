@@ -139,7 +139,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-09 | Realpath symlink confinement for wiki validatePath + confineToDir | 9 | `28df712` | gate green 1501 passed / 0 failed (wiki 282); security-reviewer PASS |
 | OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `b2f45d6` | gate green 1504 passed / 0 failed (retrieval 141); security-reviewer PASS |
 | OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `c5f871d` | gate green 1508 passed / 0 failed (core 327); security-reviewer PASS |
-| OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `<c12-sha>` | gate green 1513 passed / 0 failed (wiki 287); security-reviewer PASS |
+| OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green 1513 passed / 0 failed (wiki 287); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -264,7 +264,7 @@ Start cycle 13 at **OPT-14** (MED, OPTIMIZATION tier begins — Redis `amp:signa
 - Next: OPT-12
 
 ### Cycle 12 — 2026-06-14
-- Commit: `<c12-sha>` OPT-12: apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST
+- Commit: `cd2bae5` OPT-12: apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST
 - Item: OPT-12 — COMPLETED (LAST security backlog item; OPT-01..12 all done)
 - Mode B: 1 discovery → OPT-78 (LOW: structural fields title/tags not redacted on either path)
 - Verifier: PASS (1513 passed, 0 failed, build exit 0; wiki 282→287; prod .env doesn't set the flag → no env interaction) | Security-reviewer: PASS (all persisted untrusted content covered: body redacted before extraction + per-claim; Source persists no body; consistent with store path; default-off preserved)
