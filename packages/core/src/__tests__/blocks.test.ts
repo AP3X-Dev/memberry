@@ -1,7 +1,7 @@
 // packages/core/src/__tests__/blocks.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryBlockService, MAX_BLOCK_SIZE } from '../blocks.js';
-import type { RedisBlockLayer, Neo4jBlockLayer } from '../blocks.js';
+import type { RedisBlockLayer, Neo4jBlockLayer, CacheInvalidator } from '../blocks.js';
 import type { MemoryBlock } from '../types.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -38,6 +38,13 @@ function makeNeo4j(overrides: Partial<Neo4jBlockLayer> = {}): Neo4jBlockLayer {
     get: vi.fn().mockResolvedValue(null),
     list: vi.fn().mockResolvedValue([]),
     delete: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
+function makeCacheInvalidator(overrides: Partial<CacheInvalidator> = {}): CacheInvalidator {
+  return {
+    invalidateByScope: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -473,5 +480,72 @@ describe('MemoryBlockService.read caches Neo4j fallback in Redis', () => {
     // Should not throw — just logs a warning
     const result = await service.read('project:test', 'persona');
     expect(result).toBe(block);
+  });
+});
+
+describe('MemoryBlockService tenant-scoped cache invalidation', () => {
+  // OPT-27 residual: a named tenant's block edit must evict the tenant's own
+  // ctx bucket (the one set() wrote under), NOT the DEFAULT bucket. The block
+  // path must thread the same tenantId the block stores already use, so the
+  // cache key the invalidator computes matches the key the cache was set with.
+
+  it('threads tenantId to invalidateByScope on a named-tenant insert', async () => {
+    const redis = makeRedis();
+    const neo4j = makeNeo4j();
+    const invalidator = makeCacheInvalidator();
+    const service = new MemoryBlockService(redis, neo4j, invalidator);
+
+    await service.insert('project:test', 'custom_block', 'data', 'sess-1', 'acme');
+
+    // Must evict acme's bucket, not DEFAULT: tenant arg threaded through.
+    expect(invalidator.invalidateByScope).toHaveBeenCalledWith('project:test', 'acme');
+  });
+
+  it('threads tenantId to invalidateByScope on a named-tenant rewrite', async () => {
+    const block = makeBlock({ tier: 'working', content: 'old' });
+    const redis = makeRedis({ get: vi.fn().mockResolvedValue(block) });
+    const neo4j = makeNeo4j();
+    const invalidator = makeCacheInvalidator();
+    const service = new MemoryBlockService(redis, neo4j, invalidator);
+
+    await service.rewrite('project:test', 'custom_block', 'new', 'sess-1', 'acme');
+
+    expect(invalidator.invalidateByScope).toHaveBeenCalledWith('project:test', 'acme');
+  });
+
+  it('threads tenantId to invalidateByScope on a named-tenant archive', async () => {
+    const block = makeBlock({ content: 'data' });
+    const redis = makeRedis({ get: vi.fn().mockResolvedValue(block) });
+    const neo4j = makeNeo4j();
+    const invalidator = makeCacheInvalidator();
+    const service = new MemoryBlockService(redis, neo4j, invalidator);
+
+    await service.archive('project:test', 'persona', 'sess-1', 'acme');
+
+    expect(invalidator.invalidateByScope).toHaveBeenCalledWith('project:test', 'acme');
+  });
+
+  it('threads tenantId to invalidateByScope on a named-tenant promote', async () => {
+    const block = makeBlock({ tier: 'working' });
+    const redis = makeRedis({ get: vi.fn().mockResolvedValue(block) });
+    const neo4j = makeNeo4j();
+    const invalidator = makeCacheInvalidator();
+    const service = new MemoryBlockService(redis, neo4j, invalidator);
+
+    await service.promote('project:test', 'persona', 'working', 'core', 'sess-1', 'acme');
+
+    expect(invalidator.invalidateByScope).toHaveBeenCalledWith('project:test', 'acme');
+  });
+
+  it('passes undefined tenant (legacy DEFAULT keys) for a default-tenant edit', async () => {
+    const redis = makeRedis();
+    const neo4j = makeNeo4j();
+    const invalidator = makeCacheInvalidator();
+    const service = new MemoryBlockService(redis, neo4j, invalidator);
+
+    await service.insert('project:test', 'custom_block', 'data');
+
+    // Default-tenant path unchanged: no tenant → DEFAULT (legacy) bucket.
+    expect(invalidator.invalidateByScope).toHaveBeenCalledWith('project:test', undefined);
   });
 });

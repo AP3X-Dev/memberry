@@ -318,9 +318,10 @@ describe('AMPService.store', () => {
     const result = await service.store(input);
 
     expect(result.duplicate).toBe(false);
-    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('project:test');
-    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('feature:auth');
-    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('auth-module');
+    // Tenant is threaded through invalidation (default tenant when absent).
+    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('project:test', 'default');
+    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('feature:auth', 'default');
+    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('auth-module', 'default');
   });
 
   it('publishes signals and invalidates caches when signals are present', async () => {
@@ -345,8 +346,8 @@ describe('AMPService.store', () => {
 
     expect(result.duplicate).toBe(false);
     expect(redis.signals.publish).toHaveBeenCalledTimes(2);
-    expect(redis.cache.invalidateByNodeId).toHaveBeenCalledWith('sem-99');
-    expect(redis.cache.invalidateByNodeId).toHaveBeenCalledWith('sem-100');
+    expect(redis.cache.invalidateByNodeId).toHaveBeenCalledWith('sem-99', 'default');
+    expect(redis.cache.invalidateByNodeId).toHaveBeenCalledWith('sem-100', 'default');
     expect(neo4j.episodic.linkSignal).toHaveBeenCalledTimes(2);
     expect(redis.queue.incrementScore).toHaveBeenCalledTimes(2);
   });
@@ -819,7 +820,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     expect(createdFact.source_episode_ids).toEqual([result.id]);
     expect(createdFact.confidence).toBe(0.5);
     expect(createdFact.supersedes_fact_id).toBeNull();
-    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('auth-module');
+    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('auth-module', 'default');
   });
 
   it('promotes a corroborated ABDUCTIVE (dream) fact to deductive on reinforcement', async () => {
@@ -974,7 +975,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     expect(invalidateArgs[0]).toBe('fact-old');
     expect(invalidateArgs[2]).toBe(createdFact.id);
     // Cache invalidated for the affected scope.
-    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('auth-module');
+    expect(redis.cache.invalidateByScope).toHaveBeenCalledWith('auth-module', 'default');
   });
 
   it('skips creation when reinforcing fact already exists (same subject+predicate+object)', async () => {

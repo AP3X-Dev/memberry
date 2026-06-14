@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1547 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1557 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -71,7 +71,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-24 | MED | docker-compose mcp omits MEMBERRY_TENANT_TOKENS/_DATASTORES/_INGEST_ALLOW_DIR — isolation can't be enabled via shipped compose | ✅ DONE (c22) | docker-compose.yml:72-89; .env.example | DONE: wired all 3 vars into the mcp env block (${VAR:-} opt-in defaults, 6-space map syntax) + INGEST_ALLOW_DIR container-path/volume-mount note in compose + .env.example pointer. Names verified vs readEnv call sites. Config-only → suite green 1540/0 (verified). Ops (no sec-review). |  |
 | OPT-25 | LOW | invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink) | ✅ DONE (c23) | packages/neo4j/src/temporal-edges.ts:53-68 | DONE: module-level VALID_REL_TYPES allowlist (19 metachar-free types incl ABOUT) + throw before interpolation/session.run; doc-comment now enforced-invariant; no dep cycle (local set) +3 tests. Verifier PASS 1543/0 (neo4j 200; RED-confirmed); security-reviewer PASS (sink enforced pre-interpolation). Residual: relation-store remove fail-open + allowlist dup→OPT-83. |  |
 | OPT-26 | LOW | Global feedback boost keys mix tenant entity names — one tenant skews another's ranking | ✅ DONE (c24) | packages/retrieval/src/feedback.ts:18-21,31-46,52-82 | DONE: per-tenant key helpers (default→legacy keys zero-cold-start, named→amp:feedback:<tenant>:*); recordFeedback/getBoosts/inferUsage take tenantId; real tenant threaded at assembler getBoosts + berry_feedback recordFeedback +4 tests. Verifier PASS 1547/0 (retrieval 146); security-reviewer PASS (single chokepoint, not spoofable). Residual non-tenant-token→DEFAULT = OPT-29. |  |
-| OPT-27 | LOW | Context-cache dependency sets keyed by naked scope/node-id — one tenant's write evicts another's cache | pending | packages/redis/src/cache.ts:29-38,42-54,56-68 | prefix dep-set keys with tenant + thread tenant from load()/store(); suite green |  |
+| OPT-27 | LOW | Context-cache dependency sets keyed by naked scope/node-id — one tenant's write evicts another's cache | ✅ DONE (c25) | packages/redis/src/cache.ts:29-38,42-54,56-68 | DONE: per-tenant ctx+dep-set keys (default→legacy, named→amp:*:<tenant>:*); tenantId threaded at service.ts load/store/fact-extraction AND the block-invalidation path (CacheInvalidator/_invalidateContext/factory) so a tenant's block edit evicts its OWN bucket +10 tests. Verifier REJECT(test-setup)→fix→PASS; +block-path extension PASS 1557/0. Consolidation cache tenant gap→OPT-84. |  |
 | OPT-28 | LOW | HTTP server sets no headersTimeout/requestTimeout — slowloris DoS | pending | packages/mcp/src/server.ts:382-543 | set headersTimeout/requestTimeout/keepAliveTimeout after createServer; test asserts they are set; suite green |  |
 | OPT-29 | LOW | Multi-tenant: non-tenant tokens authenticate but silently fall back to default tenant | pending | packages/mcp/src/server.ts:296-307 | in multiTenantMode reject tokens not in tokenToTenant (or require explicit flag); new test; suite green. REINFORCED by OPT-26 review: a non-tenant token's feedback also lands in the shared default bucket — fail-closed closes both. |  |
 | OPT-30 | LOW | Token parsing splits on ',' and ':' with no escaping/validation — tokens with those chars silently corrupt | pending | packages/mcp/src/server.ts:218-246 | validate token length, warn on skipped pairs, document constraint; suite green |  |
@@ -127,6 +127,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-81 | LOW | Fact supersession is now create-before-invalidate (OPT-21) but still TWO transactions — a benign transient two-active window exists until both commit; a single Neo4j tx would make it fully atomic. | pending | packages/neo4j/src/fact.ts; packages/core/src/service.ts | add FactStore.createAndInvalidate(newFact, oldId, invalidAt) doing both writes in one tx+session; service uses it on the contradiction path; test pins atomicity (no two-active window); suite green. Source: implementing OPT-21. |  |
 | OPT-82 | LOW | CodeIndexer relation resolution (resolveRelation per SYMBOL_CALLS/IMPORTS/INHERITS edge) is still per-edge N+1 — each does an ordered OPTIONAL MATCH fallback with the rel-type interpolated. | pending | packages/code/src/indexer.ts:176-191; packages/code/src/resolver.ts | batch relation resolution per rel-type (UNWIND $edges grouped by type, or apoc.merge.relationship) without changing edge-resolution results; test pins identical edges + fewer round-trips; suite green. Source: implementing OPT-23. |  |
 | OPT-83 | LOW | Consistency: arch/relation-store.ts remove() is fail-OPEN (silently no-ops on a non-allowlisted type) vs create() which throws — asymmetric; and the rel-type allowlists are duplicated across 3 packages (arch VALID_RELATION_TYPES, code VALID_SYMBOL_RELS, neo4j VALID_REL_TYPES) with no shared source of truth. | pending | packages/arch/src/relation-store.ts:51; packages/code/src/indexer.ts:249; packages/neo4j/src/temporal-edges.ts:28 | make remove() throw on bad type (match create); optionally centralize the allowlists into one shared const; tests; suite green. Source: security-reviewing OPT-25. Not a vuln (all sinks guarded) — consistency only. |  |
+| OPT-84 | LOW | consolidation.ts invalidateByNodeId(id) calls drop the tenant → DEFAULT bucket, so on supersede/decay a NAMED tenant's context cache isn't evicted (within-tenant stale read; no cross-tenant eviction since it only touches DEFAULT). Background/global process — no per-tenant request context, so genuinely harder than OPT-27's request-path threading. | pending | packages/core/src/consolidation.ts:377,378,398,458 | derive the affected node's tenant (from the semantic/fact node's tenant_id) and pass it to invalidateByNodeId; or invalidate across tenant buckets for a shared node; test; suite green. Source: security-reviewing OPT-27. |  |
 | OPT-78 | LOW | Redaction (store + ingest paths) only covers content/task fields — structural free-text fields (title, tags, entity/claim names) persist verbatim, so a secret pasted into a title/tag/entity name is not masked even with MEMBERRY_REDACT_ON_INGEST on. | pending | packages/wiki/src/ingest.ts (title/tags/about); packages/core/src/service.ts:421-430 | when redactOnIngest, also redactSecrets the title (at minimum) + tags on both ingest and store paths; test pins a secret in a title is masked; suite green. Source: security-reviewing OPT-12. |  |
 
 ## Completed Tasks
@@ -157,6 +158,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `907ef57` | gate green 1540 passed / 0 failed (config-only); ops |
 | OPT-25 | In-function rel-type allowlist on invalidateRelationship (close latent injection sink) | 23 | `132426a` | gate green 1543 passed / 0 failed (neo4j 200); security-reviewer PASS |
 | OPT-26 | Namespace retrieval feedback boost keys by tenant (close cross-tenant ranking channel) | 24 | `2a49cbd` | gate green 1547 passed / 0 failed (retrieval 146); security-reviewer PASS |
+| OPT-27 | Namespace context-cache keys by tenant (+block-invalidation path) | 25 | `<c25-sha>` | gate green 1557 passed / 0 failed; security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -188,7 +190,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 25 at **OPT-27** (LOW, tenant — context-cache dependency sets keyed by naked scope/node-id, so one tenant's write evicts another's cached context; prefix dep-set keys with tenant + thread the resolved tenant from load()/store(), `packages/redis/src/cache.ts:29-38,42-54,56-68`; security-tagged → security-reviewer too). Then OPT-28 (slowloris timeouts), OPT-29 (multi-tenant non-tenant-token fail-closed — reinforced by OPT-26), OPT-30/31, … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 26 at **OPT-28** (LOW, DoS — HTTP server sets no headersTimeout/requestTimeout → slowloris; set headersTimeout/requestTimeout/keepAliveTimeout after createServer, `packages/mcp/src/server.ts:382-543`; security-tagged → security-reviewer too). Then OPT-29 (multi-tenant non-tenant-token fail-closed — reinforced by OPT-26), OPT-30/31, OPT-32 (berry_ask per-item cap), OPT-33/34 (redact patterns/dedup), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -383,3 +385,11 @@ Start cycle 25 at **OPT-27** (LOW, tenant — context-cache dependency sets keye
 - Verifier: PASS (1547 passed, 0 failed, build exit 0; retrieval 142→146; default back-compat intact; RED-confirmed) | Security-reviewer: PASS (channel closed for named tenants; single key chokepoint; tenant server-resolved/not spoofable; default-bucket only reachable by the OPT-29 misconfig path)
 - Metrics: passing 1543→1547 (floor 1547); skipped 16
 - Next: OPT-27
+
+### Cycle 25 — 2026-06-14
+- Commit: `<c25-sha>` OPT-27: namespace context-cache keys by tenant (+block-invalidation path)
+- Item: OPT-27 — COMPLETED (cache.ts + service.ts + block path)
+- Mode B: 1 discovery → OPT-84 (LOW: consolidation invalidateByNodeId drops tenant → named-tenant stale read; background process, no request tenant context)
+- Verifier: REJECT (new within-tenant test had a polluted setup — node-dep set retained a stale member from the prior scope-invalidation, faithful to real Redis; fixed test to use a distinct node id) → PASS 1552/0. Security-reviewer: PASS on diff but flagged the block-mutation path drops tenant (regression OPT-27 introduced) → extended the fix to thread tenant through CacheInvalidator/_invalidateContext/factory (+5 block tests) → gate PASS 1557/0.
+- Metrics: passing 1547→1557 (floor 1557); skipped 16
+- Next: OPT-28

@@ -22,7 +22,9 @@ export interface Neo4jBlockLayer {
 }
 
 export interface CacheInvalidator {
-  invalidateByScope(scope: string): Promise<void>;
+  // tenantId is threaded so a block edit evicts the SAME tenant-namespaced ctx
+  // bucket that set() wrote to. Omitted/empty → DEFAULT (legacy un-namespaced) keys.
+  invalidateByScope(scope: string, tenantId?: string): Promise<void>;
 }
 
 // ─── MemoryBlockService ─────────────────────────────────────────────────────
@@ -46,10 +48,10 @@ export class MemoryBlockService {
     }
   }
 
-  private async _invalidateContext(scope: string): Promise<void> {
+  private async _invalidateContext(scope: string, tenantId?: string): Promise<void> {
     if (this.cacheInvalidator) {
       try {
-        await this.cacheInvalidator.invalidateByScope(scope);
+        await this.cacheInvalidator.invalidateByScope(scope, tenantId);
       } catch (err) {
         console.warn('[MemoryBlockService] Context cache invalidation failed:', err);
       }
@@ -210,7 +212,7 @@ export class MemoryBlockService {
       }
     }
 
-    await this._invalidateContext(scope);
+    await this._invalidateContext(scope, tenantId);
     return updated;
   }
 
@@ -227,7 +229,7 @@ export class MemoryBlockService {
     await this.redisBlocks.delete(scope, name, sessionId, tenantId);
     await this.neo4jBlocks.delete(scope, name, sessionId, tenantId);
 
-    await this._invalidateContext(scope);
+    await this._invalidateContext(scope, tenantId);
     return content;
   }
 
@@ -299,8 +301,10 @@ export class MemoryBlockService {
       }
     }
 
-    // Invalidate assembled context cache so next load() picks up changes
-    await this._invalidateContext(block.scope);
+    // Invalidate assembled context cache so next load() picks up changes.
+    // Thread the same tenant the block store wrote under so we evict the
+    // tenant-namespaced ctx bucket, not the DEFAULT one.
+    await this._invalidateContext(block.scope, tenantId);
   }
 
   /**

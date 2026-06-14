@@ -28,10 +28,10 @@ import { readEnv } from './config/settings.js';
 
 export interface RedisLayer {
   cache: {
-    get(scopeHash: string): Promise<MemoryContext | null>;
-    set(scopeHash: string, ctx: MemoryContext, sources: string[], ttl?: number, scopeTags?: string[]): Promise<void>;
-    invalidateByScope(scope: string): Promise<number>;
-    invalidateByNodeId(nodeId: string): Promise<number>;
+    get(scopeHash: string, tenantId?: string): Promise<MemoryContext | null>;
+    set(scopeHash: string, ctx: MemoryContext, sources: string[], ttl?: number, scopeTags?: string[], tenantId?: string): Promise<void>;
+    invalidateByScope(scope: string, tenantId?: string): Promise<number>;
+    invalidateByNodeId(nodeId: string, tenantId?: string): Promise<number>;
   };
   embeddings: {
     get(content: string): Promise<number[] | null>;
@@ -227,8 +227,8 @@ export class AMPService {
     const scopeHash = hashScope(scope);
     const maxTokens = scope.max_tokens ?? 4096;
 
-    // 1. Cache hit
-    const cached = await this.redis.cache.get(scopeHash);
+    // 1. Cache hit (tenant-scoped: A's cache must never satisfy B's load)
+    const cached = await this.redis.cache.get(scopeHash, scope.tenantId);
     if (cached) return cached;
 
     // 2. Cache miss → fetch all independent layers CONCURRENTLY.
@@ -399,13 +399,16 @@ export class AMPService {
       assembled_at: new Date().toISOString(),
     };
 
-    // 7. Cache (include scope tags for block-mutation invalidation)
+    // 7. Cache (include scope tags for block-mutation invalidation).
+    // Tenant-scoped so the ctx key + dep sets live under this tenant's segment;
+    // another tenant's invalidate on the same shared tag can't evict it.
     await this.redis.cache.set(
       scopeHash,
       ctx,
       sources,
       this.config.cache.contextTTL,
       cacheScopeKeysForLoad(scope),
+      scope.tenantId,
     );
 
     return ctx;
@@ -505,7 +508,7 @@ export class AMPService {
     }
     await Promise.all(linkPromises);
 
-    await this.invalidateContextScopes([scope, ...(tags ?? []), ...(input.entities ?? [])]);
+    await this.invalidateContextScopes([scope, ...(tags ?? []), ...(input.entities ?? [])], tenantId);
 
     // 5. Publish signals and link them. Each signal's four ops (Neo4j link,
     // stream publish, cache invalidate, queue increment) are mutually
@@ -522,7 +525,7 @@ export class AMPService {
           return Promise.all([
             this.neo4j.episodic.linkSignal(id, signal),
             this.redis.signals.publish(streamSignal),
-            this.redis.cache.invalidateByNodeId(signal.target_id),
+            this.redis.cache.invalidateByNodeId(signal.target_id, tenantId),
             this.redis.queue.incrementScore(signal.target_id, 1),
           ]);
         }),
@@ -754,7 +757,7 @@ export class AMPService {
         }
 
         if (changedFactScopes.size > 0) {
-          await this.invalidateContextScopes(changedFactScopes);
+          await this.invalidateContextScopes(changedFactScopes, factTenant);
         }
       }
     }
@@ -789,7 +792,10 @@ export class AMPService {
     return emb;
   }
 
-  private async invalidateContextScopes(scopes: Iterable<string | null | undefined>): Promise<void> {
+  private async invalidateContextScopes(
+    scopes: Iterable<string | null | undefined>,
+    tenantId?: string,
+  ): Promise<void> {
     const uniqueScopes = new Set<string>();
     for (const scope of scopes) {
       const trimmed = scope?.trim();
@@ -798,7 +804,7 @@ export class AMPService {
 
     for (const scope of uniqueScopes) {
       try {
-        await this.redis.cache.invalidateByScope(scope);
+        await this.redis.cache.invalidateByScope(scope, tenantId);
       } catch (err) {
         console.warn(
           `[amp-cache] Context cache invalidation failed for scope "${scope}":`,

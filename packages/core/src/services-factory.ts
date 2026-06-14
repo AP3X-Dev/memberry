@@ -174,8 +174,8 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   const redisBlockStore = new RedisBlockStore(redis);
   const neo4jBlockStore = new Neo4jBlockStore(driver);
   const cacheInvalidator = {
-    invalidateByScope: async (scope: string): Promise<void> => {
-      await cache.invalidateByScope(scope);
+    invalidateByScope: async (scope: string, tenantId?: string): Promise<void> => {
+      await cache.invalidateByScope(scope, tenantId);
     },
   };
   const memoryBlocks = new MemoryBlockService(redisBlockStore, neo4jBlockStore, cacheInvalidator, readonlyMode);
