@@ -25,6 +25,7 @@ import {
   fetchSemanticsForEntity,
   fetchEpisodicsForProject,
   fetchEpisodicsForEntity,
+  fetchEpisodicsForEntities,
   fetchHierarchy,
   fetchBacklinks,
   fetchRelatedEntities,
@@ -315,13 +316,12 @@ export class WikiCompiler {
       const substantive: EntityInfo[] = [];
       const sparse: EntityInfo[] = [];
 
-      // Batch-fetch episodics for all entities in this project
-      const entityEpisodicMap = new Map<string, EpisodicEntry[]>();
-      const episodicPromises = entities.map(async (entity) => {
-        const eps = await fetchEpisodicsForEntity(this.driver, entity.name);
-        entityEpisodicMap.set(entity.name, eps);
-      });
-      await Promise.all(episodicPromises);
+      // Batch-fetch episodics for all entities in this project in ONE :Episodic
+      // scan (vs one full-label scan per entity). Same per-entity ORDER/LIMIT.
+      const entityEpisodicMap = await fetchEpisodicsForEntities(
+        this.driver,
+        entities.map((e) => e.name),
+      );
 
       for (const entity of entities) {
         const key = entity.name.toLowerCase();

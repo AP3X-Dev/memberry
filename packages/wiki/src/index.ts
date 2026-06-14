@@ -55,6 +55,7 @@ export {
   fetchSemanticCountForEntity,
   fetchEpisodicsForProject,
   fetchEpisodicsForEntity,
+  fetchEpisodicsForEntities,
   fetchRecentEpisodics,
   fetchHierarchy,
   fetchBacklinks,

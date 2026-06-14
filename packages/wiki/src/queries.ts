@@ -239,6 +239,62 @@ export async function fetchEpisodicsForEntity(driver: Driver, entityName: string
   }
 }
 
+/**
+ * Batched form of {@link fetchEpisodicsForEntity}. Scans `:Episodic` ONCE for an
+ * array of entity names instead of once per name, then regroups rows per name in
+ * JS. Result identity is preserved exactly:
+ *   - same matching predicate (CONTAINS on task/content OR the :MODIFIED edge),
+ *   - the per-name `ORDER BY ep.created_at DESC LIMIT 20` is kept inside a per-name
+ *     `CALL {}` subquery (the OPT-16 pattern), so each name still gets its own
+ *     top-20, identical to calling fetchEpisodicsForEntity(name) individually.
+ *
+ * Returns a Map keyed by the input entity name. Names with no matches are absent
+ * from the map (callers should treat a miss as an empty list).
+ */
+export async function fetchEpisodicsForEntities(
+  driver: Driver,
+  entityNames: string[],
+): Promise<Map<string, EpisodicEntry[]>> {
+  const grouped = new Map<string, EpisodicEntry[]>();
+  if (entityNames.length === 0) return grouped;
+  const session = driver.session();
+  try {
+    const result = await session.run(
+      `UNWIND $names AS name
+       CALL {
+         WITH name
+         MATCH (ep:Episodic)
+         WHERE (ep.task CONTAINS name OR ep.content CONTAINS name)
+            OR EXISTS { MATCH (ep)-[:MODIFIED]->(e:Entity {name: name}) }
+         RETURN DISTINCT ep.id AS id, ep.task AS task, ep.content AS content,
+                ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at
+         ORDER BY ep.created_at DESC
+         LIMIT 20
+       }
+       RETURN name AS name, id, task, content, outcome, session_id, created_at`,
+      { names: entityNames },
+    );
+    for (const r of result.records) {
+      const name = r.get('name') as string;
+      const entry: EpisodicEntry = {
+        id: r.get('id') as string,
+        task: r.get('task') as string,
+        content: r.get('content') as string,
+        outcome: r.get('outcome') as string | null,
+        session_id: r.get('session_id') as string,
+        created_at: r.get('created_at') as string,
+        project_scope: extractProjectScope(r.get('task') as string),
+      };
+      const existing = grouped.get(name);
+      if (existing) existing.push(entry);
+      else grouped.set(name, [entry]);
+    }
+    return grouped;
+  } finally {
+    await session.close();
+  }
+}
+
 export async function fetchRecentEpisodics(driver: Driver, limit: number): Promise<EpisodicEntry[]> {
   const session = driver.session();
   try {

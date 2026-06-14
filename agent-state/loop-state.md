@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1534 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1537 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -66,7 +66,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-19 | MED | Dedup key set before persistence with no rollback — a failed store() permanently swallows the memory for 24h | ✅ DONE (c17) | packages/core/src/service.ts:435-484 | DONE: DedupChecker.unmark releases the key; store() wraps persistence in try/catch → unmark-then-rethrow original error (mark stays before persist → TOCTOU/BUG-0020 intact); +3 tests. Verifier PASS 1526/0 (core 330; RED-confirmed). Reliability (no sec-review). |  |
 | OPT-20 | MED | Retrieval/code/intent embed via raw OpenAIEmbedding — Redis EmbeddingCache exists but never wired in | ✅ DONE (c18) | packages/core/src/services-factory.ts:132,174,235,302 | DONE: CachingEmbeddingProvider (read-through embed + batch-misses-only + cache-error fallthrough) wraps OpenAIEmbedding with the existing EmbeddingCache; injected into shared core.embedding (all 4 consumers) +6 tests. Subsumes OPT-65. Verifier PASS 1532/0 (core 336; behavior-identical on miss). Perf (no sec-review). |  |
 | OPT-21 | MED | Fact invalidate + create-replacement is two separate transactions; a failure between them invalidates a fact with no successor (data loss) | ✅ DONE (c19) | packages/core/src/service.ts:680-686 | DONE: reordered create-before-invalidate (replacement w/ supersedes_fact_id created first, then old invalidated) → mid-failure leaves BOTH active (recoverable) instead of losing the only fact; end-state identical +2 tests. Verifier PASS 1534/0 (core 338). Single-tx atomic supersession→OPT-81. Reliability (no sec-review). |  |
-| OPT-22 | MED | fetchEpisodicsForEntity unindexed full :Episodic substring scan, once/twice per entity on compile | pending | packages/wiki/src/queries.ts:215-240 | prefer indexed :MODIFIED, gate CONTAINS behind it, or one UNWIND batch; suite green |  |
+| OPT-22 | MED | fetchEpisodicsForEntity unindexed full :Episodic substring scan, once/twice per entity on compile | ✅ DONE (c20) | packages/wiki/src/queries.ts:215-240 | DONE: batched fetchEpisodicsForEntities (one UNWIND :Episodic scan + per-name CALL{} preserving CONTAINS-OR-:MODIFIED predicate, DISTINCT, ORDER created_at DESC, LIMIT 20); compile Phase-1 E scans→1 (result-identical) +3 tests. Verifier PASS 1537/0 (wiki 290). Phase-2 double-call→OPT-58. Perf (no sec-review). |  |
 | OPT-23 | MED | indexFile one round-trip per changed symbol (sequential findByCompositeKey + create/update) | pending | packages/code/src/indexer.ts:144-214 | batch per-file symbol upserts into one UNWIND MERGE/SET; suite green |  |
 | OPT-24 | MED | docker-compose mcp omits MEMBERRY_TENANT_TOKENS/_DATASTORES/_INGEST_ALLOW_DIR — isolation can't be enabled via shipped compose | pending | docker-compose.yml:72-89; .env.example | pass the three env vars through compose with `${VAR:-}` defaults + document in .env.example; suite green |  |
 | OPT-25 | LOW | invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink) | pending | packages/neo4j/src/temporal-edges.ts:53-68 | add in-function VALID_REL_TYPES allowlist (throw on miss); new test asserts a bad relType throws; suite green |  |
@@ -150,6 +150,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `4c3853d` | gate green 1526 passed / 0 failed (core 330); reliability (no sec-review) |
 | OPT-20 (+OPT-65) | Read-through embedding cache wired into hot paths | 18 | `3c82078` | gate green 1532 passed / 0 failed (core 336); perf — behavior-identical on miss |
 | OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `c071375` | gate green 1534 passed / 0 failed (core 338); reliability (no sec-review) |
+| OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `<c20-sha>` | gate green 1537 passed / 0 failed (wiki 290); perf — result-identical |
 
 ## Failed Attempts
 
@@ -181,7 +182,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 20 at **OPT-22** (MED, perf — fetchEpisodicsForEntity does an unindexed full :Episodic substring scan, once/twice per entity during wiki compile; prefer the indexed :MODIFIED relationship and gate the CONTAINS branch behind it, or batch entity names into one UNWIND scan, `packages/wiki/src/queries.ts:215-240`). Then OPT-23 (indexFile batch), OPT-25 (invalidateRelationship allowlist), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 21 at **OPT-23** (MED, perf — code indexer indexFile issues one Neo4j round-trip per changed symbol; batch per-file symbol upserts into a single UNWIND MERGE/SET, `packages/code/src/indexer.ts:144-214`; behavior-preserving — existing indexer tests pin the symbol/edge results). Then OPT-25 (invalidateRelationship allowlist), OPT-26/27 (tenant feedback/cache namespacing), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -336,3 +337,11 @@ Start cycle 20 at **OPT-22** (MED, perf — fetchEpisodicsForEntity does an unin
 - Verifier: PASS (1534 passed, 0 failed, build exit 0; core 336→338; RED-confirmed; end-state contract intact; error still propagates via non-fatal handler) | reliability item — no security-reviewer
 - Metrics: passing 1532→1534 (floor 1534); skipped 16
 - Next: OPT-22
+
+### Cycle 20 — 2026-06-14
+- Commit: `<c20-sha>` OPT-22: batch wiki episodic fetch into one UNWIND scan
+- Item: OPT-22 — COMPLETED
+- Mode B: clean sweep (Phase-2 double-call already tracked in OPT-58)
+- Verifier: PASS (1537 passed, 0 failed, build exit 0; wiki 287→290; result-identity verified — same predicate + per-name CALL{} LIMIT; RED-confirmed) | perf item — no security-reviewer
+- Metrics: passing 1534→1537 (floor 1537); skipped 16
+- Next: OPT-23

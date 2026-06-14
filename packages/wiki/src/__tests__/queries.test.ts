@@ -183,6 +183,95 @@ describe('fetchAllTags', () => {
   });
 });
 
+describe('fetchEpisodicsForEntities (batched single-scan)', () => {
+  it('scans :Episodic once for many entities and groups rows per entity', async () => {
+    const { fetchEpisodicsForEntities } = await import('../queries.js');
+
+    // One UNWIND scan returns rows for two entities, each tagged with `name`.
+    const mockSession = {
+      run: vi.fn(async () => mockResult([
+        mockRecord({
+          name: 'auth-module',
+          id: 'ep-1',
+          task: '[project:amp] Harden auth-module',
+          content: 'Fixed token refresh in auth-module',
+          outcome: 'approved',
+          session_id: 'sess-1',
+          created_at: '2026-04-09T12:00:00Z',
+        }),
+        mockRecord({
+          name: 'auth-module',
+          id: 'ep-2',
+          task: 'General auth-module review',
+          content: 'Reviewed auth-module flows',
+          outcome: null,
+          session_id: 'sess-2',
+          created_at: '2026-04-08T12:00:00Z',
+        }),
+        mockRecord({
+          name: 'wiki',
+          id: 'ep-3',
+          task: '[project:amp] wiki compile perf',
+          content: 'Batched wiki episodic scan',
+          outcome: 'approved',
+          session_id: 'sess-3',
+          created_at: '2026-04-07T12:00:00Z',
+        }),
+      ])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+
+    const driver = { session: vi.fn(() => mockSession) } as unknown as Driver;
+
+    const grouped = await fetchEpisodicsForEntities(driver, ['auth-module', 'wiki']);
+
+    // ONE label scan for the whole batch, not one per entity.
+    expect((mockSession.run as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+
+    // Same per-entity episodics + same project_scope extraction as the
+    // per-entity fetchEpisodicsForEntity would have returned.
+    expect(grouped.get('auth-module')?.map((e) => e.id)).toEqual(['ep-1', 'ep-2']);
+    expect(grouped.get('auth-module')?.[0].project_scope).toBe('amp');
+    expect(grouped.get('auth-module')?.[1].project_scope).toBeNull();
+    expect(grouped.get('wiki')?.map((e) => e.id)).toEqual(['ep-3']);
+    expect(grouped.get('wiki')?.[0].project_scope).toBe('amp');
+  });
+
+  it('preserves the per-entity ORDER/LIMIT contract in the Cypher (CALL{} subquery)', async () => {
+    const { fetchEpisodicsForEntities } = await import('../queries.js');
+
+    const mockSession = {
+      run: vi.fn(async () => mockResult([])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+    const driver = { session: vi.fn(() => mockSession) } as unknown as Driver;
+
+    await fetchEpisodicsForEntities(driver, ['x']);
+
+    const cypher = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    // Single scan via UNWIND, per-name top-20 preserved inside a CALL{} subquery.
+    expect(cypher).toContain('UNWIND $names AS name');
+    expect(cypher).toContain('CALL {');
+    expect(cypher).toContain('ORDER BY ep.created_at DESC');
+    expect(cypher).toContain('LIMIT 20');
+    // Same matching predicate as the per-entity query (CONTAINS + :MODIFIED edge).
+    expect(cypher).toContain('ep.task CONTAINS name OR ep.content CONTAINS name');
+    expect(cypher).toContain('[:MODIFIED]->(e:Entity {name: name})');
+  });
+
+  it('returns an empty map without touching the DB for an empty name list', async () => {
+    const { fetchEpisodicsForEntities } = await import('../queries.js');
+
+    const sessionFactory = vi.fn();
+    const driver = { session: sessionFactory } as unknown as Driver;
+
+    const grouped = await fetchEpisodicsForEntities(driver, []);
+
+    expect(grouped.size).toBe(0);
+    expect(sessionFactory).not.toHaveBeenCalled();
+  });
+});
+
 describe('fetchRecentEpisodics', () => {
   it('returns episodic entries with project scope extracted', async () => {
     const { fetchRecentEpisodics } = await import('../queries.js');
