@@ -323,4 +323,64 @@ describe('CodeWatcher', () => {
     );
     expect(mockIndexer.indexFile).not.toHaveBeenCalled();
   });
+
+  // ─── OPT-68: read-time re-confinement (TOCTOU close) ──────────────────────
+  it('OPT-68: a queued (untrusted) in-base path still indexes when confineBase is given', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'amp-watch-confine-ok-')));
+    const target = join(base, 'svc.ts');
+    writeFileSync(target, 'export const a = 1;');
+    watcher = new CodeWatcher(mockIndexer, mockDeleter, { debounceMs: 10 });
+    const indexFile = mockIndexer.indexFile as ReturnType<typeof vi.fn>;
+    const waitUntil = async (pred: () => boolean, ms = 1500): Promise<void> => {
+      const start = Date.now();
+      while (!pred() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 10));
+    };
+    try {
+      // Legit path within the base, queued WITH its confinement base → indexed
+      // (read-time re-confinement passes; behaviour identical to the unconfined path).
+      watcher.queueReindex(target, base);
+      await waitUntil(() => indexFile.mock.calls.length === 1);
+      expect(indexFile).toHaveBeenCalledTimes(1);
+      expect(indexFile).toHaveBeenCalledWith(target, expect.any(String));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('OPT-68: rejects a post-queue symlink swap that escapes the confinement base', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'amp-watch-confine-evil-')));
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'amp-watch-secret-')));
+    const secret = join(outside, 'secret.ts');
+    writeFileSync(secret, 'export const STOLEN = 1;');
+    const target = join(base, 'svc.ts');
+    watcher = new CodeWatcher(mockIndexer, mockDeleter, { debounceMs: 10 });
+    const indexFile = mockIndexer.indexFile as ReturnType<typeof vi.fn>;
+    const waitUntil = async (pred: () => boolean, ms = 1500): Promise<void> => {
+      const start = Date.now();
+      while (!pred() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 10));
+    };
+    try {
+      // 1. Initially a legit in-base file → indexes once.
+      writeFileSync(target, 'export const a = 1;');
+      watcher.queueReindex(target, base);
+      await waitUntil(() => indexFile.mock.calls.length === 1);
+      expect(indexFile).toHaveBeenCalledTimes(1);
+
+      // 2. Attacker swaps the in-base path to a symlink pointing OUTSIDE the base
+      //    (the TOCTOU window between queue-time confinement and the read). The
+      //    read-time re-confinement must reject it — the secret is never indexed.
+      rmSync(target);
+      try {
+        symlinkSync(secret, target);
+      } catch {
+        return; // symlink creation needs privileges on some platforms — skip
+      }
+      watcher.queueReindex(target, base);
+      await new Promise((r) => setTimeout(r, 250)); // generous: would have indexed in ~30ms
+      expect(indexFile).toHaveBeenCalledTimes(1); // NOT called again for the escaped path
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });

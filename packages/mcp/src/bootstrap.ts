@@ -34,6 +34,7 @@ import {
   CodeWatcher,
   extractFilePaths,
   confineReindexPath,
+  getReindexBaseDir,
   setCodeServiceInstances,
 } from '@memberry/code';
 import {
@@ -317,13 +318,16 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     if (!result.duplicate && input.content) {
       try {
         const filePaths = extractFilePaths(input.content);
+        // OPT-68: pin the confinement base so the watcher re-validates the path
+        // against the SAME base at read time (closing the queue→read TOCTOU).
+        const reindexBase = getReindexBaseDir();
         for (const fp of filePaths) {
-          const confined = confineReindexPath(fp);
+          const confined = confineReindexPath(fp, reindexBase);
           if (confined === null) {
             console.error(`[memberry-mcp] dropped out-of-base re-index path from stored content: ${fp}`);
             continue;
           }
-          codeWatcherService.queueReindex(confined);
+          codeWatcherService.queueReindex(confined, reindexBase);
         }
       } catch (err: unknown) {
         // Post-store hook failures are non-fatal

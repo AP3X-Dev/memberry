@@ -125,6 +125,12 @@ export class CodeWatcher {
   // re-parse when a change event fires for content that did not actually change
   // (no-op editor saves, touches, reverts coalesced within the debounce window).
   private lastIndexedHash = new Map<string, string>();
+  // OPT-68: for untrusted-origin (queued) paths, the confinement base captured at
+  // queue time. reindexFile re-validates confinement against it right before the
+  // read, closing the TOCTOU between OPT-03's queue-time check and the debounced
+  // read (a symlink swapped into the base within the window must not redirect the
+  // read). Absent for fs-watcher events (trusted root) → those stay unconfined here.
+  private confineBaseByPath = new Map<string, string>();
   private debounceMs: number;
   private extensions: Set<string>;
   private excludePatterns: Set<string>;
@@ -193,6 +199,7 @@ export class CodeWatcher {
       clearTimeout(timer);
     }
     this.debounceTimers.clear();
+    this.confineBaseByPath.clear();
   }
 
   /** Get list of currently watched root paths. */
@@ -208,10 +215,17 @@ export class CodeWatcher {
   /**
    * Queue a file for re-indexing (debounced).
    * Used by the post-store hook to re-index files mentioned in episode content.
+   *
+   * `confineBase` (OPT-68): when the path originates from UNTRUSTED content, the
+   * caller passes the confinement base it validated the path against at queue
+   * time; reindexFile re-validates against it just before reading, so a symlink
+   * swapped into the base during the debounce window can't redirect the read out
+   * of the base. Omit for trusted callers (no read-time re-confinement).
    */
-  queueReindex(filePath: string): void {
+  queueReindex(filePath: string, confineBase?: string): void {
     const abs = resolve(filePath);
     if (!this.shouldTrackPath(abs)) return;
+    if (confineBase !== undefined) this.confineBaseByPath.set(abs, confineBase);
     this.debouncedReindex(abs);
   }
 
@@ -230,6 +244,7 @@ export class CodeWatcher {
       if (filePath.startsWith(absRoot)) {
         clearTimeout(timer);
         this.debounceTimers.delete(filePath);
+        this.confineBaseByPath.delete(filePath);
       }
     }
   }
@@ -278,6 +293,11 @@ export class CodeWatcher {
   }
 
   private async reindexFile(filePath: string): Promise<void> {
+    // OPT-68: consume the queue-time confinement base for this path (untrusted
+    // origin). Re-validated below, right before any read.
+    const confineBase = this.confineBaseByPath.get(filePath);
+    this.confineBaseByPath.delete(filePath);
+
     // Check if file still exists (it might have been deleted)
     const exists = await new Promise<boolean>((res) => {
       stat(filePath, (err) => res(!err));
@@ -295,6 +315,16 @@ export class CodeWatcher {
           err instanceof Error ? err.message : err,
         );
       }
+      return;
+    }
+
+    // OPT-68: re-confine UNTRUSTED-origin paths at read time (TOCTOU close). The
+    // existence check above (and the realpath inside confineReindexPath) follow
+    // symlinks, so a component swapped to a symlink pointing outside the base
+    // within the debounce window is rejected HERE, before parseFile/readFile.
+    if (confineBase !== undefined && confineReindexPath(filePath, confineBase) === null) {
+      console.error(`[code-watcher] dropped re-index path that escaped the base at read time: ${filePath}`);
+      this.lastIndexedHash.delete(filePath);
       return;
     }
 
