@@ -30,3 +30,4 @@
 | OPT-26 | Namespace retrieval feedback boost keys by tenant (close cross-tenant ranking channel) | 24 | `2a49cbd` | gate green: 1547 passed / 0 failed (retrieval 146), build 0; security-reviewer PASS |
 | OPT-27 | Namespace context-cache keys by tenant (+block-invalidation path) | 25 | `5f5b026` | gate green: 1557 passed / 0 failed, build 0; security-reviewer PASS |
 | OPT-28 | Set HTTP slowloris timeouts (headers/request/keepAlive) | 26 | `5dfd81d` | gate green: 1560 passed / 0 failed (mcp 143), build 0; security-reviewer PASS |
+| OPT-29 | Fail-closed multi-tenant binding: reject non-tenant tokens (MEMBERRY_ALLOW_DEFAULT_TENANT opt-out) | 27 | `fd8046d` | gate green: 1561 passed / 0 failed (mcp 144), build 0; security-reviewer PASS |
