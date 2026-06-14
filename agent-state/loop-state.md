@@ -160,7 +160,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-25 | In-function rel-type allowlist on invalidateRelationship (close latent injection sink) | 23 | `132426a` | gate green 1543 passed / 0 failed (neo4j 200); security-reviewer PASS |
 | OPT-26 | Namespace retrieval feedback boost keys by tenant (close cross-tenant ranking channel) | 24 | `2a49cbd` | gate green 1547 passed / 0 failed (retrieval 146); security-reviewer PASS |
 | OPT-27 | Namespace context-cache keys by tenant (+block-invalidation path) | 25 | `5f5b026` | gate green 1557 passed / 0 failed; security-reviewer PASS |
-| OPT-28 | Set HTTP slowloris timeouts (headers/request/keepAlive) | 26 | `<c26-sha>` | gate green 1560 passed / 0 failed (mcp 143); security-reviewer PASS |
+| OPT-28 | Set HTTP slowloris timeouts (headers/request/keepAlive) | 26 | `5dfd81d` | gate green 1560 passed / 0 failed (mcp 143); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -397,7 +397,7 @@ Start cycle 27 at **OPT-29** (LOW, tenant — in multi-tenant mode a non-tenant 
 - Next: OPT-28
 
 ### Cycle 26 — 2026-06-14
-- Commit: `<c26-sha>` OPT-28: set HTTP slowloris timeouts
+- Commit: `5dfd81d` OPT-28: set HTTP slowloris timeouts
 - Item: OPT-28 — COMPLETED
 - Mode B: 1 discovery → OPT-85 (LOW: connection-count/flood limiting — per-connection time bounded but not count)
 - Verifier: PASS (1560 passed, 0 failed, build exit 0; mcp 140→143; RED-confirmed; SSE+shutdown intact) | Security-reviewer: PASS (slowloris 300s→30s; SSE not killed; clamp+env validation sound)
