@@ -62,7 +62,7 @@ const VALID_PREDICATE = /^[a-z][a-z0-9_]{0,40}$/;
  * predicate is a sane snake_case relation token (after lowercase+trim) and
  * subject/object are non-empty and within the sanity length cap.
  */
-function isSaneFact(subject: string, predicate: string, object: string): boolean {
+export function isSaneFact(subject: string, predicate: string, object: string): boolean {
   const s = subject.trim();
   const o = object.trim();
   if (s.length === 0 || o.length === 0) return false;

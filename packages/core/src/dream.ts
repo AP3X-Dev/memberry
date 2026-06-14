@@ -18,6 +18,7 @@
 import { nanoid } from 'nanoid';
 import type { AMPConfig, FactNode, FactScope } from './types.js';
 import type { LlmClient } from './llm.js';
+import { isSaneFact } from './extract.js';
 
 // ─── Injected dependency interfaces ──────────────────────────────────────────
 
@@ -387,6 +388,13 @@ function parseHypotheses(raw: string, entity: string): Hypothesis[] {
     if (!predicate || !object) { dropped++; continue; }
     // Force the subject to the scanned entity so hypotheses are always about it.
     const subject = typeof o.subject === 'string' && o.subject.trim() ? o.subject.trim() : entity;
+    // OPT-71: apply the SAME OPT-04 anti-poisoning shape gate the extractor uses
+    // (isSaneFact). Dream hypotheses are LLM output over untrusted-derived known
+    // facts, so without this a non-sane predicate (injection phrase / sentence /
+    // over-long value) would be minted as an abductive fact and could later be
+    // laundered into a deductive one via reinforcement-promotion. A predicate that
+    // is a known synonym (incl. space-forms) still passes (normalize-then-shape).
+    if (!isSaneFact(subject, predicate, object)) { dropped++; continue; }
     out.push({
       subject,
       predicate,
