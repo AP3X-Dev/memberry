@@ -25,3 +25,4 @@
 | OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `c071375` | gate green: 1534 passed / 0 failed (core 338), build 0; reliability (no sec-review) |
 | OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `a39fcfe` | gate green: 1537 passed / 0 failed (wiki 290), build 0; perf — result-identical |
 | OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `17fc63d` | gate green: 1540 passed / 0 failed (code 117), build 0; perf — graph-identical |
+| OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `<c22-sha>` | gate green: 1540 passed / 0 failed (config-only), build 0; ops |

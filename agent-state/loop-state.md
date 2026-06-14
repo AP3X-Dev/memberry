@@ -68,7 +68,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-21 | MED | Fact invalidate + create-replacement is two separate transactions; a failure between them invalidates a fact with no successor (data loss) | ✅ DONE (c19) | packages/core/src/service.ts:680-686 | DONE: reordered create-before-invalidate (replacement w/ supersedes_fact_id created first, then old invalidated) → mid-failure leaves BOTH active (recoverable) instead of losing the only fact; end-state identical +2 tests. Verifier PASS 1534/0 (core 338). Single-tx atomic supersession→OPT-81. Reliability (no sec-review). |  |
 | OPT-22 | MED | fetchEpisodicsForEntity unindexed full :Episodic substring scan, once/twice per entity on compile | ✅ DONE (c20) | packages/wiki/src/queries.ts:215-240 | DONE: batched fetchEpisodicsForEntities (one UNWIND :Episodic scan + per-name CALL{} preserving CONTAINS-OR-:MODIFIED predicate, DISTINCT, ORDER created_at DESC, LIMIT 20); compile Phase-1 E scans→1 (result-identical) +3 tests. Verifier PASS 1537/0 (wiki 290). Phase-2 double-call→OPT-58. Perf (no sec-review). |  |
 | OPT-23 | MED | indexFile one round-trip per changed symbol (sequential findByCompositeKey + create/update) | ✅ DONE (c21) | packages/code/src/indexer.ts:144-214 | DONE: SymbolStore.upsertSymbols — one UNWIND MERGE (ON CREATE=create props incl vectors, ON MATCH=update subset, transient __upsert_created removed before RETURN → graph-identical); indexFile collects changed→1 batched upsert (N→1); content-hash skip preserved +3 tests. Verifier PASS 1540/0 (code 117). Relation-edge N+1→OPT-82. Perf (no sec-review). |  |
-| OPT-24 | MED | docker-compose mcp omits MEMBERRY_TENANT_TOKENS/_DATASTORES/_INGEST_ALLOW_DIR — isolation can't be enabled via shipped compose | pending | docker-compose.yml:72-89; .env.example | pass the three env vars through compose with `${VAR:-}` defaults + document in .env.example; suite green |  |
+| OPT-24 | MED | docker-compose mcp omits MEMBERRY_TENANT_TOKENS/_DATASTORES/_INGEST_ALLOW_DIR — isolation can't be enabled via shipped compose | ✅ DONE (c22) | docker-compose.yml:72-89; .env.example | DONE: wired all 3 vars into the mcp env block (${VAR:-} opt-in defaults, 6-space map syntax) + INGEST_ALLOW_DIR container-path/volume-mount note in compose + .env.example pointer. Names verified vs readEnv call sites. Config-only → suite green 1540/0 (verified). Ops (no sec-review). |  |
 | OPT-25 | LOW | invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink) | pending | packages/neo4j/src/temporal-edges.ts:53-68 | add in-function VALID_REL_TYPES allowlist (throw on miss); new test asserts a bad relType throws; suite green |  |
 | OPT-26 | LOW | Global feedback boost keys mix tenant entity names — one tenant skews another's ranking | pending | packages/retrieval/src/feedback.ts:18-21,31-46,52-82 | namespace feedback keys by tenant + thread tenantId; suite green |  |
 | OPT-27 | LOW | Context-cache dependency sets keyed by naked scope/node-id — one tenant's write evicts another's cache | pending | packages/redis/src/cache.ts:29-38,42-54,56-68 | prefix dep-set keys with tenant + thread tenant from load()/store(); suite green |  |
@@ -153,6 +153,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `c071375` | gate green 1534 passed / 0 failed (core 338); reliability (no sec-review) |
 | OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `a39fcfe` | gate green 1537 passed / 0 failed (wiki 290); perf — result-identical |
 | OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `17fc63d` | gate green 1540 passed / 0 failed (code 117); perf — graph-identical |
+| OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `<c22-sha>` | gate green 1540 passed / 0 failed (config-only); ops |
 
 ## Failed Attempts
 
@@ -184,7 +185,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 22 at **OPT-24** (MED, ops — docker-compose mcp service omits MEMBERRY_TENANT_TOKENS/_TENANT_DATASTORES/_INGEST_ALLOW_DIR so multi-tenant isolation + ingest confinement can't be enabled via the shipped compose; pass them through with `${VAR:-}` defaults + document in .env.example, `docker-compose.yml:72-89`). This is config (acceptance = vars present + documented; suite still green). Then the LOW tier: OPT-25 (invalidateRelationship in-function allowlist), OPT-26/27 (tenant feedback/cache key namespacing), OPT-28 (slowloris timeouts), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 23 at **OPT-25** (LOW — invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink, currently no production caller); add an in-function VALID_REL_TYPES allowlist that throws on miss, `packages/neo4j/src/temporal-edges.ts:53-68`). NOTE: **all CRIT/HIGH/MED items are now DONE** — the remaining backlog is the LOW/INFO tier (OPT-25..66) + the OPT-67..82 review/deferred follow-ups. Work down by ID; skip any whose twin is already done; for each, the existing-tests gate + a focused new test per the row's acceptance. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -355,3 +356,11 @@ Start cycle 22 at **OPT-24** (MED, ops — docker-compose mcp service omits MEMB
 - Verifier: PASS (1540 passed, 0 failed, build exit 0; code 114→117; graph-identity verified — ON CREATE=create props, ON MATCH=update subset, marker removed before RETURN, content-hash skip preserved; RED-confirmed) | perf item — no security-reviewer
 - Metrics: passing 1537→1540 (floor 1540); skipped 16
 - Next: OPT-24
+
+### Cycle 22 — 2026-06-14
+- Commit: `<c22-sha>` OPT-24: wire tenant/ingest env vars through docker-compose mcp service
+- Item: OPT-24 — COMPLETED (last MED; all CRIT/HIGH/MED now done)
+- Mode B: clean sweep
+- Verifier (orchestrator inline — config-only YAML, no source): YAML valid (python safe_load), 3 vars present with ${VAR:-} + names match readEnv call sites; full gate re-run green 1540/0 (unchanged — config-only). Ops item — no security-reviewer.
+- Metrics: passing 1540 (floor 1540, unchanged — no new tests); skipped 16
+- Next: OPT-25 (LOW tier begins)

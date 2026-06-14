@@ -87,6 +87,13 @@ services:
       MEMBERRY_MODEL_EXTRACTION: ${MEMBERRY_MODEL_EXTRACTION:-}
       MEMBERRY_MODEL_SYNTHESIS: ${MEMBERRY_MODEL_SYNTHESIS:-}
       MEMBERRY_MODEL_DREAM: ${MEMBERRY_MODEL_DREAM:-}
+      # Multi-tenant isolation (opt-in). Empty = current single-tenant behavior.
+      MEMBERRY_TENANT_TOKENS: ${MEMBERRY_TENANT_TOKENS:-}
+      MEMBERRY_TENANT_DATASTORES: ${MEMBERRY_TENANT_DATASTORES:-}
+      # Ingest/compile path confinement (opt-in). This is a path INSIDE the
+      # container; pointing it at a non-default dir backed by host data also
+      # requires a corresponding volume mount for that path to be meaningful.
+      MEMBERRY_INGEST_ALLOW_DIR: ${MEMBERRY_INGEST_ALLOW_DIR:-}
     ports:
       - "127.0.0.1:3101:3101"
     restart: unless-stopped
