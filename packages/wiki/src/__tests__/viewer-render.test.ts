@@ -11,7 +11,35 @@
 // gone before the table tokenizer sees it.
 
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown } from '../viewer.js';
+import { renderMarkdown, renderCacheSize, resetViewerCache } from '../viewer.js';
+
+describe('OPT-57: renderMarkdown memoization', () => {
+  it('caches by source: a repeat render is a cache hit (no new entry), output identical; distinct source misses; reset clears', async () => {
+    resetViewerCache();
+    expect(renderCacheSize()).toBe(0);
+
+    const src = '# Title\n\nSee [[a/b|c]] and a `code` span.';
+    const first = await renderMarkdown(src);
+    expect(renderCacheSize()).toBe(1); // miss → stored
+
+    const second = await renderMarkdown(src);
+    expect(renderCacheSize()).toBe(1); // hit → no new entry
+    expect(second).toBe(first);        // output identical
+
+    const otherSrc = '# Different page';
+    const other = await renderMarkdown(otherSrc);
+    expect(renderCacheSize()).toBe(2); // distinct source → miss → +1
+    expect(other).not.toBe(first);
+
+    resetViewerCache();
+    expect(renderCacheSize()).toBe(0); // reset clears the render cache
+
+    // Still renders correctly after a reset (re-populates the cache).
+    const afterReset = await renderMarkdown(src);
+    expect(afterReset).toBe(first);
+    expect(renderCacheSize()).toBe(1);
+  });
+});
 
 describe('renderMarkdown — wikilink rendering', () => {
   it('produces clean anchor for [[a/b|c]] (regression: no escaping artifacts in href)', async () => {

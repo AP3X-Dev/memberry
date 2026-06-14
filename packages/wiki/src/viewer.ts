@@ -18,6 +18,22 @@ import { WikiCompiler } from './compile.js';
 
 const marked = new Marked();
 
+// OPT-57: renderMarkdown is a PURE function of its input (resolveWikilinks only
+// rewrites [[..]] syntax, marked.parse + addHeadingIds + sanitizeHtml all depend
+// only on the source), so the same markdown always yields the same HTML. The wiki
+// viewer re-rendered every page on every request; memoize by exact source so a
+// repeated view is served from cache. Keyed by content (not a hash) → no
+// collision risk; bounded by a max-entry cap (cleared wholesale when full) and
+// cleared on the file-change rebuild + test reset so stale/dead entries can't
+// accumulate.
+const RENDER_CACHE_MAX = 1024;
+const renderCache = new Map<string, string>();
+
+/** @internal test-only: current render-cache entry count. */
+export function renderCacheSize(): number {
+  return renderCache.size;
+}
+
 // Hidden round-trip claim anchors emitted by the compiler. Stripped before render
 // and before search indexing so they never surface to the reader. Stateless (no
 // shared lastIndex) — safe to reuse with String.replace.
@@ -117,9 +133,15 @@ export async function renderMarkdown(content: string): Promise<string> {
   // column separator, which split [[link|display]] across cells. Resolving
   // before marked.parse() means the `|` is gone by the time tables are parsed.
   // Sanitize the final HTML to scrub any XSS vectors from the source content.
+  const cached = renderCache.get(content);
+  if (cached !== undefined) return cached;
   const withLinks = resolveWikilinks(content);
-  const html = await marked.parse(withLinks);
-  return sanitizeHtml(addHeadingIds(html));
+  const html = sanitizeHtml(addHeadingIds(await marked.parse(withLinks)));
+  // Crude bound: drop everything once full (wikis have far fewer distinct page
+  // bodies than the cap, so this effectively never trips mid-operation).
+  if (renderCache.size >= RENDER_CACHE_MAX) renderCache.clear();
+  renderCache.set(content, html);
+  return html;
 }
 
 // ─── HTML templates ─────────────────────────────────────────────────────────
@@ -1591,6 +1613,7 @@ function scheduleCacheRebuild(wikiDir: string): void {
   cacheRebuildTimer = setTimeout(async () => {
     try {
       wikiCache = await buildCache(wikiDir);
+      renderCache.clear(); // OPT-57: drop rendered HTML for now-edited/removed pages
       console.error('[wiki-viewer] Cache rebuilt after file change');
     } catch (err) {
       console.error('[wiki-viewer] Cache rebuild failed:', err instanceof Error ? err.message : err);
@@ -1641,6 +1664,7 @@ async function getCache(wikiDir: string): Promise<WikiCache> {
  */
 export function resetViewerCache(): void {
   wikiCache = null;
+  renderCache.clear(); // OPT-57
   stopWatching();
 }
 
