@@ -153,7 +153,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `c071375` | gate green 1534 passed / 0 failed (core 338); reliability (no sec-review) |
 | OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `a39fcfe` | gate green 1537 passed / 0 failed (wiki 290); perf — result-identical |
 | OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `17fc63d` | gate green 1540 passed / 0 failed (code 117); perf — graph-identical |
-| OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `<c22-sha>` | gate green 1540 passed / 0 failed (config-only); ops |
+| OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `907ef57` | gate green 1540 passed / 0 failed (config-only); ops |
 
 ## Failed Attempts
 
@@ -358,7 +358,7 @@ Start cycle 23 at **OPT-25** (LOW — invalidateRelationship() interpolates relT
 - Next: OPT-24
 
 ### Cycle 22 — 2026-06-14
-- Commit: `<c22-sha>` OPT-24: wire tenant/ingest env vars through docker-compose mcp service
+- Commit: `907ef57` OPT-24: wire tenant/ingest env vars through docker-compose mcp service
 - Item: OPT-24 — COMPLETED (last MED; all CRIT/HIGH/MED now done)
 - Mode B: clean sweep
 - Verifier (orchestrator inline — config-only YAML, no source): YAML valid (python safe_load), 3 vars present with ${VAR:-} + names match readEnv call sites; full gate re-run green 1540/0 (unchanged — config-only). Ops item — no security-reviewer.
