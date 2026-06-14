@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1526 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1532 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -64,7 +64,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-17 | MED | EntityResolver.resolveExisting 3 sequential round-trips per call on every fact hot path | ✅ DONE (c16) | packages/neo4j/src/entity-resolver.ts:60-118 | DONE (safe non-migration): collapsed 3 sequential queries (exact/CI/alias) into 1 precedence-ranked query (CASE rank + ORDER BY rank,created_at LIMIT 1); matchType derived in TS; 3→1 round-trips; precedence/trim/create-on-miss preserved +4 tests. Verifier PASS 1523/0 (neo4j 197). Indexed name_lower migration deferred→OPT-80 (needs approval). |  |
 | OPT-18 | MED | (≡OPT-14) amp:signals stream never trimmed | ✅ DONE (c13, no-op) | packages/redis/src/streams.ts:29-42,53-98 | COVERED by OPT-14 (MAXLEN ~ on the signals XADD bounds the stream). | confirm-before-removing |
 | OPT-19 | MED | Dedup key set before persistence with no rollback — a failed store() permanently swallows the memory for 24h | ✅ DONE (c17) | packages/core/src/service.ts:435-484 | DONE: DedupChecker.unmark releases the key; store() wraps persistence in try/catch → unmark-then-rethrow original error (mark stays before persist → TOCTOU/BUG-0020 intact); +3 tests. Verifier PASS 1526/0 (core 330; RED-confirmed). Reliability (no sec-review). |  |
-| OPT-20 | MED | Retrieval/code/intent embed via raw OpenAIEmbedding — Redis EmbeddingCache exists but never wired in | pending | packages/core/src/services-factory.ts:132,174,235,302 | wrap OpenAIEmbedding in a read-through caching provider using EmbeddingCache; inject it; test asserts cache hit on repeat; suite green |  |
+| OPT-20 | MED | Retrieval/code/intent embed via raw OpenAIEmbedding — Redis EmbeddingCache exists but never wired in | ✅ DONE (c18) | packages/core/src/services-factory.ts:132,174,235,302 | DONE: CachingEmbeddingProvider (read-through embed + batch-misses-only + cache-error fallthrough) wraps OpenAIEmbedding with the existing EmbeddingCache; injected into shared core.embedding (all 4 consumers) +6 tests. Subsumes OPT-65. Verifier PASS 1532/0 (core 336; behavior-identical on miss). Perf (no sec-review). |  |
 | OPT-21 | MED | Fact invalidate + create-replacement are two transactions — mid-failure leaves a fact with no successor (data loss) | pending | packages/core/src/service.ts:680-686 | create-before-invalidate ordering (or one tx); new test proves no fact lost on mid-failure; suite green |  |
 | OPT-22 | MED | fetchEpisodicsForEntity unindexed full :Episodic substring scan, once/twice per entity on compile | pending | packages/wiki/src/queries.ts:215-240 | prefer indexed :MODIFIED, gate CONTAINS behind it, or one UNWIND batch; suite green |  |
 | OPT-23 | MED | indexFile one round-trip per changed symbol (sequential findByCompositeKey + create/update) | pending | packages/code/src/indexer.ts:144-214 | batch per-file symbol upserts into one UNWIND MERGE/SET; suite green |  |
@@ -109,7 +109,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-62 | LOW | HTTP server binds 0.0.0.0; listen() takes no host; systemd HOST=0.0.0.0 never read | pending | packages/mcp/src/server.ts:540-543 | read MEMBERRY_HOST (default 127.0.0.1), pass to listen; document 0.0.0.0 opt-in; suite green | confirm-before-removing |
 | OPT-63 | LOW | No .dockerignore: full context (node_modules,.git,wiki,.memberry,docs,.audit) sent to daemon | pending | (repo root, missing) | add .dockerignore; acceptance = file present + build still works; suite green |  |
 | OPT-64 | LOW | Dockerfile HEALTHCHECK start-period (20s) shorter than cold DB warm-up + serial bootstrap | pending | Dockerfile:70-72; docker-compose.yml | raise start-period to 60-90s or split liveness/readiness; suite green |  |
-| OPT-65 | INFO | Query embeddings in code search + intent classification bypass EmbeddingCache | pending | packages/code/src/search.ts:200,296 | inject EmbeddingCache into code search + intent (subsumed by OPT-20); suite green |  |
+| OPT-65 | INFO | Query embeddings in code search + intent classification bypass EmbeddingCache | ✅ DONE (c18, subsumed) | packages/code/src/search.ts:200,296 | COVERED by OPT-20: CodeSearch + intent classifier consume the shared core.embedding, now the cached read-through wrapper. |  |
 | OPT-66 | INFO | Intent classifier recomputes exemplar L2 norms every query despite caching vectors | pending | packages/retrieval/src/intent.ts:216-235,247-251 | precompute+cache exemplar norms alongside vectors; suite green |  |
 | OPT-67 | LOW | DeterministicAssembler entity/aspect/semantic queries are NOT tenant-filtered — rely on tools.ts:147 routing guard, not data-layer isolation (defense-in-depth gap; not a live leak). Mirrors the query.ts byEntity/byTag/expandByGraph unscoped-read class. | pending | packages/retrieval/src/assembler.ts:402-412; packages/retrieval/src/deterministic.ts; packages/neo4j/src/query.ts:142,163,356,418 | thread tenantId into DeterministicAssembler + add tenantWhere to its queries (and to byEntity/byTag/byEntityWithFacts/expandByGraph); test proves a tenant can't read another tenant's entities even if routed to deterministic; suite green. Source: found verifying OPT-01. |  |
 | OPT-68 | LOW | TOCTOU in re-index confinement: reindexFile re-checks existence after the 3s debounce but does NOT re-confine/realpath, so a symlink swapped into the base within the window could redirect the read past OPT-03's queue-time check. | pending | packages/code/src/watcher.ts (reindexFile ~221-247); packages/code/src/indexer.ts:132-172 | re-confine (or lstat/O_NOFOLLOW) inside reindexFile before parseFile reads; test proves a post-queue symlink swap is rejected; suite green. Source: found security-reviewing OPT-03. Low: needs local write to base within 3s. |  |
@@ -147,6 +147,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-16 | Batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical) | 15 | `3855d00` | gate green 1519 passed / 0 failed (retrieval 142); perf — output-identity verified |
 | OPT-17 | Collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query | 16 | `5b3127f` | gate green 1523 passed / 0 failed (neo4j 197); perf — precedence preserved |
 | OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `4c3853d` | gate green 1526 passed / 0 failed (core 330); reliability (no sec-review) |
+| OPT-20 (+OPT-65) | Read-through embedding cache wired into hot paths | 18 | `<c18-sha>` | gate green 1532 passed / 0 failed (core 336); perf — behavior-identical on miss |
 
 ## Failed Attempts
 
@@ -178,7 +179,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 18 at **OPT-20** (MED, perf — retrieval/code/intent hot paths use the raw OpenAIEmbedding with NO query-embedding cache, though a Redis EmbeddingCache exists but is never wired in; wrap OpenAIEmbedding in a read-through caching provider using the existing EmbeddingCache and inject THAT, `packages/core/src/services-factory.ts:132,174,235,302`). This also subsumes OPT-65 (and helps OPT-49/50). Then OPT-21 (fact invalidate+create atomicity), OPT-22 (wiki episodic scan), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 19 at **OPT-21** (MED, reliability — fact invalidate + create-replacement is two separate transactions; a failure between them invalidates a fact with NO successor (data loss); reorder to create-before-invalidate so a mid-failure leaves BOTH active (recoverable), or wrap in one tx, `packages/core/src/service.ts:680-686`). Then OPT-22 (wiki episodic scan), OPT-23 (indexFile batch), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -317,3 +318,11 @@ Start cycle 18 at **OPT-20** (MED, perf — retrieval/code/intent hot paths use 
 - Verifier: PASS (1526 passed, 0 failed, build exit 0; core 327→330; RED-confirmed: reverting service.ts+dedup.ts fails the 2 behavioral tests; BUG-0020 TOCTOU regression intact; mark stays before persist) | reliability item — no security-reviewer
 - Metrics: passing 1523→1526 (floor 1526); skipped 16
 - Next: OPT-20
+
+### Cycle 18 — 2026-06-14
+- Commit: `<c18-sha>` OPT-20: read-through embedding cache (wire dormant EmbeddingCache into hot paths)
+- Item: OPT-20 — COMPLETED; OPT-65 marked DONE (subsumed — code/intent share the cached wrapper)
+- Mode B: clean sweep (no production embedding site constructed outside services-factory)
+- Verifier: PASS (1532 passed, 0 failed, build exit 0; core 330→336; RED-confirmed; behavior-identical on cache miss; cache errors fall through to inner) | perf item — no security-reviewer
+- Metrics: passing 1526→1532 (floor 1532); skipped 16
+- Next: OPT-21

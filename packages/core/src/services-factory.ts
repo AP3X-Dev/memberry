@@ -32,6 +32,7 @@ import {
 import { AMPService } from './service.js';
 import { MemoryBlockService } from './blocks.js';
 import { OpenAIEmbedding } from './embedding.js';
+import { CachingEmbeddingProvider } from './caching-embedding.js';
 import { OpenAiLlmClient, NullLlmClient, type LlmClient } from './llm.js';
 import { KeyedSerialQueue } from './serial-queue.js';
 import { DreamEngine, type DreamGraphLayer, type DreamBlockLayer } from './dream.js';
@@ -129,7 +130,19 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   const scopedQuery = new ScopedQuery(driver);
   const factStore = new FactStore(driver);
 
-  const embedding: EmbeddingProvider = openaiKey ? new OpenAIEmbedding(openaiKey) : disabledEmbedding();
+  // Read-through embedding cache: identical query strings (retrieval, code
+  // search, intent classification) re-hit the OpenAI embeddings API every time
+  // otherwise. The Redis `embeddings` EmbeddingCache (constructed above) is
+  // wired in front of the RAW provider via CachingEmbeddingProvider, so all the
+  // downstream services that receive this single shared instance (AMPService
+  // here; CodeSearch + UnifiedAssembler in the MCP bootstrap) gain caching for
+  // free. The cache is best-effort — a cache failure falls through to the inner
+  // provider (see caching-embedding.ts). The disabled (no-key) provider returns
+  // meaningless zero vectors and stays unwrapped so it is never cached and its
+  // `available: false` degraded signal is preserved.
+  const embedding: EmbeddingProvider = openaiKey
+    ? new CachingEmbeddingProvider(new OpenAIEmbedding(openaiKey), embeddings)
+    : disabledEmbedding();
 
   // Per-task model overrides from env (MEMBERRY_MODEL_*); omitted keys fall back to DEFAULT_MODELS.
   const models: NonNullable<AMPConfig['models']> = {};
