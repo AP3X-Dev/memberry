@@ -9,4 +9,4 @@
 | OPT-03 | Confine post-store re-index paths to ingest base (block arbitrary file read) | 3 | `9b0b029` | gate green: 1472 passed / 0 failed (code 114), build 0; security-reviewer PASS |
 | OPT-04 | Validate extracted-fact predicate shape + value bounds (block graph poisoning) | 4 | `a47b124` | gate green: 1480 passed / 0 failed (core 321), build 0; security-reviewer PASS |
 | OPT-05 | Redact JSON-quoted credentials in SECRET_ASSIGNMENT (core + graph allowlist) | 5 | `21c3462` | gate green: 1483 passed / 0 failed (core 323, graph 53), build 0; security-reviewer PASS |
-| OPT-06 | No-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim; re2→B-01) | 6 | `<c6-sha>` | gate green: 1488 passed / 0 failed (mcp 131), build 0; security-reviewer PASS |
+| OPT-06 | No-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim; re2→B-01) | 6 | `7ce8c69` | gate green: 1488 passed / 0 failed (mcp 131), build 0; security-reviewer PASS |

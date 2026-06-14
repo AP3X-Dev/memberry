@@ -126,7 +126,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-03 | Confine post-store re-index paths to ingest base (block arbitrary file read) | 3 | `9b0b029` | gate green 1472 passed / 0 failed (code 114); security-reviewer PASS |
 | OPT-04 | Validate extracted-fact predicate shape + value bounds (block graph poisoning) | 4 | `a47b124` | gate green 1480 passed / 0 failed (core 321); security-reviewer PASS |
 | OPT-05 | Redact JSON-quoted credentials in SECRET_ASSIGNMENT (core + graph allowlist) | 5 | `21c3462` | gate green 1483 passed / 0 failed (core 323, graph 53); security-reviewer PASS |
-| OPT-06 | No-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim; re2→B-01) | 6 | `<c6-sha>` | gate green 1488 passed / 0 failed (mcp 131); security-reviewer PASS |
+| OPT-06 | No-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim; re2→B-01) | 6 | `7ce8c69` | gate green 1488 passed / 0 failed (mcp 131); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -203,7 +203,7 @@ Start cycle 7 at **OPT-07** (HIGH — Neo4j-side ReDoS: berry_grep's `=~` runs t
 - Next: OPT-06 (ReDoS — re2 dep needs a Blocked row; ship no-dep interim)
 
 ### Cycle 6 — 2026-06-13
-- Commit: `<c6-sha>` OPT-06: no-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim)
+- Commit: `7ce8c69` OPT-06: no-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim)
 - Item: OPT-06 — COMPLETED (interim; robust re2 fix filed as Blocked B-01 for human approval)
 - Mode B: lowered MAX_SCAN_TEXT_LEN 50k→4k mid-cycle (security-reviewer found polynomial ReDoS still stalls within 50k); re-ran full gate green
 - Verifier: PASS (1488 passed, 0 failed, build exit 0; mcp 126→131) | Security-reviewer: PASS (exponential shapes + unbounded input closed; residual poly/lookaround → re2 B-01; recommended + applied the 4k cap)
