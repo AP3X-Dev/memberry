@@ -255,16 +255,21 @@ export const CORE_DOMAIN_TOOLS: Record<string, ToolDomain> = {
 
 // ─── Zod schemas ─────────────────────────────────────────────────────────────
 
-const AmpLoadSchema = {
+export const AmpLoadSchema = {
   task: z.string().max(5000).describe('Task description for context assembly'),
   entities: z.array(z.string()).optional().describe('Entity names to scope the query'),
   tags: z.array(z.string()).optional().describe('Tags to scope the query'),
   max_tokens: z.number().int().positive().optional().default(4000).describe('Max tokens for context window'),
   temporal: z.object({
     time_mode: z.enum(['current', 'historical', 'interval', 'evolution']).optional().describe('Temporal query mode'),
-    as_of: z.string().optional().describe('ISO timestamp for historical mode'),
-    from: z.string().optional().describe('Interval start (ISO timestamp)'),
-    to: z.string().optional().describe('Interval end (ISO timestamp)'),
+    // OPT-40: bound the timestamp strings (were unbounded z.string()). NOT
+    // z.string().datetime() — the documented contract accepts date-only values
+    // ("2025-06-01") as well as full ISO ("2021-03-01T00:00:00.000Z"), which
+    // .datetime() would reject. .max(40) bounds the unbounded-length DoS vector
+    // while preserving both accepted forms (full ISO+ms+offset is ~29 chars).
+    as_of: z.string().max(40).optional().describe('ISO timestamp/date for historical mode'),
+    from: z.string().max(40).optional().describe('Interval start (ISO timestamp/date)'),
+    to: z.string().max(40).optional().describe('Interval end (ISO timestamp/date)'),
     include_invalidated: z.boolean().optional().describe('Include invalidated facts in evolution mode'),
   }).optional().describe('Temporal filtering options for fact queries'),
 };

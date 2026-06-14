@@ -128,7 +128,7 @@ const ResearchInitSchema = {
   constraints: z.string().max(5000).optional().describe('Constraints and off-limits rules'),
 };
 
-const ResearchLogSchema = {
+export const ResearchLogSchema = {
   campaign_id: z.string().max(200).describe('Campaign ID from berry_research_init'),
   session_id: z.string().max(200).describe('Session identifier for this agent session'),
   experiment_number: z.number().int().nonnegative().describe('Sequential experiment number (0 = baseline)'),
@@ -136,7 +136,16 @@ const ResearchLogSchema = {
   parent_id: z.string().max(200).nullable().optional().describe('Parent experiment ID (null for baseline)'),
   commit: z.string().max(200).nullable().optional().describe('Git commit hash'),
   metric_value: z.number().describe('Primary metric value'),
-  secondary_metrics: z.record(z.number()).optional().describe('Secondary metric values'),
+  // OPT-40: was z.record(z.number()) — unbounded key COUNT, unbounded key
+  // LENGTH, and NaN/Infinity values all accepted. Bound keys (≤100 chars),
+  // entry count (≤50), and require finite numeric values.
+  secondary_metrics: z
+    .record(z.string().min(1).max(100), z.number().finite())
+    .refine((rec) => Object.keys(rec).length <= 50, {
+      message: 'secondary_metrics: at most 50 entries',
+    })
+    .optional()
+    .describe('Secondary metric values (≤50 entries, finite numbers)'),
   status: z.enum(['keep', 'discard', 'crash', 'thought', 'keep*', 'interesting', 'timeout'])
     .describe('Experiment outcome status'),
   duration_s: z.number().nonnegative().describe('Experiment duration in seconds'),
