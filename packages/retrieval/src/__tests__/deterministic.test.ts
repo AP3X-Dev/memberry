@@ -90,13 +90,17 @@ describe('DeterministicAssembler', () => {
 
       let callIdx = 0;
       mockDriver.session.mockImplementation(() => {
+        // Batched per-step queries tag every row with `targetName` so results can
+        // be regrouped per target. Each step still opens one session for a single
+        // target, so the per-step session order below is unchanged.
         const responses = [
-          // Step 2: getAncestors
+          // Step 2: getAncestorsBatch
           mockNeo4jResult([
-            { name: 'Platform', depth: 0, responsibility: 'Root platform' },
+            { targetName: 'AuthService', name: 'Platform', depth: 0, responsibility: 'Root platform' },
           ]),
-          // Step 3: getEntity
+          // Step 3: getEntitiesBatch
           mockNeo4jResult([{
+            targetName: 'AuthService',
             e: mockEntityNode({
               name: 'AuthService',
               category: 'service',
@@ -105,21 +109,21 @@ describe('DeterministicAssembler', () => {
               internals: 'bcrypt hashing',
             }),
           }]),
-          // Step 4: getDependencies
+          // Step 4: getDependenciesBatch
           mockNeo4jResult([
-            { name: 'UserStore', relation: 'USES', interface_desc: 'CRUD' },
+            { targetName: 'AuthService', name: 'UserStore', relation: 'USES', interface_desc: 'CRUD' },
           ]),
-          // Step 4: getDependents
+          // Step 4: getDependentsBatch
           mockNeo4jResult([
-            { name: 'Gateway', relation: 'CALLS' },
+            { targetName: 'AuthService', name: 'Gateway', relation: 'CALLS' },
           ]),
-          // Step 5: getAspects
+          // Step 5: getAspectsBatch
           mockNeo4jResult([
-            { name: 'security', stability_tier: 'protocol', description: 'Security aspect' },
+            { targetName: 'AuthService', name: 'security', stability_tier: 'protocol', description: 'Security aspect' },
           ]),
-          // Step 6: getScopedSemantics
+          // Step 6: getScopedSemanticsBatch
           mockNeo4jResult([
-            { id: 'sem-1', content: 'Auth uses JWT tokens', confidence: 0.9, tags: ['auth'] },
+            { targetName: 'AuthService', id: 'sem-1', content: 'Auth uses JWT tokens', confidence: 0.9, tags: ['auth'] },
           ]),
         ];
 
@@ -141,6 +145,70 @@ describe('DeterministicAssembler', () => {
       const headings = sections.map((s) => s.heading);
       expect(headings).toContain('Domain Hierarchy');
       expect(headings).toContain('Target Components');
+    });
+
+    it('batches per-step queries across multiple targets (one run per step, original order preserved)', async () => {
+      // Two targets. Each step issues ONE batched query whose rows are tagged with
+      // `targetName`. This proves the N+1 reduction (6 runs for T=2, not 12) AND
+      // that regrouping preserves the original `targets` array order plus each
+      // step's per-target secondary ordering.
+      const runFns: ReturnType<typeof vi.fn>[] = [];
+      let callIdx = 0;
+      const mockDriver = {
+        session: vi.fn().mockImplementation(() => {
+          const idx = callIdx++;
+          // Batched responses, in step order. Rows for both targets in one result.
+          const responses = [
+            // Step 2: getAncestorsBatch — return Beta's rows first to prove JS
+            // regrouping (not Cypher row order) drives the final target order.
+            mockNeo4jResult([
+              { targetName: 'Beta', name: 'PlatformB', depth: 0, responsibility: 'B root' },
+              { targetName: 'Alpha', name: 'PlatformA', depth: 0, responsibility: 'A root' },
+            ]),
+            // Step 3: getEntitiesBatch
+            mockNeo4jResult([
+              { targetName: 'Alpha', e: mockEntityNode({ name: 'Alpha', category: 'service' }) },
+              { targetName: 'Beta', e: mockEntityNode({ name: 'Beta', category: 'service' }) },
+            ]),
+            // Step 4: getDependenciesBatch
+            mockNeo4jResult([
+              { targetName: 'Alpha', name: 'StoreA', relation: 'USES', interface_desc: '' },
+              { targetName: 'Beta', name: 'StoreB', relation: 'USES', interface_desc: '' },
+            ]),
+            // Step 4: getDependentsBatch
+            mockNeo4jResult([]),
+            // Step 5: getAspectsBatch
+            mockNeo4jResult([]),
+            // Step 6: getScopedSemanticsBatch
+            mockNeo4jResult([]),
+          ];
+          const run = vi.fn().mockResolvedValue(responses[idx] ?? mockNeo4jResult([]));
+          runFns.push(run);
+          return { run, close: vi.fn().mockResolvedValue(undefined) };
+        }),
+      };
+
+      const asm = new DeterministicAssembler(mockDriver as never);
+      const sections = await asm.assemble('multi target', {
+        entity_scope: ['Alpha', 'Beta'],
+      });
+
+      // Exactly one session.run per step (6), not one per target per step (12).
+      expect(runFns).toHaveLength(6);
+      expect(runFns.every((r) => r.mock.calls.length === 1)).toBe(true);
+
+      // Hierarchy: original target order (Alpha before Beta), despite Cypher
+      // returning Beta's row first.
+      const hierarchy = sections.find((s) => s.heading === 'Domain Hierarchy');
+      expect(hierarchy?.items.map((i) => i.id)).toEqual(['hier-PlatformA', 'hier-PlatformB']);
+
+      // Targets assembled in original order.
+      const targetsSection = sections.find((s) => s.heading === 'Target Components');
+      expect(targetsSection?.items.map((i) => i.id)).toEqual(['target-Alpha', 'target-Beta']);
+
+      // Dependencies grouped per target, original order.
+      const deps = sections.find((s) => s.heading === 'Dependencies & Dependents');
+      expect(deps?.items.map((i) => i.id)).toEqual(['dep-Alpha-StoreA', 'dep-Beta-StoreB']);
     });
   });
 
@@ -257,6 +325,7 @@ describe('DeterministicAssembler', () => {
                 // getAncestors: many ancestors with long responsibilities
                 ? mockNeo4jResult(
                     Array.from({ length: 20 }, (_, i) => ({
+                      targetName: 'Target',
                       name: `Ancestor${i}`,
                       depth: i,
                       responsibility: longContent,
@@ -289,8 +358,8 @@ describe('DeterministicAssembler', () => {
             return {
               run: vi.fn().mockResolvedValue(
                 mockNeo4jResult([
-                  { name: 'Root', depth: 0, responsibility: 'x'.repeat(2000) },
-                  { name: 'Service', depth: 1, responsibility: 'Small useful context' },
+                  { targetName: 'Target', name: 'Root', depth: 0, responsibility: 'x'.repeat(2000) },
+                  { targetName: 'Target', name: 'Service', depth: 1, responsibility: 'Small useful context' },
                 ]),
               ),
               close: vi.fn().mockResolvedValue(undefined),
@@ -325,9 +394,9 @@ describe('DeterministicAssembler', () => {
             return {
               run: vi.fn().mockResolvedValue(
                 mockNeo4jResult([
-                  { name: 'Deep', depth: 5, responsibility: 'Deep ancestor' },
-                  { name: 'Shallow', depth: 1, responsibility: 'Shallow ancestor' },
-                  { name: 'Root', depth: 0, responsibility: 'Root ancestor' },
+                  { targetName: 'Target', name: 'Deep', depth: 5, responsibility: 'Deep ancestor' },
+                  { targetName: 'Target', name: 'Shallow', depth: 1, responsibility: 'Shallow ancestor' },
+                  { targetName: 'Target', name: 'Root', depth: 0, responsibility: 'Root ancestor' },
                 ]),
               ),
               close: vi.fn().mockResolvedValue(undefined),
@@ -363,13 +432,13 @@ describe('DeterministicAssembler', () => {
         session: vi.fn().mockImplementation(() => {
           callIdx++;
           if (callIdx === 5) {
-            // getAspects call (5th session: ancestors, entity, deps, dependents, aspects)
+            // getAspectsBatch call (5th session: ancestors, entity, deps, dependents, aspects)
             return {
               run: vi.fn().mockResolvedValue(
                 mockNeo4jResult([
-                  { name: 'impl-aspect', stability_tier: 'implementation', description: 'Impl' },
-                  { name: 'proto-aspect', stability_tier: 'protocol', description: 'Proto' },
-                  { name: 'schema-aspect', stability_tier: 'schema', description: 'Schema' },
+                  { targetName: 'Target', name: 'impl-aspect', stability_tier: 'implementation', description: 'Impl' },
+                  { targetName: 'Target', name: 'proto-aspect', stability_tier: 'protocol', description: 'Proto' },
+                  { targetName: 'Target', name: 'schema-aspect', stability_tier: 'schema', description: 'Schema' },
                 ]),
               ),
               close: vi.fn().mockResolvedValue(undefined),

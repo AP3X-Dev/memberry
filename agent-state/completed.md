@@ -18,3 +18,4 @@
 | OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green: 1513 passed / 0 failed (wiki 287), build 0; security-reviewer PASS |
 | OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `490c3d3` | gate green: 1514 passed / 0 failed (redis 69), build 0; reliability (no sec-review) |
 | OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `b815f48` | gate green: 1518 passed / 0 failed (mcp 140), build 0; security-reviewer PASS |
+| OPT-16 | Batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical) | 15 | `<c15-sha>` | gate green: 1519 passed / 0 failed (retrieval 142), build 0; perf — output-identity verified |

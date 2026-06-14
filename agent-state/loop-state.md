@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1518 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1519 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -60,7 +60,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-13 | MED | (≡OPT-08) MCP /mcp POST body reader buffers entire request, no cap | ✅ DONE (c8, no-op) | packages/mcp/src/server.ts:371-380,439-446 | COVERED by OPT-08: /mcp POST reads its body through the now-capped readJsonBody before the SDK is invoked, so the /mcp Streamable path is bounded. (Only /messages SDK-read path remains → OPT-73.) |  |
 | OPT-14 | MED | Redis amp:signals stream grows unbounded — XADD no MAXLEN, consumer only XACKs | ✅ DONE (c13) | packages/redis/src/streams.ts:29-42,53-98 | DONE: approximate MAXLEN ~ SIGNALS_STREAM_MAXLEN (10_000, env-overridable) on the signals XADD; MAXLEN-alone (no XDEL-after-XACK — multi-consumer-group-unsafe); consumer/ack semantics unchanged +1 test. Verifier PASS 1514/0 (redis 69). Nit: raw process.env vs readEnv (non-blocking). Episodic-buffer cap→OPT-79. |  |
 | OPT-15 | MED | berry_ingest_codebase path arg has no confinement, unlike sibling code tools | ✅ DONE (c14) | packages/mcp/src/tools.ts:951-960 | DONE: confine args.path before scan/index (resolve + baseDir=cwd + startsWith(base+sep), byte-identical to sibling code tools) +4 tests. Verifier PASS 1518/0 (mcp 140; RED-confirmed by reverting guard); security-reviewer PASS (only fs-path input; confined before any read). Residual lexical-only symlink→OPT-74. |  |
-| OPT-16 | MED | DeterministicAssembler ~6 sequential queries per target entity, each own session (N+1) | pending | packages/retrieval/src/deterministic.ts:50-155,220-347 | collapse per-target steps into UNWIND-driven single queries; suite green; no behavior change |  |
+| OPT-16 | MED | DeterministicAssembler ~6 sequential queries per target entity, each own session (N+1) | ✅ DONE (c15) | packages/retrieval/src/deterministic.ts:50-155,220-347 | DONE: 5 per-step UNWIND batches (6×T→6 queries) + CALL{} subqueries to preserve per-target LIMIT 10 + aspect UNION dedup; target order driven by JS loop (output byte-identical) +1 batching test. Verifier(self): PASS 1519/0 — all existing deterministic output-identity tests held, NO assertions loosened (targetName mock col additive). Perf item (no sec-review). |  |
 | OPT-17 | MED | EntityResolver.resolveExisting 3 sequential round-trips per call on every fact hot path | pending | packages/neo4j/src/entity-resolver.ts:60-118 | persisted name_lower + index, collapse CI/alias to one indexed query; suite green |  |
 | OPT-18 | MED | (≡OPT-14) amp:signals stream never trimmed | ✅ DONE (c13, no-op) | packages/redis/src/streams.ts:29-42,53-98 | COVERED by OPT-14 (MAXLEN ~ on the signals XADD bounds the stream). | confirm-before-removing |
 | OPT-19 | MED | Dedup key set before persistence with no rollback — failed store() swallows the memory for 24h | pending | packages/core/src/service.ts:435-484 | unmark dedup key on store failure (try/catch + DedupChecker.unmark); new test proves retry possible after failure; suite green | confirm-before-removing |
@@ -143,6 +143,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green 1513 passed / 0 failed (wiki 287); security-reviewer PASS |
 | OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `490c3d3` | gate green 1514 passed / 0 failed (redis 69); reliability item (no sec-review) |
 | OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `b815f48` | gate green 1518 passed / 0 failed (mcp 140); security-reviewer PASS |
+| OPT-16 | Batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical) | 15 | `<c15-sha>` | gate green 1519 passed / 0 failed (retrieval 142); perf — output-identity verified |
 
 ## Failed Attempts
 
@@ -174,7 +175,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 15 at **OPT-16** (MED, perf — DeterministicAssembler runs ~6 sequential queries per target entity, each on its own session (N+1 across 5 assembly steps); collapse per-target steps into UNWIND-driven single queries, `packages/retrieval/src/deterministic.ts:50-155,220-347`). This is a perf/reliability item (no security-reviewer; behavior must be unchanged — the gate's existing deterministic tests pin output). Then OPT-17 (EntityResolver round-trips), OPT-19 (dedup rollback), OPT-20 (embedding cache), … down the table. SEE Blocked B-01 (re2 — needs your approval). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 16 at **OPT-17** (MED, perf — EntityResolver.resolveExisting issues 3 sequential round-trips per call on every fact read/write hot path; add a persisted name_lower property + index and collapse CI/alias resolution to one indexed query, `packages/neo4j/src/entity-resolver.ts:60-118`). NOTE: this may touch the Neo4j schema/migrations (adding an index + a persisted property) — if it requires a schema migration or a backfill of name_lower on existing nodes, that's an on-disk/graph-schema change → STOP and write a Blocked row for human approval per the rules, OR do the smallest version that adds the index without a destructive backfill (new writes get name_lower; reads fall back). Then OPT-19 (dedup rollback), OPT-20 (embedding cache), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -289,3 +290,11 @@ Start cycle 15 at **OPT-16** (MED, perf — DeterministicAssembler runs ~6 seque
 - Verifier: PASS (1518 passed, 0 failed, build exit 0; mcp 136→140; RED-confirmed by reverting the guard) | Security-reviewer: PASS (confined before any fs read; byte-identical to sibling code tools; args.path the only fs input)
 - Metrics: passing 1514→1518 (floor 1518); skipped 16
 - Next: OPT-16
+
+### Cycle 15 — 2026-06-14
+- Commit: `<c15-sha>` OPT-16: batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical)
+- Item: OPT-16 — COMPLETED (first non-trivial perf refactor)
+- Mode B: clean sweep
+- Verifier (run by orchestrator — the dispatched verifier backgrounded the gate and ended without a verdict): PASS — gate 1519 passed / 0 failed, build exit 0; retrieval 141→142; ALL existing deterministic output-identity tests held (no failures), and NO assertions were removed/loosened in deterministic.test.ts (targetName mock column is additive). Perf item — no security-reviewer.
+- Metrics: passing 1518→1519 (floor 1519); skipped 16
+- Next: OPT-17
