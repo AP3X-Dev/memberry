@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1633 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1634 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -87,7 +87,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-40 | LOW | Research/temporal schemas: unbounded z.record() and unbounded ISO strings | ✅ DONE (c36) | packages/research/src/tools.ts:131-157; packages/mcp/src/tools.ts:258-273 | DONE: ResearchLogSchema.secondary_metrics → z.record(z.string().min(1).max(100), z.number().finite()).refine(≤50 entries) (bounds key length/count + rejects NaN/Infinity that JSON.stringify silently turned to null); AmpLoadSchema.temporal.{as_of,from,to} → .max(40) (NOT .datetime() — contract accepts date-only AND full ISO). Exported both schemas. +10 tests. Verifier PASS 1625/0 (research 144, mcp 178); security-reviewer PASS (no Cypher injection — bound params; .finite() a real correctness win). Residual (fact_diff parity)→OPT-100. |  |
 | OPT-41 | LOW | AMPService.load fans out one getActive per entity (resolve 3q + fetch) — multiplicative round-trips | ✅ DONE (c37) | packages/neo4j/src/fact.ts (getActiveBatch); packages/core/src/service.ts:63-74,275-289 | DONE: FactStore.getActiveBatch resolves per-entity (unchanged precedence) then fetches ALL ids' active facts in ONE round-trip (UNWIND distinct ids → per-id OPTIONAL-MATCH+ordered collect), returning FactNode[][] in input order, each IDENTICAL to getActive(name) (same per-mode filter + ORDER BY valid_at). load() prefers it (FactLayer.getActiveBatch? optional → fallback for mocks). O(2N)→O(N resolves + 1 fetch). +integration identity test (ran on LIVE Neo4j, deep-equals per-entity union across modes) +2 wiring tests. Verifier PASS 1629/0 (neo4j 202, core 355); output-identity proven. Resolve-batching residual→OPT-101. |  |
 | OPT-42 | LOW | Fact staleness pass: nested getActive + per-fact updateConfidence loop (N+1 writes) | ✅ DONE (c38) | packages/core/src/service.ts:741-779; packages/neo4j/src/fact.ts (updateConfidenceBatch) | DONE: staleness loop accumulates {id, decayed-confidence} across entities and writes ONE FactStore.updateConfidenceBatch (UNWIND SET) instead of N per-fact updateConfidence. Decay formula max(0.1,conf*0.9) + ≥2-coverage gate + predicate-mention check + changedFactScopes all unchanged → end-state confidences identical (one shared updated_at). FactLayer.updateConfidenceBatch? optional → per-fact fallback for mocks. +2 wiring +2 live-Neo4j integration tests. Verifier PASS 1633/0 (neo4j 204, core 357); same end-state proven. (Per-entity getActive reads here still N — separate from the WRITE batch; minor, not filed.) |  |
-| OPT-43 | LOW | FactStore.create links SOURCED_FROM one episode at a time | pending | packages/neo4j/src/fact.ts:66-73 | single UNWIND batched MERGE; suite green |  |
+| OPT-43 | LOW | FactStore.create links SOURCED_FROM one episode at a time | ✅ DONE (c39) | packages/neo4j/src/fact.ts:66-77 | DONE: replaced the per-episode MERGE loop with one UNWIND $episodeIds MATCH+MERGE inside the same create tx (graph-identical: missing Episodic skipped exactly as the loop did; atomic with CREATE/FACT_ABOUT/SUPERSEDES; non-empty guard). +1 live-Neo4j integration test (2 existing linked, missing id skipped). Verifier PASS 1634/0 (neo4j 205); graph-identical proven. |  |
 | OPT-44 | LOW | EpisodicStore.create writes embedding in a second round-trip | pending | packages/neo4j/src/episodic.ts:9-52 | inline embedding into CREATE like SemanticStore; suite green |  |
 | OPT-45 | LOW | _deriveTenantFromEpisodes fetches episodes one-by-one (N+1) | pending | packages/core/src/consolidation.ts:475-497 | batched UNWIND projection of tenant_id; suite green |  |
 | OPT-46 | LOW | findBySubjectPredicate filters toLower(predicate) with no predicate index | pending | packages/neo4j/src/fact.ts:334-357 | store normalized predicate property + composite index; suite green |  |
@@ -190,6 +190,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-40 | Bound research secondary_metrics + temporal timestamp schemas | 36 | `9d8f098` | gate green 1625 passed / 0 failed (research 144, mcp 178); security-reviewer PASS |
 | OPT-41 | Batch load() fact fetch into one round-trip (FactStore.getActiveBatch) | 37 | `640d572` | gate green 1629 passed / 0 failed (neo4j 202, core 355); perf — output-identity proven (live-Neo4j integration test) |
 | OPT-42 | Batch staleness-decay writes (FactStore.updateConfidenceBatch) | 38 | `782a0a5` | gate green 1633 passed / 0 failed (neo4j 204, core 357); perf — same end-state (live-Neo4j integration test) |
+| OPT-43 | Batch SOURCED_FROM edge MERGEs in FactStore.create | 39 | `7691296` | gate green 1634 passed / 0 failed (neo4j 205); perf — graph-identical (live-Neo4j integration test) |
 
 ## Failed Attempts
 
@@ -221,7 +222,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 39 at **OPT-43** (PERF/N+1 — FactStore.create links SOURCED_FROM to each source episode one MERGE at a time in a loop, inside the create tx. Batch into one UNWIND MERGE over source_episode_ids. `packages/neo4j/src/fact.ts:66-73` — re-locate the `for (const episodeId of fact.source_episode_ids)` SOURCED_FROM loop inside create(); PERF → verifier-only, confirm the SAME edges are created — graph-identical). Then OPT-44 (EpisodicStore.create writes embedding in a 2nd round-trip → inline into CREATE like SemanticStore; neo4j/episodic.ts:9-52), OPT-45 (_deriveTenantFromEpisodes fetches episodes one-by-one → batched UNWIND projection of tenant_id; consolidation.ts:475-497), OPT-46 (findBySubjectPredicate toLower(predicate) scan → normalized predicate prop + composite index — may need a migration → check; possibly Blocked), OPT-47 (single-flight/stampede on load), OPT-48 (PENDING_SET dangling proposal ids), OPT-49/50 (double query embed → OPT-20 cache or thread vector), OPT-51+ … down the table. Still-open follow-ups: OPT-86–101. SEE Blocked B-01 (re2). GATE-CMD: `| tee /tmp/x.log | tail` INSIDE the ssh single-quotes (decisions.md c35). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 40 at **OPT-44** (PERF/N+1 — EpisodicStore.create writes the embedding in a SECOND round-trip (CREATE node, then a separate SET f.embedding), unlike SemanticStore which inlines it. Inline the embedding into the CREATE so episode creation is one round-trip. `packages/neo4j/src/episodic.ts:9-52` — re-locate create() + the separate embedding SET; mirror SemanticStore's inline pattern (check how SemanticStore.create does it); PERF → verifier-only, confirm node + embedding identical to before; watch the embedding-absent case stays a no-op). Then OPT-45 (_deriveTenantFromEpisodes one-by-one episode fetch → batched UNWIND projection of tenant_id; consolidation.ts:475-497), OPT-46 (findBySubjectPredicate toLower(predicate) scan → normalized predicate prop + composite index — MAY NEED A SCHEMA MIGRATION → if so, file Blocked, don't run unattended), OPT-47 (single-flight/stampede on load), OPT-48 (PENDING_SET dangling proposal ids), OPT-49/50 (double query embed → OPT-20 cache or thread vector), OPT-51+ … down the table. Still-open follow-ups: OPT-86–101. SEE Blocked B-01 (re2). GATE-CMD: `| tee /tmp/x.log | tail` INSIDE the ssh single-quotes (decisions.md c35). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -540,3 +541,12 @@ Start cycle 39 at **OPT-43** (PERF/N+1 — FactStore.create links SOURCED_FROM t
 - Verifier: PASS (1633 passed, 0 failed, build exit 0; neo4j 202→204, core 355→357; +4 tests). SAME-END-STATE proven: live-Neo4j integration test asserts updateConfidenceBatch persists the new confidences; wiring test asserts exact 0.5→0.45 decay, mentioned-predicate fact NOT decayed, batch preferred over per-fact.
 - Metrics: passing 1629→1633 (floor 1633); skipped 8
 - Next: OPT-43
+
+### Cycle 39 — 2026-06-14
+- Commit: `7691296` OPT-43: batch SOURCED_FROM edge MERGEs in FactStore.create
+- Item: OPT-43 — COMPLETED
+- Change: replaced the per-episode `for` loop (one MERGE round-trip per source episode, inside the create tx) with a single UNWIND $episodeIds MATCH+MERGE. Graph-identical — each id still requires the Episodic to exist (missing → no row → no edge, exactly as the loop skipped it); runs in the SAME create tx (atomic with CREATE/FACT_ABOUT/embedding/SUPERSEDES); non-empty guard mirrors the loop's zero-iteration case.
+- Mode B: clean sweep — no new findings.
+- Verifier: PASS (1634 passed, 0 failed, build exit 0; neo4j 204→205; +1 live-Neo4j integration test asserting exactly the 2 existing episodes are linked + the missing id skipped). Graph-identical proven.
+- Metrics: passing 1633→1634 (floor 1634); skipped 8
+- Next: OPT-44

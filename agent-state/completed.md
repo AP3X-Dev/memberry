@@ -43,3 +43,4 @@
 | OPT-40 | Bound research secondary_metrics (z.record key/count/finite) + temporal timestamp .max(40) | 36 | `9d8f098` | gate green: 1625 passed / 0 failed (research 144, mcp 178), build 0; security-reviewer PASS |
 | OPT-41 | Batch load() fact fetch into one round-trip (FactStore.getActiveBatch) | 37 | `640d572` | gate green: 1629 passed / 0 failed (neo4j 202, core 355), build 0; perf — output-identity proven by live-Neo4j integration test |
 | OPT-42 | Batch staleness-decay writes into one UNWIND SET (FactStore.updateConfidenceBatch) | 38 | `782a0a5` | gate green: 1633 passed / 0 failed (neo4j 204, core 357), build 0; perf — same end-state (live-Neo4j integration test) |
+| OPT-43 | Batch SOURCED_FROM edge MERGEs in FactStore.create (one UNWIND MERGE) | 39 | `7691296` | gate green: 1634 passed / 0 failed (neo4j 205), build 0; perf — graph-identical (live-Neo4j integration test) |
