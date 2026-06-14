@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { CompileInput, CompileResult, CompileV2Result, IngestInput, IngestResult, LintInput, LintResult, LintCheck } from './types.js';
@@ -147,14 +148,49 @@ export function getAllowedBaseDir(): string {
 
 /**
  * Validates that a resolved path is within the allowed base directory.
- * Prevents directory traversal attacks (e.g., ../../etc/passwd).
+ * Prevents directory traversal attacks (e.g., ../../etc/passwd) AND symlink
+ * escapes (a symlink inside the base that points outside it).
+ *
+ * Confinement layers (mirrors @memberry/code confineReindexPath):
+ *   1. Lexical: `resolve(inputPath)` must equal `base` or start with `base + sep`
+ *      (trailing-sep prefix check so a sibling like `${base}-evil` cannot pass).
+ *   2. Symlink: if the resolved target exists, its realpath (and the base's
+ *      realpath) must still satisfy the same prefix check, defeating a symlink
+ *      inside the base that resolves to a file outside it. On ENOENT (a target
+ *      not yet created, e.g. a compile output_dir) the lexical check above
+ *      already proved in-base, so we fall through and accept it.
  */
 export function validatePath(inputPath: string, baseDir?: string): string {
   const base = baseDir ?? getAllowedBaseDir();
   const resolved = path.resolve(inputPath);
+
+  // Layer 1: lexical confinement.
   if (resolved !== base && !resolved.startsWith(base + path.sep)) {
     throw new Error(`Path must be within allowed directory (${base}): ${inputPath}`);
   }
+
+  // Layer 2: symlink confinement (best-effort; only when the target exists).
+  try {
+    const realResolved = realpathSync(resolved);
+    // realpath the base too, so a base reached through a symlink still matches.
+    let realBase: string;
+    try {
+      realBase = realpathSync(base);
+    } catch {
+      realBase = base;
+    }
+    if (realResolved !== realBase && !realResolved.startsWith(realBase + path.sep)) {
+      throw new Error(`Path must be within allowed directory (${base}): ${inputPath}`);
+    }
+  } catch (err) {
+    // Re-throw our own confinement rejection; swallow stat errors (ENOENT etc.).
+    // ENOENT means the target doesn't exist yet (e.g. an output_dir to be
+    // created). The lexical check above already confirmed it is inside the base.
+    if (err instanceof Error && err.message.startsWith('Path must be within allowed directory')) {
+      throw err;
+    }
+  }
+
   return resolved;
 }
 

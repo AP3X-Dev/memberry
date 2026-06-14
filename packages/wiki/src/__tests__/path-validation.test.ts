@@ -4,6 +4,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import path from 'node:path';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { validatePath, getAllowedBaseDir, buildWikiToolHandlers, setWikiServiceInstances } from '../tools.js';
 import type { IWikiCompiler, IIngestionService, IWikiLinter } from '../tools.js';
 import type { IngestResult, CompileResult, LintResult } from '../types.js';
@@ -76,6 +78,60 @@ describe('validatePath', () => {
 
   it('includes the offending path in the error message', () => {
     expect(() => validatePath('/etc/passwd', baseDir)).toThrow('/etc/passwd');
+  });
+});
+
+// ─── validatePath symlink confinement (realpath layer) ───────────────────────
+//
+// Lexical confinement alone passes a symlink that LIVES inside the base but
+// TARGETS a file outside it (the path string is in-base; only realpath reveals
+// the escape). These tests use a real temp base on disk so realpathSync resolves.
+
+describe('validatePath symlink confinement', () => {
+  // realpathSync normalizes macOS /var -> /private/var etc., so the base used in
+  // assertions must match what the helper sees after its internal realpath.
+  let base: string;
+
+  beforeEach(() => {
+    base = realpathSync(mkdtempSync(path.join(tmpdir(), 'amp-wiki-confine-')));
+  });
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('rejects a symlink inside the base that points to a file outside it', () => {
+    // Secret file OUTSIDE the base; symlink INSIDE the base pointing at it.
+    const outsideRoot = realpathSync(mkdtempSync(path.join(tmpdir(), 'amp-wiki-outside-')));
+    try {
+      const secret = path.join(outsideRoot, 'secret.md');
+      writeFileSync(secret, '# leaked');
+      mkdirSync(path.join(base, 'docs'), { recursive: true });
+      const link = path.join(base, 'docs', 'link.md');
+      try {
+        symlinkSync(secret, link);
+      } catch {
+        // Symlink creation can fail without privileges (e.g. Windows). Skip.
+        return;
+      }
+      // Lexically inside base, but realpath escapes -> must be rejected.
+      expect(() => validatePath(link, base)).toThrow('Path must be within allowed directory');
+    } finally {
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a legitimate real path inside the base', () => {
+    mkdirSync(path.join(base, 'docs'), { recursive: true });
+    const real = path.join(base, 'docs', 'real.md');
+    writeFileSync(real, '# real');
+    expect(validatePath(real, base)).toBe(real);
+  });
+
+  it('accepts a not-yet-existing output dir under the base (ENOENT fallthrough)', () => {
+    // Compile output_dir may not exist yet; lexical confinement must still allow it.
+    const notYet = path.join(base, 'wiki-out', 'nested');
+    expect(validatePath(notYet, base)).toBe(notYet);
   });
 });
 

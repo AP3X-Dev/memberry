@@ -4,7 +4,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { watch, type FSWatcher } from 'node:fs';
+import { watch, realpathSync, type FSWatcher } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { Marked } from 'marked';
 import { readEnv } from '@memberry/core';
@@ -1780,9 +1780,17 @@ function buildPageSidebar(content: string): string {
 
 /**
  * Ensure a resolved path is confined within baseDir.
- * Returns the resolved path if safe, or null if the path escapes.
- * Rejects null bytes, and uses trailing-separator comparison to prevent
- * prefix tricks (e.g. /wiki_dir_evil/ matching /wiki_dir/).
+ * Returns the resolved path if safe, or null if the path escapes (lexically or
+ * via symlink). Rejects null bytes, and uses trailing-separator comparison to
+ * prevent prefix tricks (e.g. /wiki_dir_evil/ matching /wiki_dir/).
+ *
+ * Confinement layers (mirrors @memberry/code confineReindexPath):
+ *   1. Lexical: resolved path must BE baseDir or start with baseDir + sep.
+ *   2. Symlink: if the resolved target exists, its realpath (and the base's
+ *      realpath) must still satisfy the prefix check, defeating a symlink inside
+ *      the base that points outside it. The viewer serves files that should
+ *      already exist, so realpath normally succeeds; on ENOENT (a not-yet-created
+ *      target) the lexical check already proved in-base, so we fall through.
  */
 export function confineToDir(baseDir: string, userPath: string): string | null {
   // Reject null bytes — they can truncate paths in some runtimes
@@ -1791,9 +1799,28 @@ export function confineToDir(baseDir: string, userPath: string): string | null {
   const resolvedBase = resolve(baseDir) + sep;
   const resolvedPath = resolve(baseDir, userPath);
 
-  // The resolved path must either BE the baseDir or START WITH baseDir + separator
+  // Layer 1: lexical confinement. The resolved path must either BE the baseDir
+  // or START WITH baseDir + separator.
   if (resolvedPath !== resolve(baseDir) && !resolvedPath.startsWith(resolvedBase)) {
     return null;
+  }
+
+  // Layer 2: symlink confinement (best-effort; only when the target exists).
+  try {
+    const realResolved = realpathSync(resolvedPath);
+    // realpath the base too, so a base reached through a symlink still matches.
+    let realBase: string;
+    try {
+      realBase = realpathSync(resolve(baseDir));
+    } catch {
+      realBase = resolve(baseDir);
+    }
+    if (realResolved !== realBase && !realResolved.startsWith(realBase + sep)) {
+      return null;
+    }
+  } catch {
+    // ENOENT (or any stat error): nothing to realpath. The lexical check above
+    // already confirmed the resolved path is inside the base, so allow it.
   }
 
   return resolvedPath;

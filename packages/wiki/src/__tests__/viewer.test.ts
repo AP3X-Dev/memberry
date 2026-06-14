@@ -3,9 +3,10 @@
 // These functions are not exported, so we test them indirectly or re-implement
 // the logic for unit testing. Since they are private, we test via the public API.
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { startWikiViewer, confineToDir, resetViewerCache } from '../viewer.js';
 import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
@@ -731,6 +732,57 @@ describe('confineToDir', () => {
 
   it('rejects path that escapes after multiple levels', () => {
     expect(confineToDir(baseDir, 'a/b/c/../../../../etc/passwd')).toBeNull();
+  });
+});
+
+// ─── confineToDir symlink confinement (realpath layer) ───────────────────────
+//
+// Lexical confinement alone passes a symlink that LIVES inside the base but
+// TARGETS a file outside it. These tests use a real temp base on disk so
+// realpathSync resolves and the symlink escape is detectable.
+
+describe('confineToDir symlink confinement', () => {
+  // realpathSync normalizes macOS /var -> /private/var etc., so the base used in
+  // assertions must match what the helper sees after its internal realpath.
+  let base: string;
+
+  beforeEach(() => {
+    base = realpathSync(mkdtempSync(join(tmpdir(), 'amp-wiki-confine-')));
+  });
+
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('rejects a symlink inside the base that points to a file outside it', () => {
+    const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), 'amp-wiki-outside-')));
+    try {
+      const secret = join(outsideRoot, 'secret.md');
+      writeFileSync(secret, '# leaked');
+      mkdirSync(join(base, 'pages'), { recursive: true });
+      const link = join(base, 'pages', 'link.md');
+      try {
+        symlinkSync(secret, link);
+      } catch {
+        // Symlink creation can fail without privileges (e.g. Windows). Skip.
+        return;
+      }
+      // Lexically inside base, but realpath escapes -> must be dropped.
+      expect(confineToDir(base, 'pages/link.md')).toBeNull();
+    } finally {
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a legitimate real file inside the base', () => {
+    mkdirSync(join(base, 'pages'), { recursive: true });
+    const real = join(base, 'pages', 'real.md');
+    writeFileSync(real, '# real');
+    expect(confineToDir(base, 'pages/real.md')).toBe(real);
+  });
+
+  it('accepts a not-yet-existing path under the base (ENOENT fallthrough)', () => {
+    expect(confineToDir(base, 'pages/does-not-exist.md')).toBe(join(base, 'pages', 'does-not-exist.md'));
   });
 });
 
