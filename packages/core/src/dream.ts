@@ -205,19 +205,30 @@ export class DreamEngine {
       }
 
       for (const h of hypotheses) {
-        // Dedupe: skip if an active fact with the same (entity, predicate, object) exists.
-        let existing: FactNode[] = [];
+        // OPT-52: run the dedup READ and the create inside ONE per-entity
+        // serialized section so check-then-create is atomic. Previously the read
+        // sat OUTSIDE serialize() while only create() was serialized, so two
+        // concurrent passes keyed on the same entity_id could both read "no
+        // existing" and both mint the same abductive fact — defeating the dedup
+        // invariant this module documents (writes-per-entity go through the
+        // serializer). Single-threaded behavior (and the skipped/created counts)
+        // is unchanged.
         try {
-          existing = await this.deps.fact.findBySubjectPredicate(h.subject, h.predicate);
-        } catch { /* treat as no match */ }
-        if (existing.some((f) => f.object.toLowerCase() === h.object.toLowerCase())) {
-          result.hypotheses_skipped++;
-          continue;
-        }
-        const fact = toAbductiveFact(h, scope);
-        try {
-          await serialize(entity.entity_id, () => this.deps.fact.create(fact));
-          result.hypotheses_created++;
+          const created = await serialize(entity.entity_id, async () => {
+            // Dedupe: skip if an active fact with the same (entity, predicate,
+            // object) already exists — read inside the critical section.
+            let existing: FactNode[] = [];
+            try {
+              existing = await this.deps.fact.findBySubjectPredicate(h.subject, h.predicate);
+            } catch { /* treat as no match */ }
+            if (existing.some((f) => f.object.toLowerCase() === h.object.toLowerCase())) {
+              return false; // dedup hit — nothing minted
+            }
+            await this.deps.fact.create(toAbductiveFact(h, scope));
+            return true;
+          });
+          if (created) result.hypotheses_created++;
+          else result.hypotheses_skipped++;
         } catch (err) {
           console.error(`[dream] create hypothesis for ${entity.name} failed:`, err instanceof Error ? err.message : err);
           result.hypotheses_skipped++;

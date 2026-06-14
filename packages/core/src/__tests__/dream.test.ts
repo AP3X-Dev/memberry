@@ -113,6 +113,34 @@ describe('DreamEngine.run', () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 
+  it('OPT-52: runs the dedup read INSIDE the per-entity serializer (atomic check-then-create)', async () => {
+    // The dedup read must be inside the same serialized critical section as the
+    // create, so two concurrent passes keyed on the same entity_id can't both
+    // read "no existing" and both mint the same fact. On the pre-fix code the
+    // read ran BEFORE serialize() → readObservedInside would be false.
+    const { deps } = makeDeps();
+    let insideSerialize = false;
+    let readObservedInside: boolean | null = null;
+
+    deps.serialize = async (_key, fn) => {
+      insideSerialize = true;
+      try {
+        return await fn();
+      } finally {
+        insideSerialize = false;
+      }
+    };
+    (deps.fact.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      readObservedInside = insideSerialize;
+      return [];
+    });
+
+    await new DreamEngine(deps).run('project:test', { cards: false });
+
+    expect(deps.fact.findBySubjectPredicate).toHaveBeenCalled();
+    expect(readObservedInside).toBe(true); // dedup read is now atomic with the create
+  });
+
   it('never mutates existing facts: the fact layer exposes no invalidate/dispute', () => {
     const { deps } = makeDeps();
     // Structural guarantee — the dream pass can only create, by interface design.
