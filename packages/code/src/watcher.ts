@@ -2,6 +2,8 @@
 // Background file watcher that keeps the symbol graph fresh as source files change.
 
 import { watch, stat } from 'fs';
+import { readFile } from 'fs/promises';
+import { createHash } from 'crypto';
 import { extname, resolve, sep } from 'path';
 import type { FSWatcher } from 'fs';
 import { readEnv, isRealpathWithinBase } from '@memberry/core';
@@ -119,6 +121,10 @@ export function confineReindexPath(p: string, base?: string): string | null {
 export class CodeWatcher {
   private watchers = new Map<string, FSWatcher>();
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // OPT-59: per-file SHA-256 of the last-INDEXED content, to skip the expensive
+  // re-parse when a change event fires for content that did not actually change
+  // (no-op editor saves, touches, reverts coalesced within the debounce window).
+  private lastIndexedHash = new Map<string, string>();
   private debounceMs: number;
   private extensions: Set<string>;
   private excludePatterns: Set<string>;
@@ -280,6 +286,7 @@ export class CodeWatcher {
     if (!exists) {
       // File was deleted — remove its symbols from the graph
       console.error(`[code-watcher] File deleted, removing symbols: ${filePath}`);
+      this.lastIndexedHash.delete(filePath); // OPT-59: drop stale hash on delete
       try {
         await this.symbolDeleter.deleteByFile(filePath);
       } catch (err) {
@@ -295,7 +302,28 @@ export class CodeWatcher {
     const language = LANGUAGE_EXTENSIONS[ext];
     if (!language) return;
 
+    // OPT-59: whole-file content-hash short-circuit. Identical content yields
+    // identical symbols, so indexFile would make zero graph changes — skip the
+    // tree-sitter re-parse entirely. The hash is recorded only AFTER a successful
+    // index, so a failed index (or a read race) re-tries on the next event; the
+    // watcher is debounced + eventually-consistent, so a change racing the index
+    // fires its own follow-up event that re-indexes the latest content.
+    let content: string;
+    try {
+      content = await readFile(filePath, 'utf-8');
+    } catch {
+      // Couldn't read (race/permission) — fall through to indexFile, which handles it.
+      console.error(`[code-watcher] Re-indexing ${filePath}`);
+      await this.indexer.indexFile(filePath, language);
+      return;
+    }
+    const hash = createHash('sha256').update(content).digest('hex');
+    if (this.lastIndexedHash.get(filePath) === hash) {
+      return; // unchanged since last index — nothing to do
+    }
+
     console.error(`[code-watcher] Re-indexing ${filePath}`);
     await this.indexer.indexFile(filePath, language);
+    this.lastIndexedHash.set(filePath, hash);
   }
 }

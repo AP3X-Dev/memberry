@@ -234,6 +234,38 @@ describe('CodeWatcher', () => {
     expect(watcher.getPendingCount()).toBe(1);
   });
 
+  it('OPT-59: skips the re-index (no re-parse) when file content is unchanged', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'amp-watch-hash-')));
+    const file = join(dir, 'svc.ts');
+    writeFileSync(file, 'export const a = 1;');
+    watcher = new CodeWatcher(mockIndexer, mockDeleter, { debounceMs: 10 });
+    const indexFile = mockIndexer.indexFile as ReturnType<typeof vi.fn>;
+    const waitUntil = async (pred: () => boolean, ms = 1500): Promise<void> => {
+      const start = Date.now();
+      while (!pred() && Date.now() - start < ms) await new Promise((r) => setTimeout(r, 10));
+    };
+
+    try {
+      // First event for never-seen content → indexes once.
+      watcher.queueReindex(file);
+      await waitUntil(() => indexFile.mock.calls.length === 1);
+      expect(indexFile).toHaveBeenCalledTimes(1);
+
+      // Second event, identical content → short-circuited (no re-parse/index).
+      watcher.queueReindex(file);
+      await new Promise((r) => setTimeout(r, 250)); // generous: would have indexed in ~30ms
+      expect(indexFile).toHaveBeenCalledTimes(1);
+
+      // Content actually changes → re-index runs again.
+      writeFileSync(file, 'export const a = 2;');
+      watcher.queueReindex(file);
+      await waitUntil(() => indexFile.mock.calls.length === 2);
+      expect(indexFile).toHaveBeenCalledTimes(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('multiple rapid queueReindex calls for same file only produce one pending', () => {
     watcher = new CodeWatcher(mockIndexer, mockDeleter, { debounceMs: 500 });
     watcher.queueReindex('/tmp/test/src/service.ts');
