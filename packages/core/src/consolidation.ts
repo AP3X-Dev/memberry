@@ -10,10 +10,30 @@ import type {
 } from './types.js';
 import { SIGNAL_WEIGHTS, DEFAULT_TENANT } from './types.js';
 import { extractFacts } from './extract.js';
+import { readEnv } from './config/settings.js';
 
 // ─── Runtime validators ──────────────────────────────────────────────────────
 
 const VALID_DECAY_CLASSES = new Set(['volatile', 'stable', 'permanent']);
+
+/**
+ * OPT-31: an existing active fact whose confidence is at/above this threshold is
+ * treated as ESTABLISHED and is protected from auto-invalidation by a *lower*-
+ * confidence, extraction-derived contradiction during (auto-applied)
+ * consolidation. Such a contender is instead recorded as a `tentative`
+ * superseding candidate — the established fact stays active — so untrusted
+ * content can't silently overwrite an authoritative fact; it must be
+ * corroborated (or human-approved) to win. Override via
+ * MEMBERRY_FACT_PROTECT_CONFIDENCE (clamped to [0,1]; default 0.75).
+ */
+const DEFAULT_FACT_PROTECT_CONFIDENCE = 0.75;
+function factProtectConfidence(): number {
+  const raw = readEnv('MEMBERRY_FACT_PROTECT_CONFIDENCE');
+  if (raw === undefined) return DEFAULT_FACT_PROTECT_CONFIDENCE;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_FACT_PROTECT_CONFIDENCE;
+  return Math.min(1, Math.max(0, parsed));
+}
 
 /**
  * Validates that a Record<string, unknown> (e.g. from Redis) has all required
@@ -530,7 +550,18 @@ export class ConsolidationEngine {
             // Same fact — skip (reinforce by doing nothing; confidence is maintained)
             continue;
           }
-          // Different object — invalidate old, create new with supersession
+          // Different object — a contradiction. Auto-invalidating an ESTABLISHED
+          // fact from extraction-derived (potentially untrusted) content would
+          // let injected input silently overwrite an authoritative fact (OPT-31).
+          // Gate it: an established fact (confidence >= protect threshold) is only
+          // auto-invalidated by a contender at least as confident; otherwise the
+          // contender is held as `tentative` (the established fact stays active)
+          // for corroboration / human review.
+          const newConfidence = input.confidence ?? 0.5;
+          const protect = factProtectConfidence();
+          const autoInvalidate =
+            current.confidence < protect || newConfidence >= current.confidence;
+
           const newFactId = `fact-${nanoid(12)}`;
           const newFact: FactNode = {
             id: newFactId,
@@ -541,8 +572,8 @@ export class ConsolidationEngine {
             source_episode_ids: episodeIds,
             valid_at: now,
             invalid_at: null,
-            confidence: input.confidence ?? 0.5,
-            status: 'active',
+            confidence: newConfidence,
+            status: autoInvalidate ? 'active' : 'tentative',
             inference_type: 'inductive',
             supersedes_fact_id: current.id,
             scope: input.scope ?? 'project',
@@ -550,8 +581,23 @@ export class ConsolidationEngine {
             created_at: now,
             updated_at: now,
           };
-          await factLayer.invalidate(current.id, now, newFactId);
-          await factLayer.create(newFact);
+
+          if (autoInvalidate) {
+            await factLayer.invalidate(current.id, now, newFactId);
+            await factLayer.create(newFact);
+          } else {
+            // Hold the contradiction: established fact stays active; record the
+            // contender as tentative (supersedes link kept for traceability).
+            // Predicate is OPT-04-validated snake_case, so it is log-safe;
+            // subject/object are NOT logged (untrusted, may carry newlines).
+            await factLayer.create(newFact);
+            console.error(
+              `[consolidation] held extraction-derived contradiction (predicate ` +
+              `"${input.predicate}") as tentative: existing confidence ` +
+              `${current.confidence} >= protect ${protect}, contender ` +
+              `${newConfidence}; existing fact left active for review.`,
+            );
+          }
         } else {
           // New fact
           const newFact: FactNode = {
