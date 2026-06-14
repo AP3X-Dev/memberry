@@ -120,17 +120,28 @@ const INTENT_THRESHOLDS: Record<QueryIntent, number> = {
 // ─── Cached exemplar embeddings ──────────────────────────────────────────────
 // WeakMap keyed by provider instance — allows GC when provider is released,
 // and correctly re-computes if a different provider is used.
+//
+// Each exemplar caches its L2 norm alongside its vector: the norm is a pure
+// function of the (already-cached) vector, so computing it once at cache-build
+// time and reusing it is bit-identical to recomputing it per query — it just
+// drops a redundant sqrt-over-the-whole-vector for all ~29 exemplars on every
+// embedding-path classification.
 
-const exemplarCache = new WeakMap<EmbeddingProvider, Map<QueryIntent, number[][]>>();
+interface ExemplarVec {
+  readonly vec: number[];
+  readonly norm: number;
+}
 
-async function getExemplarEmbeddings(embedding: EmbeddingProvider): Promise<Map<QueryIntent, number[][]>> {
+const exemplarCache = new WeakMap<EmbeddingProvider, Map<QueryIntent, ExemplarVec[]>>();
+
+async function getExemplarEmbeddings(embedding: EmbeddingProvider): Promise<Map<QueryIntent, ExemplarVec[]>> {
   const cached = exemplarCache.get(embedding);
   if (cached) return cached;
 
-  const computed = new Map<QueryIntent, number[][]>();
+  const computed = new Map<QueryIntent, ExemplarVec[]>();
   for (const [intent, texts] of Object.entries(EXEMPLARS)) {
     const embeddings = await embedding.embedBatch(texts);
-    computed.set(intent as QueryIntent, embeddings);
+    computed.set(intent as QueryIntent, embeddings.map((vec) => ({ vec, norm: l2Norm(vec) })));
   }
   exemplarCache.set(embedding, computed);
   return computed;
@@ -225,8 +236,8 @@ async function classifyByEmbedding(
   let bestSim = -1;
 
   for (const [intent, vecs] of exemplars) {
-    for (const exemplarVec of vecs) {
-      const sim = cosineSimilarity(queryVec, exemplarVec, queryNorm, l2Norm(exemplarVec));
+    for (const { vec, norm } of vecs) {
+      const sim = cosineSimilarity(queryVec, vec, queryNorm, norm);
       if (sim > bestSim) {
         bestSim = sim;
         bestIntent = intent;
