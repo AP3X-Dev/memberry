@@ -16,6 +16,15 @@
  */
 import { isNeo4jInt } from './coerce.js';
 import type { AmpGraphNodeType } from './types.js';
+// OPT-34: single source of truth for secret redaction. Previously this file
+// kept its OWN copy of SECRET_PATTERNS/SECRET_ASSIGNMENT/redactSecrets, which
+// drifted from @memberry/core (it lacked core's github_pat_ entry → a PAT was
+// redacted at ingest but LEAKED at export). Import core's redactor so the export
+// path inherits every pattern (incl. the OPT-33 Stripe/Bearer/escaped-quote
+// fixes) automatically. graph already depends on core (no dep cycle: core never
+// imports graph). Re-exported below so existing `./allowlist.js` importers and
+// the package barrel keep resolving these names.
+import { redactSecrets, redactValue } from '@memberry/core';
 
 /**
  * Explicit per-node-type property allowlist. Only these keys are emitted into
@@ -89,50 +98,10 @@ const FORBIDDEN_KEYS = new Set<string>([
   'source_episode_ids',
 ]);
 
-const SECRET_REPLACEMENT = '[REDACTED]';
-
-/**
- * Conservative secret-pattern matchers, applied to every surviving free-text
- * string (labels, allowlisted string properties, source_file). Intentionally
- * avoids look-behind for broad runtime compatibility.
- */
-const SECRET_PATTERNS: RegExp[] = [
-  /sk-[A-Za-z0-9_-]{16,}/g, // OpenAI-style secret keys
-  /AKIA[0-9A-Z]{16}/g, // AWS access key id
-  /ghp_[A-Za-z0-9]{30,}/g, // GitHub personal access token
-  /gho_[A-Za-z0-9]{30,}/g, // GitHub OAuth token
-  /xox[baprs]-[A-Za-z0-9-]{10,}/g, // Slack token
-  /AIza[0-9A-Za-z_-]{30,}/g, // Google API key
-  /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}/g, // JWT
-  /-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----/g, // PEM
-];
-
-/**
- * Matches `KEY = "value"` / `secret: value` / `token=value` assignments where
- * the key name signals a credential. Captures the key prefix (incl. any quotes
- * around the key and the separator), redacts the value.
- *
- * Kept in sync with @memberry/core's redact.ts copy (duplicated to avoid a
- * dep cycle; OPT-34 will dedupe). Handles bare, spaced, AND JSON-quoted shapes
- * (`"password":"hunter2"`, `"api_key": "sk-..."`, `'secret' = 'x'`). The value
- * capture is bounded — a quoted value stops at its closing quote, a bare value
- * at whitespace / `,` / `;` / `}` — so it never over-masks across a JSON object.
- */
-const SECRET_ASSIGNMENT =
-  /(["']?\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret|auth)\b["']?\s*[:=]\s*)(?:(["'])[^"']*\2|[^"'\s,;}]+)/gi;
-
-/** Redact common secret shapes from a free-text string. */
-export function redactSecrets(value: string): string {
-  let out = value;
-  for (const re of SECRET_PATTERNS) out = out.replace(re, SECRET_REPLACEMENT);
-  out = out.replace(SECRET_ASSIGNMENT, (_m, prefix) => `${prefix}${SECRET_REPLACEMENT}`);
-  return out;
-}
-
-/** Redact secrets from an arbitrary value if (and only if) it is a string. */
-export function redactValue(value: unknown): unknown {
-  return typeof value === 'string' ? redactSecrets(value) : value;
-}
+// Secret redaction now lives in @memberry/core (imported above) — the single
+// source of truth. Re-export so this module's public surface is unchanged for
+// `./allowlist.js` consumers (snapshot.ts) and the @memberry/graph barrel.
+export { redactSecrets, redactValue };
 
 /** True for an array that looks like an embedding/vector (all numbers). */
 function isNumericVector(value: unknown): boolean {

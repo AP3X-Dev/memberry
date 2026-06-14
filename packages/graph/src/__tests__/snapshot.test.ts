@@ -236,6 +236,18 @@ describe('secret-safety at the snapshot boundary', () => {
     );
   });
 
+  it('OPT-34: the export redactor is now core\'s (drift fixed) — redacts github_pat_ and inherits OPT-33 patterns', () => {
+    // The old graph-local copy lacked the github_pat_ entry, so a fine-grained
+    // PAT was redacted at ingest but LEAKED at export. Now graph imports core's
+    // redactor, so the export path covers it (and every other core pattern).
+    expect(redactSecrets('github_pat_' + 'a'.repeat(30))).toBe('[REDACTED]');
+    // Inherited OPT-33 coverage proves it's genuinely the shared implementation.
+    expect(redactSecrets('sk_live_' + 'b'.repeat(24))).toBe('[REDACTED]');
+    expect(redactSecrets('Authorization: Bearer abcdef0123456789XYZ')).toBe(
+      'Authorization: Bearer [REDACTED]',
+    );
+  });
+
   it('applyAllowlist drops forbidden keys and coerces ints', () => {
     const out = applyAllowlist('symbol', {
       name: 'x',

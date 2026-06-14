@@ -15,6 +15,7 @@ const SECRET_REPLACEMENT = '[REDACTED]';
 /** Conservative high-signal secret shapes (no look-behind, broad runtime compat). */
 const SECRET_PATTERNS: RegExp[] = [
   /sk-[A-Za-z0-9_-]{16,}/g, // OpenAI-style secret keys
+  /\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{10,}/g, // Stripe secret / restricted keys
   /AKIA[0-9A-Z]{16}/g, // AWS access key id
   /ghp_[A-Za-z0-9]{30,}/g, // GitHub personal access token
   /gho_[A-Za-z0-9]{30,}/g, // GitHub OAuth token
@@ -34,12 +35,28 @@ const SECRET_PATTERNS: RegExp[] = [
  * JSON-quoted (`"password":"hunter2"`, `"api_key": "sk-..."`, `'secret' = 'x'`)
  * shapes — JSON is the dominant form for secrets flowing in from API responses,
  * config dumps and tool outputs. The value capture is bounded: a quoted value
- * stops at its closing quote (`[^"']*` + backref), a bare value stops at
- * whitespace / `,` / `;` / `}` — so `{"a":"1","password":"hunter2","b":"2"}`
+ * spans to its FIRST UNESCAPED closing quote (`(?:\\.|(?!\2)[^\\])*` handles
+ * embedded `\"` escapes — OPT-33: previously `[^"']*` stopped at the escaped
+ * quote and leaked the value's tail plus the adjacent key), a bare value stops
+ * at whitespace / `,` / `;` / `}` — so `{"a":"1","password":"hunter2","b":"2"}`
  * masks only the password value and leaves the sibling keys intact.
+ *
+ * Keyword list (OPT-33) covers pwd/passphrase/private_key/credential(s)/
+ * secret_key and the AWS secret/session keys in addition to the originals.
+ * `Authorization: Bearer …` is handled separately by BEARER_TOKEN below (the
+ * `\bauth\b` keyword can't match the longer word "Authorization", and a bare
+ * value capture would stop at the space after "Bearer" and leak the token).
  */
 const SECRET_ASSIGNMENT =
-  /(["']?\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret|auth)\b["']?\s*[:=]\s*)(?:(["'])[^"']*\2|[^"'\s,;}]+)/gi;
+  /(["']?\b(?:api[_-]?key|aws[_-]?secret[_-]?access[_-]?key|aws[_-]?session[_-]?token|secret[_-]?key|access[_-]?token|client[_-]?secret|private[_-]?key|passphrase|password|passwd|pwd|credentials?|secret|token|auth)\b["']?\s*[:=]\s*)(?:(["'])(?:\\.|(?!\2)[^\\])*\2|[^"'\s,;}]+)/gi;
+
+/**
+ * `Bearer <token>` (e.g. inside an `Authorization: Bearer …` header). Redacts
+ * the token, keeps the scheme word. Min length 8 avoids matching prose like
+ * "Bearer token". OPT-33: closes the OPT-05 review residual where
+ * `Authorization: Bearer xxx` slipped through entirely.
+ */
+const BEARER_TOKEN = /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi;
 
 /**
  * Credentials embedded in connection strings, e.g.
@@ -52,6 +69,7 @@ export function redactSecrets(value: string): string {
   let out = value;
   for (const re of SECRET_PATTERNS) out = out.replace(re, SECRET_REPLACEMENT);
   out = out.replace(SECRET_ASSIGNMENT, (_m, prefix) => `${prefix}${SECRET_REPLACEMENT}`);
+  out = out.replace(BEARER_TOKEN, (_m, prefix) => `${prefix}${SECRET_REPLACEMENT}`);
   out = out.replace(URL_CREDENTIALS, (_m, prefix) => `${prefix}${SECRET_REPLACEMENT}@`);
   return out;
 }
