@@ -400,10 +400,13 @@ const AmpMemoryArchiveSchema = {
   session_id: z.string().max(500).optional().describe('Session ID for working-tier blocks'),
 };
 
-const AmpTimelineSchema = {
+export const AmpTimelineSchema = {
   entity: z.string().max(200).describe('Entity name to get timeline for'),
   include_episodes: z.boolean().optional().describe('Include linked episodes in timeline (default false)'),
-  limit: z.number().int().max(100).optional().describe('Maximum number of facts to return'),
+  // OPT-39: was .int().max(100) only — a 0 fell through to "return all" and a
+  // negative limit did tl.facts.slice(0, -n) (silently dropped the LAST n facts).
+  // Require a positive int so the handler's slice is always well-defined.
+  limit: z.number().int().positive().max(100).optional().describe('Maximum number of facts to return (1–100)'),
 };
 
 const AmpFactDiffSchema = {
@@ -1197,7 +1200,11 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
     async berry_timeline(args) {
       if (!factStore) throw new Error('FactStore not initialised');
       const tl = await factStore.timeline(args.entity, tenantId);
-      const facts = args.limit ? tl.facts.slice(0, args.limit) : tl.facts;
+      // OPT-39: only slice for a positive limit. The schema already rejects
+      // 0/negative at the MCP boundary; this defends a direct caller too (a
+      // negative would otherwise slice off the tail via a negative end index).
+      const facts =
+        typeof args.limit === 'number' && args.limit > 0 ? tl.facts.slice(0, args.limit) : tl.facts;
 
       const lines: string[] = [
         `# Timeline: ${tl.entity}`,
