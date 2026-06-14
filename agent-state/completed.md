@@ -40,3 +40,4 @@
 | OPT-36 | Bound berry_store signals[] schema (target_id 500 / detail 2000 / array 50) | 33 | `929f202` | gate green: 1601 passed / 0 failed (mcp 160), build 0; security-reviewer PASS |
 | OPT-37 | Shape-validate MEMBERRY_TENANT_DATASTORES (fail-closed, no silent localhost colocation) | 34 | `25f5b90` | gate green: 1609 passed / 0 failed (mcp 168), build 0; security-reviewer PASS |
 | OPT-39 | Bound AmpTimelineSchema.limit to a positive int (+handler slice guard) | 35 | `dfaad0e` | gate green: 1615 passed / 0 failed (mcp 174), build 0; security-reviewer PASS |
+| OPT-40 | Bound research secondary_metrics (z.record key/count/finite) + temporal timestamp .max(40) | 36 | `9d8f098` | gate green: 1625 passed / 0 failed (research 144, mcp 178), build 0; security-reviewer PASS |
