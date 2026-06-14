@@ -83,6 +83,67 @@ export const DEFAULT_HTTP_REQUEST_TIMEOUT_MS = 30_000;
 export const DEFAULT_HTTP_KEEPALIVE_TIMEOUT_MS = 10_000;
 
 /**
+ * Sanity bounds on a single token parsed from MEMBERRY_API_TOKENS /
+ * MEMBERRY_TENANT_TOKENS. The lower bound rejects parse artifacts (a stray
+ * fragment left by a misplaced delimiter); the upper bound rejects an
+ * obviously-corrupt giant value. These are deliberately permissive — real
+ * tokens sit comfortably inside the range — they only catch misconfiguration,
+ * not enforce a credential policy.
+ */
+export const MIN_API_TOKEN_LEN = 4;
+export const MAX_API_TOKEN_LEN = 4_096;
+
+/**
+ * Parse a comma-separated `name:token` list (MEMBERRY_API_TOKENS /
+ * MEMBERRY_TENANT_TOKENS) into a sink via `onValid`. Each entry is split on the
+ * FIRST `:`; entries that are empty, lack a `:`, have an empty half, or carry a
+ * token whose length is outside [MIN_API_TOKEN_LEN, MAX_API_TOKEN_LEN] are
+ * SKIPPED WITH A WARNING rather than silently dropped (the previous behavior
+ * masked typos and could silently disable auth / multi-tenant mode). A non-empty
+ * var that yields zero valid pairs is also warned.
+ *
+ * CONSTRAINT (documented, not escapable): because the delimiters are literal,
+ * a name or token may NOT contain `,` or `:` — such a value is split apart and
+ * will be reported as malformed. Warnings log the entry's position and (for a
+ * well-formed-but-rejected entry) its NAME only — never a token value.
+ */
+export function parseTokenPairs(
+  raw: string | undefined,
+  varName: string,
+  onValid: (name: string, token: string) => void,
+): void {
+  if (!raw) return;
+  const entries = raw.split(',');
+  let accepted = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i].trim();
+    if (!entry) continue; // tolerate empty/trailing commas silently
+    const idx = entry.indexOf(':');
+    const name = idx > 0 ? entry.slice(0, idx).trim() : '';
+    const token = idx > 0 ? entry.slice(idx + 1).trim() : '';
+    if (idx <= 0 || !name || !token) {
+      console.error(
+        `[memberry] ${varName}: skipping malformed entry #${i + 1} (expected "name:token" with non-empty halves; names/tokens may not contain ',' or ':').`,
+      );
+      continue;
+    }
+    if (token.length < MIN_API_TOKEN_LEN || token.length > MAX_API_TOKEN_LEN) {
+      console.error(
+        `[memberry] ${varName}: skipping entry #${i + 1} ("${name}") — token length ${token.length} outside [${MIN_API_TOKEN_LEN}..${MAX_API_TOKEN_LEN}].`,
+      );
+      continue;
+    }
+    onValid(name, token);
+    accepted++;
+  }
+  if (accepted === 0) {
+    console.error(
+      `[memberry] WARNING: ${varName} is set but yielded ZERO valid "name:token" pairs — check the delimiters and token length.`,
+    );
+  }
+}
+
+/**
  * Thrown by readJsonBody when the request body exceeds the configured cap,
  * either from the Content-Length header (early reject) or the streaming
  * backstop. The /mcp handler distinguishes this from a JSON parse error to
@@ -281,34 +342,18 @@ export function createAMPServer(): AMPMCPServer {
     // Each token maps to an actor identity, so a leaked token can be revoked
     // individually instead of rotating one shared secret for everyone.
     const tokenToActor = new Map<string, string>();
-    const namedTokensRaw = readEnv('MEMBERRY_API_TOKENS');
-    if (namedTokensRaw) {
-      for (const pair of namedTokensRaw.split(',')) {
-        const idx = pair.indexOf(':');
-        if (idx <= 0) continue;
-        const name = pair.slice(0, idx).trim();
-        const tok = pair.slice(idx + 1).trim();
-        if (name && tok) tokenToActor.set(tok, name);
-      }
-    }
+    parseTokenPairs(readEnv('MEMBERRY_API_TOKENS'), 'MEMBERRY_API_TOKENS', (name, tok) => {
+      tokenToActor.set(tok, name);
+    });
 
     // Per-tenant tokens: MEMBERRY_TENANT_TOKENS="acme:tokA,globex:tokB". Presence
     // of any tenant token turns on multi-tenant mode; each token binds a request
     // to its tenant. Tenant tokens are also valid auth tokens (actor = tenant).
     const tokenToTenant = new Map<string, string>();
-    const tenantTokensRaw = readEnv('MEMBERRY_TENANT_TOKENS');
-    if (tenantTokensRaw) {
-      for (const pair of tenantTokensRaw.split(',')) {
-        const idx = pair.indexOf(':');
-        if (idx <= 0) continue;
-        const tenant = pair.slice(0, idx).trim();
-        const tok = pair.slice(idx + 1).trim();
-        if (tenant && tok) {
-          tokenToTenant.set(tok, tenant);
-          if (!tokenToActor.has(tok)) tokenToActor.set(tok, tenant);
-        }
-      }
-    }
+    parseTokenPairs(readEnv('MEMBERRY_TENANT_TOKENS'), 'MEMBERRY_TENANT_TOKENS', (tenant, tok) => {
+      tokenToTenant.set(tok, tenant);
+      if (!tokenToActor.has(tok)) tokenToActor.set(tok, tenant);
+    });
     const multiTenantMode = tokenToTenant.size > 0;
 
     // OPT-29: fail-closed tenant binding. In multi-tenant mode a token that
