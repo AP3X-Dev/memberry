@@ -1,6 +1,7 @@
 // packages/mcp/src/bootstrap.ts
 // Wires up Redis, Neo4j, embedding, and core services from environment variables.
 
+import { z } from 'zod';
 import { DistributedLock, ProposalStore } from '@memberry/redis';
 import { runMigrations, checkVectorIndexDimensions, SemanticStore, ProvenanceTraversal } from '@memberry/neo4j';
 import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath } from '@memberry/core';
@@ -63,6 +64,67 @@ import {
 export interface BootstrapHandles {
   /** Call to disconnect Redis and Neo4j cleanly. */
   shutdown(): Promise<void>;
+}
+
+/** A per-tenant dedicated-datastore config (the value side of MEMBERRY_TENANT_DATASTORES). */
+export interface TenantDatastoreConfig {
+  neo4jUri: string;
+  neo4jUser?: string;
+  neo4jPassword: string;
+  redisUrl: string;
+  openaiKey?: string;
+}
+
+// OPT-37: shape-validate MEMBERRY_TENANT_DATASTORES. neo4jUri/neo4jPassword/redisUrl
+// are REQUIRED — they are exactly what makes an entry a *dedicated* store. Without
+// validation, a non-object value (a string is iterated char-by-char by
+// Object.entries) or an entry missing those fields would silently construct a
+// core pointing at the localhost DEFAULTS — i.e. the SHARED instance — so a tenant
+// the operator believed was physically isolated would actually be colocated. Fail
+// closed instead. `.strict()` also rejects typo'd keys that would be ignored.
+const TenantDatastoreSchema = z
+  .object({
+    neo4jUri: z.string().min(1),
+    neo4jUser: z.string().min(1).optional(),
+    neo4jPassword: z.string().min(1),
+    redisUrl: z.string().min(1),
+    openaiKey: z.string().min(1).optional(),
+  })
+  .strict();
+const TenantDatastoresSchema = z.record(z.string().min(1), TenantDatastoreSchema);
+
+/**
+ * Parse + validate MEMBERRY_TENANT_DATASTORES. Returns {} when unset/empty.
+ * Throws (fail-closed, at startup) on invalid JSON, a non-object root, or any
+ * entry missing/typoing a required field — never silently falls back to the
+ * shared localhost datastore. Error messages name the offending key PATH only,
+ * never the value, so a password is not echoed into logs.
+ */
+export function parseTenantDatastores(
+  raw: string | undefined,
+): Record<string, TenantDatastoreConfig> {
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `MEMBERRY_TENANT_DATASTORES is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(
+      'MEMBERRY_TENANT_DATASTORES must be a JSON object mapping tenant -> { neo4jUri, neo4jPassword, redisUrl, neo4jUser?, openaiKey? }',
+    );
+  }
+  const result = TenantDatastoresSchema.safeParse(parsed);
+  if (!result.success) {
+    const detail = result.error.issues
+      .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+      .join('; ');
+    throw new Error(`MEMBERRY_TENANT_DATASTORES is malformed: ${detail}`);
+  }
+  return result.data;
 }
 
 export async function bootstrap(): Promise<BootstrapHandles> {
@@ -374,15 +436,9 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   // Tenants listed here get their OWN Neo4j/Redis (physical isolation); all other
   // tenants share this instance with a tenant_id filter (logical isolation).
   const dedicatedTenantCores: Array<{ close(): Promise<void> }> = [];
-  const tenantDatastoresRaw = readEnv('MEMBERRY_TENANT_DATASTORES');
-  if (tenantDatastoresRaw) {
-    let map: Record<string, { neo4jUri?: string; neo4jUser?: string; neo4jPassword?: string; redisUrl?: string; openaiKey?: string }>;
-    try {
-      map = JSON.parse(tenantDatastoresRaw);
-    } catch (err) {
-      throw new Error(`MEMBERRY_TENANT_DATASTORES is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    for (const [tenant, ds] of Object.entries(map)) {
+  const tenantDatastores = parseTenantDatastores(readEnv('MEMBERRY_TENANT_DATASTORES'));
+  {
+    for (const [tenant, ds] of Object.entries(tenantDatastores)) {
       const tcore = createCoreServices({
         neo4jUri: ds.neo4jUri, neo4jUser: ds.neo4jUser, neo4jPassword: ds.neo4jPassword,
         redisUrl: ds.redisUrl, openaiKey: ds.openaiKey ?? openaiKey, exportPath,
