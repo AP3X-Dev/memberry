@@ -134,7 +134,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-07 | Bounded tx timeout on grep =~ rawCypher path (Neo4j-side ReDoS backstop) | 7 | `7374e7a` | gate green 1492 passed / 0 failed (neo4j 193); security-reviewer PASS |
 | OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `27fc2e4` | gate green 1495 passed / 0 failed (mcp 136); security-reviewer PASS |
 | OPT-09 | Realpath symlink confinement for wiki validatePath + confineToDir | 9 | `28df712` | gate green 1501 passed / 0 failed (wiki 282); security-reviewer PASS |
-| OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `<c10-sha>` | gate green 1504 passed / 0 failed (retrieval 141); security-reviewer PASS |
+| OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `b2f45d6` | gate green 1504 passed / 0 failed (retrieval 141); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -243,7 +243,7 @@ Start cycle 11 at **OPT-11** (MED — dream-generated project_card written verba
 - Next: OPT-10
 
 ### Cycle 10 — 2026-06-14
-- Commit: `<c10-sha>` OPT-10: fence untrusted evidence + untrusted-data guard in berry_ask synthesis
+- Commit: `b2f45d6` OPT-10: fence untrusted evidence + untrusted-data guard in berry_ask synthesis
 - Item: OPT-10 — COMPLETED
 - Mode B: 1 discovery → OPT-75 (LOW: output-side leak/echo filtering of the synthesized answer)
 - Verifier: PASS (1504 passed, 0 failed, build exit 0; retrieval 138→141; RED-confirmed naked-injection format before change) | Security-reviewer: PASS (sound data/instruction separation; strip regex covers open+close, ci, ws-tolerant, ReDoS-safe; additive — citation/answer-format preserved; confirmed dream=OPT-11 is the remaining free-text untrusted→LLM gap, extraction adequately covered by OPT-04)
