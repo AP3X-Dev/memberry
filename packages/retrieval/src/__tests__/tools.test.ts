@@ -89,4 +89,26 @@ describe('registerRetrievalTools — tenant threading', () => {
       expect.objectContaining({ tenantId: 'default' }),
     );
   });
+
+  it('berry_feedback threads the container tenantId into recordFeedback()', async () => {
+    const feedbackTracker = makeFeedback();
+    const { server, handlers } = makeServerStub();
+    const container = createRetrievalContainer({ assembler: makeAssembler(), feedbackTracker, tenantId: 'acme' });
+
+    registerRetrievalTools(server as never, container);
+    await handlers.get('berry_feedback')!({
+      result_id: 'sem-1',
+      was_useful: true,
+      session_id: 'sess-1',
+      query: 'auth flow',
+      source_type: 'semantic',
+    });
+
+    // Second positional arg is the resolved tenant — pins that the feedback
+    // write is tenant-scoped, not process-global.
+    expect(feedbackTracker.recordFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({ result_id: 'sem-1', was_useful: true }),
+      'acme',
+    );
+  });
 });

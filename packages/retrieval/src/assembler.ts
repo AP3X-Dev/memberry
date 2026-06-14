@@ -312,7 +312,7 @@ export class UnifiedAssembler {
     // kick them off now so they overlap the (slower) layer fetches instead of
     // running as a sequential tail afterward.
     const boostsPromise: Promise<BoostFactors | undefined> = this.feedback
-      .getBoosts()
+      .getBoosts(tenant)
       .catch(() => undefined);
     const collectionSizePromise = this.getCollectionSize();
 

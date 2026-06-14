@@ -46,7 +46,7 @@ export interface IFeedbackTracker {
     was_useful: boolean;
     session_id: string;
     timestamp: string;
-  }): Promise<void>;
+  }, tenantId?: string): Promise<void>;
 }
 
 // ─── Service container ────────────────────────────────────────────────────────
@@ -215,6 +215,8 @@ export function registerRetrievalTools(
     { readOnlyHint: true } satisfies ToolAnnotations,
     async (args) => {
       if (!feedbackTracker) throw new Error('Retrieval services not initialised');
+      // Scope the write to this container's tenant so one tenant's feedback
+      // never re-ranks another tenant's retrieval (covert ranking channel).
       await feedbackTracker.recordFeedback({
         query: args.query,
         result_id: args.result_id,
@@ -222,7 +224,7 @@ export function registerRetrievalTools(
         was_useful: args.was_useful,
         session_id: args.session_id,
         timestamp: new Date().toISOString(),
-      });
+      }, tenantId);
       return textContent(JSON.stringify({ recorded: true, result_id: args.result_id, was_useful: args.was_useful }));
     },
   ));

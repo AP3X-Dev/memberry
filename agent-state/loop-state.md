@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1543 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1547 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -70,10 +70,10 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-23 | MED | indexFile one round-trip per changed symbol (sequential findByCompositeKey + create/update) | ✅ DONE (c21) | packages/code/src/indexer.ts:144-214 | DONE: SymbolStore.upsertSymbols — one UNWIND MERGE (ON CREATE=create props incl vectors, ON MATCH=update subset, transient __upsert_created removed before RETURN → graph-identical); indexFile collects changed→1 batched upsert (N→1); content-hash skip preserved +3 tests. Verifier PASS 1540/0 (code 117). Relation-edge N+1→OPT-82. Perf (no sec-review). |  |
 | OPT-24 | MED | docker-compose mcp omits MEMBERRY_TENANT_TOKENS/_DATASTORES/_INGEST_ALLOW_DIR — isolation can't be enabled via shipped compose | ✅ DONE (c22) | docker-compose.yml:72-89; .env.example | DONE: wired all 3 vars into the mcp env block (${VAR:-} opt-in defaults, 6-space map syntax) + INGEST_ALLOW_DIR container-path/volume-mount note in compose + .env.example pointer. Names verified vs readEnv call sites. Config-only → suite green 1540/0 (verified). Ops (no sec-review). |  |
 | OPT-25 | LOW | invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink) | ✅ DONE (c23) | packages/neo4j/src/temporal-edges.ts:53-68 | DONE: module-level VALID_REL_TYPES allowlist (19 metachar-free types incl ABOUT) + throw before interpolation/session.run; doc-comment now enforced-invariant; no dep cycle (local set) +3 tests. Verifier PASS 1543/0 (neo4j 200; RED-confirmed); security-reviewer PASS (sink enforced pre-interpolation). Residual: relation-store remove fail-open + allowlist dup→OPT-83. |  |
-| OPT-26 | LOW | Global feedback boost keys mix tenant entity names — one tenant skews another's ranking | pending | packages/retrieval/src/feedback.ts:18-21,31-46,52-82 | namespace feedback keys by tenant + thread tenantId; suite green |  |
+| OPT-26 | LOW | Global feedback boost keys mix tenant entity names — one tenant skews another's ranking | ✅ DONE (c24) | packages/retrieval/src/feedback.ts:18-21,31-46,52-82 | DONE: per-tenant key helpers (default→legacy keys zero-cold-start, named→amp:feedback:<tenant>:*); recordFeedback/getBoosts/inferUsage take tenantId; real tenant threaded at assembler getBoosts + berry_feedback recordFeedback +4 tests. Verifier PASS 1547/0 (retrieval 146); security-reviewer PASS (single chokepoint, not spoofable). Residual non-tenant-token→DEFAULT = OPT-29. |  |
 | OPT-27 | LOW | Context-cache dependency sets keyed by naked scope/node-id — one tenant's write evicts another's cache | pending | packages/redis/src/cache.ts:29-38,42-54,56-68 | prefix dep-set keys with tenant + thread tenant from load()/store(); suite green |  |
 | OPT-28 | LOW | HTTP server sets no headersTimeout/requestTimeout — slowloris DoS | pending | packages/mcp/src/server.ts:382-543 | set headersTimeout/requestTimeout/keepAliveTimeout after createServer; test asserts they are set; suite green |  |
-| OPT-29 | LOW | Multi-tenant: non-tenant tokens authenticate but silently fall back to default tenant | pending | packages/mcp/src/server.ts:296-307 | in multiTenantMode reject tokens not in tokenToTenant (or require explicit flag); new test; suite green |  |
+| OPT-29 | LOW | Multi-tenant: non-tenant tokens authenticate but silently fall back to default tenant | pending | packages/mcp/src/server.ts:296-307 | in multiTenantMode reject tokens not in tokenToTenant (or require explicit flag); new test; suite green. REINFORCED by OPT-26 review: a non-tenant token's feedback also lands in the shared default bucket — fail-closed closes both. |  |
 | OPT-30 | LOW | Token parsing splits on ',' and ':' with no escaping/validation — tokens with those chars silently corrupt | pending | packages/mcp/src/server.ts:218-246 | validate token length, warn on skipped pairs, document constraint; suite green |  |
 | OPT-31 | LOW | Consolidation re-extracts facts via the same unvalidated predicate path on autoApply with no human gate | partial (c4) | packages/core/src/consolidation.ts:501-583 | predicate-shape validation half DONE via OPT-04 (consolidation's extractFacts calls now route through the hardened validateFactResponse). REMAINING: gate extraction-driven fact INVALIDATION (autoApply dispute path) behind a confidence/human gate. |  |
 | OPT-32 | LOW | berry_ask evidence items have no per-item length cap — one oversized memory dominates the synthesis prompt | pending | packages/retrieval/src/assembler.ts:138-164,539-573 | per-item char/token cap before concat; suite green |  |
@@ -156,6 +156,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `17fc63d` | gate green 1540 passed / 0 failed (code 117); perf — graph-identical |
 | OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `907ef57` | gate green 1540 passed / 0 failed (config-only); ops |
 | OPT-25 | In-function rel-type allowlist on invalidateRelationship (close latent injection sink) | 23 | `132426a` | gate green 1543 passed / 0 failed (neo4j 200); security-reviewer PASS |
+| OPT-26 | Namespace retrieval feedback boost keys by tenant (close cross-tenant ranking channel) | 24 | `<c24-sha>` | gate green 1547 passed / 0 failed (retrieval 146); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -187,7 +188,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 24 at **OPT-26** (LOW, tenant — global feedback boost keys mix tenant entity names; one tenant can skew/poison another's retrieval ranking; namespace feedback keys by tenant + thread tenantId, `packages/retrieval/src/feedback.ts:18-21,31-46,52-82`; security-tagged → security-reviewer too). Then OPT-27 (context-cache dep-set tenant prefix), OPT-28 (slowloris timeouts), OPT-29/30/31 (tenant token edge cases / consolidation predicate gate), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 25 at **OPT-27** (LOW, tenant — context-cache dependency sets keyed by naked scope/node-id, so one tenant's write evicts another's cached context; prefix dep-set keys with tenant + thread the resolved tenant from load()/store(), `packages/redis/src/cache.ts:29-38,42-54,56-68`; security-tagged → security-reviewer too). Then OPT-28 (slowloris timeouts), OPT-29 (multi-tenant non-tenant-token fail-closed — reinforced by OPT-26), OPT-30/31, … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -374,3 +375,11 @@ Start cycle 24 at **OPT-26** (LOW, tenant — global feedback boost keys mix ten
 - Verifier: PASS (1543 passed, 0 failed, build exit 0; neo4j 197→200; RED-confirmed by removing guard). NOTE: the dispatched verifier mis-summed the total as 1689 (verbose-reporter artifact); orchestrator re-ran and confirmed authoritative 1543/0 from per-package final lines. | Security-reviewer: PASS (sink enforced before interpolation; allowlist metachar-free incl ABOUT; no dep cycle; latent/LOW correct)
 - Metrics: passing 1540→1543 (floor 1543); skipped 16
 - Next: OPT-26
+
+### Cycle 24 — 2026-06-14
+- Commit: `<c24-sha>` OPT-26: namespace retrieval feedback boost keys by tenant
+- Item: OPT-26 — COMPLETED
+- Mode B: residual folded into existing OPT-29 (non-tenant-token→DEFAULT also pollutes the shared feedback bucket; fail-closed closes both)
+- Verifier: PASS (1547 passed, 0 failed, build exit 0; retrieval 142→146; default back-compat intact; RED-confirmed) | Security-reviewer: PASS (channel closed for named tenants; single key chokepoint; tenant server-resolved/not spoofable; default-bucket only reachable by the OPT-29 misconfig path)
+- Metrics: passing 1543→1547 (floor 1547); skipped 16
+- Next: OPT-27

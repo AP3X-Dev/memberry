@@ -217,6 +217,99 @@ describe('FeedbackTracker', () => {
     });
   });
 
+  describe('tenant isolation', () => {
+    // Stateful in-memory Redis keyed by the actual Redis key, so a write under
+    // one tenant's key is only visible to a read of that same key. This is what
+    // makes the cross-tenant test meaningful (the top-level mock is stateless).
+    function createStatefulRedis(): FeedbackRedisLayer {
+      const zsets = new Map<string, Map<string, number>>();
+      const set = (key: string): Map<string, number> => {
+        let m = zsets.get(key);
+        if (!m) { m = new Map(); zsets.set(key, m); }
+        return m;
+      };
+      return {
+        zincrby: vi.fn(async (key: string, increment: number, member: string) => {
+          const m = set(key);
+          const next = (m.get(member) ?? 0) + increment;
+          m.set(member, next);
+          return next;
+        }),
+        zrevrangeWithScores: vi.fn(async (key: string, start: number, stop: number) => {
+          const m = zsets.get(key);
+          if (!m) return [];
+          return [...m.entries()]
+            .map(([member, score]) => ({ member, score }))
+            .sort((a, b) => b.score - a.score)
+            .slice(start, stop + 1);
+        }),
+        lpush: vi.fn().mockResolvedValue(1),
+        ltrim: vi.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    function signal(query: string): FeedbackSignal {
+      return {
+        query,
+        result_id: 'sem-1',
+        source_type: 'semantic',
+        was_useful: true,
+        session_id: 'sess-1',
+        timestamp: '2025-01-01T00:00:00Z',
+      };
+    }
+
+    it('does not leak one tenant\'s boosts to another tenant', async () => {
+      const sharedRedis = createStatefulRedis();
+      const t = new FeedbackTracker(sharedRedis);
+
+      // Tenant 'acme' records feedback that boosts the "AcmeSecret" entity.
+      await t.recordFeedback(signal('AcmeSecret'), 'acme');
+
+      // Tenant 'globex' must NOT see acme's boost (different key namespace).
+      const globexBoosts = await t.getBoosts('globex');
+      expect(globexBoosts.entity_boosts['AcmeSecret']).toBeUndefined();
+
+      // The owning tenant 'acme' DOES see its own boost.
+      const acmeBoosts = await t.getBoosts('acme');
+      expect(acmeBoosts.entity_boosts['AcmeSecret']).toBe(1.0);
+    });
+
+    it('namespaces non-default tenant keys with the tenant segment', async () => {
+      const redis = createStatefulRedis();
+      const t = new FeedbackTracker(redis);
+
+      await t.recordFeedback(signal('Widget'), 'acme');
+
+      const keysWritten = (redis.zincrby as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => c[0]);
+      expect(keysWritten).toContain('amp:feedback:acme:entity_boost');
+      expect(keysWritten).toContain('amp:feedback:acme:source_boost');
+      // Must NOT touch the un-namespaced (default/global) keys.
+      expect(keysWritten).not.toContain('amp:feedback:entity_boost');
+      expect(keysWritten).not.toContain('amp:feedback:source_boost');
+    });
+
+    it('default tenant round-trips on the un-namespaced (legacy) keys', async () => {
+      const redis = createStatefulRedis();
+      const t = new FeedbackTracker(redis);
+
+      // No tenant arg → default tenant → original keys (back-compat, no cold start).
+      await t.recordFeedback(signal('LegacyEntity'));
+
+      const entityKeys = (redis.zincrby as ReturnType<typeof vi.fn>).mock.calls
+        .map((c: unknown[]) => c[0])
+        .filter((k: string) => k.includes('entity_boost'));
+      expect(entityKeys).toContain('amp:feedback:entity_boost');
+
+      const boosts = await t.getBoosts();
+      expect(boosts.entity_boosts['LegacyEntity']).toBe(1.0);
+
+      // An explicit 'default' tenant resolves to the same legacy keys/data.
+      const explicitDefault = await t.getBoosts('default');
+      expect(explicitDefault.entity_boosts['LegacyEntity']).toBe(1.0);
+    });
+  });
+
   describe('inferUsage', () => {
     it('records positive feedback for result IDs found in store content', async () => {
       const resultIds = ['abcdef1234567890', 'xyz99887766554433'];
