@@ -120,7 +120,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 |----|------|-------|--------|--------|
 | OPT-01 | Gate ranked code channel on default tenant (close cross-tenant code leak) | 1 | `11d703c` | gate green 1463 passed / 0 failed; security-reviewer PASS |
 | OPT-02 | Bind SSE/Streamable sessions to creating tenant+actor; 403 on token mismatch | 2 | `20c7819` | gate green 1465 passed / 0 failed (mcp 126); security-reviewer PASS |
-| OPT-03 | Confine post-store re-index paths to ingest base (block arbitrary file read) | 3 | `<c3-sha>` | gate green 1472 passed / 0 failed (code 114); security-reviewer PASS |
+| OPT-03 | Confine post-store re-index paths to ingest base (block arbitrary file read) | 3 | `9b0b029` | gate green 1472 passed / 0 failed (code 114); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -173,7 +173,7 @@ Start cycle 4 at **OPT-04** (HIGH — extractFacts trusts LLM predicates/values;
 - Next: OPT-03
 
 ### Cycle 3 — 2026-06-13
-- Commit: `<c3-sha>` OPT-03: confine post-store re-index paths to ingest base (block arbitrary file read)
+- Commit: `9b0b029` OPT-03: confine post-store re-index paths to ingest base (block arbitrary file read)
 - Item: OPT-03 — COMPLETED
 - Mode B: 1 discovery (TOCTOU between confine and reindexFile read) → added as OPT-68 (LOW)
 - Verifier: PASS (1472 passed, 0 failed, build exit 0; code 107→114) | Security-reviewer: PASS (all escape vectors closed — .., abs, ${base}EVIL prefix, symlink-realpath on both sides; hook is sole untrusted entry; base resolves to systemd WorkingDirectory)
