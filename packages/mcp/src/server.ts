@@ -62,6 +62,25 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 export const DEFAULT_MAX_REQUEST_BODY_BYTES = 1_000_000;
 
 /**
+ * OPT-62: resolve the network interface the HTTP server binds to. Previously the
+ * bind host was hardcoded (Node `listen(port)` with no host → ALL interfaces),
+ * so the systemd/.env `HOST` var and any intent to restrict to loopback were
+ * silently ignored. Precedence: MEMBERRY_HOST (canonical, AMP_HOST legacy via
+ * readEnv) → the generic HOST env (mirrors how PORT is read) → undefined.
+ *
+ * `undefined` PRESERVES the prior all-interfaces bind, so the default behavior
+ * (and the LAN-accessible deployment) is unchanged. A security-conscious operator
+ * can now set MEMBERRY_HOST=127.0.0.1 to restrict the server to loopback. Whether
+ * the DEFAULT should flip to loopback is a deployment-posture decision (it would
+ * break LAN access) — tracked as a Blocked item, not changed here.
+ */
+export function resolveListenHost(): string | undefined {
+  const h = readEnv('MEMBERRY_HOST') ?? process.env['HOST'];
+  const trimmed = h?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
  * HTTP receive-timeout defaults guarding against slow-client (slowloris) DoS.
  * Node's defaults leave the server exposed: requestTimeout defaults to 300_000ms
  * (5 minutes) and headersTimeout to ~60_000ms, so a slow trickle can hold a
@@ -788,12 +807,17 @@ export function createAMPServer(): AMPMCPServer {
     // Node's warning or leave the receive window misordered.
     httpServer.requestTimeout = Math.max(requestTimeout, httpServer.headersTimeout);
 
+    // OPT-62: bind to the configured host when set (MEMBERRY_HOST / HOST), else
+    // keep the prior all-interfaces bind (no host arg) so default behavior + the
+    // LAN-accessible deployment are unchanged.
+    const listenHost = resolveListenHost();
     await new Promise<void>((resolve, reject) => {
-      httpServer.listen(port, () => resolve());
+      if (listenHost) httpServer.listen(port, listenHost, () => resolve());
+      else httpServer.listen(port, () => resolve());
       httpServer.once('error', reject);
     });
 
-    console.error(`[memberry-mcp] SSE server listening on http://localhost:${port}/sse`);
+    console.error(`[memberry-mcp] SSE server listening on http://${listenHost ?? 'localhost'}:${port}/sse`);
 
     return { httpServer, transports, servers, streamableTransports, streamableServers, sessionIdentity };
   }
