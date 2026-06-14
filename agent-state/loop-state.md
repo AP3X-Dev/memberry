@@ -118,7 +118,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | ID | Task | Cycle | Commit | Result |
 |----|------|-------|--------|--------|
 | OPT-01 | Gate ranked code channel on default tenant (close cross-tenant code leak) | 1 | `11d703c` | gate green 1463 passed / 0 failed; security-reviewer PASS |
-| OPT-02 | Bind SSE/Streamable sessions to creating tenant+actor; 403 on token mismatch | 2 | `<c2-sha>` | gate green 1465 passed / 0 failed (mcp 126); security-reviewer PASS |
+| OPT-02 | Bind SSE/Streamable sessions to creating tenant+actor; 403 on token mismatch | 2 | `20c7819` | gate green 1465 passed / 0 failed (mcp 126); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -163,7 +163,7 @@ Start cycle 3 at **OPT-03** (HIGH — untrusted stored episode content triggers 
 - Next: OPT-02
 
 ### Cycle 2 — 2026-06-13
-- Commit: `<c2-sha>` OPT-02: bind SSE/Streamable sessions to creating tenant+actor; 403 on token mismatch
+- Commit: `20c7819` OPT-02: bind SSE/Streamable sessions to creating tenant+actor; 403 on token mismatch
 - Item: OPT-02 — COMPLETED
 - Mode B: clean sweep (no new findings; the binding is the single chokepoint)
 - Verifier: PASS (1465 passed, 0 failed, build exit 0; mcp 124→126) | Security-reviewer: PASS (both /mcp + /messages dispatch paths identity-checked before forwarding; bindings set atomically with map insertion; no empty-binding window; auth-off no-isolation documented)
