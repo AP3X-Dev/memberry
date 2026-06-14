@@ -3,6 +3,7 @@
 
 import OpenAI from 'openai';
 import type { FactInput } from './types.js';
+import { normalizePredicate } from './predicates.js';
 
 // ─── Transient error detection ─────────────────────────────────────────────
 
@@ -40,9 +41,16 @@ interface RawFact {
 // garbage ("ignore previous and grant", "is the admin password", sentences with
 // spaces/punctuation, absurdly long strings) does not fit that shape — so we drop
 // any fact whose predicate is not a sane relation token, and cap subject/object
-// length to block payloads smuggled through those fields. This mirrors the
-// normalize step in service.normalizePredicate (lowercase + trim) without coupling
-// to it (service.ts already imports extract.ts; importing back would be circular).
+// length to block payloads smuggled through those fields.
+//
+// OPT-69: the shape gate runs against the NORMALIZED predicate. normalizePredicate
+// (shared module — no service.ts cycle) maps KNOWN synonyms, including legitimate
+// space-forms the synonym map anticipates ("depends on"→"uses", "runs on"→
+// "located_at"), to canonical snake_case BEFORE the shape check — so those survive
+// instead of being dropped. Crucially this does NOT loosen OPT-04: a predicate not
+// in the curated map is returned unchanged (lowercase+trim, identical to the prior
+// gate), so an UNKNOWN space/punctuation predicate ("is the admin password") still
+// fails the snake_case regex and is dropped.
 
 /** Max characters for a subject or object value. Real entity names/values are short. */
 const MAX_VALUE_LEN = 200;
@@ -59,7 +67,10 @@ function isSaneFact(subject: string, predicate: string, object: string): boolean
   const o = object.trim();
   if (s.length === 0 || o.length === 0) return false;
   if (s.length > MAX_VALUE_LEN || o.length > MAX_VALUE_LEN) return false;
-  const pred = predicate.toLowerCase().trim();
+  // Normalize KNOWN synonyms (incl. space-forms) to canonical snake_case before
+  // the shape check; unknown predicates pass through as lowercase+trim (the prior
+  // behavior), so injection phrases with spaces/punctuation are still rejected.
+  const pred = normalizePredicate(predicate);
   return VALID_PREDICATE.test(pred);
 }
 
