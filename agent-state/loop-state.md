@@ -155,7 +155,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `a39fcfe` | gate green 1537 passed / 0 failed (wiki 290); perf — result-identical |
 | OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `17fc63d` | gate green 1540 passed / 0 failed (code 117); perf — graph-identical |
 | OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `907ef57` | gate green 1540 passed / 0 failed (config-only); ops |
-| OPT-25 | In-function rel-type allowlist on invalidateRelationship (close latent injection sink) | 23 | `<c23-sha>` | gate green 1543 passed / 0 failed (neo4j 200); security-reviewer PASS |
+| OPT-25 | In-function rel-type allowlist on invalidateRelationship (close latent injection sink) | 23 | `132426a` | gate green 1543 passed / 0 failed (neo4j 200); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -368,7 +368,7 @@ Start cycle 24 at **OPT-26** (LOW, tenant — global feedback boost keys mix ten
 - Next: OPT-25 (LOW tier begins)
 
 ### Cycle 23 — 2026-06-14
-- Commit: `<c23-sha>` OPT-25: in-function rel-type allowlist on invalidateRelationship
+- Commit: `132426a` OPT-25: in-function rel-type allowlist on invalidateRelationship
 - Item: OPT-25 — COMPLETED
 - Mode B: 1 discovery → OPT-83 (LOW consistency: relation-store remove fail-open asymmetry + 3-way allowlist duplication)
 - Verifier: PASS (1543 passed, 0 failed, build exit 0; neo4j 197→200; RED-confirmed by removing guard). NOTE: the dispatched verifier mis-summed the total as 1689 (verbose-reporter artifact); orchestrator re-ran and confirmed authoritative 1543/0 from per-package final lines. | Security-reviewer: PASS (sink enforced before interpolation; allowlist metachar-free incl ABOUT; no dep cycle; latent/LOW correct)
