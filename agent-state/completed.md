@@ -11,4 +11,4 @@
 | OPT-05 | Redact JSON-quoted credentials in SECRET_ASSIGNMENT (core + graph allowlist) | 5 | `21c3462` | gate green: 1483 passed / 0 failed (core 323, graph 53), build 0; security-reviewer PASS |
 | OPT-06 | No-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim; re2→B-01) | 6 | `7ce8c69` | gate green: 1488 passed / 0 failed (mcp 131), build 0; security-reviewer PASS |
 | OPT-07 | Bounded tx timeout on grep =~ rawCypher path (Neo4j-side ReDoS backstop) | 7 | `7374e7a` | gate green: 1492 passed / 0 failed (neo4j 193), build 0; security-reviewer PASS |
-| OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `<c8-sha>` | gate green: 1495 passed / 0 failed (mcp 136), build 0; security-reviewer PASS |
+| OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `27fc2e4` | gate green: 1495 passed / 0 failed (mcp 136), build 0; security-reviewer PASS |

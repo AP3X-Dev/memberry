@@ -130,7 +130,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-05 | Redact JSON-quoted credentials in SECRET_ASSIGNMENT (core + graph allowlist) | 5 | `21c3462` | gate green 1483 passed / 0 failed (core 323, graph 53); security-reviewer PASS |
 | OPT-06 | No-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim; re2→B-01) | 6 | `7ce8c69` | gate green 1488 passed / 0 failed (mcp 131); security-reviewer PASS |
 | OPT-07 | Bounded tx timeout on grep =~ rawCypher path (Neo4j-side ReDoS backstop) | 7 | `7374e7a` | gate green 1492 passed / 0 failed (neo4j 193); security-reviewer PASS |
-| OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `<c8-sha>` | gate green 1495 passed / 0 failed (mcp 136); security-reviewer PASS |
+| OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `27fc2e4` | gate green 1495 passed / 0 failed (mcp 136); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -223,7 +223,7 @@ Start cycle 9 at **OPT-09** (MED — ingest/viewer path confinement doesn't reso
 - Next: OPT-08
 
 ### Cycle 8 — 2026-06-14
-- Commit: `<c8-sha>` OPT-08: cap MCP request body size → HTTP 413 (closes dup OPT-13)
+- Commit: `27fc2e4` OPT-08: cap MCP request body size → HTTP 413 (closes dup OPT-13)
 - Item: OPT-08 — COMPLETED; OPT-13 marked DONE (no-op, /mcp body goes through the capped readJsonBody)
 - Mode B: 1 discovery → OPT-73 (LOW: /messages SSE POST body not capped — SDK-read)
 - Verifier: PASS (1495 passed, 0 failed, build exit 0; mcp →136; server.test.ts 14→17) | Security-reviewer: PASS (peak buffered ≤ cap+1 chunk; honest/chunked/lying Content-Length all 413; no crash from req.destroy; env-override hardened)
