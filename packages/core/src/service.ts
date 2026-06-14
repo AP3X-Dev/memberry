@@ -67,7 +67,9 @@ export interface FactLayer {
    *  Optional — load() falls back to per-entity getActive when absent. */
   getActiveBatch?(entityNames: string[], options?: TemporalOptions, tenantId?: string): Promise<FactNode[][]>;
   create(fact: FactNode): Promise<string>;
-  findBySubjectPredicate(subject: string, predicate: string, tenantId?: string): Promise<FactNode[]>;
+  /** OPT-70: `includeTentative` opts into surfacing tentative contenders for
+   *  corroboration/promotion. Default (omitted) = active-only, as before. */
+  findBySubjectPredicate(subject: string, predicate: string, tenantId?: string, opts?: { includeTentative?: boolean }): Promise<FactNode[]>;
   invalidate(id: string, invalidAt: string, supersededById?: string): Promise<void>;
   /** Link two co-extracted facts from the same episode (optional — degrades gracefully) */
   linkCoExtracted?(factId1: string, factId2: string, episodeId: string): Promise<void>;
@@ -684,21 +686,35 @@ export class AMPService {
           const originalPredicate = fi.predicate;
           const normalizedPredicate = normalizePredicate(fi.predicate);
 
-          // Check for existing active fact with same subject + normalized predicate
-          // (tenant-scoped so we never reconcile against another tenant's fact).
-          const existing = await factLayer.findBySubjectPredicate(fi.subject, normalizedPredicate, factTenant);
-          const conflicting = existing.find(f => f.object !== fi.object);
+          // Reconcile against existing facts for this subject + normalized
+          // predicate (tenant-scoped so we never reconcile across tenants).
+          // OPT-70: also surface `tentative` contenders so an unconfirmed fact
+          // can be corroborated and promoted. A CONFLICT, however, counts only
+          // against an ESTABLISHED (active) fact — a tentative contender neither
+          // supersedes nor is superseded until it is itself confirmed.
+          const existing = await factLayer.findBySubjectPredicate(
+            fi.subject, normalizedPredicate, factTenant, { includeTentative: true },
+          );
+          const conflicting = existing.find(f => f.object !== fi.object && f.status === 'active');
           const reinforcing = existing.find(f => f.object === fi.object);
 
           if (reinforcing) {
-            // Explicit evidence now corroborates a prior dream-minted guess — promote
-            // it from a tentative abductive hypothesis to a confirmed deductive fact.
-            // ONLY abductive facts are promoted: inductive facts (consolidation-
-            // generalized patterns) are also created `tentative`, but an explicit
-            // example must not rewrite their provenance to deductive — they stay
-            // inductive. Anything else is already known: skip (consolidation boosts
-            // confidence later).
-            if (reinforcing.inference_type === 'abductive' && factLayer.corroborate) {
+            // Explicit evidence now corroborates a prior tentative guess — promote
+            // it to a confirmed deductive fact. Promotable contenders:
+            //   • abductive (dream-minted) hypotheses — promoted as before;
+            //   • OPT-70: deductive extraction-origin facts (created `tentative`
+            //     until a SECOND, INDEPENDENT episode corroborates them) — so a
+            //     single untrusted episode can't mint an authoritative fact, and
+            //     a retry of the SAME episode can't self-corroborate.
+            // Inductive (consolidation-generalized) facts keep their provenance:
+            // an explicit example must not rewrite them to deductive. An already
+            // ACTIVE fact is known: skip (consolidation boosts confidence later).
+            const independent = !reinforcing.source_episode_ids.includes(episodeId);
+            const promotable =
+              reinforcing.status === 'tentative' &&
+              (reinforcing.inference_type === 'abductive' ||
+                (reinforcing.inference_type === 'deductive' && independent));
+            if (promotable && factLayer.corroborate) {
               const boosted = Math.min(1, Math.max(reinforcing.confidence, 0.5) + 0.1);
               await factLayer.corroborate(reinforcing.id, boosted);
               changedFactScopes.add(fi.subject);
@@ -722,7 +738,13 @@ export class AMPService {
             valid_at: now,
             invalid_at: null,
             confidence: fi.confidence ?? 0.5,
-            status: 'active',
+            // OPT-70: a brand-new extraction-origin fact is UNCONFIRMED — created
+            // `tentative` so a single untrusted episode can't mint an authoritative
+            // active/deductive fact; an independent corroborating episode promotes
+            // it (reinforcing branch above). A fact that supersedes an EXISTING
+            // active fact stays active — a deliberate update, OPT-21 supersession
+            // unchanged. (Hardening untrusted-content supersession → OPT-70b.)
+            status: conflicting ? 'active' : 'tentative',
             inference_type: 'deductive',
             supersedes_fact_id: conflicting?.id ?? null,
             scope: fi.scope ?? 'project',

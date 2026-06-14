@@ -419,7 +419,12 @@ export class FactStore {
     }
   }
 
-  async findBySubjectPredicate(subject: string, predicate: string, tenantId?: string): Promise<FactNode[]> {
+  async findBySubjectPredicate(
+    subject: string,
+    predicate: string,
+    tenantId?: string,
+    opts?: { includeTentative?: boolean },
+  ): Promise<FactNode[]> {
     // Resolve subject to canonical entity_id first — same resolution
     // path as getActive/timeline/diff to avoid fragmentation
     const resolved = await this.resolver.resolveExisting(subject);
@@ -428,15 +433,21 @@ export class FactStore {
     const session = this.driver.session();
     try {
       const tenant = resolveTenant(tenantId);
+      // OPT-70: callers reconciling extraction-origin facts opt into seeing
+      // `tentative` contenders so an unconfirmed fact can be corroborated and
+      // promoted. Default = active-only — byte-identical for every existing
+      // caller (e.g. consolidation). The status list is a bound parameter; no
+      // caller-derived value is interpolated into the Cypher.
+      const statuses = opts?.includeTentative ? ['active', 'tentative'] : ['active'];
       const result = await session.run(
         `MATCH (f:Fact)
          WHERE f.entity_id = $entityId
            AND toLower(f.predicate) = toLower($predicate)
-           AND f.status = 'active'
+           AND f.status IN $statuses
            AND ${tenantWhere('f', tenant)}
          RETURN f
          ORDER BY f.valid_at DESC`,
-        { entityId: resolved.id, predicate, [TENANT_PARAM]: tenant },
+        { entityId: resolved.id, predicate, statuses, [TENANT_PARAM]: tenant },
       );
       return result.records.map((r) => mapFactNode(r.get('f').properties));
     } finally {

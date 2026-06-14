@@ -470,6 +470,32 @@ describe('FactStore', () => {
     expect(found!.object).toBe('Express');
   });
 
+  it('OPT-70: findBySubjectPredicate is active-only by default, includes tentative on opt-in', async () => {
+    if (!neo4jAvailable) return;
+    // A unique predicate isolates this from other 'uses' facts in the suite.
+    const activeFact = makeFactNode('sp-tent-active', {
+      subject: 'auth-module', predicate: 'opt70_runtime', object: 'node', status: 'active',
+    });
+    const tentativeFact = makeFactNode('sp-tent-tentative', {
+      subject: 'auth-module', predicate: 'opt70_runtime', object: 'deno', status: 'tentative',
+    });
+    await store.create(activeFact);
+    await store.create(tentativeFact);
+    createdIds.push(activeFact.id, tentativeFact.id);
+
+    // Default: active-only — byte-identical to the pre-OPT-70 contract.
+    const activeOnly = await store.findBySubjectPredicate('auth-module', 'opt70_runtime');
+    expect(activeOnly.map((f) => f.id)).toEqual([activeFact.id]);
+
+    // Opt-in: surfaces the tentative contender too (for corroboration/promotion).
+    const withTentative = await store.findBySubjectPredicate(
+      'auth-module', 'opt70_runtime', undefined, { includeTentative: true },
+    );
+    expect(withTentative.map((f) => f.id).sort()).toEqual(
+      [activeFact.id, tentativeFact.id].sort(),
+    );
+  });
+
   // ─── edge cases: empty source_episode_ids ─────────────────────────────────
 
   it('should create a fact with empty source_episode_ids', async () => {

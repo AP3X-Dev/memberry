@@ -920,14 +920,18 @@ describe('AMPService.store — real-time fact extraction', () => {
     expect(result.duplicate).toBe(false);
     expect(result.id).toBeTruthy();
     expect(mockExtractFacts).toHaveBeenCalledWith(input.content, 'test-key', undefined); // 3rd arg = config.models?.extraction
-    expect(factLayer.findBySubjectPredicate).toHaveBeenCalledWith('auth-module', 'uses', 'default');
+    expect(factLayer.findBySubjectPredicate).toHaveBeenCalledWith('auth-module', 'uses', 'default', { includeTentative: true }); // OPT-70: opt into tentative contenders
     expect(factLayer.create).toHaveBeenCalledOnce();
     // Verify the created fact
     const createdFact = (factLayer.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as FactNode;
     expect(createdFact.subject).toBe('auth-module');
     expect(createdFact.predicate).toBe('uses');
     expect(createdFact.object).toBe('JWT');
-    expect(createdFact.status).toBe('active');
+    // OPT-70: a brand-new extraction-origin fact is UNCONFIRMED — it is created
+    // `tentative` (was `active`) so a single untrusted episode can't mint an
+    // authoritative fact. It is promoted to active once an independent episode
+    // corroborates it (see the OPT-70 promotion test below).
+    expect(createdFact.status).toBe('tentative');
     expect(createdFact.inference_type).toBe('deductive'); // explicit capture
     expect(createdFact.source_episode_ids).toEqual([result.id]);
     expect(createdFact.confidence).toBe(0.5);
@@ -1008,6 +1012,78 @@ describe('AMPService.store — real-time fact extraction', () => {
 
     expect(factLayer.corroborate).not.toHaveBeenCalled(); // inductive must not be promoted
     expect(factLayer.create).not.toHaveBeenCalled();
+  });
+
+  it('OPT-70: an INDEPENDENT episode corroborates a tentative DEDUCTIVE fact → promoted to active', async () => {
+    // A tentative deductive fact minted by an earlier, DIFFERENT episode ('ep-old')
+    // is now reinforced by a distinct episode → promote it (corroborate). This is
+    // the legitimate path that lets an extraction-origin fact become authoritative
+    // once a SECOND, independent episode confirms it.
+    const existing = makeFactNode({
+      id: 'fact-dt', object: 'JWT', status: 'tentative',
+      inference_type: 'deductive', confidence: 0.5, source_episode_ids: ['ep-old'],
+    });
+    const factLayer = makeFactLayer();
+    (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([existing]);
+    mockExtractFacts.mockResolvedValue([
+      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+    ]);
+
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    await service.processExtraction('auth uses JWT', 'ep-new', 'default'); // distinct from 'ep-old'
+
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-dt', expect.any(Number));
+    expect(factLayer.create).not.toHaveBeenCalled(); // reinforcing → no new fact
+    // OPT-70: reconciliation must opt into seeing tentative contenders.
+    expect(factLayer.findBySubjectPredicate).toHaveBeenCalledWith(
+      'auth-module', 'uses', 'default', { includeTentative: true },
+    );
+  });
+
+  it('OPT-70: a retry of the SAME episode does NOT self-corroborate its own tentative fact', async () => {
+    // Independence guard: a tentative deductive fact whose provenance already
+    // includes THIS episode (e.g. an extraction retry) must not promote itself —
+    // a single untrusted episode cannot bootstrap its own corroboration.
+    const existing = makeFactNode({
+      id: 'fact-dt', object: 'JWT', status: 'tentative',
+      inference_type: 'deductive', confidence: 0.5, source_episode_ids: ['ep-same'],
+    });
+    const factLayer = makeFactLayer();
+    (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([existing]);
+    mockExtractFacts.mockResolvedValue([
+      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+    ]);
+
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    await service.processExtraction('auth uses JWT', 'ep-same', 'default'); // SAME id as the fact's provenance
+
+    expect(factLayer.corroborate).not.toHaveBeenCalled(); // same episode → no self-promotion
+    expect(factLayer.create).not.toHaveBeenCalled();       // reinforcing → no duplicate
+  });
+
+  it('OPT-70: a TENTATIVE conflicting fact is not superseded — the new fact stays tentative', async () => {
+    // Only an ESTABLISHED (active) conflicting fact triggers supersession. A
+    // different-object TENTATIVE fact must not be invalidated, and the new fact
+    // (no active conflict) is itself tentative — two unconfirmed contenders
+    // coexist until one is corroborated.
+    const tentativeOther = makeFactNode({
+      id: 'fact-t-other', object: 'session-cookies', status: 'tentative',
+      inference_type: 'deductive', confidence: 0.5,
+    });
+    const factLayer = makeFactLayer();
+    (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([tentativeOther]);
+    mockExtractFacts.mockResolvedValue([
+      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+    ]);
+
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    await service.processExtraction('auth uses JWT', 'ep-x', 'default');
+
+    expect(factLayer.invalidate).not.toHaveBeenCalled(); // tentative contender not superseded
+    expect(factLayer.create).toHaveBeenCalledOnce();
+    const created = (factLayer.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as FactNode;
+    expect(created.status).toBe('tentative');
+    expect(created.supersedes_fact_id).toBeNull();
   });
 
   it('auto-invalidates conflicting fact and creates replacement with supersedes_fact_id', async () => {
