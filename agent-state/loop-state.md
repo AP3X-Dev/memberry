@@ -149,7 +149,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-17 | Collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query | 16 | `5b3127f` | gate green 1523 passed / 0 failed (neo4j 197); perf — precedence preserved |
 | OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `4c3853d` | gate green 1526 passed / 0 failed (core 330); reliability (no sec-review) |
 | OPT-20 (+OPT-65) | Read-through embedding cache wired into hot paths | 18 | `3c82078` | gate green 1532 passed / 0 failed (core 336); perf — behavior-identical on miss |
-| OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `<c19-sha>` | gate green 1534 passed / 0 failed (core 338); reliability (no sec-review) |
+| OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `c071375` | gate green 1534 passed / 0 failed (core 338); reliability (no sec-review) |
 
 ## Failed Attempts
 
@@ -330,7 +330,7 @@ Start cycle 20 at **OPT-22** (MED, perf — fetchEpisodicsForEntity does an unin
 - Next: OPT-21
 
 ### Cycle 19 — 2026-06-14
-- Commit: `<c19-sha>` OPT-21: create-before-invalidate fact supersession (no data loss on mid-failure)
+- Commit: `c071375` OPT-21: create-before-invalidate fact supersession (no data loss on mid-failure)
 - Item: OPT-21 — COMPLETED
 - Mode B: 1 discovery → OPT-81 (LOW: single-tx atomic supersession to remove the benign transient two-active window)
 - Verifier: PASS (1534 passed, 0 failed, build exit 0; core 336→338; RED-confirmed; end-state contract intact; error still propagates via non-fatal handler) | reliability item — no security-reviewer
