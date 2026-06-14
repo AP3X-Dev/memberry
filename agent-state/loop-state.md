@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1504 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1508 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -55,7 +55,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-08 | MED | readJsonBody buffers the entire request body with no size limit — memory-exhaustion DoS | ✅ DONE (c8) | packages/mcp/src/server.ts:371-380 | DONE: 1MB cap (env MEMBERRY_MAX_BODY_BYTES) via Content-Length early-reject + streaming backstop (throws before buffering over-cap chunk) → typed err → HTTP 413; +3 tests. Verifier PASS 1495/0 (mcp 136); security-reviewer PASS (peak≤cap+1chunk, all 3 CL vectors 413). Residual /messages SDK body→OPT-73. |  |
 | OPT-09 | MED | Ingest/viewer path confinement does not resolve symlinks (realpath missing) — symlink escapes allow-dir | ✅ DONE (c9) | packages/wiki/src/tools.ts:144-159; packages/wiki/src/viewer.ts:1787-1800 | DONE: realpath Layer-2 (target+base) added to validatePath + confineToDir (replicated, no wiki→code dep; ENOENT→lexical fallthrough; contracts preserved) +6 tests. Verifier PASS 1501/0 (wiki 282; RED-confirmed symlink tests ran on Linux); security-reviewer PASS (all 3 uses + every confineToDir serve site). Residual ancestor/TOCTOU→OPT-74. |  |
 | OPT-10 | MED | berry_ask synthesizes over untrusted memory with no instruction-guarding, returns raw answer (stored prompt injection) | ✅ DONE (c10) | packages/retrieval/src/assembler.ts:68-164 | DONE: ASK_SYSTEM_PROMPT untrusted-data guard + each evidence item fenced <<<EVIDENCE n>>> + stripEvidenceFences anti-forgery (covers open/close, ci, ws-tolerant, ReDoS-safe) +3 tests. Scoped to berry_ask (berry_context doesn't LLM-synthesize). Verifier PASS 1504/0 (retrieval 141); security-reviewer PASS. Residual output-side filtering→OPT-75. |  |
-| OPT-11 | MED | Dream project_card written verbatim into a core block injected into every session (second-order prompt injection) | pending | packages/core/src/dream.ts:242-269 | fence fact lines in CARD_SYSTEM_PROMPT + sanitize card before persistence; test asserts guarding; suite green |  |
+| OPT-11 | MED | Dream project_card written verbatim into a core block injected into every session (second-order prompt injection) | ✅ DONE (c11) | packages/core/src/dream.ts:242-269 | DONE: fenced+guarded BOTH dream prompts (hypothesis+card) + stripFactFences anti-forgery + sanitizeCard (strips fences + neutralizes injection-openers) BEFORE core-block persist +4 tests. Verifier REJECT→test-mock fix (non-gap entity fires 1 chat call; respond-by-content mock)→PASS 1508/0 (core 327); security-reviewer PASS. Residual undelimited block-injection→OPT-76, extract.ts unfenced→OPT-77. |  |
 | OPT-12 | MED | berry_ingest/berry_braindump persist untrusted content verbatim, bypassing MEMBERRY_REDACT_ON_INGEST | pending | packages/wiki/src/ingest.ts:41-196,282-300 | apply redactSecrets to claim/braindump/Source content when redactOnIngest; new test proves a secret is redacted on ingest; suite green |  |
 | OPT-13 | MED | (≡OPT-08) MCP /mcp POST body reader buffers entire request, no cap | ✅ DONE (c8, no-op) | packages/mcp/src/server.ts:371-380,439-446 | COVERED by OPT-08: /mcp POST reads its body through the now-capped readJsonBody before the SDK is invoked, so the /mcp Streamable path is bounded. (Only /messages SDK-read path remains → OPT-73.) |  |
 | OPT-14 | MED | Redis amp:signals stream grows unbounded — XADD no MAXLEN, consumer only XACKs | pending | packages/redis/src/streams.ts:29-42,53-98 | MAXLEN ~ cap on publish or XDEL after XACK; test asserts bounded growth; suite green |  |
@@ -120,6 +120,8 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-73 | LOW | /messages SSE POST body is NOT size-capped — transport.handlePostMessage(req,res) lets the MCP SDK read the body itself, bypassing OPT-08's readJsonBody cap (the /mcp Streamable path IS capped). Residual unbounded-body vector on the SSE path. | pending | packages/mcp/src/server.ts:~642 (handlePostMessage) | bound the /messages body (capped pass-through stream wrapper around req before handPostMessage, or a Content-Length pre-check 413), or document/configure the SDK's own limit; test asserts an over-cap /messages body is rejected; suite green. Source: security-reviewing OPT-08. |  |
 | OPT-74 | MED | Path-confinement (confineReindexPath OPT-03, validatePath/confineToDir OPT-09) only realpaths the FULL target; a symlinked ANCESTOR of a not-yet-existing leaf (e.g. compile output_dir to be created under a planted symlink dir) isn't caught (ENOENT→lexical fallthrough), and a check→use TOCTOU window remains (callers pass original args path downstream). | pending | packages/code/src/watcher.ts (confineReindexPath); packages/wiki/src/tools.ts (validatePath); packages/wiki/src/viewer.ts (confineToDir) | realpath the NEAREST EXISTING ANCESTOR and re-assert prefix (lexically join the non-existent tail), in the shared confinement pattern; for read/serve, prefer open-then-fstat / O_NOFOLLOW to shrink TOCTOU; tests pin a symlinked-ancestor escape rejected; suite green. Source: security-reviewing OPT-03 + OPT-09 (supersedes/absorbs OPT-68's TOCTOU note). |  |
 | OPT-75 | LOW | berry_ask returns the raw LLM answer unfiltered — no output-side check that a (jailbroken-through-the-fence) answer didn't leak other evidence or echo injected instructions. OPT-10 fenced the INPUT; this is the OUTPUT-side residual. | pending | packages/retrieval/src/assembler.ts (ask → parseAskResponse ~193) | add a lightweight output sanity/leak check on the synthesized answer (e.g. flag/strip if it echoes the system-prompt guard text or content not present in cited evidence); test pins it; suite green. Defense-in-depth only (jailbreak can't be fully prevented at prompt level). Source: security-reviewing OPT-10. |  |
+| OPT-76 | MED | Core memory blocks (incl. the dream project_card) are injected into every agent session via renderBlocksMarkdown as `### name\n<content>` with NO untrusted-data delimiter — the full fix for the OPT-11 second-order channel (OPT-11 mitigates at generation+sanitize, not at injection). | pending | packages/core/src/service.ts:811-837 (renderBlocksMarkdown), 291-302 | wrap auto-generated/untrusted-derived core blocks in a session-level untrusted-data fence + guard so the agent treats injected block content as data, not directions; test pins the fence; suite green. Source: security-reviewing OPT-11. |  |
+| OPT-77 | LOW | extract.ts FACT_EXTRACTION_PROMPT feeds untrusted content.slice(0,4000) into the LLM user message with NO fence/guard (lower risk: JSON-mode structured-triple output + OPT-04 validateFactResponse downstream, so worst case is a malicious triple that gets dropped). Consistency gap vs OPT-10/OPT-11. | pending | packages/core/src/extract.ts:127-136 | mirror the untrusted-data fence + guard on the extraction prompt (the content is data to extract triples from, never instructions); test pins it; suite green. Source: security-reviewing OPT-11. |  |
 
 ## Completed Tasks
 
@@ -135,6 +137,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `27fc2e4` | gate green 1495 passed / 0 failed (mcp 136); security-reviewer PASS |
 | OPT-09 | Realpath symlink confinement for wiki validatePath + confineToDir | 9 | `28df712` | gate green 1501 passed / 0 failed (wiki 282); security-reviewer PASS |
 | OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `b2f45d6` | gate green 1504 passed / 0 failed (retrieval 141); security-reviewer PASS |
+| OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `<c11-sha>` | gate green 1508 passed / 0 failed (core 327); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -166,7 +169,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 11 at **OPT-11** (MED — dream-generated project_card written verbatim into a core block injected into every session; fence fact lines in CARD_SYSTEM_PROMPT + sanitize the card before persistence, `packages/core/src/dream.ts:242-269`; the OPT-10 security review confirmed dream is the remaining unfenced free-text untrusted→LLM path). Then OPT-12 (ingest redaction) down the table. SEE Blocked B-01 (re2 — needs your approval). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 12 at **OPT-12** (MED — berry_ingest/berry_braindump persist untrusted content verbatim, bypassing MEMBERRY_REDACT_ON_INGEST; apply redactSecrets to claim/braindump/Source content when redactOnIngest, `packages/wiki/src/ingest.ts:41-196,282-300`). Then OPT-14 (Redis stream trim) — note OPT-13 already done — down the table. SEE Blocked B-01 (re2 — needs your approval). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -249,3 +252,11 @@ Start cycle 11 at **OPT-11** (MED — dream-generated project_card written verba
 - Verifier: PASS (1504 passed, 0 failed, build exit 0; retrieval 138→141; RED-confirmed naked-injection format before change) | Security-reviewer: PASS (sound data/instruction separation; strip regex covers open+close, ci, ws-tolerant, ReDoS-safe; additive — citation/answer-format preserved; confirmed dream=OPT-11 is the remaining free-text untrusted→LLM gap, extraction adequately covered by OPT-04)
 - Metrics: passing 1501→1504 (floor 1504); skipped 16
 - Next: OPT-11
+
+### Cycle 11 — 2026-06-14
+- Commit: `<c11-sha>` OPT-11: fence+guard dream prompts + sanitize project_card before core-block persist
+- Item: OPT-11 — COMPLETED
+- Mode B: 2 discoveries → OPT-76 (MED: wrap core blocks as untrusted data at session injection — full second-order fix), OPT-77 (LOW: extract.ts FACT_EXTRACTION_PROMPT still unfenced). Note: sanitizeCard opener-1 regex is O(n²) but defended by maxTokens:400 output cap (latent, no fix needed).
+- Verifier: REJECT then PASS — first run: 2 of 4 new tests failed (non-gap entity mod-b fires only the card chat call, not hypothesize; positional mocks mis-sequenced). Maker fixed tests with respond-by-content mockImplementation (dream.ts untouched). Re-run GREEN 1508/0 (core 323→327) | Security-reviewer: PASS (input fenced both paths; sanitizeCard correctly pre-persist; regexes don't over-match)
+- Metrics: passing 1504→1508 (floor 1508); skipped 16
+- Next: OPT-12
