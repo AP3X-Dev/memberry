@@ -540,6 +540,62 @@ describe('createAMPServer', () => {
     if (saved.capCanon !== undefined) process.env.MEMBERRY_MAX_BODY_BYTES = saved.capCanon;
   });
 
+  it('OPT-73: applies the configurable body cap to the /messages SSE POST (413 over-cap, legit under-cap passes)', async () => {
+    // The SSE transport reads the body itself (getRawBody, fixed 4mb) — the
+    // configurable OPT-08 cap did not apply to /messages. After OPT-73 the same
+    // MEMBERRY_MAX_BODY_BYTES governs both /mcp and /messages.
+    const saved = { cap: process.env.AMP_MAX_BODY_BYTES, capCanon: process.env.MEMBERRY_MAX_BODY_BYTES };
+    process.env.AMP_MAX_BODY_BYTES = '1024'; // 1 KB cap
+    delete process.env.MEMBERRY_MAX_BODY_BYTES;
+
+    await withSseServer(async (baseUrl) => {
+      const auth = { authorization: 'Bearer test-health-token' };
+
+      // Open the SSE stream and read the `endpoint` event to learn the sessionId.
+      // Keep the connection OPEN during the /messages POSTs (closing it would tear
+      // down the session → 404), then abort in finally.
+      const ac = new AbortController();
+      const sse = await fetch(`${baseUrl}/sse`, { headers: { ...auth, accept: 'text/event-stream' }, signal: ac.signal });
+      expect(sse.status).toBe(200);
+      const reader = sse.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let sessionId: string | null = null;
+      for (let i = 0; i < 20 && sessionId === null; i++) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const m = buf.match(/sessionId=([0-9a-fA-F-]+)/);
+        if (m) sessionId = m[1]!;
+      }
+      expect(sessionId).toEqual(expect.any(String));
+
+      try {
+        const headers = { ...auth, 'content-type': 'application/json' };
+
+        // Over-cap body → 413 (the configurable cap now applies to /messages too).
+        const oversized = JSON.stringify({ jsonrpc: '2.0', method: 'x', params: { pad: 'x'.repeat(4096) } });
+        expect(oversized.length).toBeGreaterThan(1024);
+        const tooLarge = await fetch(`${baseUrl}/messages?sessionId=${sessionId}`, { method: 'POST', headers, body: oversized });
+        expect(tooLarge.status).toBe(413);
+
+        // Under-cap valid message → NOT rejected by the cap (legit flow unchanged).
+        const ok = await fetch(`${baseUrl}/messages?sessionId=${sessionId}`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+        });
+        expect(ok.status).not.toBe(413);
+      } finally {
+        ac.abort();
+        await reader.cancel().catch(() => {});
+      }
+    });
+
+    if (saved.cap === undefined) delete process.env.AMP_MAX_BODY_BYTES; else process.env.AMP_MAX_BODY_BYTES = saved.cap;
+    if (saved.capCanon !== undefined) process.env.MEMBERRY_MAX_BODY_BYTES = saved.capCanon;
+  });
+
   it('OPT-08: catches an over-cap chunked body with no Content-Length (streaming backstop)', async () => {
     // The Content-Length early check cannot fire when the client uses
     // Transfer-Encoding: chunked (no declared length). Only the streaming

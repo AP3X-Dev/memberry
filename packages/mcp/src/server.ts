@@ -759,7 +759,37 @@ export function createAMPServer(): AMPMCPServer {
               return;
             }
 
-            await transport.handlePostMessage(req, res);
+            // OPT-73: the SSE transport would otherwise read the body itself via
+            // getRawBody(limit: 4mb) — the configurable OPT-08 cap
+            // (MEMBERRY_MAX_BODY_BYTES, default 1MB) did NOT apply to /messages, so
+            // an operator couldn't tighten the SSE POST limit and it diverged from
+            // /mcp. Pre-read with the SAME capped reader and hand the parsed body to
+            // the SDK (it uses `parsedBody ?? getRawBody(...)`, so a provided body
+            // skips its own read) → both POST paths now honor one configurable cap.
+            let parsedBody: unknown;
+            try {
+              parsedBody = await readJsonBody(req);
+            } catch (err) {
+              if (err instanceof RequestBodyTooLargeError) {
+                res.writeHead(413);
+                res.end('Payload too large');
+                req.destroy();
+              } else {
+                res.writeHead(400);
+                res.end('Parse error: Invalid JSON');
+              }
+              return;
+            }
+            // An empty body is never a valid JSON-RPC message; reject explicitly
+            // (passing undefined would make the SDK re-read the already-consumed
+            // stream).
+            if (parsedBody === undefined) {
+              res.writeHead(400);
+              res.end('Parse error: empty body');
+              return;
+            }
+
+            await transport.handlePostMessage(req, res, parsedBody);
             return;
           }
 
