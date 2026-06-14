@@ -143,7 +143,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green 1513 passed / 0 failed (wiki 287); security-reviewer PASS |
 | OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `490c3d3` | gate green 1514 passed / 0 failed (redis 69); reliability item (no sec-review) |
 | OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `b815f48` | gate green 1518 passed / 0 failed (mcp 140); security-reviewer PASS |
-| OPT-16 | Batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical) | 15 | `<c15-sha>` | gate green 1519 passed / 0 failed (retrieval 142); perf — output-identity verified |
+| OPT-16 | Batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical) | 15 | `3855d00` | gate green 1519 passed / 0 failed (retrieval 142); perf — output-identity verified |
 
 ## Failed Attempts
 
@@ -292,7 +292,7 @@ Start cycle 16 at **OPT-17** (MED, perf — EntityResolver.resolveExisting issue
 - Next: OPT-16
 
 ### Cycle 15 — 2026-06-14
-- Commit: `<c15-sha>` OPT-16: batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical)
+- Commit: `3855d00` OPT-16: batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical)
 - Item: OPT-16 — COMPLETED (first non-trivial perf refactor)
 - Mode B: clean sweep
 - Verifier (run by orchestrator — the dispatched verifier backgrounded the gate and ended without a verdict): PASS — gate 1519 passed / 0 failed, build exit 0; retrieval 141→142; ALL existing deterministic output-identity tests held (no failures), and NO assertions were removed/loosened in deterministic.test.ts (targetName mock column is additive). Perf item — no security-reviewer.
