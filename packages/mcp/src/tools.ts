@@ -27,8 +27,18 @@ export interface IConsolidationEngine {
 }
 
 export interface IScopedQuery {
-  rawCypher(cypher: string, limit: number, params?: Record<string, unknown>): Promise<Record<string, unknown>[]>;
+  rawCypher(cypher: string, limit: number, params?: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>[]>;
 }
+
+/**
+ * Bounded server-side transaction timeout (ms) for berry_grep's regex (`=~`)
+ * Cypher. assertSafeRegex() shape-rejects the worst exponential patterns up
+ * front (OPT-06); this timeout is the residual backstop (OPT-07) so any runaway
+ * server-side regex — including polynomial shapes that slip the static screen —
+ * self-aborts on Neo4j instead of pinning the shared instance for the whole
+ * deployment. Scoped to grep only; berry_query's raw path is left untouched.
+ */
+const GREP_QUERY_TIMEOUT_MS = 5000;
 
 export interface IMemoryBlockService {
   read(scope: string, name: string, sessionId?: string, tenantId?: string): Promise<{ id: string; name: string; tier: string; content: string; scope: string; session_id?: string; created_at: string; updated_at: string } | null>;
@@ -592,6 +602,13 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         grepTenant: tenantId,
       };
 
+      // SECURITY (OPT-07): only the regex path builds `=~ $grepRegex` Cypher,
+      // whose Java-regex evaluation runs server-side with no inherent bound. Bind
+      // a transaction timeout on that path so a runaway regex self-aborts instead
+      // of pinning shared Neo4j. Non-regex grep (CONTAINS) is index-friendly and
+      // keeps the prior unbounded behaviour (undefined → no transactionConfig).
+      const grepTimeoutMs = isRegex ? GREP_QUERY_TIMEOUT_MS : undefined;
+
       // Mandatory tenant isolation per node type. The default tenant also matches
       // legacy rows with no tenant_id; a named tenant matches strictly.
       const tenantIsDefault = tenantId === DEFAULT_TENANT;
@@ -695,7 +712,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         const scopeFilter = args.scope ? ' AND (e.scope = $grepScope OR $grepScope IN e.tags)' : '';
         const cypher = `MATCH (e:Episodic) WHERE (${matchExpr('e.content')} OR ${matchExpr('e.task')})${scopeFilter} AND ${tFilter('e')} RETURN e ORDER BY e.created_at DESC`;
         try {
-          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams);
+          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams, grepTimeoutMs);
           for (const row of rows) {
             const e = row.e as Record<string, unknown>;
             const content = (e.content as string) ?? '';
@@ -719,7 +736,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         const scopeFilter = args.scope ? ' AND (s.scope = $grepScope OR $grepScope IN s.tags)' : '';
         const cypher = `MATCH (s:Semantic) WHERE ${matchExpr('s.content')}${scopeFilter} AND ${tFilter('s')} RETURN s ORDER BY s.confidence DESC`;
         try {
-          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams);
+          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams, grepTimeoutMs);
           for (const row of rows) {
             const s = row.s as Record<string, unknown>;
             addResult(
@@ -738,7 +755,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         const statusFilter = ` AND f.status = 'active'`;
         const cypher = `MATCH (f:Fact) WHERE (${matchExpr('f.subject')} OR ${matchExpr('f.predicate')} OR ${matchExpr('f.object')})${scopeFilter}${statusFilter} AND ${tFilter('f')} RETURN f ORDER BY f.updated_at DESC`;
         try {
-          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams);
+          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams, grepTimeoutMs);
           for (const row of rows) {
             const f = row.f as Record<string, unknown>;
             const sub = (f.subject as string) ?? '';
@@ -762,7 +779,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         const scopeFilter = args.scope ? ' AND b.scope = $grepScope' : '';
         const cypher = `MATCH (b:MemoryBlock) WHERE (${matchExpr('b.content')} OR ${matchExpr('b.name')})${scopeFilter} AND ${tFilter('b')} RETURN b ORDER BY b.updated_at DESC`;
         try {
-          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams);
+          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams, grepTimeoutMs);
           for (const row of rows) {
             const b = row.b as Record<string, unknown>;
             const content = (b.content as string) ?? '';
@@ -791,7 +808,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         const descMatch = `ent.description IS NOT NULL AND ${matchExpr('ent.description')}`;
         const cypher = `MATCH (ent:Entity) WHERE (${matchExpr('ent.name')} OR (${descMatch}) OR ${aliasMatch}) AND ${tFilter('ent')} RETURN ent`;
         try {
-          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams);
+          const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams, grepTimeoutMs);
           for (const row of rows) {
             const ent = row.ent as Record<string, unknown>;
             const name = (ent.name as string) ?? '';

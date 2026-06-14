@@ -501,7 +501,15 @@ export class ScopedQuery {
     }
   }
 
-  async rawCypher(cypher: string, limit: number, params: Record<string, unknown> = {}): Promise<Record<string, unknown>[]> {
+  /**
+   * @param timeoutMs Optional bounded transaction timeout in milliseconds. When
+   *   set, it is passed to neo4j-driver as `transactionConfig.timeout` so the
+   *   server self-aborts a runaway query (e.g. a catastrophic `=~` regex) instead
+   *   of pinning the shared Neo4j instance — closing the residual ReDoS gap on
+   *   the grep path (OPT-07). When omitted, no transactionConfig is passed and
+   *   behaviour is identical to before (berry_query and other callers unaffected).
+   */
+  async rawCypher(cypher: string, limit: number, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<Record<string, unknown>[]> {
     // Layer 1: static validation rejects mutating constructs up front.
     validateReadOnlyCypher(cypher);
 
@@ -513,7 +521,14 @@ export class ScopedQuery {
       const safeLimit = normalizeRawCypherLimit(limit);
       const finalCypher = `CALL {\n${stripTrailingSemicolons(cypher)}\n}\nRETURN * LIMIT ${safeLimit}`;
 
-      const result = await session.run(finalCypher, params);
+      // Layer 3 (OPT-07): bounded server-side transaction timeout. Pass the
+      // timeout as a neo4j Integer (matching this file's convention for integer
+      // values handed to the driver). Only attach a transactionConfig when a
+      // valid positive timeout is supplied, so existing callers keep the exact
+      // two-arg session.run signature and behaviour.
+      const result = timeoutMs != null && Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? await session.run(finalCypher, params, { timeout: neo4j.int(timeoutMs) })
+        : await session.run(finalCypher, params);
       return result.records.map((r) => {
         const obj: Record<string, unknown> = {};
         for (const key of r.keys) {

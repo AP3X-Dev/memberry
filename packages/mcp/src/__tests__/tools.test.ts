@@ -827,6 +827,7 @@ describe('berry_grep handler', () => {
       expect.stringContaining('Semantic'),
       2,
       expect.any(Object),
+      undefined, // non-regex grep path passes no tx timeout (OPT-07: only =~ regex path is timed)
     );
 
     vi.mocked(mockScopedQuery.rawCypher).mockClear();
@@ -836,6 +837,7 @@ describe('berry_grep handler', () => {
       expect.stringContaining('Semantic'),
       20,
       expect.any(Object),
+      undefined, // non-regex grep path passes no tx timeout (OPT-07)
     );
   });
 
@@ -953,5 +955,27 @@ describe('berry_grep handler', () => {
       grepPatternLower: dangerousPattern.toLowerCase(),
       grepScope: dangerousScope,
     });
+  });
+
+  it('OPT-07: passes a bounded transaction timeout (5000ms) on the regex (=~) grep path', async () => {
+    vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([]);
+
+    const handlers = buildToolHandlers();
+    await handlers.berry_grep({ pattern: 'JWT|OAuth2', regex: true, node_types: ['semantic'] });
+
+    expect(mockScopedQuery.rawCypher).toHaveBeenCalledTimes(1);
+    const [, , , timeoutMs] = vi.mocked(mockScopedQuery.rawCypher).mock.calls[0];
+    expect(timeoutMs).toBe(5000);
+  });
+
+  it('OPT-07: leaves the non-regex grep path unbounded (timeout arg undefined)', async () => {
+    vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([]);
+
+    const handlers = buildToolHandlers();
+    await handlers.berry_grep({ pattern: 'JWT', node_types: ['semantic'] });
+
+    expect(mockScopedQuery.rawCypher).toHaveBeenCalledTimes(1);
+    const [, , , timeoutMs] = vi.mocked(mockScopedQuery.rawCypher).mock.calls[0];
+    expect(timeoutMs).toBeUndefined();
   });
 });

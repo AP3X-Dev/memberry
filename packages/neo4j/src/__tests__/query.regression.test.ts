@@ -1,5 +1,6 @@
 // packages/neo4j/src/__tests__/query.regression.test.ts
 import { describe, it, expect, vi } from 'vitest';
+import neo4j from 'neo4j-driver';
 import { ScopedQuery } from '../query.js';
 
 describe('ScopedQuery.rawCypher regression', () => {
@@ -60,6 +61,46 @@ describe('ScopedQuery.rawCypher regression', () => {
       expect.stringContaining('$grepPatternLower'),
       params,
     );
+  });
+
+  it('OPT-07: passes a bounded transaction timeout to session.run when timeoutMs is provided', async () => {
+    // SECURITY (OPT-07): a runaway server-side regex (=~) must self-abort instead
+    // of pinning the shared Neo4j instance. The grep path passes a transaction
+    // timeout (3rd arg to session.run); the driver aborts the tx when it elapses.
+    const session = {
+      run: vi.fn().mockResolvedValue({ records: [] }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const mockDriver = {
+      session: vi.fn().mockReturnValue(session),
+    };
+
+    const query = new ScopedQuery(mockDriver as never);
+    await query.rawCypher('MATCH (s:Semantic) WHERE s.content =~ $rx RETURN s', 10, { rx: '(?i).*x.*' }, 5000);
+
+    expect(session.run).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ rx: '(?i).*x.*' }),
+      expect.objectContaining({ timeout: neo4j.int(5000) }),
+    );
+  });
+
+  it('OPT-07: omits the transactionConfig arg entirely when no timeout is given (no regression)', async () => {
+    const session = {
+      run: vi.fn().mockResolvedValue({ records: [] }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const mockDriver = {
+      session: vi.fn().mockReturnValue(session),
+    };
+
+    const query = new ScopedQuery(mockDriver as never);
+    await query.rawCypher('MATCH (s:Semantic) RETURN s', 10);
+
+    // Default callers (berry_query) must reach session.run with exactly two args —
+    // no third transactionConfig — so their timeout behaviour is unchanged.
+    expect(session.run).toHaveBeenCalledTimes(1);
+    expect(session.run.mock.calls[0]).toHaveLength(2);
   });
 
   it('BUG-0001: rawCypher rejects mutating Cypher queries before reaching the database', async () => {
