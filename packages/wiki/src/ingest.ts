@@ -7,6 +7,7 @@ import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import { nanoid } from 'nanoid';
 import type { ExtractionProvider } from '@memberry/core';
+import { readEnv, redactSecrets } from '@memberry/core';
 import type { IngestInput, IngestResult } from './types.js';
 import { needsConversion, type DocumentConverter } from './document-converter.js';
 
@@ -32,11 +33,24 @@ export async function initWikiSchema(driver: Driver): Promise<void> {
 // ─── Ingestion service ──────────────────────────────────────────────────────
 
 export class IngestionService {
+  /**
+   * Secret redaction at the ingest boundary (opt-in), mirroring AmpService.store
+   * (service.ts ~424) which gates on config.redactOnIngest. Defaults to the same
+   * mechanism the core services factory uses (services-factory.ts ~144):
+   * `MEMBERRY_REDACT_ON_INGEST === 'true'`. Explicit constructor value wins so
+   * callers/tests can force it on or off without touching the env.
+   */
+  private readonly redactOnIngest: boolean;
+
   constructor(
     private driver: Driver,
     private extractor?: ExtractionProvider,
     private converter?: DocumentConverter,
-  ) {}
+    redactOnIngest?: boolean,
+  ) {
+    this.redactOnIngest =
+      redactOnIngest ?? readEnv('MEMBERRY_REDACT_ON_INGEST') === 'true';
+  }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
     const {
@@ -80,6 +94,14 @@ export class IngestionService {
       }
     } else {
       throw new Error('ingest requires either `content` or `source_path`');
+    }
+
+    // 1b. Redact secrets from the verbatim body before anything derived from it
+    // is persisted (paragraph-split brain-dump claims, auto-extraction input).
+    // Matches AmpService.store, which redacts content before persistence when the
+    // flag is on. Title/tags/entity names are structural and left untouched.
+    if (this.redactOnIngest) {
+      content = redactSecrets(content);
     }
 
     // 2. Determine title
@@ -155,7 +177,11 @@ export class IngestionService {
         project_tag,
       ];
 
-      await this.createSemanticNode(semanticId, claim.content, claim.confidence ?? baseConfidence, tags, decayClass);
+      // Redact claim content too: pre-extracted / auto-extracted claims are not
+      // derived from the (already-redacted) `content` string, so they need their
+      // own pass. Brain-dump fallback claims are redacted transitively via content.
+      const claimContent = this.redactOnIngest ? redactSecrets(claim.content) : claim.content;
+      await this.createSemanticNode(semanticId, claimContent, claim.confidence ?? baseConfidence, tags, decayClass);
       claimsStored++;
 
       // Link CITES → Source
