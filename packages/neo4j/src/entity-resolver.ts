@@ -61,53 +61,49 @@ export class EntityResolver {
     text = text.trim(); // same whitespace-insensitivity as resolve(), so lookups match
     const session = this.driver.session();
     try {
-      // Staged queries with deterministic ordering (ORDER BY created_at ASC)
-      // to ensure consistent resolution when multiple entities match.
-
-      // 1. Exact name match
-      const exact = await session.run(
-        'MATCH (e:Entity {name: $text}) RETURN e LIMIT 1',
-        { text },
-      );
-      if (exact.records.length > 0) {
-        const props = exact.records[0].get('e').properties;
-        return {
-          id: props.id as string,
-          name: props.name as string,
-          aliases: toStringArray(props.aliases),
-          matchType: 'exact',
-        };
-      }
-
-      // 2. Case-insensitive name match
-      const ci = await session.run(
-        'MATCH (e:Entity) WHERE toLower(e.name) = toLower($text) RETURN e ORDER BY e.created_at ASC LIMIT 1',
-        { text },
-      );
-      if (ci.records.length > 0) {
-        const props = ci.records[0].get('e').properties;
-        return {
-          id: props.id as string,
-          name: props.name as string,
-          aliases: toStringArray(props.aliases),
-          matchType: 'case_insensitive',
-        };
-      }
-
-      // 3. Alias match
-      const al = await session.run(
+      // Single round-trip resolution (OPT-17): one query evaluates all three
+      // match modes — exact name, case-insensitive name, alias — and returns the
+      // single best match by precedence. This replaces the prior three sequential
+      // session.run() round-trips while preserving identical resolution semantics.
+      //
+      // Precedence is enforced by a computed rank (lower wins): exact (0) beats
+      // case-insensitive (1) beats alias (2). When several entities share a rank,
+      // `created_at ASC` breaks the tie — the same deterministic ordering the
+      // staged queries used. ORDER BY rank, created_at, LIMIT 1 collapses to the
+      // exact node the cascade would have returned (an exact-name node satisfies
+      // both the exact and the CI predicate, but its rank 0 sorts ahead of any
+      // rank-1 CI-only node, so exact still wins over CI, and CI over alias).
+      const res = await session.run(
         `MATCH (e:Entity)
-         WHERE any(a IN COALESCE(e.aliases, []) WHERE toLower(a) = toLower($text))
-         RETURN e ORDER BY e.created_at ASC LIMIT 1`,
+         WHERE e.name = $text
+            OR toLower(e.name) = toLower($text)
+            OR any(a IN COALESCE(e.aliases, []) WHERE toLower(a) = toLower($text))
+         WITH e,
+              CASE
+                WHEN e.name = $text THEN 0
+                WHEN toLower(e.name) = toLower($text) THEN 1
+                ELSE 2
+              END AS rank
+         RETURN e ORDER BY rank ASC, e.created_at ASC LIMIT 1`,
         { text },
       );
-      if (al.records.length > 0) {
-        const props = al.records[0].get('e').properties;
+      if (res.records.length > 0) {
+        const props = res.records[0].get('e').properties;
+        const name = props.name as string;
+        // Derive matchType from the matched node's own props — same precedence as
+        // the rank above. (Read from props, not a returned column, so the value is
+        // robust to how the record exposes columns.)
+        const matchType: ResolvedEntity['matchType'] =
+          name === text
+            ? 'exact'
+            : name.toLowerCase() === text.toLowerCase()
+              ? 'case_insensitive'
+              : 'alias';
         return {
           id: props.id as string,
-          name: props.name as string,
+          name,
           aliases: toStringArray(props.aliases),
-          matchType: 'alias',
+          matchType,
         };
       }
 

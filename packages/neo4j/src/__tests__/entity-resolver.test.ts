@@ -132,6 +132,56 @@ describe('EntityResolver', () => {
       expect(result!.id).toBe('ent-1');
       expect(result!.matchType).toBe('exact');
     });
+
+    // OPT-17: resolveExisting collapsed 3 sequential round-trips into 1.
+    it('issues a single session.run per resolution (exact path)', async () => {
+      const { driver, run } = makeDriver([
+        { records: [mockRecord({ id: 'ent-1', name: 'AMP', aliases: [], created_at: '2026-01-01' })] },
+      ]);
+      const resolver = new EntityResolver(driver);
+
+      await resolver.resolveExisting('AMP');
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it('issues a single session.run even on a miss', async () => {
+      const { driver, run } = makeDriver([{ records: [] }]);
+      const resolver = new EntityResolver(driver);
+
+      const result = await resolver.resolveExisting('Unknown');
+      expect(result).toBeNull();
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    // Precedence is now derived from the matched node's own props. The single
+    // combined query returns the best-ranked node; matchType must reflect it.
+    it('derives case_insensitive matchType when the matched name differs only in case', async () => {
+      const { driver, run } = makeDriver([
+        { records: [mockRecord({ id: 'ent-1', name: 'AMP', aliases: [], created_at: '2026-01-01' })] },
+      ]);
+      const resolver = new EntityResolver(driver);
+
+      const result = await resolver.resolveExisting('amp');
+      expect(result!.id).toBe('ent-1');
+      expect(result!.matchType).toBe('case_insensitive');
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it('derives alias matchType when the match is via an alias', async () => {
+      const { driver, run } = makeDriver([
+        {
+          records: [
+            mockRecord({ id: 'ent-1', name: 'AMP', aliases: ['Agent Memory Protocol'], created_at: '2026-01-01' }),
+          ],
+        },
+      ]);
+      const resolver = new EntityResolver(driver);
+
+      const result = await resolver.resolveExisting('Agent Memory Protocol');
+      expect(result!.id).toBe('ent-1');
+      expect(result!.matchType).toBe('alias');
+      expect(run).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('alias accumulation', () => {

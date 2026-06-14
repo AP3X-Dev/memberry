@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1519 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1523 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -61,7 +61,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-14 | MED | Redis amp:signals stream grows unbounded — XADD no MAXLEN, consumer only XACKs | ✅ DONE (c13) | packages/redis/src/streams.ts:29-42,53-98 | DONE: approximate MAXLEN ~ SIGNALS_STREAM_MAXLEN (10_000, env-overridable) on the signals XADD; MAXLEN-alone (no XDEL-after-XACK — multi-consumer-group-unsafe); consumer/ack semantics unchanged +1 test. Verifier PASS 1514/0 (redis 69). Nit: raw process.env vs readEnv (non-blocking). Episodic-buffer cap→OPT-79. |  |
 | OPT-15 | MED | berry_ingest_codebase path arg has no confinement, unlike sibling code tools | ✅ DONE (c14) | packages/mcp/src/tools.ts:951-960 | DONE: confine args.path before scan/index (resolve + baseDir=cwd + startsWith(base+sep), byte-identical to sibling code tools) +4 tests. Verifier PASS 1518/0 (mcp 140; RED-confirmed by reverting guard); security-reviewer PASS (only fs-path input; confined before any read). Residual lexical-only symlink→OPT-74. |  |
 | OPT-16 | MED | DeterministicAssembler ~6 sequential queries per target entity, each own session (N+1) | ✅ DONE (c15) | packages/retrieval/src/deterministic.ts:50-155,220-347 | DONE: 5 per-step UNWIND batches (6×T→6 queries) + CALL{} subqueries to preserve per-target LIMIT 10 + aspect UNION dedup; target order driven by JS loop (output byte-identical) +1 batching test. Verifier(self): PASS 1519/0 — all existing deterministic output-identity tests held, NO assertions loosened (targetName mock col additive). Perf item (no sec-review). |  |
-| OPT-17 | MED | EntityResolver.resolveExisting 3 sequential round-trips per call on every fact hot path | pending | packages/neo4j/src/entity-resolver.ts:60-118 | persisted name_lower + index, collapse CI/alias to one indexed query; suite green |  |
+| OPT-17 | MED | EntityResolver.resolveExisting 3 sequential round-trips per call on every fact hot path | ✅ DONE (c16) | packages/neo4j/src/entity-resolver.ts:60-118 | DONE (safe non-migration): collapsed 3 sequential queries (exact/CI/alias) into 1 precedence-ranked query (CASE rank + ORDER BY rank,created_at LIMIT 1); matchType derived in TS; 3→1 round-trips; precedence/trim/create-on-miss preserved +4 tests. Verifier PASS 1523/0 (neo4j 197). Indexed name_lower migration deferred→OPT-80 (needs approval). |  |
 | OPT-18 | MED | (≡OPT-14) amp:signals stream never trimmed | ✅ DONE (c13, no-op) | packages/redis/src/streams.ts:29-42,53-98 | COVERED by OPT-14 (MAXLEN ~ on the signals XADD bounds the stream). | confirm-before-removing |
 | OPT-19 | MED | Dedup key set before persistence with no rollback — failed store() swallows the memory for 24h | pending | packages/core/src/service.ts:435-484 | unmark dedup key on store failure (try/catch + DedupChecker.unmark); new test proves retry possible after failure; suite green | confirm-before-removing |
 | OPT-20 | MED | Retrieval/code/intent embed via raw OpenAIEmbedding — Redis EmbeddingCache exists but never wired in | pending | packages/core/src/services-factory.ts:132,174,235,302 | wrap OpenAIEmbedding in a read-through caching provider using EmbeddingCache; inject it; test asserts cache hit on repeat; suite green |  |
@@ -123,6 +123,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-76 | MED | Core memory blocks (incl. the dream project_card) are injected into every agent session via renderBlocksMarkdown as `### name\n<content>` with NO untrusted-data delimiter — the full fix for the OPT-11 second-order channel (OPT-11 mitigates at generation+sanitize, not at injection). | pending | packages/core/src/service.ts:811-837 (renderBlocksMarkdown), 291-302 | wrap auto-generated/untrusted-derived core blocks in a session-level untrusted-data fence + guard so the agent treats injected block content as data, not directions; test pins the fence; suite green. Source: security-reviewing OPT-11. |  |
 | OPT-77 | LOW | extract.ts FACT_EXTRACTION_PROMPT feeds untrusted content.slice(0,4000) into the LLM user message with NO fence/guard (lower risk: JSON-mode structured-triple output + OPT-04 validateFactResponse downstream, so worst case is a malicious triple that gets dropped). Consistency gap vs OPT-10/OPT-11. | pending | packages/core/src/extract.ts:127-136 | mirror the untrusted-data fence + guard on the extraction prompt (the content is data to extract triples from, never instructions); test pins it; suite green. Source: security-reviewing OPT-11. |  |
 | OPT-79 | LOW | amp:episodic-buffer Redis stream has no MAXLEN on add — partially self-bounding via flush() XDEL, but events for never-flushed sessions accumulate unbounded. Also: SIGNALS_STREAM_MAXLEN uses raw process.env not the readEnv helper (minor consistency). | pending | packages/redis/src/streams.ts (EpisodicBuffer.add ~; SIGNALS_STREAM_MAXLEN ~24) | add a matching MAXLEN ~ safety cap to the episodic-buffer XADD; optionally route SIGNALS_STREAM_MAXLEN through readEnv for consistency; test pins bounded growth; suite green. Source: implementing/verifying OPT-14. |  |
+| OPT-80 | LOW | (deferred enhancement, needs approval) EntityResolver CI/alias resolution still does a toLower(e.name) scan + alias-array scan unservable by the entity_name index — make it index-backed. | pending | packages/neo4j/src/entity-resolver.ts; packages/neo4j/src/schema.ts + migrations.ts | add persisted :Entity.name_lower property + index (and lowercased-alias index), rewrite resolveExisting to equality-match name_lower; REQUIRES a schema migration + backfill of name_lower on existing nodes → HUMAN APPROVAL before running. Source: implementing OPT-17. |  |
 | OPT-78 | LOW | Redaction (store + ingest paths) only covers content/task fields — structural free-text fields (title, tags, entity/claim names) persist verbatim, so a secret pasted into a title/tag/entity name is not masked even with MEMBERRY_REDACT_ON_INGEST on. | pending | packages/wiki/src/ingest.ts (title/tags/about); packages/core/src/service.ts:421-430 | when redactOnIngest, also redactSecrets the title (at minimum) + tags on both ingest and store paths; test pins a secret in a title is masked; suite green. Source: security-reviewing OPT-12. |  |
 
 ## Completed Tasks
@@ -144,6 +145,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `490c3d3` | gate green 1514 passed / 0 failed (redis 69); reliability item (no sec-review) |
 | OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `b815f48` | gate green 1518 passed / 0 failed (mcp 140); security-reviewer PASS |
 | OPT-16 | Batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical) | 15 | `3855d00` | gate green 1519 passed / 0 failed (retrieval 142); perf — output-identity verified |
+| OPT-17 | Collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query | 16 | `<c16-sha>` | gate green 1523 passed / 0 failed (neo4j 197); perf — precedence preserved |
 
 ## Failed Attempts
 
@@ -175,7 +177,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 16 at **OPT-17** (MED, perf — EntityResolver.resolveExisting issues 3 sequential round-trips per call on every fact read/write hot path; add a persisted name_lower property + index and collapse CI/alias resolution to one indexed query, `packages/neo4j/src/entity-resolver.ts:60-118`). NOTE: this may touch the Neo4j schema/migrations (adding an index + a persisted property) — if it requires a schema migration or a backfill of name_lower on existing nodes, that's an on-disk/graph-schema change → STOP and write a Blocked row for human approval per the rules, OR do the smallest version that adds the index without a destructive backfill (new writes get name_lower; reads fall back). Then OPT-19 (dedup rollback), OPT-20 (embedding cache), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 17 at **OPT-19** (MED, reliability — dedup key is set BEFORE persistence with no rollback, so a failed store() permanently swallows the memory for 24h; wrap the post-mark body in try/catch and delete the dedup key on failure before rethrowing, add DedupChecker.unmark, `packages/core/src/service.ts:435-484`; confirm-before-removing tag is a false-positive — it's adding rollback, not removing). (OPT-18 done as no-op dup.) Then OPT-20 (embedding cache), OPT-21 (fact invalidate+create atomicity), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -298,3 +300,11 @@ Start cycle 16 at **OPT-17** (MED, perf — EntityResolver.resolveExisting issue
 - Verifier (run by orchestrator — the dispatched verifier backgrounded the gate and ended without a verdict): PASS — gate 1519 passed / 0 failed, build exit 0; retrieval 141→142; ALL existing deterministic output-identity tests held (no failures), and NO assertions were removed/loosened in deterministic.test.ts (targetName mock column is additive). Perf item — no security-reviewer.
 - Metrics: passing 1518→1519 (floor 1519); skipped 16
 - Next: OPT-17
+
+### Cycle 16 — 2026-06-14
+- Commit: `<c16-sha>` OPT-17: collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query
+- Item: OPT-17 — COMPLETED (safe non-migration 3→1 collapse)
+- Mode B: 1 discovery → OPT-80 (LOW, deferred/needs-approval: indexed name_lower migration for index-backed CI/alias resolution)
+- Verifier: PASS (1523 passed, 0 failed, build exit 0; neo4j 193→197; precedence exact>CI>alias preserved via CASE rank; existing entity-resolver contract tests held) | perf item — no security-reviewer
+- Metrics: passing 1519→1523 (floor 1523); skipped 16
+- Next: OPT-19
