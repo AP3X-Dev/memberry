@@ -152,7 +152,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-20 (+OPT-65) | Read-through embedding cache wired into hot paths | 18 | `3c82078` | gate green 1532 passed / 0 failed (core 336); perf — behavior-identical on miss |
 | OPT-21 | Create-before-invalidate fact supersession (no data loss on mid-failure) | 19 | `c071375` | gate green 1534 passed / 0 failed (core 338); reliability (no sec-review) |
 | OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `a39fcfe` | gate green 1537 passed / 0 failed (wiki 290); perf — result-identical |
-| OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `<c21-sha>` | gate green 1540 passed / 0 failed (code 117); perf — graph-identical |
+| OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `17fc63d` | gate green 1540 passed / 0 failed (code 117); perf — graph-identical |
 
 ## Failed Attempts
 
@@ -349,7 +349,7 @@ Start cycle 22 at **OPT-24** (MED, ops — docker-compose mcp service omits MEMB
 - Next: OPT-23
 
 ### Cycle 21 — 2026-06-14
-- Commit: `<c21-sha>` OPT-23: batch per-file symbol upserts into one UNWIND MERGE
+- Commit: `17fc63d` OPT-23: batch per-file symbol upserts into one UNWIND MERGE
 - Item: OPT-23 — COMPLETED
 - Mode B: 1 discovery → OPT-82 (LOW: batch relation-edge resolution N+1)
 - Verifier: PASS (1540 passed, 0 failed, build exit 0; code 114→117; graph-identity verified — ON CREATE=create props, ON MATCH=update subset, marker removed before RETURN, content-hash skip preserved; RED-confirmed) | perf item — no security-reviewer
