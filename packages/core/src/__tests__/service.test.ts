@@ -61,6 +61,7 @@ function makeRedis(overrides: Partial<RedisLayer> = {}): RedisLayer {
       isDuplicate: vi.fn().mockResolvedValue(false),
       markSeen: vi.fn().mockResolvedValue(undefined),
       checkAndMark: vi.fn().mockResolvedValue(false),
+      unmark: vi.fn().mockResolvedValue(undefined),
     },
     signals: {
       publish: vi.fn().mockResolvedValue('stream-id-1'),
@@ -252,6 +253,7 @@ describe('AMPService.store', () => {
         isDuplicate: vi.fn().mockResolvedValue(true),
         markSeen: vi.fn().mockResolvedValue(undefined),
         checkAndMark: vi.fn().mockResolvedValue(true),
+        unmark: vi.fn().mockResolvedValue(undefined),
       },
     });
     const neo4j = makeNeo4j();
@@ -397,6 +399,133 @@ describe('AMPService.store', () => {
     // embedding.embed should NOT be called since cache hit
     expect(embedding.embed).not.toHaveBeenCalled();
     expect(redis.embeddings.set).not.toHaveBeenCalled();
+  });
+});
+
+// ─── OPT-19: dedup key rollback on persistence failure ──────────────────────
+// The dedup key is MARKED (checkAndMark, SET NX) before persistence. If
+// persistence then throws, the key must be RELEASED (unmark) before the error
+// propagates — otherwise a retry of identical content is silently swallowed as a
+// duplicate for the 24h TTL, losing the memory.
+describe('AMPService.store — dedup rollback on persistence failure', () => {
+  it('releases the dedup key and rethrows the original error when persistence throws', async () => {
+    const persistErr = new Error('neo4j unavailable');
+    const redis = makeRedis();
+    const neo4j = makeNeo4j({
+      episodic: {
+        // Persistence fails: episodic.create rejects.
+        create: vi.fn().mockRejectedValue(persistErr),
+        linkToAgent: vi.fn().mockResolvedValue(undefined),
+        linkToEntity: vi.fn().mockResolvedValue(undefined),
+        linkToModel: vi.fn().mockResolvedValue(undefined),
+        linkSignal: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+    const embedding = makeEmbedding();
+    const service = new AMPService(redis, neo4j, embedding, makeConfig());
+
+    const input: EpisodeInput = {
+      session_id: 'sess-rollback-1',
+      agent_id: 'agent-1',
+      task: 'test task',
+      content: 'Content whose persistence fails',
+    };
+
+    // (a) The original persistence error propagates (not swallowed).
+    await expect(service.store(input)).rejects.toBe(persistErr);
+
+    // (b) The dedup key was marked, then released so a retry is not swallowed.
+    expect(redis.dedup.checkAndMark).toHaveBeenCalledOnce();
+    expect(redis.dedup.unmark).toHaveBeenCalledOnce();
+    // unmark uses the SAME agent/hash args as checkAndMark.
+    const markArgs = vi.mocked(redis.dedup.checkAndMark).mock.calls[0];
+    const unmarkArgs = vi.mocked(redis.dedup.unmark).mock.calls[0];
+    expect(unmarkArgs[0]).toBe(markArgs[0]);
+    expect(unmarkArgs[1]).toBe(markArgs[1]);
+  });
+
+  it('does NOT swallow a retry of the same content after a failed store (key released)', async () => {
+    // Simulate a real dedup keyed by content using an in-memory set, so the
+    // retry path is exercised end-to-end (not just an unmark spy assertion).
+    const seen = new Set<string>();
+    const realDedup = {
+      isDuplicate: vi.fn(async (a: string, h: string) => seen.has(`${a}:${h}`)),
+      markSeen: vi.fn(async (a: string, h: string) => { seen.add(`${a}:${h}`); }),
+      checkAndMark: vi.fn(async (a: string, h: string) => {
+        const k = `${a}:${h}`;
+        if (seen.has(k)) return true; // duplicate
+        seen.add(k);
+        return false;
+      }),
+      unmark: vi.fn(async (a: string, h: string) => { seen.delete(`${a}:${h}`); }),
+    };
+    const redis = makeRedis({ dedup: realDedup });
+
+    // First attempt: persistence fails.
+    const neo4jFail = makeNeo4j({
+      episodic: {
+        create: vi.fn().mockRejectedValue(new Error('transient db error')),
+        linkToAgent: vi.fn().mockResolvedValue(undefined),
+        linkToEntity: vi.fn().mockResolvedValue(undefined),
+        linkToModel: vi.fn().mockResolvedValue(undefined),
+        linkSignal: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+    const embedding = makeEmbedding();
+    const input: EpisodeInput = {
+      session_id: 'sess-rollback-2',
+      agent_id: 'agent-1',
+      task: 'test task',
+      content: 'Same content stored twice',
+    };
+
+    const serviceFail = new AMPService(redis, neo4jFail, embedding, makeConfig());
+    await expect(serviceFail.store(input)).rejects.toThrow('transient db error');
+
+    // Retry: persistence succeeds. Because the key was released, this is NOT
+    // treated as a duplicate — it proceeds to persist again.
+    const neo4jOk = makeNeo4j();
+    const serviceOk = new AMPService(redis, neo4jOk, embedding, makeConfig());
+    const result = await serviceOk.store(input);
+
+    expect(result.duplicate).toBe(false);
+    expect(result.id).toBeTruthy();
+    expect(neo4jOk.episodic.create).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the dedup key on success so a second identical store IS deduped', async () => {
+    // Happy path: real in-memory dedup. First store succeeds and the key stays
+    // marked; the second identical store is correctly swallowed as a duplicate.
+    const seen = new Set<string>();
+    const realDedup = {
+      isDuplicate: vi.fn(async (a: string, h: string) => seen.has(`${a}:${h}`)),
+      markSeen: vi.fn(async (a: string, h: string) => { seen.add(`${a}:${h}`); }),
+      checkAndMark: vi.fn(async (a: string, h: string) => {
+        const k = `${a}:${h}`;
+        if (seen.has(k)) return true;
+        seen.add(k);
+        return false;
+      }),
+      unmark: vi.fn(async (a: string, h: string) => { seen.delete(`${a}:${h}`); }),
+    };
+    const redis = makeRedis({ dedup: realDedup });
+    const embedding = makeEmbedding();
+    const input: EpisodeInput = {
+      session_id: 'sess-happy-dedup',
+      agent_id: 'agent-1',
+      task: 'test task',
+      content: 'Identical content stored twice on the happy path',
+    };
+
+    const first = await new AMPService(redis, makeNeo4j(), embedding, makeConfig()).store(input);
+    expect(first.duplicate).toBe(false);
+    expect(first.id).toBeTruthy();
+
+    const second = await new AMPService(redis, makeNeo4j(), embedding, makeConfig()).store(input);
+    expect(second.duplicate).toBe(true);
+    expect(second.id).toBe('');
+    // Success path never releases the key.
+    expect(realDedup.unmark).not.toHaveBeenCalled();
   });
 });
 

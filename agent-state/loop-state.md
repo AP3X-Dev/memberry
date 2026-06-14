@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1523 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1526 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -63,7 +63,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-16 | MED | DeterministicAssembler ~6 sequential queries per target entity, each own session (N+1) | ✅ DONE (c15) | packages/retrieval/src/deterministic.ts:50-155,220-347 | DONE: 5 per-step UNWIND batches (6×T→6 queries) + CALL{} subqueries to preserve per-target LIMIT 10 + aspect UNION dedup; target order driven by JS loop (output byte-identical) +1 batching test. Verifier(self): PASS 1519/0 — all existing deterministic output-identity tests held, NO assertions loosened (targetName mock col additive). Perf item (no sec-review). |  |
 | OPT-17 | MED | EntityResolver.resolveExisting 3 sequential round-trips per call on every fact hot path | ✅ DONE (c16) | packages/neo4j/src/entity-resolver.ts:60-118 | DONE (safe non-migration): collapsed 3 sequential queries (exact/CI/alias) into 1 precedence-ranked query (CASE rank + ORDER BY rank,created_at LIMIT 1); matchType derived in TS; 3→1 round-trips; precedence/trim/create-on-miss preserved +4 tests. Verifier PASS 1523/0 (neo4j 197). Indexed name_lower migration deferred→OPT-80 (needs approval). |  |
 | OPT-18 | MED | (≡OPT-14) amp:signals stream never trimmed | ✅ DONE (c13, no-op) | packages/redis/src/streams.ts:29-42,53-98 | COVERED by OPT-14 (MAXLEN ~ on the signals XADD bounds the stream). | confirm-before-removing |
-| OPT-19 | MED | Dedup key set before persistence with no rollback — failed store() swallows the memory for 24h | pending | packages/core/src/service.ts:435-484 | unmark dedup key on store failure (try/catch + DedupChecker.unmark); new test proves retry possible after failure; suite green | confirm-before-removing |
+| OPT-19 | MED | Dedup key set before persistence with no rollback — a failed store() permanently swallows the memory for 24h | ✅ DONE (c17) | packages/core/src/service.ts:435-484 | DONE: DedupChecker.unmark releases the key; store() wraps persistence in try/catch → unmark-then-rethrow original error (mark stays before persist → TOCTOU/BUG-0020 intact); +3 tests. Verifier PASS 1526/0 (core 330; RED-confirmed). Reliability (no sec-review). |  |
 | OPT-20 | MED | Retrieval/code/intent embed via raw OpenAIEmbedding — Redis EmbeddingCache exists but never wired in | pending | packages/core/src/services-factory.ts:132,174,235,302 | wrap OpenAIEmbedding in a read-through caching provider using EmbeddingCache; inject it; test asserts cache hit on repeat; suite green |  |
 | OPT-21 | MED | Fact invalidate + create-replacement are two transactions — mid-failure leaves a fact with no successor (data loss) | pending | packages/core/src/service.ts:680-686 | create-before-invalidate ordering (or one tx); new test proves no fact lost on mid-failure; suite green |  |
 | OPT-22 | MED | fetchEpisodicsForEntity unindexed full :Episodic substring scan, once/twice per entity on compile | pending | packages/wiki/src/queries.ts:215-240 | prefer indexed :MODIFIED, gate CONTAINS behind it, or one UNWIND batch; suite green |  |
@@ -146,6 +146,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `b815f48` | gate green 1518 passed / 0 failed (mcp 140); security-reviewer PASS |
 | OPT-16 | Batch DeterministicAssembler per-step queries via UNWIND (6×T→6, output-identical) | 15 | `3855d00` | gate green 1519 passed / 0 failed (retrieval 142); perf — output-identity verified |
 | OPT-17 | Collapse EntityResolver.resolveExisting 3 sequential queries into 1 precedence-ranked query | 16 | `5b3127f` | gate green 1523 passed / 0 failed (neo4j 197); perf — precedence preserved |
+| OPT-19 | Release dedup key on failed store() so retries aren't swallowed (unmark + rollback) | 17 | `<c17-sha>` | gate green 1526 passed / 0 failed (core 330); reliability (no sec-review) |
 
 ## Failed Attempts
 
@@ -177,7 +178,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 17 at **OPT-19** (MED, reliability — dedup key is set BEFORE persistence with no rollback, so a failed store() permanently swallows the memory for 24h; wrap the post-mark body in try/catch and delete the dedup key on failure before rethrowing, add DedupChecker.unmark, `packages/core/src/service.ts:435-484`; confirm-before-removing tag is a false-positive — it's adding rollback, not removing). (OPT-18 done as no-op dup.) Then OPT-20 (embedding cache), OPT-21 (fact invalidate+create atomicity), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 18 at **OPT-20** (MED, perf — retrieval/code/intent hot paths use the raw OpenAIEmbedding with NO query-embedding cache, though a Redis EmbeddingCache exists but is never wired in; wrap OpenAIEmbedding in a read-through caching provider using the existing EmbeddingCache and inject THAT, `packages/core/src/services-factory.ts:132,174,235,302`). This also subsumes OPT-65 (and helps OPT-49/50). Then OPT-21 (fact invalidate+create atomicity), OPT-22 (wiki episodic scan), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -308,3 +309,11 @@ Start cycle 17 at **OPT-19** (MED, reliability — dedup key is set BEFORE persi
 - Verifier: PASS (1523 passed, 0 failed, build exit 0; neo4j 193→197; precedence exact>CI>alias preserved via CASE rank; existing entity-resolver contract tests held) | perf item — no security-reviewer
 - Metrics: passing 1519→1523 (floor 1523); skipped 16
 - Next: OPT-19
+
+### Cycle 17 — 2026-06-14
+- Commit: `<c17-sha>` OPT-19: release dedup key on failed store() so retries aren't swallowed
+- Item: OPT-19 — COMPLETED
+- Mode B: clean sweep
+- Verifier: PASS (1526 passed, 0 failed, build exit 0; core 327→330; RED-confirmed: reverting service.ts+dedup.ts fails the 2 behavioral tests; BUG-0020 TOCTOU regression intact; mark stays before persist) | reliability item — no security-reviewer
+- Metrics: passing 1523→1526 (floor 1526); skipped 16
+- Next: OPT-20

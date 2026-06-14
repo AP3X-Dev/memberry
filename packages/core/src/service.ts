@@ -41,6 +41,7 @@ export interface RedisLayer {
     isDuplicate(agentId: string, contentHash: string): Promise<boolean>;
     markSeen(agentId: string, contentHash: string, ttl?: number): Promise<void>;
     checkAndMark(agentId: string, contentHash: string, ttl?: number): Promise<boolean>;
+    unmark(agentId: string, contentHash: string): Promise<void>;
   };
   signals: {
     publish(signal: StreamSignal): Promise<string>;
@@ -435,11 +436,16 @@ export class AMPService {
     // 1. Atomic dedup check-and-mark (prevents TOCTOU race between isDuplicate/markSeen).
     // Namespaced by tenant so identical content in two tenants isn't cross-deduped.
     const contentHash = createHash('sha256').update(input.content).digest('hex');
-    const isDup = await this.redis.dedup.checkAndMark(`${tenantId}:${input.agent_id}`, contentHash);
+    const dedupAgentKey = `${tenantId}:${input.agent_id}`;
+    const isDup = await this.redis.dedup.checkAndMark(dedupAgentKey, contentHash);
     if (isDup) {
       return { id: '', duplicate: true };
     }
 
+    // From here the dedup key is MARKED. If persistence fails we must release it
+    // (unmark) before rethrowing, otherwise a retry of identical content would be
+    // silently swallowed as a duplicate for the 24h TTL — losing the memory.
+    try {
     // 2. Generate embedding with cache
     let embedding: number[] | undefined;
     const cachedEmb = await this.redis.embeddings.get(input.content);
@@ -558,6 +564,18 @@ export class AMPService {
     }
 
     return { id, duplicate: false };
+    } catch (err) {
+      // Persistence failed after the dedup key was marked. Release the key so a
+      // retry of the same content is NOT treated as a duplicate, then rethrow the
+      // ORIGINAL error unchanged (never swallow it). Best-effort: if unmark itself
+      // fails, surface the original persistence error, not the unmark error.
+      try {
+        await this.redis.dedup.unmark(dedupAgentKey, contentHash);
+      } catch {
+        /* unmark failed; the original error below is the meaningful one */
+      }
+      throw err;
+    }
   }
 
   /**

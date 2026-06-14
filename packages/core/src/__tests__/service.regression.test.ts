@@ -30,6 +30,7 @@ function makeRedis(overrides: Partial<RedisLayer> = {}): RedisLayer {
       isDuplicate: vi.fn().mockResolvedValue(false),
       markSeen: vi.fn().mockResolvedValue(undefined),
       checkAndMark: vi.fn().mockResolvedValue(false),
+      unmark: vi.fn().mockResolvedValue(undefined),
     },
     signals: {
       publish: vi.fn().mockResolvedValue('stream-id-1'),

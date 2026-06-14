@@ -32,4 +32,14 @@ export class DedupChecker {
     // SET ... NX returns 'OK' if the key was set (not a duplicate), null if it already existed (duplicate)
     return result === null;
   }
+
+  /**
+   * Release a dedup key previously set via markSeen/checkAndMark. Used to roll
+   * back the dedup mark when downstream persistence fails, so a retry of the
+   * same content is not silently swallowed as a duplicate for the 24h TTL.
+   * Uses the SAME key construction as mark.
+   */
+  async unmark(agentId: string, contentHash: string): Promise<void> {
+    await this.redis.del(dedupKey(agentId, contentHash));
+  }
 }

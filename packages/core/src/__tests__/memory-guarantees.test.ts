@@ -28,7 +28,7 @@ function makeRedis(): RedisLayer {
   return {
     cache: { get: vi.fn().mockResolvedValue(null), set: vi.fn().mockResolvedValue(undefined), invalidateByScope: vi.fn().mockResolvedValue(0), invalidateByNodeId: vi.fn().mockResolvedValue(0) },
     embeddings: { get: vi.fn().mockResolvedValue(null), set: vi.fn().mockResolvedValue(undefined) },
-    dedup: { isDuplicate: vi.fn().mockResolvedValue(false), markSeen: vi.fn().mockResolvedValue(undefined), checkAndMark: vi.fn().mockResolvedValue(false) },
+    dedup: { isDuplicate: vi.fn().mockResolvedValue(false), markSeen: vi.fn().mockResolvedValue(undefined), checkAndMark: vi.fn().mockResolvedValue(false), unmark: vi.fn().mockResolvedValue(undefined) },
     signals: { publish: vi.fn().mockResolvedValue('s') }, queue: { incrementScore: vi.fn().mockResolvedValue(1) },
   };
 }
