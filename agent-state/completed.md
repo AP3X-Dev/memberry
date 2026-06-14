@@ -36,3 +36,4 @@
 | OPT-32 | Per-item evidence cap for berry_ask synthesis (one oversized memory can't dominate the prompt) | 30 | `d023c6a` | gate green: 1586 passed / 0 failed (retrieval 156), build 0; perf/hardening (verifier-only) |
 | OPT-33 | Broaden secret redaction (Stripe/Bearer/escaped-quote/keywords) | 31 | `607f1ae` | gate green: 1592 passed / 0 failed (core 353), build 0; security-reviewer PASS |
 | OPT-34 | Dedupe graph redactor to @memberry/core (fix github_pat_ export drift) | 31 | `607f1ae` | gate green: 1592 passed / 0 failed (graph 54), build 0; security-reviewer PASS |
+| OPT-35 | Size guard for CodeIndexer parseFile (stat-and-skip > 2 MiB) | 32 | `5a46f84` | gate green: 1595 passed / 0 failed (code 120), build 0; hardening (verifier-only) |
