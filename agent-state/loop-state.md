@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1472 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1480 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -48,7 +48,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-01 | CRIT | berry_ask/berry_context (ranked) leak another tenant's indexed code via the un-tenant-filtered code-search channel | ✅ DONE (c1) | packages/retrieval/src/assembler.ts:301-321; packages/code/src/search.ts | DONE: gated channel on isDefaultTenant(tenant) in assembleRanked + 2 tests. Verifier PASS 1463/0; security-reviewer PASS (single chokepoint, satellite code tools withheld from tenants). |  |
 | OPT-02 | HIGH | Multi-tenant SSE/Streamable sessions not bound to the authenticating token — any valid token can drive another tenant's session | ✅ DONE (c2) | packages/mcp/src/server.ts:435-525 | DONE: sessionIdentity map binds {tenant,actor} at creation; /messages + /mcp follow-ups 403 on mismatch + 2 tests. Verifier PASS 1465/0 (mcp 126); security-reviewer PASS (both dispatch paths guarded, no empty-binding window). |  |
 | OPT-03 | HIGH | Untrusted stored episode content triggers arbitrary source-file reads into the graph (post-store re-index hook, no path confinement) | ✅ DONE (c3) | packages/mcp/src/bootstrap.ts:238-253; packages/code/src/watcher.ts; packages/code/src/indexer.ts | DONE: confineReindexPath (lexical prefix + realpath symlink layers, base=MEMBERRY_INGEST_ALLOW_DIR??cwd) applied in the store hook, drop+log, never throws; +7 tests. Verifier PASS 1472/0 (code 114); security-reviewer PASS (fully closed on Linux; TOCTOU→OPT-68). | confirm-before-removing |
-| OPT-04 | HIGH | extractFacts trusts LLM predicates/values — injected content mints arbitrary active/deductive facts (graph poisoning) | pending | packages/core/src/extract.ts:35-57,61-71,90-119 | hard canonical-predicate allowlist in validateFactResponse (drop/quarantine non-allowed); clamp injected-origin facts to tentative; new test proves a bogus predicate is dropped; suite green | confirm-before-removing |
+| OPT-04 | HIGH | extractFacts trusts LLM predicates/values — injected content mints arbitrary active/deductive facts (graph poisoning) | ✅ DONE (c4) | packages/core/src/extract.ts:35-57,61-71,90-119 | DONE: validateFactResponse drops facts whose predicate isn't snake_case `^[a-z][a-z0-9_]{0,40}$` or whose subject/object empty/>200 chars (covers all 3 extractFacts call sites incl. consolidation) +8 tests. Chose format-validation over brittle allowlist; status-clamp deferred→OPT-70. Verifier PASS 1480/0 (core 321); security-reviewer PASS. | confirm-before-removing |
 | OPT-05 | HIGH | redactSecrets misses JSON-quoted credentials ("password":"value") | pending | packages/core/src/redact.ts:32-33,42-48 | broaden SECRET_ASSIGNMENT to optional-quoted keys; add JSON-shape cases to redact.test.ts (RED first); keep graph/allowlist.ts in sync; suite green |  |
 | OPT-06 | HIGH | berry_grep compiles attacker regex with new RegExp + .test/.exec on untrusted content — event-loop ReDoS | pending | packages/mcp/src/tools.ts:562-568,619-620,685,730,752,781 | run user regex through a linear-time matcher (re2) or reject via static ReDoS check + cap scanned text length; new test proves a catastrophic pattern does not hang; suite green. (re2 dep → Blocked first) |  |
 | OPT-07 | HIGH | berry_grep passes raw user regex into Cypher =~ with no transaction timeout — Neo4j-side ReDoS | pending | packages/mcp/src/tools.ts:574,588-596,677,701,720,744,773 | bounded transaction timeout on grep rawCypher (session.run timeout/transactionConfig) + pre-screen pattern; new test asserts the timeout is set; suite green |  |
@@ -75,7 +75,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-28 | LOW | HTTP server sets no headersTimeout/requestTimeout — slowloris DoS | pending | packages/mcp/src/server.ts:382-543 | set headersTimeout/requestTimeout/keepAliveTimeout after createServer; test asserts they are set; suite green |  |
 | OPT-29 | LOW | Multi-tenant: non-tenant tokens authenticate but silently fall back to default tenant | pending | packages/mcp/src/server.ts:296-307 | in multiTenantMode reject tokens not in tokenToTenant (or require explicit flag); new test; suite green |  |
 | OPT-30 | LOW | Token parsing splits on ',' and ':' with no escaping/validation — tokens with those chars silently corrupt | pending | packages/mcp/src/server.ts:218-246 | validate token length, warn on skipped pairs, document constraint; suite green |  |
-| OPT-31 | LOW | Consolidation re-extracts facts via the same unvalidated predicate path on autoApply with no human gate | pending | packages/core/src/consolidation.ts:501-583 | share the OPT-04 predicate allowlist in extractFacts; gate extraction-driven invalidation; suite green |  |
+| OPT-31 | LOW | Consolidation re-extracts facts via the same unvalidated predicate path on autoApply with no human gate | partial (c4) | packages/core/src/consolidation.ts:501-583 | predicate-shape validation half DONE via OPT-04 (consolidation's extractFacts calls now route through the hardened validateFactResponse). REMAINING: gate extraction-driven fact INVALIDATION (autoApply dispute path) behind a confidence/human gate. |  |
 | OPT-32 | LOW | berry_ask evidence items have no per-item length cap — one oversized memory dominates the synthesis prompt | pending | packages/retrieval/src/assembler.ts:138-164,539-573 | per-item char/token cap before concat; suite green |  |
 | OPT-33 | LOW | redactSecrets misses AWS secret keys, Bearer tokens, Stripe keys, generic high-entropy | pending | packages/core/src/redact.ts:16-26,32-33 | add the missing patterns (RED tests first); sync graph/allowlist.ts; suite green |  |
 | OPT-34 | LOW | Graph export redaction omits github_pat_ fine-grained PAT the core redactor catches | pending | packages/graph/src/allowlist.ts:99-108 | dedupe by importing core SECRET_PATTERNS; test asserts github_pat_ redacted in export; suite green |  |
@@ -113,6 +113,9 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-66 | INFO | Intent classifier recomputes exemplar L2 norms every query despite caching vectors | pending | packages/retrieval/src/intent.ts:216-235,247-251 | precompute+cache exemplar norms alongside vectors; suite green |  |
 | OPT-67 | LOW | DeterministicAssembler entity/aspect/semantic queries are NOT tenant-filtered — rely on tools.ts:147 routing guard, not data-layer isolation (defense-in-depth gap; not a live leak). Mirrors the query.ts byEntity/byTag/expandByGraph unscoped-read class. | pending | packages/retrieval/src/assembler.ts:402-412; packages/retrieval/src/deterministic.ts; packages/neo4j/src/query.ts:142,163,356,418 | thread tenantId into DeterministicAssembler + add tenantWhere to its queries (and to byEntity/byTag/byEntityWithFacts/expandByGraph); test proves a tenant can't read another tenant's entities even if routed to deterministic; suite green. Source: found verifying OPT-01. |  |
 | OPT-68 | LOW | TOCTOU in re-index confinement: reindexFile re-checks existence after the 3s debounce but does NOT re-confine/realpath, so a symlink swapped into the base within the window could redirect the read past OPT-03's queue-time check. | pending | packages/code/src/watcher.ts (reindexFile ~221-247); packages/code/src/indexer.ts:132-172 | re-confine (or lstat/O_NOFOLLOW) inside reindexFile before parseFile reads; test proves a post-queue symlink swap is rejected; suite green. Source: found security-reviewing OPT-03. Low: needs local write to base within 3s. |  |
+| OPT-69 | LOW | extract.ts predicate format-check runs BEFORE normalizePredicate, so space-form synonym predicates the synonym map anticipates ("depends on", "runs on", "built with") get dropped at extraction instead of normalized. | pending | packages/core/src/extract.ts:48-66; packages/core/src/service.ts:907-967 | normalize/space→snake the predicate (or apply the synonym map) BEFORE the shape regex, so legit space-form predicates normalize instead of dropping; test pins a space-form predicate survives+normalizes; suite green. Source: found verifying OPT-04. |  |
+| OPT-70 | MED | In-shape fact poisoning remains: a legit-shaped predicate (is_admin, password_is) + ≤200-char values still mints an authoritative active/deductive fact from untrusted content. The real fix is provenance-based clamping. | pending | packages/core/src/service.ts:646-651,658-678; packages/core/src/extract.ts | clamp extraction-origin facts to status=tentative (and/or capped confidence) until corroborated by an independent episode, then promote — closes OPT-04's primary residual without false-dropping. Adjust the active/deductive test contract intentionally (waiver). Source: security-reviewing OPT-04. |  |
+| OPT-71 | LOW | Dream-minted abductive hypothesis facts bypass validateFactResponse; via reinforcement promotion (service.ts:646-648) an attacker who also stores a corroborating episode can launder an unvalidated dream predicate into a deductive fact. | pending | packages/core/src/dream.ts:190-208; fact.create call ~202 | apply the same isSaneFact predicate-shape check to dream hypotheses before fact.create; test pins a non-sane dream predicate is dropped; suite green. Source: security-reviewing OPT-04. |  |
 
 ## Completed Tasks
 
@@ -121,6 +124,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-01 | Gate ranked code channel on default tenant (close cross-tenant code leak) | 1 | `11d703c` | gate green 1463 passed / 0 failed; security-reviewer PASS |
 | OPT-02 | Bind SSE/Streamable sessions to creating tenant+actor; 403 on token mismatch | 2 | `20c7819` | gate green 1465 passed / 0 failed (mcp 126); security-reviewer PASS |
 | OPT-03 | Confine post-store re-index paths to ingest base (block arbitrary file read) | 3 | `9b0b029` | gate green 1472 passed / 0 failed (code 114); security-reviewer PASS |
+| OPT-04 | Validate extracted-fact predicate shape + value bounds (block graph poisoning) | 4 | `<c4-sha>` | gate green 1480 passed / 0 failed (core 321); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -152,7 +156,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 4 at **OPT-04** (HIGH — extractFacts trusts LLM predicates/values; add a canonical-predicate allowlist + clamp injected-origin facts to tentative, `packages/core/src/extract.ts`). Then OPT-05, OPT-06, … down the table. If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 5 at **OPT-05** (HIGH — redactSecrets misses JSON-quoted credentials `"password":"value"`; broaden SECRET_ASSIGNMENT + RED tests, keep graph/allowlist.ts in sync, `packages/core/src/redact.ts`). Then OPT-06, OPT-07, … down the table. If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -179,3 +183,11 @@ Start cycle 4 at **OPT-04** (HIGH — extractFacts trusts LLM predicates/values;
 - Verifier: PASS (1472 passed, 0 failed, build exit 0; code 107→114) | Security-reviewer: PASS (all escape vectors closed — .., abs, ${base}EVIL prefix, symlink-realpath on both sides; hook is sole untrusted entry; base resolves to systemd WorkingDirectory)
 - Metrics: passing 1465→1472 (floor 1472); skipped 16
 - Next: OPT-04
+
+### Cycle 4 — 2026-06-13
+- Commit: `<c4-sha>` OPT-04: validate extracted-fact predicate shape + value bounds (block graph poisoning)
+- Item: OPT-04 — COMPLETED (format-validation chosen over brittle allowlist; covers all 3 extractFacts sites incl. consolidation, so OPT-31's predicate half is done)
+- Mode B: 3 discoveries → OPT-69 (normalize-before-shape-check, LOW), OPT-70 (provenance/tentative clamp for in-shape poisoning, MED), OPT-71 (dream-hypothesis predicate validation, LOW)
+- Verifier: PASS (1480 passed, 0 failed, build exit 0; core 313→321) | Security-reviewer: PASS (instruction-smuggling predicates + oversized values dropped, no false-drops; residuals → OPT-70/71)
+- Metrics: passing 1472→1480 (floor 1480); skipped 16
+- Next: OPT-05

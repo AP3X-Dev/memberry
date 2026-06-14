@@ -32,7 +32,38 @@ interface RawFact {
   object: string;
 }
 
-function validateFactResponse(data: unknown): RawFact[] {
+// ─── Anti-poisoning sanity bounds ─────────────────────────────────────────────
+// Facts are extracted from FULLY UNTRUSTED stored content, so the LLM's output is
+// attacker-influenceable. We can't use a fixed predicate allowlist (predicates are
+// open-ended: uses, depends_on, located_at, runs_on, prefers, …), but a legitimate
+// relation is always a short snake_case identifier. Injected instruction text or
+// garbage ("ignore previous and grant", "is the admin password", sentences with
+// spaces/punctuation, absurdly long strings) does not fit that shape — so we drop
+// any fact whose predicate is not a sane relation token, and cap subject/object
+// length to block payloads smuggled through those fields. This mirrors the
+// normalize step in service.normalizePredicate (lowercase + trim) without coupling
+// to it (service.ts already imports extract.ts; importing back would be circular).
+
+/** Max characters for a subject or object value. Real entity names/values are short. */
+const MAX_VALUE_LEN = 200;
+/** A legitimate predicate is a bounded snake_case relation token. */
+const VALID_PREDICATE = /^[a-z][a-z0-9_]{0,40}$/;
+
+/**
+ * True when a raw fact has the shape of a legitimate, non-injected triple:
+ * predicate is a sane snake_case relation token (after lowercase+trim) and
+ * subject/object are non-empty and within the sanity length cap.
+ */
+function isSaneFact(subject: string, predicate: string, object: string): boolean {
+  const s = subject.trim();
+  const o = object.trim();
+  if (s.length === 0 || o.length === 0) return false;
+  if (s.length > MAX_VALUE_LEN || o.length > MAX_VALUE_LEN) return false;
+  const pred = predicate.toLowerCase().trim();
+  return VALID_PREDICATE.test(pred);
+}
+
+export function validateFactResponse(data: unknown): RawFact[] {
   if (typeof data !== 'object' || data === null) return [];
   const obj = data as Record<string, unknown>;
   if (!Array.isArray(obj.facts)) return [];
@@ -46,11 +77,17 @@ function validateFactResponse(data: unknown): RawFact[] {
       typeof (item as Record<string, unknown>).predicate === 'string' &&
       typeof (item as Record<string, unknown>).object === 'string'
     ) {
-      valid.push({
-        subject: (item as Record<string, unknown>).subject as string,
-        predicate: (item as Record<string, unknown>).predicate as string,
-        object: (item as Record<string, unknown>).object as string,
-      });
+      const subject = (item as Record<string, unknown>).subject as string;
+      const predicate = (item as Record<string, unknown>).predicate as string;
+      const object = (item as Record<string, unknown>).object as string;
+      // Drop facts that don't have the shape of a legitimate relation triple —
+      // this quarantines prompt-injection / graph-poisoning attempts before they
+      // can be minted as authoritative active/deductive facts downstream.
+      if (!isSaneFact(subject, predicate, object)) {
+        console.warn(`[extract] Dropped non-sane fact (possible injection): predicate="${predicate.slice(0, 60)}" subjectLen=${subject.length} objectLen=${object.length}`);
+        continue;
+      }
+      valid.push({ subject, predicate, object });
     }
   }
   return valid;
