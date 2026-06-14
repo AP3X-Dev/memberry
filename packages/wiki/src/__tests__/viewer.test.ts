@@ -774,6 +774,24 @@ describe('confineToDir symlink confinement', () => {
     }
   });
 
+  it('OPT-74: drops a not-yet-existing target under a symlinked ANCESTOR', () => {
+    const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), 'amp-wiki-anc-')));
+    try {
+      const evil = join(base, 'evil');
+      try {
+        symlinkSync(outsideRoot, evil);
+      } catch {
+        return; // symlinks need privileges on some platforms — skip
+      }
+      // base/evil → outsideRoot; a path being created under it must be dropped.
+      expect(confineToDir(base, 'evil/sub/new.md')).toBeNull();
+      // sanity: a genuine in-base not-yet-created target is still accepted.
+      expect(confineToDir(base, 'pages/created-later.md')).toBe(join(base, 'pages', 'created-later.md'));
+    } finally {
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
   it('accepts a legitimate real file inside the base', () => {
     mkdirSync(join(base, 'pages'), { recursive: true });
     const real = join(base, 'pages', 'real.md');

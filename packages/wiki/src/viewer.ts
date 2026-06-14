@@ -4,10 +4,10 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { watch, realpathSync, type FSWatcher } from 'node:fs';
+import { watch, type FSWatcher } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { Marked } from 'marked';
-import { readEnv } from '@memberry/core';
+import { readEnv, isRealpathWithinBase } from '@memberry/core';
 import type { Driver } from 'neo4j-driver';
 import type { ViewerConfig } from './types.js';
 import { renderSettingsBody, applyHooksTuning, runHooksInstall, getSettingsData, type InstallRequest, type TuningPatch } from './settings.js';
@@ -1805,22 +1805,11 @@ export function confineToDir(baseDir: string, userPath: string): string | null {
     return null;
   }
 
-  // Layer 2: symlink confinement (best-effort; only when the target exists).
-  try {
-    const realResolved = realpathSync(resolvedPath);
-    // realpath the base too, so a base reached through a symlink still matches.
-    let realBase: string;
-    try {
-      realBase = realpathSync(resolve(baseDir));
-    } catch {
-      realBase = resolve(baseDir);
-    }
-    if (realResolved !== realBase && !realResolved.startsWith(realBase + sep)) {
-      return null;
-    }
-  } catch {
-    // ENOENT (or any stat error): nothing to realpath. The lexical check above
-    // already confirmed the resolved path is inside the base, so allow it.
+  // Layer 2: symlink confinement via the shared core helper (OPT-74) — resolves
+  // the NEAREST EXISTING ANCESTOR so a symlinked ancestor of a not-yet-created
+  // target can't escape (the old ENOENT→lexical-allow fallthrough missed it).
+  if (!isRealpathWithinBase(resolvedPath, resolve(baseDir))) {
+    return null;
   }
 
   return resolvedPath;

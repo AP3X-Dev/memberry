@@ -2,13 +2,12 @@
 import { z } from 'zod';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { CompileInput, CompileResult, CompileV2Result, IngestInput, IngestResult, LintInput, LintResult, LintCheck } from './types.js';
 import type { ReconcileInput, ReconcileResult } from './reconcile.js';
 import { parseFrontmatter } from './reconcile.js';
-import { readEnv } from '@memberry/core';
+import { readEnv, isRealpathWithinBase } from '@memberry/core';
 
 // ─── Service interfaces (injected, no concrete imports) ──────────────────────
 
@@ -169,26 +168,12 @@ export function validatePath(inputPath: string, baseDir?: string): string {
     throw new Error(`Path must be within allowed directory (${base}): ${inputPath}`);
   }
 
-  // Layer 2: symlink confinement (best-effort; only when the target exists).
-  try {
-    const realResolved = realpathSync(resolved);
-    // realpath the base too, so a base reached through a symlink still matches.
-    let realBase: string;
-    try {
-      realBase = realpathSync(base);
-    } catch {
-      realBase = base;
-    }
-    if (realResolved !== realBase && !realResolved.startsWith(realBase + path.sep)) {
-      throw new Error(`Path must be within allowed directory (${base}): ${inputPath}`);
-    }
-  } catch (err) {
-    // Re-throw our own confinement rejection; swallow stat errors (ENOENT etc.).
-    // ENOENT means the target doesn't exist yet (e.g. an output_dir to be
-    // created). The lexical check above already confirmed it is inside the base.
-    if (err instanceof Error && err.message.startsWith('Path must be within allowed directory')) {
-      throw err;
-    }
+  // Layer 2: symlink confinement via the shared core helper (OPT-74). It resolves
+  // the NEAREST EXISTING ANCESTOR for not-yet-created targets (e.g. a compile
+  // output_dir), so a symlinked ancestor of the path being created can't escape —
+  // the old ENOENT→lexical-allow fallthrough missed that.
+  if (!isRealpathWithinBase(resolved, base)) {
+    throw new Error(`Path must be within allowed directory (${base}): ${inputPath}`);
   }
 
   return resolved;

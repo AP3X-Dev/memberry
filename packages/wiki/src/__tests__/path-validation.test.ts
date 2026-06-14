@@ -121,6 +121,30 @@ describe('validatePath symlink confinement', () => {
     }
   });
 
+  it('OPT-74: rejects a not-yet-existing target under a symlinked ANCESTOR', () => {
+    // A planted symlink DIR inside the base points outside; a path to be created
+    // under it (leaf does not exist) must be rejected — pre-OPT-74 the
+    // ENOENT→lexical-allow fallthrough let it through.
+    const outsideRoot = realpathSync(mkdtempSync(path.join(tmpdir(), 'amp-wiki-anc-')));
+    try {
+      const evil = path.join(base, 'evil');
+      try {
+        symlinkSync(outsideRoot, evil);
+      } catch {
+        return; // symlinks need privileges on some platforms — skip
+      }
+      expect(() => validatePath(path.join(base, 'evil', 'out', 'new.md'), base)).toThrow(
+        'Path must be within allowed directory',
+      );
+      // sanity: a genuine in-base not-yet-created target still validates.
+      expect(validatePath(path.join(base, 'docs', 'created-later.md'), base)).toBe(
+        path.join(base, 'docs', 'created-later.md'),
+      );
+    } finally {
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
   it('accepts a legitimate real path inside the base', () => {
     mkdirSync(path.join(base, 'docs'), { recursive: true });
     const real = path.join(base, 'docs', 'real.md');
