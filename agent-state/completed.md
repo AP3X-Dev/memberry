@@ -34,3 +34,5 @@
 | OPT-30 (+OPT-38) | Validate token-pair parsing (length 4..4096) + warn on skipped/empty/zero-pair entries | 28 | `760254c` | gate green: 1571 passed / 0 failed (mcp 154), build 0; security-reviewer PASS |
 | OPT-31 | Gate extraction-driven fact invalidation by confidence (protect established facts from untrusted contradictions) | 29 | `a941912` | gate green: 1576 passed / 0 failed (core 348), build 0; security-reviewer PASS |
 | OPT-32 | Per-item evidence cap for berry_ask synthesis (one oversized memory can't dominate the prompt) | 30 | `d023c6a` | gate green: 1586 passed / 0 failed (retrieval 156), build 0; perf/hardening (verifier-only) |
+| OPT-33 | Broaden secret redaction (Stripe/Bearer/escaped-quote/keywords) | 31 | `607f1ae` | gate green: 1592 passed / 0 failed (core 353), build 0; security-reviewer PASS |
+| OPT-34 | Dedupe graph redactor to @memberry/core (fix github_pat_ export drift) | 31 | `607f1ae` | gate green: 1592 passed / 0 failed (graph 54), build 0; security-reviewer PASS |
