@@ -717,5 +717,27 @@ describe('UnifiedAssembler', () => {
       expect(openIdx).toBeLessThan(injIdx);
       expect(closeIdx).toBeGreaterThan(injIdx);
     });
+
+    // OPT-32: per-item evidence cap is wired into the ask() prompt assembly.
+    it('caps an oversized evidence item in the synthesis prompt (OPT-32)', async () => {
+      const prev = process.env.MEMBERRY_ASK_MAX_EVIDENCE_ITEM_CHARS;
+      process.env.MEMBERRY_ASK_MAX_EVIDENCE_ITEM_CHARS = '20'; // tiny cap → forces truncation
+      try {
+        const chat = vi.fn().mockResolvedValue(JSON.stringify({ answer: 'ok', cited: [1] }));
+        const { asm } = askAssembler(chat);
+
+        await asm.ask('what auth approach was chosen?', { tag_scope: ['project:amp'] });
+
+        const messages = chat.mock.calls[0]![0] as ChatMessage[];
+        const user = (messages.find((m) => m.role === 'user') as ChatMessage).content;
+        // At least one evidence item exceeds 20 chars → the truncation marker is present.
+        expect(user).toContain('…[truncated');
+        // The full injection string (>20 chars) can no longer appear verbatim.
+        expect(user).not.toContain(INJECTION);
+      } finally {
+        if (prev === undefined) delete process.env.MEMBERRY_ASK_MAX_EVIDENCE_ITEM_CHARS;
+        else process.env.MEMBERRY_ASK_MAX_EVIDENCE_ITEM_CHARS = prev;
+      }
+    });
   });
 });

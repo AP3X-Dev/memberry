@@ -19,6 +19,7 @@ import { computeQueryStats, lexicalTextScore, adaptiveWeights, inferSourceTypeBo
 import { classifyIntent } from './intent.js';
 import type { QueryIntent } from './intent.js';
 import type { EmbeddingProvider, LlmClient, ChatMessage } from '@memberry/core';
+import { readEnv } from '@memberry/core';
 import { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from '@memberry/neo4j';
 
 // Tenant-scoped options: RetrievalOptions lives in ./types.js (shared shape), but
@@ -92,10 +93,35 @@ function stripEvidenceFences(content: string): string {
   return content.replace(/<<<\s*(END\s+)?EVIDENCE\b[^>]*>>>/gi, '[fence removed]');
 }
 
-/** Wrap one evidence item in named untrusted-data fences (see ASK_SYSTEM_PROMPT). */
-function formatEvidenceItem(index: number, id: string, content: string): string {
+/**
+ * OPT-32: per-item evidence char cap. Without it, one oversized memory item can
+ * consume most of the (token-budgeted) synthesis prompt, crowding out the other
+ * evidence and dominating the answer. Each item is independently capped before
+ * concat so no single item can dominate. Env-overridable; positive int only.
+ */
+export const DEFAULT_MAX_EVIDENCE_ITEM_CHARS = 4_000;
+export function maxEvidenceItemChars(): number {
+  const raw = readEnv('MEMBERRY_ASK_MAX_EVIDENCE_ITEM_CHARS');
+  if (raw === undefined) return DEFAULT_MAX_EVIDENCE_ITEM_CHARS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_EVIDENCE_ITEM_CHARS;
+}
+
+/** Truncate one evidence item to `maxChars`, appending a visible marker so the
+ *  model (and any reader) knows the item was clipped, not silently swallowed. */
+export function capEvidenceContent(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content;
+  const removed = content.length - maxChars;
+  return `${content.slice(0, maxChars)}\n…[truncated ${removed} chars]`;
+}
+
+/** Wrap one evidence item in named untrusted-data fences (see ASK_SYSTEM_PROMPT).
+ *  Fences are stripped from the raw content FIRST (anti-forgery), THEN the item
+ *  is length-capped (OPT-32) so no single item dominates the synthesis prompt. */
+export function formatEvidenceItem(index: number, id: string, content: string, maxChars: number): string {
   const n = index + 1;
-  return `${EVIDENCE_FENCE_OPEN(n)}\n[${n}] (${id})\n${stripEvidenceFences(content)}\n${EVIDENCE_FENCE_CLOSE(n)}`;
+  const safe = capEvidenceContent(stripEvidenceFences(content), maxChars);
+  return `${EVIDENCE_FENCE_OPEN(n)}\n[${n}] (${id})\n${safe}\n${EVIDENCE_FENCE_CLOSE(n)}`;
 }
 
 /** Parse the synthesis JSON; map cited numbers to evidence node IDs. Degrades to raw text. */
@@ -179,7 +205,8 @@ export class UnifiedAssembler {
     // Fence each retrieved (untrusted) memory item so the model can tell data
     // from instructions. The system prompt instructs the model that anything
     // inside these fences is untrusted data, never a command to follow.
-    const numbered = evidence.map((it, i) => formatEvidenceItem(i, it.id, it.content)).join('\n\n');
+    const itemCap = maxEvidenceItemChars();
+    const numbered = evidence.map((it, i) => formatEvidenceItem(i, it.id, it.content, itemCap)).join('\n\n');
     const messages: ChatMessage[] = [
       { role: 'system', content: ASK_SYSTEM_PROMPT },
       { role: 'user', content: `Question: ${question}\n\nEvidence:\n${numbered}` },
