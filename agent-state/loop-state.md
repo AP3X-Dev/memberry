@@ -132,7 +132,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-06 | No-dep ReDoS screen + 4k scan cap for berry_grep JS-side regex (interim; re2→B-01) | 6 | `7ce8c69` | gate green 1488 passed / 0 failed (mcp 131); security-reviewer PASS |
 | OPT-07 | Bounded tx timeout on grep =~ rawCypher path (Neo4j-side ReDoS backstop) | 7 | `7374e7a` | gate green 1492 passed / 0 failed (neo4j 193); security-reviewer PASS |
 | OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `27fc2e4` | gate green 1495 passed / 0 failed (mcp 136); security-reviewer PASS |
-| OPT-09 | Realpath symlink confinement for wiki validatePath + confineToDir | 9 | `<c9-sha>` | gate green 1501 passed / 0 failed (wiki 282); security-reviewer PASS |
+| OPT-09 | Realpath symlink confinement for wiki validatePath + confineToDir | 9 | `28df712` | gate green 1501 passed / 0 failed (wiki 282); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -233,7 +233,7 @@ Start cycle 10 at **OPT-10** (MED — berry_ask synthesizes over untrusted memor
 - Next: OPT-09
 
 ### Cycle 9 — 2026-06-14
-- Commit: `<c9-sha>` OPT-09: realpath symlink confinement for wiki validatePath + confineToDir
+- Commit: `28df712` OPT-09: realpath symlink confinement for wiki validatePath + confineToDir
 - Item: OPT-09 — COMPLETED
 - Mode B: 1 discovery → OPT-74 (MED: symlinked-ancestor-of-not-yet-existing-leaf + TOCTOU across all confinement helpers; absorbs OPT-68's TOCTOU note)
 - Verifier: PASS (1501 passed, 0 failed, build exit 0; wiki 276→282; RED-confirmed: reverting the realpath layer → 2 symlink-test failures, so the tests genuinely run on Linux) | Security-reviewer: PASS (symlink-escape closed for ingest/compile/viewer; every confineToDir serve site covered; lexical-first so swallowing realpath errors never bypasses)
