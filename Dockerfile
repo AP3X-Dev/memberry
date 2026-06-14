@@ -67,7 +67,14 @@ ENV MCP_PORT=3101 \
 
 # Liveness probe against the unauthenticated health endpoint. Alpine ships wget;
 # fall back to a tiny Node HTTP GET if wget is ever unavailable.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# start-period must span the FULL pre-listen boot: bootstrap() connects Neo4j +
+# Redis and runs the serial schema init (~34 statements) BEFORE startSSE() opens
+# the port, so /healthz cannot answer until that finishes. Under standalone
+# `docker run` (no compose depends_on gate) the DBs may still be warming on top
+# of that, so 20s was too tight; 60s is a safe grace window — failed checks
+# during it are ignored and the first passing check flips the container healthy
+# immediately, so a fast boot is unaffected.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD wget -qO- "http://127.0.0.1:${MCP_PORT}/healthz" >/dev/null 2>&1 \
    || node -e "require('http').get('http://127.0.0.1:'+(process.env.MCP_PORT||3101)+'/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
