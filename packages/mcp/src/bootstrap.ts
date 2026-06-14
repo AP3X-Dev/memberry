@@ -147,6 +147,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     signals,
     queue,
     scopedQuery,
+    episodic,
     factStore: factStoreInstance,
     embedding,
     llm,
@@ -203,7 +204,12 @@ export async function bootstrap(): Promise<BootstrapHandles> {
 
   const consolidationEngine = new ConsolidationEngine(
     { lock, signals, queue, cache, proposals },
-    { semantic, fact: factStoreInstance },
+    // OPT-102: wire the episodic accessor so _deriveTenantFromEpisodes can read
+    // source episodes' tenant_id. Without it, a promote/supersede whose
+    // after.tenant_id is unset would mis-attribute the consolidated semantic to
+    // DEFAULT_TENANT in multi-tenant mode. EpisodicStore exposes getById +
+    // getTenantsByIds (OPT-45) — matching the optional ConsolidationNeo4jLayer.episodic.
+    { semantic, episodic, fact: factStoreInstance },
     config,
   );
 

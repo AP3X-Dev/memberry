@@ -29,4 +29,28 @@ describe('bootstrap.ts regression', () => {
     // Must return applied: false on error path
     expect(applyBody).toContain('applied: false');
   });
+
+  it('OPT-102: wires the episodic accessor into the ConsolidationEngine neo4j layer', () => {
+    // Before the fix, bootstrap built `new ConsolidationEngine(redisLayer,
+    // { semantic, fact }, config)` with NO episodic accessor, so in production
+    // _deriveTenantFromEpisodes' episode-fetch path was dead — a promote/supersede
+    // whose after.tenant_id is unset mis-attributed the consolidated semantic to
+    // DEFAULT_TENANT in multi-tenant mode. The fix passes core.episodic (an
+    // EpisodicStore exposing getById + getTenantsByIds, OPT-45) as the 2nd arg's
+    // episodic accessor. (Engine-level derivation behaviour is covered by
+    // consolidation.test.ts; this pins the prod wiring that activates it.)
+    const ctorMatch = BOOTSTRAP_SOURCE.match(
+      /new ConsolidationEngine\(([\s\S]*?)\n\s{2}\);/,
+    );
+    expect(ctorMatch).not.toBeNull();
+    const ctorArgs = ctorMatch![1];
+
+    // The neo4j-layer (2nd) arg must include the episodic accessor alongside
+    // semantic + fact so the engine can read source episodes' tenant_id.
+    expect(ctorArgs).toMatch(/\{\s*semantic,\s*episodic,\s*fact:/);
+
+    // And episodic must be destructured from the core service kit (between
+    // scopedQuery and factStore) — not a stray identifier.
+    expect(BOOTSTRAP_SOURCE).toMatch(/scopedQuery,\s*episodic,\s*factStore:/);
+  });
 });
