@@ -203,6 +203,29 @@ describe('EpisodicStore', () => {
     }
   });
 
+  it('OPT-45: getTenantsByIds projects tenant_id for found episodes and omits missing ones', async () => {
+    if (!neo4jAvailable) return;
+    const id1 = 'test-episodic-tenant-1';
+    const id2 = 'test-episodic-tenant-2';
+    const base = { session_id: 'session-001', agent_id: TEST_AGENT_ID, task: 't', content: 'c', created_at: new Date().toISOString() };
+    await store.create({ ...base, id: id1, tenant_id: 'acme' });
+    await store.create({ ...base, id: id2, tenant_id: 'globex' });
+
+    try {
+      const tenants = await store.getTenantsByIds([id1, id2, 'test-episodic-tenant-missing']);
+      // One entry per FOUND episode; the missing id contributes nothing.
+      expect([...tenants].sort()).toEqual(['acme', 'globex']);
+      expect(await store.getTenantsByIds([])).toEqual([]);
+    } finally {
+      const session = driver.session();
+      try {
+        await session.run('MATCH (e:Episodic) WHERE e.id IN $ids DETACH DELETE e', { ids: [id1, id2] });
+      } finally {
+        await session.close();
+      }
+    }
+  });
+
   it('should link an episodic node to an agent via GENERATED_BY', async () => {
     if (!neo4jAvailable) return;
 

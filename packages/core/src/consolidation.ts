@@ -192,6 +192,12 @@ export interface ConsolidationNeo4jLayer {
    */
   episodic?: {
     getById(id: string): Promise<EpisodicNode | null>;
+    /** OPT-45: batched tenant_id projection for many episodes in ONE query
+     *  (optional — _deriveTenantFromEpisodes falls back to per-id getById when
+     *  absent). One entry per FOUND episode (its tenant_id, null when unset);
+     *  missing episodes are omitted, matching the per-id loop's "doesn't
+     *  contribute" behavior. */
+    getTenantsByIds?(ids: string[]): Promise<Array<string | null>>;
   };
   fact?: ConsolidationFactLayer;
 }
@@ -502,12 +508,25 @@ export class ConsolidationEngine {
     if (!accessor || episodeIds.length === 0) return DEFAULT_TENANT;
 
     const tenants = new Set<string>();
-    for (const id of episodeIds) {
+    if (accessor.getTenantsByIds) {
+      // OPT-45: one batched tenant_id projection instead of one getById per id.
+      // Same contribution semantics: a found episode adds (tenant_id ?? DEFAULT);
+      // a missing episode yields no row (doesn't contribute).
       try {
-        const ep = await accessor.getById(id);
-        if (ep) tenants.add(ep.tenant_id ?? DEFAULT_TENANT);
+        for (const t of await accessor.getTenantsByIds(episodeIds)) {
+          tenants.add(t ?? DEFAULT_TENANT);
+        }
       } catch {
-        // Non-critical: a missing/unreadable episode just doesn't contribute.
+        // Non-critical: a failed batch read contributes nothing (→ DEFAULT below).
+      }
+    } else {
+      for (const id of episodeIds) {
+        try {
+          const ep = await accessor.getById(id);
+          if (ep) tenants.add(ep.tenant_id ?? DEFAULT_TENANT);
+        } catch {
+          // Non-critical: a missing/unreadable episode just doesn't contribute.
+        }
       }
     }
 

@@ -50,6 +50,26 @@ export class EpisodicStore {
     }
   }
 
+  /**
+   * OPT-45: project tenant_id for many episodes in ONE query (UNWIND), instead
+   * of one getById per id. Returns one entry per FOUND episode (its tenant_id,
+   * or null when unset); a missing episode yields no row (omitted) — matching the
+   * per-id derivation loop where a missing episode simply doesn't contribute.
+   */
+  async getTenantsByIds(ids: string[]): Promise<Array<string | null>> {
+    if (ids.length === 0) return [];
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `UNWIND $ids AS id MATCH (e:Episodic {id: id}) RETURN e.tenant_id AS tenant`,
+        { ids },
+      );
+      return result.records.map((r) => (r.get('tenant') as string | null) ?? null);
+    } finally {
+      await session.close();
+    }
+  }
+
   async getById(id: string): Promise<EpisodicNode | null> {
     const session = this.driver.session();
     try {

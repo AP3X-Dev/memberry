@@ -531,6 +531,52 @@ describe('ConsolidationEngine tenant propagation', () => {
       'default',
     );
   });
+
+  it('OPT-45: derives tenant via the batched getTenantsByIds projection (not per-id getById)', async () => {
+    const proposal: ConsolidationProposal = {
+      id: 'prop-promote-batch',
+      type: 'promote',
+      scope: 'test',
+      affected_ids: ['ep-1', 'ep-2'],
+      before: {},
+      after: { content: 'Batched', confidence: 0.7 } as Record<string, unknown>,
+      score: 10,
+      created_at: new Date().toISOString(),
+    };
+
+    const promoteFromEpisodic = vi.fn().mockResolvedValue('new-id');
+    const getById = vi.fn();
+    const getTenantsByIds = vi.fn().mockResolvedValue(['acme', 'acme']); // common tenant
+
+    const redis = makeRedis({
+      proposals: {
+        save: vi.fn().mockResolvedValue(undefined),
+        get: vi.fn().mockResolvedValue(proposal),
+        listPending: vi.fn().mockResolvedValue(['prop-promote-batch']),
+        remove: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(null),
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('x'),
+        promoteFromEpisodic,
+      },
+      episodic: { getById, getTenantsByIds },
+    });
+
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    await engine.reviewProposal('prop-promote-batch', 'approve');
+
+    expect(getTenantsByIds).toHaveBeenCalledWith(['ep-1', 'ep-2']);
+    expect(getById).not.toHaveBeenCalled(); // batched path preferred over per-id
+    expect(promoteFromEpisodic).toHaveBeenCalledWith(
+      'ep-1',
+      expect.objectContaining({ tenant_id: 'acme' }),
+      'acme',
+    );
+  });
 });
 
 describe('ConsolidationEngine.status', () => {
