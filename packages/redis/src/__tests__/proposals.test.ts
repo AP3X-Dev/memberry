@@ -120,6 +120,24 @@ describe('ProposalStore', () => {
     expect(pending).not.toContain('remove-002');
   });
 
+  it('OPT-48: self-heals dangling pending ids when the proposal key has expired', async () => {
+    if (!redisAvailable) return;
+    await store.save(makeProposal({ id: 'live-001' }));
+    await store.save(makeProposal({ id: 'dead-001' }));
+    // Simulate TTL expiry of `dead`: drop its proposal key but NOT its set id
+    // (the bug — remove() would srem it, but expiry doesn't).
+    await redis.del('amp:proposals:dead-001');
+
+    const pending = await store.listPending();
+    expect(pending).toContain('live-001');
+    expect(pending).not.toContain('dead-001'); // dangling id filtered out
+
+    // …and pruned from the set, so it cannot reappear on the next call.
+    const rawSet = await redis.smembers('amp:proposals:pending');
+    expect(rawSet).toContain('live-001');
+    expect(rawSet).not.toContain('dead-001');
+  });
+
   it('should store all proposal fields including nested objects', async () => {
     if (!redisAvailable) return;
     const proposal = makeProposal({

@@ -27,7 +27,30 @@ export class ProposalStore {
   }
 
   async listPending(): Promise<string[]> {
-    return this.redis.smembers(PENDING_SET);
+    const ids = await this.redis.smembers(PENDING_SET);
+    if (ids.length === 0) return [];
+    // OPT-48: self-heal. A proposal key expires after DEFAULT_TTL, but its id was
+    // only sremmed from PENDING_SET on an explicit remove() — so an unreviewed,
+    // expired proposal leaves a DANGLING id in the set forever (the set grows
+    // unbounded and listPending returns ids whose proposal is gone). Check each
+    // id's key existence in one pipeline, prune the dead ones, and return only
+    // ids backed by a live proposal.
+    const pipeline = this.redis.pipeline();
+    for (const id of ids) pipeline.exists(proposalKey(id));
+    const results = await pipeline.exec();
+    // Defensive: if the pipeline failed wholesale, return the unpruned ids rather
+    // than risk nuking the set on a transient error.
+    if (!results) return ids;
+
+    const live: string[] = [];
+    const dead: string[] = [];
+    ids.forEach((id, i) => {
+      // ioredis pipeline result row = [err, value]; EXISTS → 1 (present) / 0 (gone).
+      if (results[i]?.[1] === 1) live.push(id);
+      else dead.push(id);
+    });
+    if (dead.length > 0) await this.redis.srem(PENDING_SET, ...dead);
+    return live;
   }
 
   async remove(id: string): Promise<void> {
