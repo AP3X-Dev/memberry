@@ -3,8 +3,9 @@
 // Extracts symbols, call relationships, and import information.
 
 import { createHash } from 'crypto';
-import { readFile } from 'fs/promises';
+import { readFile, stat } from 'fs/promises';
 import { nanoid } from 'nanoid';
+import { readEnv } from '@memberry/core';
 import type {
   SupportedLanguage,
   SymbolNode,
@@ -91,10 +92,40 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 // ─── Main parse function ──────────────────────────────────────────────────────
 
+/**
+ * OPT-35: skip parsing files larger than this. Tree-sitter loads the whole
+ * source into memory and walks the full AST, so a multi-MB generated/minified/
+ * vendored file (or a mislabeled binary) can blow up parse time and memory.
+ * Mirrors the 2 MB cap the structural-search path already enforces. Override via
+ * MEMBERRY_MAX_PARSE_FILE_BYTES (positive int; falls back to the default).
+ */
+const DEFAULT_MAX_PARSE_BYTES = 2 * 1024 * 1024;
+function maxParseBytes(): number {
+  const raw = readEnv('MEMBERRY_MAX_PARSE_FILE_BYTES');
+  if (raw === undefined) return DEFAULT_MAX_PARSE_BYTES;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_PARSE_BYTES;
+}
+
+/** An empty parse result — returned when a file is skipped (e.g. over the size cap). */
+function emptyParsedFile(filePath: string, language: SupportedLanguage): ParsedFile {
+  return { file_path: filePath, language, symbols: [], relations: [], imports: [] };
+}
+
 export async function parseFile(
   filePath: string,
   language: SupportedLanguage,
 ): Promise<ParsedFile> {
+  // OPT-35: stat-and-skip oversized files BEFORE reading them into memory, so an
+  // outsized file can't pin the parse. A stat failure (race/permission) falls
+  // through to readFile, which surfaces the original error to the caller.
+  try {
+    const { size } = await stat(filePath);
+    if (size > maxParseBytes()) return emptyParsedFile(filePath, language);
+  } catch {
+    // fall through — readFile below reports the real error
+  }
+
   const source = await readFile(filePath, 'utf-8');
 
   // Non-tree-sitter formats (SQL, Terraform/HCL, MCP config) use conservative
