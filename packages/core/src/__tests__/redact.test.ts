@@ -34,6 +34,20 @@ describe('redactSecrets', () => {
     expect(redactSecrets('client_secret=abc123def')).toBe('client_secret=[REDACTED]');
   });
 
+  it('redacts JSON-quoted credential keys (the dominant secret shape)', () => {
+    // Quoted key + quoted value — the key stays visible, only the value is masked.
+    expect(redactSecrets('"password":"hunter2"')).toBe('"password":[REDACTED]');
+    expect(redactSecrets('"api_key": "sk-shortvalue"')).toBe('"api_key": [REDACTED]');
+    // Single-quoted key with spaced `=` separator.
+    expect(redactSecrets("'secret' = 'x'")).toBe("'secret' = [REDACTED]");
+  });
+
+  it('masks only the secret value inside a JSON object, leaving siblings intact', () => {
+    expect(redactSecrets('{"a":"1","password":"hunter2","b":"2"}')).toBe(
+      '{"a":"1","password":[REDACTED],"b":"2"}',
+    );
+  });
+
   it('redacts credentials embedded in connection strings', () => {
     expect(redactSecrets('redis://user:p4ssw0rd@host:6379')).toBe('redis://user:[REDACTED]@host:6379');
     expect(redactSecrets('postgres://admin:secretpw@db/app')).toBe('postgres://admin:[REDACTED]@db/app');

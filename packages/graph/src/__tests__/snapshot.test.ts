@@ -229,6 +229,13 @@ describe('secret-safety at the snapshot boundary', () => {
     expect(redactSecrets('plain text')).toBe('plain text');
   });
 
+  it('redactSecrets masks JSON-quoted credentials without over-matching siblings', () => {
+    expect(redactSecrets('"password":"hunter2"')).toBe('"password":[REDACTED]');
+    expect(redactSecrets('{"a":"1","password":"hunter2","b":"2"}')).toBe(
+      '{"a":"1","password":[REDACTED],"b":"2"}',
+    );
+  });
+
   it('applyAllowlist drops forbidden keys and coerces ints', () => {
     const out = applyAllowlist('symbol', {
       name: 'x',

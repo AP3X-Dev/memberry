@@ -109,10 +109,17 @@ const SECRET_PATTERNS: RegExp[] = [
 
 /**
  * Matches `KEY = "value"` / `secret: value` / `token=value` assignments where
- * the key name signals a credential. Captures the key prefix, redacts the value.
+ * the key name signals a credential. Captures the key prefix (incl. any quotes
+ * around the key and the separator), redacts the value.
+ *
+ * Kept in sync with @memberry/core's redact.ts copy (duplicated to avoid a
+ * dep cycle; OPT-34 will dedupe). Handles bare, spaced, AND JSON-quoted shapes
+ * (`"password":"hunter2"`, `"api_key": "sk-..."`, `'secret' = 'x'`). The value
+ * capture is bounded — a quoted value stops at its closing quote, a bare value
+ * at whitespace / `,` / `;` / `}` — so it never over-masks across a JSON object.
  */
 const SECRET_ASSIGNMENT =
-  /\b((?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret|auth)\s*[:=]\s*)(['"]?)[^'"\s,;]+\2/gi;
+  /(["']?\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret|auth)\b["']?\s*[:=]\s*)(?:(["'])[^"']*\2|[^"'\s,;}]+)/gi;
 
 /** Redact common secret shapes from a free-text string. */
 export function redactSecrets(value: string): string {

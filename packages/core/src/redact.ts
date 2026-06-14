@@ -27,10 +27,19 @@ const SECRET_PATTERNS: RegExp[] = [
 
 /**
  * `KEY = "value"` / `secret: value` / `token=value` assignments where the key
- * name signals a credential. Captures the key prefix, redacts the value.
+ * name signals a credential. Captures the key prefix (incl. any quotes around
+ * the key and the separator), redacts the value.
+ *
+ * Handles bare (`password=hunter2`), spaced (`password: hunter2`), AND
+ * JSON-quoted (`"password":"hunter2"`, `"api_key": "sk-..."`, `'secret' = 'x'`)
+ * shapes — JSON is the dominant form for secrets flowing in from API responses,
+ * config dumps and tool outputs. The value capture is bounded: a quoted value
+ * stops at its closing quote (`[^"']*` + backref), a bare value stops at
+ * whitespace / `,` / `;` / `}` — so `{"a":"1","password":"hunter2","b":"2"}`
+ * masks only the password value and leaves the sibling keys intact.
  */
 const SECRET_ASSIGNMENT =
-  /\b((?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret|auth)\s*[:=]\s*)(['"]?)[^'"\s,;]+\2/gi;
+  /(["']?\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?token|client[_-]?secret|auth)\b["']?\s*[:=]\s*)(?:(["'])[^"']*\2|[^"'\s,;}]+)/gi;
 
 /**
  * Credentials embedded in connection strings, e.g.
