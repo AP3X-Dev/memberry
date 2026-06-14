@@ -39,3 +39,4 @@
 | OPT-35 | Size guard for CodeIndexer parseFile (stat-and-skip > 2 MiB) | 32 | `5a46f84` | gate green: 1595 passed / 0 failed (code 120), build 0; hardening (verifier-only) |
 | OPT-36 | Bound berry_store signals[] schema (target_id 500 / detail 2000 / array 50) | 33 | `929f202` | gate green: 1601 passed / 0 failed (mcp 160), build 0; security-reviewer PASS |
 | OPT-37 | Shape-validate MEMBERRY_TENANT_DATASTORES (fail-closed, no silent localhost colocation) | 34 | `25f5b90` | gate green: 1609 passed / 0 failed (mcp 168), build 0; security-reviewer PASS |
+| OPT-39 | Bound AmpTimelineSchema.limit to a positive int (+handler slice guard) | 35 | `dfaad0e` | gate green: 1615 passed / 0 failed (mcp 174), build 0; security-reviewer PASS |
