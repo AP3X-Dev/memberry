@@ -62,6 +62,27 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 export const DEFAULT_MAX_REQUEST_BODY_BYTES = 1_000_000;
 
 /**
+ * HTTP receive-timeout defaults guarding against slow-client (slowloris) DoS.
+ * Node's defaults leave the server exposed: requestTimeout defaults to 300_000ms
+ * (5 minutes) and headersTimeout to ~60_000ms, so a slow trickle can hold a
+ * connection — and a connection-pool slot — open far longer than any legitimate
+ * MCP request needs. These bound how long the server will WAIT TO RECEIVE the
+ * request (headers + body), NOT how long the response may stay open, so a
+ * long-lived SSE GET response is unaffected (its tiny request is read instantly).
+ *
+ * Overridable via MEMBERRY_HTTP_HEADERS_TIMEOUT_MS / MEMBERRY_HTTP_REQUEST_TIMEOUT_MS /
+ * MEMBERRY_HTTP_KEEPALIVE_TIMEOUT_MS (each with the legacy AMP_HTTP_* fallback).
+ *
+ * Ordering constraint: Node requires requestTimeout === 0 or
+ * requestTimeout >= headersTimeout, so the request-receipt window is never
+ * shorter than the headers-receipt window. Defaults satisfy this
+ * (30_000 >= 20_000).
+ */
+export const DEFAULT_HTTP_HEADERS_TIMEOUT_MS = 20_000;
+export const DEFAULT_HTTP_REQUEST_TIMEOUT_MS = 30_000;
+export const DEFAULT_HTTP_KEEPALIVE_TIMEOUT_MS = 10_000;
+
+/**
  * Thrown by readJsonBody when the request body exceeds the configured cap,
  * either from the Content-Length header (early reject) or the streaming
  * backstop. The /mcp handler distinguishes this from a JSON parse error to
@@ -654,6 +675,38 @@ export function createAMPServer(): AMPMCPServer {
         }
       },
     );
+
+    // ── Slowloris (slow-client) DoS guard ────────────────────────────────────
+    // Bound how long the server will WAIT TO RECEIVE a request. Without these,
+    // Node's requestTimeout default (300_000ms) lets a slow trickle hold a
+    // connection — and a pool slot — open for 5 minutes. These limits apply to
+    // request RECEIPT (headers/body), not response duration, so the long-lived
+    // SSE GET response stays alive (its empty request finishes reading at once).
+    // Each is env-overridable; a non-positive/unparseable value falls back to
+    // the default. The ordering invariant (requestTimeout >= headersTimeout) is
+    // enforced after resolution so a partial override can't misconfigure Node.
+    const resolveTimeoutMs = (canonical: string, fallback: number): number => {
+      const raw = readEnv(canonical);
+      if (raw === undefined) return fallback;
+      const parsed = Number.parseInt(raw, 10);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+    };
+    httpServer.keepAliveTimeout = resolveTimeoutMs(
+      'MEMBERRY_HTTP_KEEPALIVE_TIMEOUT_MS',
+      DEFAULT_HTTP_KEEPALIVE_TIMEOUT_MS,
+    );
+    httpServer.headersTimeout = resolveTimeoutMs(
+      'MEMBERRY_HTTP_HEADERS_TIMEOUT_MS',
+      DEFAULT_HTTP_HEADERS_TIMEOUT_MS,
+    );
+    const requestTimeout = resolveTimeoutMs(
+      'MEMBERRY_HTTP_REQUEST_TIMEOUT_MS',
+      DEFAULT_HTTP_REQUEST_TIMEOUT_MS,
+    );
+    // Node requires requestTimeout === 0 or requestTimeout >= headersTimeout.
+    // Clamp up so a too-low override (or a raised headersTimeout) can't trip
+    // Node's warning or leave the receive window misordered.
+    httpServer.requestTimeout = Math.max(requestTimeout, httpServer.headersTimeout);
 
     await new Promise<void>((resolve, reject) => {
       httpServer.listen(port, () => resolve());

@@ -1,7 +1,13 @@
 // packages/mcp/src/__tests__/server.test.ts
 import { describe, it, expect } from 'vitest';
 import type { AddressInfo } from 'node:net';
-import { closeSSEHandle, createAMPServer } from '../server.js';
+import {
+  closeSSEHandle,
+  createAMPServer,
+  DEFAULT_HTTP_HEADERS_TIMEOUT_MS,
+  DEFAULT_HTTP_REQUEST_TIMEOUT_MS,
+  DEFAULT_HTTP_KEEPALIVE_TIMEOUT_MS,
+} from '../server.js';
 import { TOOL_NAMES, DOMAIN_TOOL_NAMES_MAP, ALWAYS_ON_TOOL_NAMES } from '../tools.js';
 
 async function withSseServer(run: (baseUrl: string) => Promise<void>): Promise<void> {
@@ -512,6 +518,74 @@ describe('createAMPServer', () => {
       expect(initialize.status).toBe(200);
       expect(initialize.headers.get('mcp-session-id')).toEqual(expect.any(String));
     });
+  });
+
+  it('OPT-28: sets conservative receive timeouts on the HTTP server to bound slowloris exposure', async () => {
+    // Pure property assertion — no slow-client simulation needed. Without the
+    // fix these are Node's defaults (requestTimeout 300_000, keepAliveTimeout
+    // 5_000, headersTimeout ~60_000), leaving the slowloris window open.
+    const amp = createAMPServer();
+    const handle = await amp.startSSE(0);
+    try {
+      expect(handle.httpServer.headersTimeout).toBe(DEFAULT_HTTP_HEADERS_TIMEOUT_MS);
+      expect(handle.httpServer.requestTimeout).toBe(DEFAULT_HTTP_REQUEST_TIMEOUT_MS);
+      expect(handle.httpServer.keepAliveTimeout).toBe(DEFAULT_HTTP_KEEPALIVE_TIMEOUT_MS);
+      // Node invariant: requestTimeout must be 0 or >= headersTimeout.
+      expect(handle.httpServer.requestTimeout).toBeGreaterThanOrEqual(
+        handle.httpServer.headersTimeout,
+      );
+    } finally {
+      await closeSSEHandle(handle, 500);
+    }
+  });
+
+  it('OPT-28: honors MEMBERRY_HTTP_* timeout env overrides (and keeps the request>=headers invariant)', async () => {
+    const saved = {
+      headers: process.env.MEMBERRY_HTTP_HEADERS_TIMEOUT_MS,
+      request: process.env.MEMBERRY_HTTP_REQUEST_TIMEOUT_MS,
+      keepAlive: process.env.MEMBERRY_HTTP_KEEPALIVE_TIMEOUT_MS,
+    };
+    process.env.MEMBERRY_HTTP_HEADERS_TIMEOUT_MS = '7000';
+    process.env.MEMBERRY_HTTP_REQUEST_TIMEOUT_MS = '9000';
+    process.env.MEMBERRY_HTTP_KEEPALIVE_TIMEOUT_MS = '3000';
+
+    const amp = createAMPServer();
+    const handle = await amp.startSSE(0);
+    try {
+      expect(handle.httpServer.headersTimeout).toBe(7000);
+      expect(handle.httpServer.requestTimeout).toBe(9000);
+      expect(handle.httpServer.keepAliveTimeout).toBe(3000);
+    } finally {
+      await closeSSEHandle(handle, 500);
+      if (saved.headers === undefined) delete process.env.MEMBERRY_HTTP_HEADERS_TIMEOUT_MS; else process.env.MEMBERRY_HTTP_HEADERS_TIMEOUT_MS = saved.headers;
+      if (saved.request === undefined) delete process.env.MEMBERRY_HTTP_REQUEST_TIMEOUT_MS; else process.env.MEMBERRY_HTTP_REQUEST_TIMEOUT_MS = saved.request;
+      if (saved.keepAlive === undefined) delete process.env.MEMBERRY_HTTP_KEEPALIVE_TIMEOUT_MS; else process.env.MEMBERRY_HTTP_KEEPALIVE_TIMEOUT_MS = saved.keepAlive;
+    }
+  });
+
+  it('OPT-28: clamps requestTimeout up to headersTimeout when an override would violate the Node invariant', async () => {
+    // requestTimeout (5000) < headersTimeout (8000) would make Node warn/misorder
+    // the receive window. The clamp must raise requestTimeout to headersTimeout.
+    const saved = {
+      headers: process.env.MEMBERRY_HTTP_HEADERS_TIMEOUT_MS,
+      request: process.env.MEMBERRY_HTTP_REQUEST_TIMEOUT_MS,
+    };
+    process.env.MEMBERRY_HTTP_HEADERS_TIMEOUT_MS = '8000';
+    process.env.MEMBERRY_HTTP_REQUEST_TIMEOUT_MS = '5000';
+
+    const amp = createAMPServer();
+    const handle = await amp.startSSE(0);
+    try {
+      expect(handle.httpServer.headersTimeout).toBe(8000);
+      expect(handle.httpServer.requestTimeout).toBe(8000);
+      expect(handle.httpServer.requestTimeout).toBeGreaterThanOrEqual(
+        handle.httpServer.headersTimeout,
+      );
+    } finally {
+      await closeSSEHandle(handle, 500);
+      if (saved.headers === undefined) delete process.env.MEMBERRY_HTTP_HEADERS_TIMEOUT_MS; else process.env.MEMBERRY_HTTP_HEADERS_TIMEOUT_MS = saved.headers;
+      if (saved.request === undefined) delete process.env.MEMBERRY_HTTP_REQUEST_TIMEOUT_MS; else process.env.MEMBERRY_HTTP_REQUEST_TIMEOUT_MS = saved.request;
+    }
   });
 
   it('closes active SSE sessions before waiting for the HTTP server to drain', async () => {

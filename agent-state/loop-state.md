@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1557 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1560 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -72,7 +72,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-25 | LOW | invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink) | ✅ DONE (c23) | packages/neo4j/src/temporal-edges.ts:53-68 | DONE: module-level VALID_REL_TYPES allowlist (19 metachar-free types incl ABOUT) + throw before interpolation/session.run; doc-comment now enforced-invariant; no dep cycle (local set) +3 tests. Verifier PASS 1543/0 (neo4j 200; RED-confirmed); security-reviewer PASS (sink enforced pre-interpolation). Residual: relation-store remove fail-open + allowlist dup→OPT-83. |  |
 | OPT-26 | LOW | Global feedback boost keys mix tenant entity names — one tenant skews another's ranking | ✅ DONE (c24) | packages/retrieval/src/feedback.ts:18-21,31-46,52-82 | DONE: per-tenant key helpers (default→legacy keys zero-cold-start, named→amp:feedback:<tenant>:*); recordFeedback/getBoosts/inferUsage take tenantId; real tenant threaded at assembler getBoosts + berry_feedback recordFeedback +4 tests. Verifier PASS 1547/0 (retrieval 146); security-reviewer PASS (single chokepoint, not spoofable). Residual non-tenant-token→DEFAULT = OPT-29. |  |
 | OPT-27 | LOW | Context-cache dependency sets keyed by naked scope/node-id — one tenant's write evicts another's cache | ✅ DONE (c25) | packages/redis/src/cache.ts:29-38,42-54,56-68 | DONE: per-tenant ctx+dep-set keys (default→legacy, named→amp:*:<tenant>:*); tenantId threaded at service.ts load/store/fact-extraction AND the block-invalidation path (CacheInvalidator/_invalidateContext/factory) so a tenant's block edit evicts its OWN bucket +10 tests. Verifier REJECT(test-setup)→fix→PASS; +block-path extension PASS 1557/0. Consolidation cache tenant gap→OPT-84. |  |
-| OPT-28 | LOW | HTTP server sets no headersTimeout/requestTimeout — slowloris DoS | pending | packages/mcp/src/server.ts:382-543 | set headersTimeout/requestTimeout/keepAliveTimeout after createServer; test asserts they are set; suite green |  |
+| OPT-28 | LOW | HTTP server sets no headersTimeout/requestTimeout — slowloris DoS | ✅ DONE (c26) | packages/mcp/src/server.ts:382-543 | DONE: keepAliveTimeout=10s/headersTimeout=20s/requestTimeout=30s (down from Node 300s) env-overridable + Math.max(req,headers) clamp; SSE unaffected (request-receipt not response-duration) +3 tests. Verifier PASS 1560/0 (mcp 143); security-reviewer PASS. Residual conn-count/flood limit→OPT-85. |  |
 | OPT-29 | LOW | Multi-tenant: non-tenant tokens authenticate but silently fall back to default tenant | pending | packages/mcp/src/server.ts:296-307 | in multiTenantMode reject tokens not in tokenToTenant (or require explicit flag); new test; suite green. REINFORCED by OPT-26 review: a non-tenant token's feedback also lands in the shared default bucket — fail-closed closes both. |  |
 | OPT-30 | LOW | Token parsing splits on ',' and ':' with no escaping/validation — tokens with those chars silently corrupt | pending | packages/mcp/src/server.ts:218-246 | validate token length, warn on skipped pairs, document constraint; suite green |  |
 | OPT-31 | LOW | Consolidation re-extracts facts via the same unvalidated predicate path on autoApply with no human gate | partial (c4) | packages/core/src/consolidation.ts:501-583 | predicate-shape validation half DONE via OPT-04 (consolidation's extractFacts calls now route through the hardened validateFactResponse). REMAINING: gate extraction-driven fact INVALIDATION (autoApply dispute path) behind a confidence/human gate. |  |
@@ -128,6 +128,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-82 | LOW | CodeIndexer relation resolution (resolveRelation per SYMBOL_CALLS/IMPORTS/INHERITS edge) is still per-edge N+1 — each does an ordered OPTIONAL MATCH fallback with the rel-type interpolated. | pending | packages/code/src/indexer.ts:176-191; packages/code/src/resolver.ts | batch relation resolution per rel-type (UNWIND $edges grouped by type, or apoc.merge.relationship) without changing edge-resolution results; test pins identical edges + fewer round-trips; suite green. Source: implementing OPT-23. |  |
 | OPT-83 | LOW | Consistency: arch/relation-store.ts remove() is fail-OPEN (silently no-ops on a non-allowlisted type) vs create() which throws — asymmetric; and the rel-type allowlists are duplicated across 3 packages (arch VALID_RELATION_TYPES, code VALID_SYMBOL_RELS, neo4j VALID_REL_TYPES) with no shared source of truth. | pending | packages/arch/src/relation-store.ts:51; packages/code/src/indexer.ts:249; packages/neo4j/src/temporal-edges.ts:28 | make remove() throw on bad type (match create); optionally centralize the allowlists into one shared const; tests; suite green. Source: security-reviewing OPT-25. Not a vuln (all sinks guarded) — consistency only. |  |
 | OPT-84 | LOW | consolidation.ts invalidateByNodeId(id) calls drop the tenant → DEFAULT bucket, so on supersede/decay a NAMED tenant's context cache isn't evicted (within-tenant stale read; no cross-tenant eviction since it only touches DEFAULT). Background/global process — no per-tenant request context, so genuinely harder than OPT-27's request-path threading. | pending | packages/core/src/consolidation.ts:377,378,398,458 | derive the affected node's tenant (from the semantic/fact node's tenant_id) and pass it to invalidateByNodeId; or invalidate across tenant buckets for a shared node; test; suite green. Source: security-reviewing OPT-27. |  |
+| OPT-85 | LOW | OPT-28 bounds per-connection receive TIME but not concurrent connection COUNT — a slowloris opening many sub-30s connections, or a connection flood, still pressures the accept queue/pool. | pending | packages/mcp/src/server.ts (createServer/listen); deploy (reverse proxy) | set httpServer.maxConnections to a sane cap and/or document a reverse-proxy connection-limit + rate-limit in front; test asserts the cap is set; suite green. Source: security-reviewing OPT-28. |  |
 | OPT-78 | LOW | Redaction (store + ingest paths) only covers content/task fields — structural free-text fields (title, tags, entity/claim names) persist verbatim, so a secret pasted into a title/tag/entity name is not masked even with MEMBERRY_REDACT_ON_INGEST on. | pending | packages/wiki/src/ingest.ts (title/tags/about); packages/core/src/service.ts:421-430 | when redactOnIngest, also redactSecrets the title (at minimum) + tags on both ingest and store paths; test pins a secret in a title is masked; suite green. Source: security-reviewing OPT-12. |  |
 
 ## Completed Tasks
@@ -159,6 +160,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-25 | In-function rel-type allowlist on invalidateRelationship (close latent injection sink) | 23 | `132426a` | gate green 1543 passed / 0 failed (neo4j 200); security-reviewer PASS |
 | OPT-26 | Namespace retrieval feedback boost keys by tenant (close cross-tenant ranking channel) | 24 | `2a49cbd` | gate green 1547 passed / 0 failed (retrieval 146); security-reviewer PASS |
 | OPT-27 | Namespace context-cache keys by tenant (+block-invalidation path) | 25 | `5f5b026` | gate green 1557 passed / 0 failed; security-reviewer PASS |
+| OPT-28 | Set HTTP slowloris timeouts (headers/request/keepAlive) | 26 | `<c26-sha>` | gate green 1560 passed / 0 failed (mcp 143); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -190,7 +192,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 26 at **OPT-28** (LOW, DoS — HTTP server sets no headersTimeout/requestTimeout → slowloris; set headersTimeout/requestTimeout/keepAliveTimeout after createServer, `packages/mcp/src/server.ts:382-543`; security-tagged → security-reviewer too). Then OPT-29 (multi-tenant non-tenant-token fail-closed — reinforced by OPT-26), OPT-30/31, OPT-32 (berry_ask per-item cap), OPT-33/34 (redact patterns/dedup), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 27 at **OPT-29** (LOW, tenant — in multi-tenant mode a non-tenant token (global MEMBERRY_API_TOKEN / per-actor MEMBERRY_API_TOKENS) authenticates but silently falls back to DEFAULT tenant; make tenant binding mandatory: reject tokens not in tokenToTenant when multiTenantMode (or require an explicit flag), `packages/mcp/src/server.ts:296-307`; security-tagged → security-reviewer too. REINFORCED by OPT-26/27 reviews — closes the residual default-bucket path for feedback+cache). Then OPT-30 (token parse validation), OPT-31 (consolidation predicate gate), OPT-32 (berry_ask per-item cap), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -393,3 +395,11 @@ Start cycle 26 at **OPT-28** (LOW, DoS — HTTP server sets no headersTimeout/re
 - Verifier: REJECT (new within-tenant test had a polluted setup — node-dep set retained a stale member from the prior scope-invalidation, faithful to real Redis; fixed test to use a distinct node id) → PASS 1552/0. Security-reviewer: PASS on diff but flagged the block-mutation path drops tenant (regression OPT-27 introduced) → extended the fix to thread tenant through CacheInvalidator/_invalidateContext/factory (+5 block tests) → gate PASS 1557/0.
 - Metrics: passing 1547→1557 (floor 1557); skipped 16
 - Next: OPT-28
+
+### Cycle 26 — 2026-06-14
+- Commit: `<c26-sha>` OPT-28: set HTTP slowloris timeouts
+- Item: OPT-28 — COMPLETED
+- Mode B: 1 discovery → OPT-85 (LOW: connection-count/flood limiting — per-connection time bounded but not count)
+- Verifier: PASS (1560 passed, 0 failed, build exit 0; mcp 140→143; RED-confirmed; SSE+shutdown intact) | Security-reviewer: PASS (slowloris 300s→30s; SSE not killed; clamp+env validation sound)
+- Metrics: passing 1557→1560 (floor 1560); skipped 16
+- Next: OPT-29
