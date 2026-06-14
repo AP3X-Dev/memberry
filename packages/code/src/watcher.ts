@@ -1,10 +1,10 @@
 // packages/code/src/watcher.ts
 // Background file watcher that keeps the symbol graph fresh as source files change.
 
-import { watch, stat, realpathSync } from 'fs';
+import { watch, stat } from 'fs';
 import { extname, resolve, sep } from 'path';
 import type { FSWatcher } from 'fs';
-import { readEnv } from '@memberry/core';
+import { readEnv, isRealpathWithinBase } from '@memberry/core';
 import { LANGUAGE_EXTENSIONS } from './types.js';
 
 // ─── Injected interfaces ───────────────────────────────────────────────────
@@ -102,23 +102,13 @@ export function confineReindexPath(p: string, base?: string): string | null {
     return null;
   }
 
-  // Layer 2: symlink confinement (best-effort; only when the target exists).
-  try {
-    const realResolved = realpathSync(resolved);
-    // realpath the base too, so a base reached through a symlink still matches.
-    let realBase: string;
-    try {
-      realBase = realpathSync(baseDir);
-    } catch {
-      realBase = baseDir;
-    }
-    if (realResolved !== realBase && !realResolved.startsWith(realBase + sep)) {
-      return null;
-    }
-  } catch {
-    // ENOENT (or any stat error): nothing to realpath. The lexical check above
-    // already confirmed the resolved path is inside the base, so allow it
-    // (a not-yet-existing in-project file is fine — reindexFile re-checks).
+  // Layer 2: symlink confinement via the shared core helper (OPT-74). This now
+  // resolves the NEAREST EXISTING ANCESTOR when the target doesn't exist yet, so
+  // a symlinked ancestor of a not-yet-created leaf can't escape (the old
+  // ENOENT→lexical-allow fallthrough). Defeats a symlink at any level in/under
+  // the base, including the base reached through a symlink.
+  if (!isRealpathWithinBase(resolved, baseDir)) {
+    return null;
   }
 
   return resolved;

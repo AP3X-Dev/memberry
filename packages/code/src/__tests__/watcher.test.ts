@@ -127,6 +127,27 @@ describe('confineReindexPath', () => {
       rmSync(outsideRoot, { recursive: true, force: true });
     }
   });
+
+  it('OPT-74: drops a not-yet-existing leaf under a symlinked ANCESTOR', () => {
+    // A planted symlink DIRECTORY inside the base points outside; a path being
+    // created under it (leaf does not exist yet) must NOT escape — pre-OPT-74 the
+    // ENOENT→lexical-allow fallthrough let it through.
+    const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), 'amp-outside-anc-')));
+    try {
+      const evil = join(base, 'evil');
+      try {
+        symlinkSync(outsideRoot, evil);
+      } catch {
+        return; // symlink creation needs privileges on some platforms — skip
+      }
+      // base/evil → outsideRoot; base/evil/sub/new.ts doesn't exist.
+      expect(confineReindexPath(join(base, 'evil', 'sub', 'new.ts'), base)).toBeNull();
+      // sanity: a genuinely in-base not-yet-existing leaf is still accepted.
+      expect(confineReindexPath('src/created-later.ts', base)).toBe(resolve(base, 'src/created-later.ts'));
+    } finally {
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 // ─── CodeWatcher ────────────────────────────────────────────────────────────
