@@ -125,7 +125,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-02 | Bind SSE/Streamable sessions to creating tenant+actor; 403 on token mismatch | 2 | `20c7819` | gate green 1465 passed / 0 failed (mcp 126); security-reviewer PASS |
 | OPT-03 | Confine post-store re-index paths to ingest base (block arbitrary file read) | 3 | `9b0b029` | gate green 1472 passed / 0 failed (code 114); security-reviewer PASS |
 | OPT-04 | Validate extracted-fact predicate shape + value bounds (block graph poisoning) | 4 | `a47b124` | gate green 1480 passed / 0 failed (core 321); security-reviewer PASS |
-| OPT-05 | Redact JSON-quoted credentials in SECRET_ASSIGNMENT (core + graph allowlist) | 5 | `<c5-sha>` | gate green 1483 passed / 0 failed (core 323, graph 53); security-reviewer PASS |
+| OPT-05 | Redact JSON-quoted credentials in SECRET_ASSIGNMENT (core + graph allowlist) | 5 | `21c3462` | gate green 1483 passed / 0 failed (core 323, graph 53); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -194,7 +194,7 @@ Start cycle 6 at **OPT-06** (HIGH — berry_grep event-loop ReDoS, `packages/mcp
 - Next: OPT-05
 
 ### Cycle 5 — 2026-06-13
-- Commit: `<c5-sha>` OPT-05: redact JSON-quoted credentials in SECRET_ASSIGNMENT (core + graph allowlist)
+- Commit: `21c3462` OPT-05: redact JSON-quoted credentials in SECRET_ASSIGNMENT (core + graph allowlist)
 - Item: OPT-05 — COMPLETED
 - Mode B: residuals folded into existing items — OPT-33 (escaped-quote tail leak, Bearer-header, pwd/private_key keys) + OPT-34 (github_pat_ export drift confirmed)
 - Verifier: PASS (1483 passed, 0 failed, build exit 0; core 321→323, graph 52→53) | Security-reviewer: PASS (JSON gap closed both paths, no ReDoS, no prose false-positives, harmless over-redaction of booleans)
