@@ -158,7 +158,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `907ef57` | gate green 1540 passed / 0 failed (config-only); ops |
 | OPT-25 | In-function rel-type allowlist on invalidateRelationship (close latent injection sink) | 23 | `132426a` | gate green 1543 passed / 0 failed (neo4j 200); security-reviewer PASS |
 | OPT-26 | Namespace retrieval feedback boost keys by tenant (close cross-tenant ranking channel) | 24 | `2a49cbd` | gate green 1547 passed / 0 failed (retrieval 146); security-reviewer PASS |
-| OPT-27 | Namespace context-cache keys by tenant (+block-invalidation path) | 25 | `<c25-sha>` | gate green 1557 passed / 0 failed; security-reviewer PASS |
+| OPT-27 | Namespace context-cache keys by tenant (+block-invalidation path) | 25 | `5f5b026` | gate green 1557 passed / 0 failed; security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -387,7 +387,7 @@ Start cycle 26 at **OPT-28** (LOW, DoS — HTTP server sets no headersTimeout/re
 - Next: OPT-27
 
 ### Cycle 25 — 2026-06-14
-- Commit: `<c25-sha>` OPT-27: namespace context-cache keys by tenant (+block-invalidation path)
+- Commit: `5f5b026` OPT-27: namespace context-cache keys by tenant (+block-invalidation path)
 - Item: OPT-27 — COMPLETED (cache.ts + service.ts + block path)
 - Mode B: 1 discovery → OPT-84 (LOW: consolidation invalidateByNodeId drops tenant → named-tenant stale read; background process, no request tenant context)
 - Verifier: REJECT (new within-tenant test had a polluted setup — node-dep set retained a stale member from the prior scope-invalidation, faithful to real Redis; fixed test to use a distinct node id) → PASS 1552/0. Security-reviewer: PASS on diff but flagged the block-mutation path drops tenant (regression OPT-27 introduced) → extended the fix to thread tenant through CacheInvalidator/_invalidateContext/factory (+5 block tests) → gate PASS 1557/0.
