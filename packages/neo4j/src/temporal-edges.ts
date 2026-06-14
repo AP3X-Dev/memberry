@@ -9,6 +9,31 @@ export interface TemporalEdgeProperties {
 }
 
 /**
+ * Allowlist of relationship types that may be passed to invalidateRelationship().
+ *
+ * Neo4j cannot parameterize relationship types, so a dynamic relType is
+ * interpolated into the Cypher pattern. To prevent Cypher injection this set is
+ * enforced in-function (mirrors VALID_RELATION_TYPES in @memberry/arch
+ * relation-store.ts and VALID_SYMBOL_RELS in @memberry/code indexer.ts).
+ *
+ * It covers every relationship type this codebase creates that may carry
+ * temporal validity (valid_at/invalid_at) and could therefore be invalidated:
+ *   - ABOUT, REFERENCES, FACT_ABOUT, SAME_EPISODE  (temporal knowledge edges)
+ *   - SUPERSEDES, PROMOTED_FROM, SUPERSEDES_FACT     (provenance/evolution)
+ *   - REINFORCES, CORRECTS, CONTRADICTS              (signal edges)
+ *   - USES, CALLS, EXTENDS, IMPLEMENTS, EMITS, LISTENS  (structural edges)
+ *   - SOURCED_FROM, GENERATED_BY, USED_MODEL         (other known graph edges)
+ * The goal is to reject arbitrary/injected strings, not to be minimal.
+ */
+const VALID_REL_TYPES: Set<string> = new Set([
+  'ABOUT', 'REFERENCES', 'FACT_ABOUT', 'SAME_EPISODE',
+  'SUPERSEDES', 'PROMOTED_FROM', 'SUPERSEDES_FACT',
+  'REINFORCES', 'CORRECTS', 'CONTRADICTS',
+  'USES', 'CALLS', 'EXTENDS', 'IMPLEMENTS', 'EMITS', 'LISTENS',
+  'SOURCED_FROM', 'GENERATED_BY', 'USED_MODEL',
+]);
+
+/**
  * Build a SET clause fragment that stamps temporal properties on a relationship.
  * Uses COALESCE so existing valid_at is never overwritten on MERGE.
  *
@@ -47,8 +72,12 @@ export function activeRelationshipFilter(alias: string, asOfParam?: string): str
  * @param session  A neo4j session or transaction with a run() method
  * @param fromId   The id property of the source node
  * @param toId     The id property of the target node
- * @param relType  The relationship type (must be from a validated allowlist)
+ * @param relType  The relationship type. Validated in-function against
+ *                 VALID_REL_TYPES before interpolation — Cypher cannot
+ *                 parameterize relationship types, so this allowlist is the
+ *                 enforced injection guard. Throws on any non-allowlisted value.
  * @param invalidAt  ISO timestamp for invalidation (defaults to now)
+ * @throws Error if relType is not in the VALID_REL_TYPES allowlist.
  */
 export async function invalidateRelationship(
   session: { run: (query: string, params?: Record<string, unknown>) => Promise<unknown> },
@@ -57,8 +86,12 @@ export async function invalidateRelationship(
   relType: string,
   invalidAt?: string,
 ): Promise<void> {
+  // Relationship types cannot be parameterized in Cypher — enforce the
+  // allowlist here (not via caller convention) to block Cypher injection.
+  if (!VALID_REL_TYPES.has(relType)) {
+    throw new Error(`Invalid relationship type: ${relType}. Must be one of: ${[...VALID_REL_TYPES].join(', ')}`);
+  }
   const now = invalidAt ?? new Date().toISOString();
-  // relType is caller-validated (enum/allowlist) before reaching here.
   await session.run(
     `MATCH (a {id: $fromId})-[r:${relType}]->(b {id: $toId})
      WHERE r.invalid_at IS NULL

@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1540 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1543 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -69,7 +69,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-22 | MED | fetchEpisodicsForEntity unindexed full :Episodic substring scan, once/twice per entity on compile | ✅ DONE (c20) | packages/wiki/src/queries.ts:215-240 | DONE: batched fetchEpisodicsForEntities (one UNWIND :Episodic scan + per-name CALL{} preserving CONTAINS-OR-:MODIFIED predicate, DISTINCT, ORDER created_at DESC, LIMIT 20); compile Phase-1 E scans→1 (result-identical) +3 tests. Verifier PASS 1537/0 (wiki 290). Phase-2 double-call→OPT-58. Perf (no sec-review). |  |
 | OPT-23 | MED | indexFile one round-trip per changed symbol (sequential findByCompositeKey + create/update) | ✅ DONE (c21) | packages/code/src/indexer.ts:144-214 | DONE: SymbolStore.upsertSymbols — one UNWIND MERGE (ON CREATE=create props incl vectors, ON MATCH=update subset, transient __upsert_created removed before RETURN → graph-identical); indexFile collects changed→1 batched upsert (N→1); content-hash skip preserved +3 tests. Verifier PASS 1540/0 (code 117). Relation-edge N+1→OPT-82. Perf (no sec-review). |  |
 | OPT-24 | MED | docker-compose mcp omits MEMBERRY_TENANT_TOKENS/_DATASTORES/_INGEST_ALLOW_DIR — isolation can't be enabled via shipped compose | ✅ DONE (c22) | docker-compose.yml:72-89; .env.example | DONE: wired all 3 vars into the mcp env block (${VAR:-} opt-in defaults, 6-space map syntax) + INGEST_ALLOW_DIR container-path/volume-mount note in compose + .env.example pointer. Names verified vs readEnv call sites. Config-only → suite green 1540/0 (verified). Ops (no sec-review). |  |
-| OPT-25 | LOW | invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink) | pending | packages/neo4j/src/temporal-edges.ts:53-68 | add in-function VALID_REL_TYPES allowlist (throw on miss); new test asserts a bad relType throws; suite green |  |
+| OPT-25 | LOW | invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink) | ✅ DONE (c23) | packages/neo4j/src/temporal-edges.ts:53-68 | DONE: module-level VALID_REL_TYPES allowlist (19 metachar-free types incl ABOUT) + throw before interpolation/session.run; doc-comment now enforced-invariant; no dep cycle (local set) +3 tests. Verifier PASS 1543/0 (neo4j 200; RED-confirmed); security-reviewer PASS (sink enforced pre-interpolation). Residual: relation-store remove fail-open + allowlist dup→OPT-83. |  |
 | OPT-26 | LOW | Global feedback boost keys mix tenant entity names — one tenant skews another's ranking | pending | packages/retrieval/src/feedback.ts:18-21,31-46,52-82 | namespace feedback keys by tenant + thread tenantId; suite green |  |
 | OPT-27 | LOW | Context-cache dependency sets keyed by naked scope/node-id — one tenant's write evicts another's cache | pending | packages/redis/src/cache.ts:29-38,42-54,56-68 | prefix dep-set keys with tenant + thread tenant from load()/store(); suite green |  |
 | OPT-28 | LOW | HTTP server sets no headersTimeout/requestTimeout — slowloris DoS | pending | packages/mcp/src/server.ts:382-543 | set headersTimeout/requestTimeout/keepAliveTimeout after createServer; test asserts they are set; suite green |  |
@@ -126,6 +126,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-80 | LOW | (deferred enhancement, needs approval) EntityResolver CI/alias resolution still does a toLower(e.name) scan + alias-array scan unservable by the entity_name index — make it index-backed. | pending | packages/neo4j/src/entity-resolver.ts; packages/neo4j/src/schema.ts + migrations.ts | add persisted :Entity.name_lower property + index (and lowercased-alias index), rewrite resolveExisting to equality-match name_lower; REQUIRES a schema migration + backfill of name_lower on existing nodes → HUMAN APPROVAL before running. Source: implementing OPT-17. |  |
 | OPT-81 | LOW | Fact supersession is now create-before-invalidate (OPT-21) but still TWO transactions — a benign transient two-active window exists until both commit; a single Neo4j tx would make it fully atomic. | pending | packages/neo4j/src/fact.ts; packages/core/src/service.ts | add FactStore.createAndInvalidate(newFact, oldId, invalidAt) doing both writes in one tx+session; service uses it on the contradiction path; test pins atomicity (no two-active window); suite green. Source: implementing OPT-21. |  |
 | OPT-82 | LOW | CodeIndexer relation resolution (resolveRelation per SYMBOL_CALLS/IMPORTS/INHERITS edge) is still per-edge N+1 — each does an ordered OPTIONAL MATCH fallback with the rel-type interpolated. | pending | packages/code/src/indexer.ts:176-191; packages/code/src/resolver.ts | batch relation resolution per rel-type (UNWIND $edges grouped by type, or apoc.merge.relationship) without changing edge-resolution results; test pins identical edges + fewer round-trips; suite green. Source: implementing OPT-23. |  |
+| OPT-83 | LOW | Consistency: arch/relation-store.ts remove() is fail-OPEN (silently no-ops on a non-allowlisted type) vs create() which throws — asymmetric; and the rel-type allowlists are duplicated across 3 packages (arch VALID_RELATION_TYPES, code VALID_SYMBOL_RELS, neo4j VALID_REL_TYPES) with no shared source of truth. | pending | packages/arch/src/relation-store.ts:51; packages/code/src/indexer.ts:249; packages/neo4j/src/temporal-edges.ts:28 | make remove() throw on bad type (match create); optionally centralize the allowlists into one shared const; tests; suite green. Source: security-reviewing OPT-25. Not a vuln (all sinks guarded) — consistency only. |  |
 | OPT-78 | LOW | Redaction (store + ingest paths) only covers content/task fields — structural free-text fields (title, tags, entity/claim names) persist verbatim, so a secret pasted into a title/tag/entity name is not masked even with MEMBERRY_REDACT_ON_INGEST on. | pending | packages/wiki/src/ingest.ts (title/tags/about); packages/core/src/service.ts:421-430 | when redactOnIngest, also redactSecrets the title (at minimum) + tags on both ingest and store paths; test pins a secret in a title is masked; suite green. Source: security-reviewing OPT-12. |  |
 
 ## Completed Tasks
@@ -154,6 +155,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-22 | Batch wiki episodic fetch into one UNWIND scan (E scans→1, results identical) | 20 | `a39fcfe` | gate green 1537 passed / 0 failed (wiki 290); perf — result-identical |
 | OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `17fc63d` | gate green 1540 passed / 0 failed (code 117); perf — graph-identical |
 | OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `907ef57` | gate green 1540 passed / 0 failed (config-only); ops |
+| OPT-25 | In-function rel-type allowlist on invalidateRelationship (close latent injection sink) | 23 | `<c23-sha>` | gate green 1543 passed / 0 failed (neo4j 200); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -185,7 +187,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 23 at **OPT-25** (LOW — invalidateRelationship() interpolates relType into Cypher with no in-function allowlist (latent injection sink, currently no production caller); add an in-function VALID_REL_TYPES allowlist that throws on miss, `packages/neo4j/src/temporal-edges.ts:53-68`). NOTE: **all CRIT/HIGH/MED items are now DONE** — the remaining backlog is the LOW/INFO tier (OPT-25..66) + the OPT-67..82 review/deferred follow-ups. Work down by ID; skip any whose twin is already done; for each, the existing-tests gate + a focused new test per the row's acceptance. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 24 at **OPT-26** (LOW, tenant — global feedback boost keys mix tenant entity names; one tenant can skew/poison another's retrieval ranking; namespace feedback keys by tenant + thread tenantId, `packages/retrieval/src/feedback.ts:18-21,31-46,52-82`; security-tagged → security-reviewer too). Then OPT-27 (context-cache dep-set tenant prefix), OPT-28 (slowloris timeouts), OPT-29/30/31 (tenant token edge cases / consolidation predicate gate), … down the table. SEE Blocked B-01 (re2). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -364,3 +366,11 @@ Start cycle 23 at **OPT-25** (LOW — invalidateRelationship() interpolates relT
 - Verifier (orchestrator inline — config-only YAML, no source): YAML valid (python safe_load), 3 vars present with ${VAR:-} + names match readEnv call sites; full gate re-run green 1540/0 (unchanged — config-only). Ops item — no security-reviewer.
 - Metrics: passing 1540 (floor 1540, unchanged — no new tests); skipped 16
 - Next: OPT-25 (LOW tier begins)
+
+### Cycle 23 — 2026-06-14
+- Commit: `<c23-sha>` OPT-25: in-function rel-type allowlist on invalidateRelationship
+- Item: OPT-25 — COMPLETED
+- Mode B: 1 discovery → OPT-83 (LOW consistency: relation-store remove fail-open asymmetry + 3-way allowlist duplication)
+- Verifier: PASS (1543 passed, 0 failed, build exit 0; neo4j 197→200; RED-confirmed by removing guard). NOTE: the dispatched verifier mis-summed the total as 1689 (verbose-reporter artifact); orchestrator re-ran and confirmed authoritative 1543/0 from per-package final lines. | Security-reviewer: PASS (sink enforced before interpolation; allowlist metachar-free incl ABOUT; no dep cycle; latent/LOW correct)
+- Metrics: passing 1540→1543 (floor 1543); skipped 16
+- Next: OPT-26

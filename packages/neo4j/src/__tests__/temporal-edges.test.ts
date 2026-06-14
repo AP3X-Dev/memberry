@@ -1,5 +1,5 @@
 // packages/neo4j/src/__tests__/temporal-edges.test.ts
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { createNeo4jDriver } from '../driver.js';
 import { initSchema } from '../schema.js';
 import { EpisodicStore } from '../episodic.js';
@@ -55,6 +55,40 @@ describe('activeRelationshipFilter', () => {
     expect(filter).toContain('COALESCE(r.valid_at');
     expect(filter).toContain('$asOf');
     expect(filter).toContain('r.invalid_at IS NULL OR r.invalid_at > $asOf');
+  });
+});
+
+describe('invalidateRelationship relType validation (no Neo4j)', () => {
+  it('throws "Invalid relationship type" for an injection-shaped relType and does NOT call session.run', async () => {
+    const run = vi.fn().mockResolvedValue(undefined);
+    const session = { run };
+
+    await expect(
+      invalidateRelationship(session, 'a', 'b', 'KNOWS]->() DETACH DELETE a //'),
+    ).rejects.toThrow('Invalid relationship type');
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown plain relType without running the query', async () => {
+    const run = vi.fn().mockResolvedValue(undefined);
+    const session = { run };
+
+    await expect(
+      invalidateRelationship(session, 'a', 'b', 'NOT_A_REAL_REL'),
+    ).rejects.toThrow('Invalid relationship type');
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('proceeds for a legit relType (ABOUT) — preserves existing behavior', async () => {
+    const run = vi.fn().mockResolvedValue(undefined);
+    const session = { run };
+
+    await invalidateRelationship(session, 'a', 'b', 'ABOUT', '2026-01-01T00:00:00.000Z');
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const [query, params] = run.mock.calls[0];
+    expect(query).toContain('[r:ABOUT]');
+    expect(params).toMatchObject({ fromId: 'a', toId: 'b', now: '2026-01-01T00:00:00.000Z' });
   });
 });
 
