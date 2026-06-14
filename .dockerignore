@@ -1,0 +1,81 @@
+# .dockerignore — trims the build context sent to the Docker daemon.
+#
+# The Dockerfile uses EXPLICIT COPYs (package.json, package-lock.json, packages/,
+# tsconfig.json, tsconfig.build.json, scripts/) and runs `npm ci` + `npm run build`
+# inside the image, so nothing here may exclude those build inputs. Everything
+# listed below is either reinstalled/rebuilt in the image (node_modules, dist) or
+# is not part of the image at all (docs, agent state, IDE/agent configs, secrets).
+#
+# Pattern note: docker matches against the FULL context-relative path, so nested
+# matches need a `**/` prefix (`**/node_modules`, not `node_modules`).
+
+# ── Dependencies & build artifacts (reinstalled / recompiled in the image) ──────
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/coverage
+.nyc_output
+
+# ── VCS ─────────────────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+
+# ── Generated data / memory exports (never part of the runtime image) ───────────
+.memberry
+.amp
+/wiki
+amp-graph-out
+.lab
+.yggdrasil
+.codebase
+.audit
+
+# ── Internal docs, planning, and loop state (not shipped) ───────────────────────
+docs
+agent-state
+PRPs
+*.plan.md
+*handoff*.md
+CHANGELOG.md
+README.md
+SECURITY.md
+THREAT-MODEL.md
+AGENTS.md
+
+# ── Agent / IDE / CI configs (not needed at build or runtime) ───────────────────
+.claude
+.claude-plugin
+.augment
+.codex
+.cursorrules
+.superpowers
+.github
+skills
+*.example
+
+# ── Local-only build inputs the image doesn't use ───────────────────────────────
+bench
+deploy
+assets
+
+# ── Docker / compose files (read by the engine, not copied into the image) ──────
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# ── Secrets & env (must never enter the context) ────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+credentials.json
+
+# ── OS / editor cruft ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
