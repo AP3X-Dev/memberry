@@ -52,6 +52,32 @@ describe('rrfFusion', () => {
     expect(aScore).toBeGreaterThan(0);
   });
 
+  it('OPT-51: empty/non-matching entity_boosts are no-ops; a matching substring boost still applies', () => {
+    const list1 = [makeResult('alpha', 0.9), makeResult('beta', 0.8)];
+    const srcZero = { symbol: 0, semantic: 0, episodic: 0, arch_entity: 0, aspect: 0 } as const;
+    const scoresOf = (res: RetrievalResult[]) =>
+      res.map((r) => [r.id, r.score] as const).sort((x, y) => x[0].localeCompare(y[0]));
+
+    const noBoosts = rrfFusion([list1], 10);
+
+    // Empty entity_boosts → identical to no boosts (the OPT-51 short-circuit is a
+    // true no-op, not a result-altering path).
+    const empty = rrfFusion([list1], 10, 60, { entity_boosts: {}, source_type_boosts: { ...srcZero } });
+    expect(scoresOf(empty)).toEqual(scoresOf(noBoosts));
+
+    // A boost key that matches NO candidate content/title → also a no-op (proves
+    // the hoist preserved the substring-match guard, not an unconditional boost).
+    const nonMatching = rrfFusion([list1], 10, 60, { entity_boosts: { zzz_nomatch: 0.5 }, source_type_boosts: { ...srcZero } });
+    expect(scoresOf(nonMatching)).toEqual(scoresOf(noBoosts));
+
+    // A boost key that IS a substring of alpha's content ("content of alpha") →
+    // alpha's score changes (the boost still applies after the hoist).
+    const matching = rrfFusion([list1], 10, 60, { entity_boosts: { alpha: 0.5 }, source_type_boosts: { ...srcZero } });
+    const alphaMatched = matching.find((r) => r.id === 'alpha')!.score;
+    const alphaBase = noBoosts.find((r) => r.id === 'alpha')!.score;
+    expect(alphaMatched).not.toBe(alphaBase);
+  });
+
   it('applies postBoost function before MMR', () => {
     const list1 = [makeResult('a', 0.9), makeResult('b', 0.3)];
     // Boost b's score dramatically

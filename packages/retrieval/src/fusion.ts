@@ -47,12 +47,22 @@ export function rrfFusion(
     }
   }
 
-  // Apply boost factors from feedback history
+  // Apply boost factors from feedback history.
+  // OPT-51: hoist the entity-boost entries out of the per-candidate loop (they
+  // are identical for every candidate, so rebuilding the array N times was pure
+  // waste) and skip the inner scan entirely when there are no entity boosts
+  // (cold-start / no-feedback tenants). Substring-match semantics and the
+  // per-candidate multiplication order are unchanged → output-identical.
+  // entity_boosts is already bounded to the top 50 (FeedbackTracker.getBoosts).
   if (boosts) {
+    const entityBoostEntries = Object.entries(boosts.entity_boosts);
     for (const entry of scores.values()) {
-      for (const [entity, boost] of Object.entries(boosts.entity_boosts)) {
-        if (entry.result.content.includes(entity) || entry.result.title.includes(entity)) {
-          entry.rrfScore *= (1 + boost);
+      if (entityBoostEntries.length > 0) {
+        const { content, title } = entry.result;
+        for (const [entity, boost] of entityBoostEntries) {
+          if (content.includes(entity) || title.includes(entity)) {
+            entry.rrfScore *= (1 + boost);
+          }
         }
       }
 
