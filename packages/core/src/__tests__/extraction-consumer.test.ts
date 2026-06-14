@@ -38,6 +38,27 @@ class FakeQueue implements ExtractionQueuePort {
   }
 }
 
+/** Queue that implements the OPT-56 atomic ops (requeue / deadLetterAndAck). */
+class AtomicFakeQueue extends FakeQueue {
+  requeueCalls: Array<{ originalId: string; retry: { episodeId: string; content: string; tenantId?: string; attempt?: number } }> = [];
+  dlAckCalls: Array<{ job: QueuedJob; error: string }> = [];
+  private rseq = 0;
+
+  async requeue(originalId: string, retry: { episodeId: string; content: string; tenantId?: string; attempt?: number }): Promise<string> {
+    this.requeueCalls.push({ originalId, retry });
+    this.delivered.delete(originalId); // atomic: original removed in the same op
+    const id = `r${++this.rseq}`;
+    this.available.push({ id, episodeId: retry.episodeId, content: retry.content, attempt: retry.attempt ?? 0 });
+    return id;
+  }
+
+  async deadLetterAndAck(job: QueuedJob, error: string): Promise<void> {
+    this.dlAckCalls.push({ job, error });
+    this.dead.push({ job, error });
+    this.delivered.delete(job.id); // atomic: original removed in the same op
+  }
+}
+
 describe('ExtractionConsumer', () => {
   it('processes a job and acks it on success', async () => {
     const q = new FakeQueue();
@@ -84,6 +105,42 @@ describe('ExtractionConsumer', () => {
     expect(q.dead[0].job.episodeId).toBe('ep1');
     expect(q.dead[0].error).toContain('always fails');
     expect(q.available).toHaveLength(0); // not re-queued after dead-letter
+  });
+
+  it('OPT-56: uses atomic requeue (enqueue+ack in one op), not separate enqueue+ack, on retry', async () => {
+    const q = new AtomicFakeQueue();
+    await q.enqueue({ episodeId: 'ep1', content: 'boom' });
+    const handler = vi.fn().mockRejectedValue(new Error('extract failed'));
+    const consumer = new ExtractionConsumer(q, handler, { maxAttempts: 3 });
+
+    await consumer.drainOnce();
+
+    // Retry went through the atomic op — NOT the separate ack() path.
+    expect(q.requeueCalls).toHaveLength(1);
+    expect(q.requeueCalls[0].originalId).toBeTruthy();
+    expect(q.requeueCalls[0].retry.attempt).toBe(1);
+    expect(q.acked).toHaveLength(0);      // standalone ack() NOT used (atomic acked internally)
+    expect(q.dead).toHaveLength(0);
+    expect(q.available).toHaveLength(1);  // the retry is queued
+    expect(q.available[0].attempt).toBe(1);
+  });
+
+  it('OPT-56: uses atomic deadLetterAndAck (no separate ack) when exhausting maxAttempts', async () => {
+    const q = new AtomicFakeQueue();
+    const handler = vi.fn().mockRejectedValue(new Error('always fails'));
+    const consumer = new ExtractionConsumer(q, handler, { maxAttempts: 3 });
+
+    await q.enqueue({ episodeId: 'ep1', content: 'x' }); // attempt 0
+    await consumer.drainOnce(); // 0 → 1 (atomic requeue)
+    await consumer.drainOnce(); // 1 → 2 (atomic requeue)
+    await consumer.drainOnce(); // 2 → max → atomic dead-letter+ack
+
+    expect(handler).toHaveBeenCalledTimes(3);
+    expect(q.requeueCalls).toHaveLength(2);   // two retries via atomic requeue
+    expect(q.dlAckCalls).toHaveLength(1);     // final dead-letter via atomic op
+    expect(q.dead).toHaveLength(1);
+    expect(q.acked).toHaveLength(0);          // standalone ack() never used on the atomic path
+    expect(q.available).toHaveLength(0);
   });
 
   it('drains a batch of multiple jobs in one pass', async () => {

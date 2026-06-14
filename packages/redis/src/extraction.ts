@@ -117,6 +117,61 @@ export class ExtractionQueue {
     await this.redis.xdel(EXTRACTION_STREAM, id);
   }
 
+  /**
+   * OPT-56: atomically re-enqueue a retry AND ack+remove the original delivery in
+   * ONE Redis transaction. The consumer's prior path did enqueue THEN ack as two
+   * separate commands — a crash BETWEEN them re-delivered the original (still in
+   * the group PEL) ON TOP OF the re-enqueued copy → duplicate extraction. With
+   * MULTI the server runs XADD(retry)+XACK+XDEL(original) together, so a client
+   * crash falls either entirely before EXEC (original stays pending → reclaimed
+   * once, no dup) or entirely after (retry added, original gone). The duplicate
+   * window is closed with NO drop risk (ack-before-enqueue would have risked loss).
+   * Returns the new retry message id.
+   */
+  async requeue(originalId: string, retry: ExtractionJob): Promise<string> {
+    const res = (await this.redis
+      .multi()
+      .xadd(
+        EXTRACTION_STREAM, '*',
+        'episodeId', retry.episodeId,
+        'content', retry.content,
+        'tenantId', retry.tenantId ?? 'default',
+        'attempt', String(retry.attempt ?? 0),
+      )
+      .xack(EXTRACTION_STREAM, EXTRACTION_GROUP, originalId)
+      .xdel(EXTRACTION_STREAM, originalId)
+      .exec()) as Array<[Error | null, unknown]> | null;
+    // exec() returns [err, result] per queued command; the XADD id is the first.
+    const xaddErr = res?.[0]?.[0];
+    const newId = res?.[0]?.[1] as string | undefined;
+    if (xaddErr) throw xaddErr;
+    if (!newId) throw new Error('requeue MULTI/EXEC returned no message id');
+    return newId;
+  }
+
+  /**
+   * OPT-56: atomically dead-letter a permanently-failed job AND ack+remove its
+   * original delivery in one transaction, closing the same crash-window that could
+   * otherwise re-deliver the original on top of the DLQ entry. Fields mirror
+   * deadLetter() so stats()/replayDeadLetters() behave identically.
+   */
+  async deadLetterAndAck(job: ExtractionJobEntry, error: string): Promise<void> {
+    await this.redis
+      .multi()
+      .xadd(
+        EXTRACTION_DLQ, '*',
+        'episodeId', job.episodeId,
+        'content', job.content,
+        'tenantId', job.tenantId ?? 'default',
+        'attempt', String(job.attempt),
+        'error', error.slice(0, 500),
+        'failed_at', new Date().toISOString(),
+      )
+      .xack(EXTRACTION_STREAM, EXTRACTION_GROUP, job.id)
+      .xdel(EXTRACTION_STREAM, job.id)
+      .exec();
+  }
+
   /** Move a permanently-failed job to the dead-letter stream. */
   async deadLetter(job: ExtractionJobEntry, error: string): Promise<void> {
     await this.redis.xadd(

@@ -91,4 +91,59 @@ describe('ExtractionQueue', () => {
     expect(stats.deadLettered).toBe(0);
     expect(stats.pending).toBe(1);
   });
+
+  // NOTE: these assert PER-CONSUMER pending + this-entry removal rather than the
+  // GLOBAL stats() counts — the gate's Redis is shared with cerebro's live MCP
+  // ExtractionConsumer (same stream + 'extractors' group), which perturbs the
+  // group-wide pending/len counts. Per-consumer XPENDING isolates our entry.
+  async function c1PendingHas(id: string): Promise<boolean> {
+    const pend = (await (redis as unknown as {
+      xpending: (...a: unknown[]) => Promise<unknown>;
+    }).xpending(EXTRACTION_STREAM, EXTRACTION_GROUP, '-', '+', 100, 'c1')) as unknown[] | null;
+    return Array.isArray(pend) && pend.some((e) => Array.isArray(e) && e[0] === id);
+  }
+
+  it('OPT-56: requeue atomically acks+removes the original and adds a retry (no duplicate)', async () => {
+    if (!redisAvailable) return;
+    await queue.ensureGroup();
+    await queue.enqueue({ episodeId: 'ep-rq', content: 'x', attempt: 0 });
+    const [job] = await queue.read('c1', 10);
+    if (!job) return; // live consumer raced us for the '>' read — skip (rare)
+    expect(job.attempt).toBe(0);
+
+    const newId = await queue.requeue(job.id, {
+      episodeId: job.episodeId, content: job.content, attempt: job.attempt + 1,
+    });
+    expect(newId).toBeTruthy();
+    expect(newId).not.toBe(job.id);
+
+    // Original was XACK'd (no longer pending for c1) AND XDEL'd from the stream —
+    // so it can't be reclaimed and reprocessed alongside the retry (no duplicate).
+    expect(await c1PendingHas(job.id)).toBe(false);
+    const orig = (await redis.xrange(EXTRACTION_STREAM, job.id, job.id)) as [string, string[]][];
+    expect(orig).toHaveLength(0);
+  });
+
+  it('OPT-56: deadLetterAndAck atomically DLQs and acks+removes the original', async () => {
+    if (!redisAvailable) return;
+    await queue.ensureGroup();
+    await queue.enqueue({ episodeId: 'ep-dla', content: 'fail' });
+    const [job] = await queue.read('c1', 10);
+    if (!job) return; // live consumer raced us — skip (rare)
+
+    await queue.deadLetterAndAck(job, 'boom');
+
+    // Original acked for c1 + removed from the main stream.
+    expect(await c1PendingHas(job.id)).toBe(false);
+    const orig = (await redis.xrange(EXTRACTION_STREAM, job.id, job.id)) as [string, string[]][];
+    expect(orig).toHaveLength(0);
+    // The DLQ received an entry for this episode.
+    const dlq = (await redis.xrange(EXTRACTION_DLQ, '-', '+')) as [string, string[]][];
+    const inDlq = dlq.some(([, fields]) => {
+      const o: Record<string, string> = {};
+      for (let i = 0; i < fields.length; i += 2) o[fields[i]] = fields[i + 1];
+      return o['episodeId'] === 'ep-dla';
+    });
+    expect(inDlq).toBe(true);
+  });
 });

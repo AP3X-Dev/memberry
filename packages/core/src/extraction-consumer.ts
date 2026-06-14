@@ -23,6 +23,16 @@ export interface ExtractionQueuePort {
   ack(id: string): Promise<void>;
   enqueue(job: { episodeId: string; content: string; tenantId?: string; attempt?: number }): Promise<string>;
   deadLetter(job: QueuedJob, error: string): Promise<void>;
+  /** OPT-56: atomically enqueue a retry AND ack+remove the original in one tx
+   *  (closes the crash-window duplicate). Optional — handle() falls back to
+   *  enqueue()+ack() when a queue/mock doesn't implement it. */
+  requeue?(
+    originalId: string,
+    retry: { episodeId: string; content: string; tenantId?: string; attempt?: number },
+  ): Promise<string>;
+  /** OPT-56: atomically dead-letter AND ack+remove the original in one tx.
+   *  Optional — handle() falls back to deadLetter()+ack() when absent. */
+  deadLetterAndAck?(job: QueuedJob, error: string): Promise<void>;
 }
 
 export interface ExtractionConsumerOptions {
@@ -103,13 +113,27 @@ export class ExtractionConsumer {
           `[amp-extraction] job ${job.id} (episode ${job.episodeId}) failed permanently ` +
           `after ${job.attempt + 1} attempt(s); dead-lettering:`, msg,
         );
-        await this.queue.deadLetter(job, msg);
+        // OPT-56: atomic dead-letter+ack when supported (no duplicate on a crash
+        // between the two writes); else the prior deadLetter-then-ack ordering.
+        if (this.queue.deadLetterAndAck) {
+          await this.queue.deadLetterAndAck(job, msg);
+        } else {
+          await this.queue.deadLetter(job, msg);
+          await this.queue.ack(job.id);
+        }
       } else {
         console.warn(`[amp-extraction] job ${job.id} attempt ${job.attempt + 1} failed; re-enqueuing:`, msg);
-        await this.queue.enqueue({ episodeId: job.episodeId, content: job.content, tenantId: job.tenantId, attempt: job.attempt + 1 });
+        // OPT-56: atomic requeue (enqueue retry + ack original in ONE tx) closes
+        // the crash-window where the original was re-delivered on top of the
+        // re-enqueued copy → duplicate extraction. Falls back to the prior
+        // enqueue-then-ack (at-least-once: prefers a rare duplicate over a drop).
+        if (this.queue.requeue) {
+          await this.queue.requeue(job.id, { episodeId: job.episodeId, content: job.content, tenantId: job.tenantId, attempt: job.attempt + 1 });
+        } else {
+          await this.queue.enqueue({ episodeId: job.episodeId, content: job.content, tenantId: job.tenantId, attempt: job.attempt + 1 });
+          await this.queue.ack(job.id);
+        }
       }
-      // Remove the current delivery either way (we've re-enqueued or dead-lettered).
-      await this.queue.ack(job.id);
     }
   }
 
