@@ -45,3 +45,4 @@
 | OPT-42 | Batch staleness-decay writes into one UNWIND SET (FactStore.updateConfidenceBatch) | 38 | `782a0a5` | gate green: 1633 passed / 0 failed (neo4j 204, core 357), build 0; perf — same end-state (live-Neo4j integration test) |
 | OPT-43 | Batch SOURCED_FROM edge MERGEs in FactStore.create (one UNWIND MERGE) | 39 | `7691296` | gate green: 1634 passed / 0 failed (neo4j 205), build 0; perf — graph-identical (live-Neo4j integration test) |
 | OPT-44 | Inline EpisodicStore embedding into CREATE (one round-trip, mirrors SemanticStore) | 40 | `5190aae` | gate green: 1635 passed / 0 failed (neo4j 206), build 0; perf — persisted node identical (live-Neo4j) |
+| OPT-45 | Batch tenant derivation (_deriveTenantFromEpisodes → EpisodicStore.getTenantsByIds) | 41 | `453eb1f` | gate green: 1637 passed / 0 failed (neo4j 207, core 358), build 0; perf — same derived tenant (live-Neo4j) |
