@@ -62,6 +62,10 @@ export interface RedisLayer {
 
 export interface FactLayer {
   getActive(entityName: string, options?: TemporalOptions, tenantId?: string): Promise<FactNode[]>;
+  /** OPT-41: batched getActive for many entities in ~1 fact round-trip. Returns
+   *  one array per input name, in input order, each identical to getActive(name).
+   *  Optional — load() falls back to per-entity getActive when absent. */
+  getActiveBatch?(entityNames: string[], options?: TemporalOptions, tenantId?: string): Promise<FactNode[][]>;
   create(fact: FactNode): Promise<string>;
   findBySubjectPredicate(subject: string, predicate: string, tenantId?: string): Promise<FactNode[]>;
   invalidate(id: string, invalidAt: string, supersededById?: string): Promise<void>;
@@ -272,9 +276,15 @@ export class AMPService {
       this._vectorSearch(scope.task, 20, scope.tenantId, projectScope),
     ]);
 
+    // OPT-41: one batched fact fetch (UNWIND ids) instead of one getActive per
+    // entity. getActiveBatch returns per-entity arrays in input order, each
+    // identical to getActive — so the dedup+rank below is byte-identical. Falls
+    // back to the per-entity fan-out for fact layers (e.g. mocks) without it.
     const factsPromise: Promise<FactNode[][]> =
       this.neo4j.fact && scope.entities && scope.entities.length > 0
-        ? Promise.all(scope.entities.map((e) => this.neo4j.fact!.getActive(e, scope.temporal, scope.tenantId)))
+        ? this.neo4j.fact.getActiveBatch
+          ? this.neo4j.fact.getActiveBatch(scope.entities, scope.temporal, scope.tenantId)
+          : Promise.all(scope.entities.map((e) => this.neo4j.fact!.getActive(e, scope.temporal, scope.tenantId)))
         : Promise.resolve([]);
 
     const [[coreRaw, workingRaw], [byScope, byVector], factResults] = await Promise.all([

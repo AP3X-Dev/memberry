@@ -245,6 +245,48 @@ describe('FactStore', () => {
     expect(found).toBeDefined();
   });
 
+  // ─── getActiveBatch (OPT-41) — output-identity vs per-entity getActive ───────
+
+  it('getActiveBatch is output-identical to the per-entity getActive union', async () => {
+    if (!neo4jAvailable) return;
+    // Two active facts with DISTINCT valid_at → ORDER BY valid_at is a total
+    // order, so there is no tie nondeterminism to make the comparison flaky.
+    const f1 = makeFactNode('batch-1', { subject: 'auth-module', object: 'JWT', valid_at: '2024-01-01T00:00:00.000Z' });
+    const f2 = makeFactNode('batch-2', { subject: 'auth-module', object: 'bcrypt', valid_at: '2024-02-01T00:00:00.000Z' });
+    await store.create(f1);
+    await store.create(f2);
+    createdIds.push(f1.id, f2.id);
+
+    for (const opts of [
+      undefined,
+      { time_mode: 'current' as const },
+      { time_mode: 'historical' as const, as_of: '2030-01-01T00:00:00.000Z' },
+      { time_mode: 'evolution' as const },
+    ]) {
+      // Single known entity.
+      const single = await store.getActiveBatch(['auth-module'], opts);
+      expect(single).toEqual([await store.getActive('auth-module', opts)]);
+
+      // Mixed: a known entity + an unknown one → [<facts>, []], in input order.
+      const mixed = await store.getActiveBatch(['auth-module', 'no-such-entity-xyz'], opts);
+      expect(mixed).toEqual([
+        await store.getActive('auth-module', opts),
+        await store.getActive('no-such-entity-xyz', opts),
+      ]);
+      expect(mixed[1]).toEqual([]);
+
+      // Duplicate name → both positions get that entity's facts.
+      const dup = await store.getActiveBatch(['auth-module', 'auth-module'], opts);
+      const one = await store.getActive('auth-module', opts);
+      expect(dup).toEqual([one, one]);
+    }
+  });
+
+  it('getActiveBatch returns [] for empty input', async () => {
+    if (!neo4jAvailable) return;
+    expect(await store.getActiveBatch([])).toEqual([]);
+  });
+
   // ─── invalidate ────────────────────────────────────────────────────────────
 
   it('should invalidate a fact and set invalid_at', async () => {

@@ -244,6 +244,47 @@ describe('AMPService.load', () => {
     expect(result.tokens).toBe(0);
     expect(result.markdown).toContain('No relevant memories found');
   });
+
+  // ─── OPT-41: load() uses the batched fact accessor when available ────────────
+  function makeFact(object: string): FactNode {
+    const now = '2024-01-01T00:00:00.000Z';
+    return {
+      id: `f-${object}`, subject: 'auth', predicate: 'uses', object, entity_id: null,
+      source_episode_ids: [], valid_at: now, invalid_at: null, confidence: 0.9,
+      status: 'active', inference_type: 'deductive', supersedes_fact_id: null,
+      scope: 'project', tags: [], created_at: now, updated_at: now,
+    };
+  }
+
+  it('OPT-41: load uses getActiveBatch when present (not per-entity getActive)', async () => {
+    const getActive = vi.fn().mockResolvedValue([]);
+    const getActiveBatch = vi.fn().mockResolvedValue([[makeFact('BATCHMARK')]]);
+    const factLayer = {
+      getActive, getActiveBatch,
+      create: vi.fn(), findBySubjectPredicate: vi.fn().mockResolvedValue([]), invalidate: vi.fn(),
+    } as unknown as FactLayer;
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+
+    const result = await service.load({ task: 't', entities: ['auth'] });
+
+    expect(getActiveBatch).toHaveBeenCalledWith(['auth'], undefined, undefined);
+    expect(getActive).not.toHaveBeenCalled();
+    expect(result.markdown).toContain('BATCHMARK');
+  });
+
+  it('OPT-41: load falls back to per-entity getActive when getActiveBatch is absent', async () => {
+    const getActive = vi.fn().mockResolvedValue([makeFact('FALLBACKMARK')]);
+    const factLayer = {
+      getActive,
+      create: vi.fn(), findBySubjectPredicate: vi.fn().mockResolvedValue([]), invalidate: vi.fn(),
+    } as unknown as FactLayer;
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+
+    const result = await service.load({ task: 't', entities: ['auth'] });
+
+    expect(getActive).toHaveBeenCalledWith('auth', undefined, undefined);
+    expect(result.markdown).toContain('FALLBACKMARK');
+  });
 });
 
 describe('AMPService.store', () => {

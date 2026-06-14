@@ -191,6 +191,90 @@ export class FactStore {
     }
   }
 
+  /**
+   * OPT-41: batched getActive for many entity names. Resolution stays per-entity
+   * (unchanged precedence semantics), but ALL resolved entities' active facts are
+   * fetched in ONE round-trip (UNWIND distinct ids → per-id ordered collect)
+   * instead of one fact query per entity — collapsing the load() hot path from
+   * O(2N) round-trips to O(N resolves + 1 fetch). Returns one FactNode[] per
+   * input name, in input order, each IDENTICAL to getActive(name, options,
+   * tenantId): same per-mode filter, same `ORDER BY f.valid_at`. Callers that
+   * dedup+rank the union are therefore output-identical. (Batching the resolve
+   * too would mean replicating EntityResolver precedence in one query — deferred.)
+   */
+  async getActiveBatch(
+    entityNames: string[],
+    options?: TemporalOptions,
+    tenantId?: string,
+  ): Promise<FactNode[][]> {
+    if (entityNames.length === 0) return [];
+    const resolved = await Promise.all(entityNames.map((n) => this.resolver.resolveExisting(n)));
+    const ids = resolved.map((r) => (r ? r.id : null));
+    const distinct = [...new Set(ids.filter((x): x is string => x !== null))];
+    if (distinct.length === 0) return entityNames.map(() => []);
+
+    const timeMode = options?.time_mode ?? 'current';
+    const tenant = resolveTenant(tenantId);
+    const tFilter = tenantWhere('f', tenant);
+    const params: Record<string, unknown> = { ids: distinct, [TENANT_PARAM]: tenant };
+
+    // Mirror getActive's per-mode filter + sort EXACTLY (see the switch above).
+    let factFilter: string;
+    let order: 'ASC' | 'DESC';
+    switch (timeMode) {
+      case 'current':
+        factFilter = `f.status = 'active' AND f.invalid_at IS NULL`;
+        order = 'DESC';
+        break;
+      case 'historical':
+        params.as_of = options?.as_of ?? new Date().toISOString();
+        factFilter = `f.valid_at <= $as_of AND (f.invalid_at IS NULL OR f.invalid_at > $as_of)`;
+        order = 'DESC';
+        break;
+      case 'interval':
+        params.from = options?.from ?? '1970-01-01T00:00:00.000Z';
+        params.to = options?.to ?? new Date().toISOString();
+        factFilter = `f.valid_at <= $to AND (f.invalid_at IS NULL OR f.invalid_at > $from)`;
+        order = 'DESC';
+        break;
+      case 'evolution':
+        factFilter = options?.include_invalidated ? 'true' : `f.status <> 'invalidated'`;
+        order = 'ASC';
+        break;
+      default: {
+        const _exhaustive: never = timeMode;
+        throw new Error(`Unknown time_mode: ${String(_exhaustive)}`);
+      }
+    }
+
+    const session = this.driver.session();
+    try {
+      // OPTIONAL MATCH + collect inside the per-id subquery so an id with no
+      // matching facts still yields a row (→ [] for that position) rather than
+      // being eliminated; $ids is distinct so there is no aggregation-merge.
+      const cypher = `
+        UNWIND $ids AS eid
+        CALL {
+          WITH eid
+          OPTIONAL MATCH (f:Fact) WHERE f.entity_id = eid AND ${factFilter} AND ${tFilter}
+          WITH f ORDER BY f.valid_at ${order}
+          RETURN collect(f) AS facts
+        }
+        RETURN eid, facts`;
+      const result = await session.run(cypher, params);
+      const byId = new Map<string, FactNode[]>();
+      for (const rec of result.records) {
+        const eid = rec.get('eid') as string;
+        const nodes = rec.get('facts') as Array<{ properties: Record<string, unknown> }>;
+        byId.set(eid, nodes.map((n) => mapFactNode(n.properties)));
+      }
+      // Map back to input order (duplicate names share their resolved id's facts).
+      return ids.map((id) => (id ? (byId.get(id) ?? []) : []));
+    } finally {
+      await session.close();
+    }
+  }
+
   async invalidate(id: string, invalidAt: string, supersededById?: string): Promise<void> {
     const session = this.driver.session();
     try {
