@@ -37,9 +37,12 @@ export interface IScopedQuery {
  * front (OPT-06); this timeout is the residual backstop (OPT-07) so any runaway
  * server-side regex — including polynomial shapes that slip the static screen —
  * self-aborts on Neo4j instead of pinning the shared instance for the whole
- * deployment. Scoped to grep only; berry_query's raw path is left untouched.
+ * deployment. OPT-72: tightened 5000→2000 (grep is meant to be a quick search;
+ * the 4k scan cap + shape screen already bound the regex, so a tighter backstop
+ * costs nothing legitimate). berry_query's raw path is now ALSO bounded — by the
+ * rawCypher DEFAULT timeout (OPT-72), not this grep-specific value.
  */
-const GREP_QUERY_TIMEOUT_MS = 5000;
+const GREP_QUERY_TIMEOUT_MS = 2000;
 
 export interface IMemoryBlockService {
   read(scope: string, name: string, sessionId?: string, tenantId?: string): Promise<{ id: string; name: string; tier: string; content: string; scope: string; session_id?: string; created_at: string; updated_at: string } | null>;

@@ -957,7 +957,7 @@ describe('berry_grep handler', () => {
     });
   });
 
-  it('OPT-07: passes a bounded transaction timeout (5000ms) on the regex (=~) grep path', async () => {
+  it('OPT-07/OPT-72: passes a tightened transaction timeout (2000ms) on the regex (=~) grep path', async () => {
     vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([]);
 
     const handlers = buildToolHandlers();
@@ -965,10 +965,10 @@ describe('berry_grep handler', () => {
 
     expect(mockScopedQuery.rawCypher).toHaveBeenCalledTimes(1);
     const [, , , timeoutMs] = vi.mocked(mockScopedQuery.rawCypher).mock.calls[0];
-    expect(timeoutMs).toBe(5000);
+    expect(timeoutMs).toBe(2000); // OPT-72 tightened 5000→2000
   });
 
-  it('OPT-07: leaves the non-regex grep path unbounded (timeout arg undefined)', async () => {
+  it('OPT-72: the non-regex grep path passes no explicit timeout (bounded by the rawCypher default)', async () => {
     vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([]);
 
     const handlers = buildToolHandlers();
@@ -976,6 +976,8 @@ describe('berry_grep handler', () => {
 
     expect(mockScopedQuery.rawCypher).toHaveBeenCalledTimes(1);
     const [, , , timeoutMs] = vi.mocked(mockScopedQuery.rawCypher).mock.calls[0];
+    // The handler passes no explicit per-call timeout here; rawCypher applies its
+    // 15s DEFAULT (OPT-72) so this path is bounded too — it is NOT unbounded.
     expect(timeoutMs).toBeUndefined();
   });
 });

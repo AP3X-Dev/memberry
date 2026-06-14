@@ -19,6 +19,8 @@ describe('ScopedQuery.rawCypher regression', () => {
     expect(session.run).toHaveBeenCalledWith(
       expect.stringMatching(/RETURN \* LIMIT 25\s*$/),
       {},
+      // OPT-72: every raw query now carries a default transaction timeout.
+      expect.objectContaining({ timeout: expect.anything() }),
     );
   });
 
@@ -37,6 +39,7 @@ describe('ScopedQuery.rawCypher regression', () => {
     expect(session.run).toHaveBeenCalledWith(
       expect.stringMatching(/RETURN \* LIMIT 100\s*$/),
       {},
+      expect.objectContaining({ timeout: expect.anything() }), // OPT-72 default timeout
     );
   });
 
@@ -60,6 +63,7 @@ describe('ScopedQuery.rawCypher regression', () => {
     expect(session.run).toHaveBeenCalledWith(
       expect.stringContaining('$grepPatternLower'),
       params,
+      expect.objectContaining({ timeout: expect.anything() }), // OPT-72 default timeout
     );
   });
 
@@ -85,22 +89,53 @@ describe('ScopedQuery.rawCypher regression', () => {
     );
   });
 
-  it('OPT-07: omits the transactionConfig arg entirely when no timeout is given (no regression)', async () => {
+  it('OPT-72: applies a DEFAULT bounded transaction timeout when no timeout is given', async () => {
+    // OPT-07 only timed the grep path, so berry_query's raw `=~` was unbounded on
+    // the shared Neo4j. OPT-72 makes rawCypher bound EVERY raw query by default:
+    // a caller that passes no timeoutMs (e.g. berry_query) now still reaches
+    // session.run with a transactionConfig carrying the 15s default. (Supersedes
+    // the old OPT-07 assertion that no transactionConfig was passed.)
+    const prev = process.env.MEMBERRY_RAW_CYPHER_TIMEOUT_MS;
+    const prevAmp = process.env.AMP_RAW_CYPHER_TIMEOUT_MS;
+    delete process.env.MEMBERRY_RAW_CYPHER_TIMEOUT_MS;
+    delete process.env.AMP_RAW_CYPHER_TIMEOUT_MS;
+    try {
+      const session = {
+        run: vi.fn().mockResolvedValue({ records: [] }),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      const mockDriver = { session: vi.fn().mockReturnValue(session) };
+
+      const query = new ScopedQuery(mockDriver as never);
+      await query.rawCypher('MATCH (s:Semantic) RETURN s', 10);
+
+      expect(session.run).toHaveBeenCalledTimes(1);
+      expect(session.run.mock.calls[0]).toHaveLength(3); // cypher, params, transactionConfig
+      expect(session.run).toHaveBeenCalledWith(
+        expect.any(String),
+        {},
+        expect.objectContaining({ timeout: neo4j.int(15000) }), // the default
+      );
+    } finally {
+      if (prev === undefined) delete process.env.MEMBERRY_RAW_CYPHER_TIMEOUT_MS; else process.env.MEMBERRY_RAW_CYPHER_TIMEOUT_MS = prev;
+      if (prevAmp === undefined) delete process.env.AMP_RAW_CYPHER_TIMEOUT_MS; else process.env.AMP_RAW_CYPHER_TIMEOUT_MS = prevAmp;
+    }
+  });
+
+  it('OPT-72: an explicit timeoutMs still overrides the default (grep path)', async () => {
     const session = {
       run: vi.fn().mockResolvedValue({ records: [] }),
       close: vi.fn().mockResolvedValue(undefined),
     };
-    const mockDriver = {
-      session: vi.fn().mockReturnValue(session),
-    };
-
+    const mockDriver = { session: vi.fn().mockReturnValue(session) };
     const query = new ScopedQuery(mockDriver as never);
-    await query.rawCypher('MATCH (s:Semantic) RETURN s', 10);
+    await query.rawCypher('MATCH (s:Semantic) WHERE s.content =~ $rx RETURN s', 10, { rx: '.*' }, 2000);
 
-    // Default callers (berry_query) must reach session.run with exactly two args —
-    // no third transactionConfig — so their timeout behaviour is unchanged.
-    expect(session.run).toHaveBeenCalledTimes(1);
-    expect(session.run.mock.calls[0]).toHaveLength(2);
+    expect(session.run).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ rx: '.*' }),
+      expect.objectContaining({ timeout: neo4j.int(2000) }), // explicit grep bound, not the 15s default
+    );
   });
 
   it('BUG-0001: rawCypher rejects mutating Cypher queries before reaching the database', async () => {

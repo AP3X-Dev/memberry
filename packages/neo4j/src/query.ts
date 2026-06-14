@@ -1,8 +1,25 @@
 // packages/neo4j/src/query.ts
 import neo4j, { type Driver } from 'neo4j-driver';
 import type { SemanticNode, FactNode, EpisodicNode, TemporalOptions } from '@memberry/core';
+import { readEnv } from '@memberry/core';
 import { activeRelationshipFilter } from './temporal-edges.js';
 import { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from './tenant.js';
+
+/**
+ * OPT-72: default bounded transaction timeout applied to EVERY rawCypher call
+ * (incl. berry_query) so no raw `=~`/analytical query can pin the shared Neo4j
+ * unbounded — OPT-07 only timed the grep path, leaving berry_query's raw `=~`
+ * unbounded. Generous (15s) so legitimate slow analytics aren't false-aborted;
+ * the grep path passes a tighter explicit bound. Override via
+ * MEMBERRY_RAW_CYPHER_TIMEOUT_MS (positive int; falls back to the default).
+ */
+const DEFAULT_RAW_CYPHER_TIMEOUT_MS = 15_000;
+function defaultRawCypherTimeoutMs(): number {
+  const raw = readEnv('MEMBERRY_RAW_CYPHER_TIMEOUT_MS');
+  if (raw === undefined) return DEFAULT_RAW_CYPHER_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_RAW_CYPHER_TIMEOUT_MS;
+}
 
 export interface QueryScope {
   entities?: string[];
@@ -502,12 +519,13 @@ export class ScopedQuery {
   }
 
   /**
-   * @param timeoutMs Optional bounded transaction timeout in milliseconds. When
-   *   set, it is passed to neo4j-driver as `transactionConfig.timeout` so the
-   *   server self-aborts a runaway query (e.g. a catastrophic `=~` regex) instead
-   *   of pinning the shared Neo4j instance — closing the residual ReDoS gap on
-   *   the grep path (OPT-07). When omitted, no transactionConfig is passed and
-   *   behaviour is identical to before (berry_query and other callers unaffected).
+   * @param timeoutMs Optional bounded transaction timeout in milliseconds, passed
+   *   to neo4j-driver as `transactionConfig.timeout` so the server self-aborts a
+   *   runaway query (e.g. a catastrophic `=~` regex) instead of pinning the shared
+   *   Neo4j instance. OPT-72: when omitted, a generous DEFAULT
+   *   (MEMBERRY_RAW_CYPHER_TIMEOUT_MS, 15s) is applied — so EVERY raw path,
+   *   including berry_query, is bounded (OPT-07 only timed the grep path). An
+   *   explicit timeoutMs (e.g. the tighter grep bound) still wins.
    */
   async rawCypher(cypher: string, limit: number, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<Record<string, unknown>[]> {
     // Layer 1: static validation rejects mutating constructs up front.
@@ -521,14 +539,16 @@ export class ScopedQuery {
       const safeLimit = normalizeRawCypherLimit(limit);
       const finalCypher = `CALL {\n${stripTrailingSemicolons(cypher)}\n}\nRETURN * LIMIT ${safeLimit}`;
 
-      // Layer 3 (OPT-07): bounded server-side transaction timeout. Pass the
-      // timeout as a neo4j Integer (matching this file's convention for integer
-      // values handed to the driver). Only attach a transactionConfig when a
-      // valid positive timeout is supplied, so existing callers keep the exact
-      // two-arg session.run signature and behaviour.
-      const result = timeoutMs != null && Number.isFinite(timeoutMs) && timeoutMs > 0
-        ? await session.run(finalCypher, params, { timeout: neo4j.int(timeoutMs) })
-        : await session.run(finalCypher, params);
+      // Layer 3 (OPT-07 + OPT-72): bounded server-side transaction timeout on
+      // EVERY raw query. An explicit timeoutMs (e.g. the tightened grep bound)
+      // wins; otherwise the generous default is applied so even berry_query's raw
+      // `=~` self-aborts instead of pinning the shared Neo4j unbounded. Passed as
+      // a neo4j Integer (this file's convention for ints handed to the driver).
+      const effectiveTimeoutMs =
+        timeoutMs != null && Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? timeoutMs
+          : defaultRawCypherTimeoutMs();
+      const result = await session.run(finalCypher, params, { timeout: neo4j.int(effectiveTimeoutMs) });
       return result.records.map((r) => {
         const obj: Record<string, unknown> = {};
         for (const key of r.keys) {
