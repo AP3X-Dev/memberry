@@ -137,7 +137,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `27fc2e4` | gate green 1495 passed / 0 failed (mcp 136); security-reviewer PASS |
 | OPT-09 | Realpath symlink confinement for wiki validatePath + confineToDir | 9 | `28df712` | gate green 1501 passed / 0 failed (wiki 282); security-reviewer PASS |
 | OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `b2f45d6` | gate green 1504 passed / 0 failed (retrieval 141); security-reviewer PASS |
-| OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `<c11-sha>` | gate green 1508 passed / 0 failed (core 327); security-reviewer PASS |
+| OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `c5f871d` | gate green 1508 passed / 0 failed (core 327); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -254,7 +254,7 @@ Start cycle 12 at **OPT-12** (MED — berry_ingest/berry_braindump persist untru
 - Next: OPT-11
 
 ### Cycle 11 — 2026-06-14
-- Commit: `<c11-sha>` OPT-11: fence+guard dream prompts + sanitize project_card before core-block persist
+- Commit: `c5f871d` OPT-11: fence+guard dream prompts + sanitize project_card before core-block persist
 - Item: OPT-11 — COMPLETED
 - Mode B: 2 discoveries → OPT-76 (MED: wrap core blocks as untrusted data at session injection — full second-order fix), OPT-77 (LOW: extract.ts FACT_EXTRACTION_PROMPT still unfenced). Note: sanitizeCard opener-1 regex is O(n²) but defended by maxTokens:400 output cap (latent, no fix needed).
 - Verifier: REJECT then PASS — first run: 2 of 4 new tests failed (non-gap entity mod-b fires only the card chat call, not hypothesize; positional mocks mis-sequenced). Maker fixed tests with respond-by-content mockImplementation (dream.ts untouched). Re-run GREEN 1508/0 (core 323→327) | Security-reviewer: PASS (input fenced both paths; sanitizeCard correctly pre-persist; regexes don't over-match)

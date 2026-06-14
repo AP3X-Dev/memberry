@@ -14,4 +14,4 @@
 | OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `27fc2e4` | gate green: 1495 passed / 0 failed (mcp 136), build 0; security-reviewer PASS |
 | OPT-09 | Realpath symlink confinement for wiki validatePath + confineToDir | 9 | `28df712` | gate green: 1501 passed / 0 failed (wiki 282), build 0; security-reviewer PASS |
 | OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `b2f45d6` | gate green: 1504 passed / 0 failed (retrieval 141), build 0; security-reviewer PASS |
-| OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `<c11-sha>` | gate green: 1508 passed / 0 failed (core 327), build 0; security-reviewer PASS |
+| OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `c5f871d` | gate green: 1508 passed / 0 failed (core 327), build 0; security-reviewer PASS |
