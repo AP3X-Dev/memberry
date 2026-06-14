@@ -854,6 +854,79 @@ describe('berry_grep handler', () => {
     expect(text).toContain('1 match');
   });
 
+  // ─── ReDoS screen (OPT-06) ────────────────────────────────────────────────
+  //
+  // These assert the static screen REJECTS catastrophic-backtracking patterns
+  // BEFORE they reach any .test()/.exec(). They never execute a hanging regex —
+  // each asserts the rejection response, proving the pattern is short-circuited.
+
+  it('rejects a nested-quantifier ReDoS pattern (regex mode) before executing it', async () => {
+    // Classic catastrophic backtracking; must be rejected, not run.
+    vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([]);
+    const handlers = buildToolHandlers();
+    const result = await handlers.berry_grep({ pattern: '(a+)+$', regex: true });
+
+    const text = result.content[0].text;
+    expect(text).toContain('**Error:**');
+    expect(text).toContain('Unsafe regular expression');
+    // Proof it short-circuited: no Cypher query was ever issued.
+    expect(mockScopedQuery.rawCypher).not.toHaveBeenCalled();
+  });
+
+  it('rejects a quantified-alternation ReDoS pattern (regex mode) before executing it', async () => {
+    vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([]);
+    const handlers = buildToolHandlers();
+    const result = await handlers.berry_grep({ pattern: '(a|aa)+$', regex: true });
+
+    const text = result.content[0].text;
+    expect(text).toContain('**Error:**');
+    expect(text).toContain('Unsafe regular expression');
+    expect(mockScopedQuery.rawCypher).not.toHaveBeenCalled();
+  });
+
+  it('rejects a huge bounded-repetition pattern (regex mode) before executing it', async () => {
+    vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([]);
+    const handlers = buildToolHandlers();
+    const result = await handlers.berry_grep({ pattern: 'a{2000}', regex: true });
+
+    const text = result.content[0].text;
+    expect(text).toContain('**Error:**');
+    expect(text).toContain('Unsafe regular expression');
+    expect(mockScopedQuery.rawCypher).not.toHaveBeenCalled();
+  });
+
+  it('does not over-reject benign regex patterns', async () => {
+    // Each of these is a legitimate pattern that MUST pass the screen and run.
+    vi.mocked(mockScopedQuery.rawCypher).mockImplementation(async (cypher: string) => {
+      if (cypher.includes('Semantic')) {
+        return [{ s: { id: 'sem-1', content: 'foo and bar and a word', confidence: 0.5 } }];
+      }
+      return [];
+    });
+    const handlers = buildToolHandlers();
+
+    for (const pattern of ['foo.*bar', '\\bword\\b', 'JWT|OAuth2', 'a{1,10}']) {
+      vi.mocked(mockScopedQuery.rawCypher).mockClear();
+      const result = await handlers.berry_grep({ pattern, regex: true, node_types: ['semantic'] });
+      const text = result.content[0].text;
+      expect(text).not.toContain('Unsafe regular expression');
+      // It reached the query layer (was not screened out).
+      expect(mockScopedQuery.rawCypher).toHaveBeenCalled();
+    }
+  });
+
+  it('does not screen non-regex (exact substring) patterns', async () => {
+    // A literal containing regex metachars must NOT be treated as a ReDoS shape
+    // when regex=false — it is a plain substring search.
+    vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([]);
+    const handlers = buildToolHandlers();
+    const result = await handlers.berry_grep({ pattern: '(a+)+$', node_types: ['semantic'] });
+
+    const text = result.content[0].text;
+    expect(text).not.toContain('Unsafe regular expression');
+    expect(mockScopedQuery.rawCypher).toHaveBeenCalled();
+  });
+
   it('parameterizes pattern and scope instead of interpolating user text into Cypher', async () => {
     const dangerousPattern = "JWT' OR 1=1 //";
     const dangerousScope = "project:amp' OR true //";

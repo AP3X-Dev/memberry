@@ -6,6 +6,7 @@ import type { LoadScope, MemoryContext, EpisodeInput, MemoryTier, FactTimeline, 
 import { DEFAULT_TENANT } from '@memberry/core';
 import { parseAmpUri, uriToLoadScope } from './uri.js';
 import { scanCodebase, type CodebaseScan } from './codebase-scanner.js';
+import { assertSafeRegex, capScanText, UnsafeRegexError } from './safe-regex.js';
 
 export type { RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 
@@ -558,11 +559,26 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
       const limit = normalizeBoundedPositiveInt(args.limit, 20, 50);
       const nodeTypes = args.node_types ?? ['episodic', 'semantic', 'fact', 'block', 'entity'];
 
-      // Validate regex if regex mode
+      // Validate regex if regex mode.
+      //
+      // SECURITY (OPT-06): the user `pattern` is re-compiled with `new RegExp`
+      // and executed JS-side (.test()/.exec()) against untrusted stored content
+      // on the single-threaded event loop with no time bound — a catastrophic-
+      // backtracking pattern (e.g. `(a+)+$`) is a one-call event-loop DoS. We
+      // pre-screen the pattern with a conservative static ReDoS heuristic and
+      // REJECT dangerous shapes BEFORE the pattern is ever compiled or run, so
+      // this is the single chokepoint guarding every downstream .test()/.exec()
+      // site (extractSnippet + the per-node-type match() loops below). This is a
+      // best-effort interim screen, NOT a proof of safety; the robust linear-
+      // time fix (re2) is deferred. See safe-regex.ts.
       if (isRegex) {
         try {
+          assertSafeRegex(pattern);
           new RegExp(pattern);
         } catch (e) {
+          if (e instanceof UnsafeRegexError) {
+            return textContent(`**Error:** Unsafe regular expression rejected: ${e.message}`);
+          }
           return textContent(`**Error:** Invalid regular expression: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
@@ -608,8 +624,11 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
       const seenIds = new Set<string>();
 
       // Helper: extract snippet around match
-      function extractSnippet(text: string, pat: string, isRx: boolean, isCaseSens: boolean): string {
-        if (!text) return '';
+      function extractSnippet(fullText: string, pat: string, isRx: boolean, isCaseSens: boolean): string {
+        if (!fullText) return '';
+        // SECURITY (OPT-06): bound the input handed to rx.exec() so even a
+        // pattern that slips the static screen has bounded backtracking work.
+        const text = capScanText(fullText);
         let matchIdx = -1;
         let matchLen = pat.length;
 
@@ -682,7 +701,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
             const content = (e.content as string) ?? '';
             const task = (e.task as string) ?? '';
             const contentMatch = isRegex
-              ? new RegExp(pattern, caseSensitive ? '' : 'i').test(content)
+              ? new RegExp(pattern, caseSensitive ? '' : 'i').test(capScanText(content))
               : caseSensitive ? content.includes(pattern) : content.toLowerCase().includes(pattern.toLowerCase());
             const matchedField = contentMatch ? 'content' : 'task';
             const matchedValue = contentMatch ? content : task;
@@ -727,7 +746,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
             const obj = (f.object as string) ?? '';
             const combined = `${sub} ${pred} ${obj}`;
             const subMatch = isRegex
-              ? new RegExp(pattern, caseSensitive ? '' : 'i').test(sub)
+              ? new RegExp(pattern, caseSensitive ? '' : 'i').test(capScanText(sub))
               : caseSensitive ? sub.includes(pattern) : sub.toLowerCase().includes(pattern.toLowerCase());
             addResult(
               f.id as string, 'fact', subMatch ? 'subject' : 'predicate/object', combined, 1,
@@ -749,7 +768,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
             const content = (b.content as string) ?? '';
             const name = (b.name as string) ?? '';
             const nameMatch = isRegex
-              ? new RegExp(pattern, caseSensitive ? '' : 'i').test(name)
+              ? new RegExp(pattern, caseSensitive ? '' : 'i').test(capScanText(name))
               : caseSensitive ? name.includes(pattern) : name.toLowerCase().includes(pattern.toLowerCase());
             addResult(
               `${b.scope}/${b.name}`, 'block', nameMatch ? 'name' : 'content',
@@ -778,7 +797,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
             const name = (ent.name as string) ?? '';
             const desc = (ent.description as string) ?? '';
             const nameMatch = isRegex
-              ? new RegExp(pattern, caseSensitive ? '' : 'i').test(name)
+              ? new RegExp(pattern, caseSensitive ? '' : 'i').test(capScanText(name))
               : caseSensitive ? name.includes(pattern) : name.toLowerCase().includes(pattern.toLowerCase());
             addResult(
               ent.id as string, 'entity', nameMatch ? 'name' : 'description',
