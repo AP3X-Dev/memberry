@@ -13,3 +13,4 @@
 | OPT-07 | Bounded tx timeout on grep =~ rawCypher path (Neo4j-side ReDoS backstop) | 7 | `7374e7a` | gate green: 1492 passed / 0 failed (neo4j 193), build 0; security-reviewer PASS |
 | OPT-08 (+OPT-13) | Cap MCP request body size → HTTP 413 (memory-exhaustion DoS) | 8 | `27fc2e4` | gate green: 1495 passed / 0 failed (mcp 136), build 0; security-reviewer PASS |
 | OPT-09 | Realpath symlink confinement for wiki validatePath + confineToDir | 9 | `28df712` | gate green: 1501 passed / 0 failed (wiki 282), build 0; security-reviewer PASS |
+| OPT-10 | Fence untrusted evidence + untrusted-data guard in berry_ask synthesis | 10 | `<c10-sha>` | gate green: 1504 passed / 0 failed (retrieval 141), build 0; security-reviewer PASS |
