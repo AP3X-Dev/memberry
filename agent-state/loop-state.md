@@ -28,7 +28,7 @@ Baseline measured 2026-06-13 on `master` (d2d8850) with the clean-auth env above
 
 | Metric | Command | Baseline | Floor (running best) | Direction |
 |--------|---------|----------|----------------------|-----------|
-| Tests passing | `npm test` (sum of "N passed") | 1461 | 1514 | up-only |
+| Tests passing | `npm test` (sum of "N passed") | 1461 | 1518 | up-only |
 | Tests failing | `npm test` | 0 | 0 | must-be-0 |
 | Build/typecheck | `npm run build` exit code | 0 | 0 | must-be-0 |
 | Tests skipped | `npm test` (sum "N skipped") | 16 | 16 | down-preferred (informational) |
@@ -59,7 +59,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-12 | MED | berry_ingest/berry_braindump persist untrusted content verbatim, bypassing MEMBERRY_REDACT_ON_INGEST | ✅ DONE (c12) | packages/wiki/src/ingest.ts:41-196,282-300 | DONE: IngestionService.redactOnIngest flag (default MEMBERRY_REDACT_ON_INGEST==='true', mirrors service.ts/factory) redacts verbatim body (before extraction) + each claim.content; exported redactSecrets from core index +5 tests. (Source nodes persist no body.) Verifier PASS 1513/0 (wiki 287; .env doesn't set flag→no interaction); security-reviewer PASS. Residual structural fields→OPT-78. |  |
 | OPT-13 | MED | (≡OPT-08) MCP /mcp POST body reader buffers entire request, no cap | ✅ DONE (c8, no-op) | packages/mcp/src/server.ts:371-380,439-446 | COVERED by OPT-08: /mcp POST reads its body through the now-capped readJsonBody before the SDK is invoked, so the /mcp Streamable path is bounded. (Only /messages SDK-read path remains → OPT-73.) |  |
 | OPT-14 | MED | Redis amp:signals stream grows unbounded — XADD no MAXLEN, consumer only XACKs | ✅ DONE (c13) | packages/redis/src/streams.ts:29-42,53-98 | DONE: approximate MAXLEN ~ SIGNALS_STREAM_MAXLEN (10_000, env-overridable) on the signals XADD; MAXLEN-alone (no XDEL-after-XACK — multi-consumer-group-unsafe); consumer/ack semantics unchanged +1 test. Verifier PASS 1514/0 (redis 69). Nit: raw process.env vs readEnv (non-blocking). Episodic-buffer cap→OPT-79. |  |
-| OPT-15 | MED | berry_ingest_codebase path arg has no confinement, unlike sibling code tools | pending | packages/mcp/src/tools.ts:951-960 | resolve+confine args.path like berry_code_index; new test rejects outside-root path; suite green |  |
+| OPT-15 | MED | berry_ingest_codebase path arg has no confinement, unlike sibling code tools | ✅ DONE (c14) | packages/mcp/src/tools.ts:951-960 | DONE: confine args.path before scan/index (resolve + baseDir=cwd + startsWith(base+sep), byte-identical to sibling code tools) +4 tests. Verifier PASS 1518/0 (mcp 140; RED-confirmed by reverting guard); security-reviewer PASS (only fs-path input; confined before any read). Residual lexical-only symlink→OPT-74. |  |
 | OPT-16 | MED | DeterministicAssembler ~6 sequential queries per target entity, each own session (N+1) | pending | packages/retrieval/src/deterministic.ts:50-155,220-347 | collapse per-target steps into UNWIND-driven single queries; suite green; no behavior change |  |
 | OPT-17 | MED | EntityResolver.resolveExisting 3 sequential round-trips per call on every fact hot path | pending | packages/neo4j/src/entity-resolver.ts:60-118 | persisted name_lower + index, collapse CI/alias to one indexed query; suite green |  |
 | OPT-18 | MED | (≡OPT-14) amp:signals stream never trimmed | ✅ DONE (c13, no-op) | packages/redis/src/streams.ts:29-42,53-98 | COVERED by OPT-14 (MAXLEN ~ on the signals XADD bounds the stream). | confirm-before-removing |
@@ -142,6 +142,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `c5f871d` | gate green 1508 passed / 0 failed (core 327); security-reviewer PASS |
 | OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green 1513 passed / 0 failed (wiki 287); security-reviewer PASS |
 | OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `490c3d3` | gate green 1514 passed / 0 failed (redis 69); reliability item (no sec-review) |
+| OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `<c14-sha>` | gate green 1518 passed / 0 failed (mcp 140); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -173,7 +174,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 
 ## Next Run Instructions
 
-Start cycle 14 at **OPT-15** (MED, security-tagged — berry_ingest_codebase path arg has no confinement, unlike sibling code tools; resolve+confine args.path like berry_code_index, `packages/mcp/src/tools.ts:951-960`). This IS a security item → run the security-reviewer too. Then OPT-16 (deterministic N+1), OPT-17 (EntityResolver round-trips), … down the table. (OPT-13/OPT-18 done as no-op dups; all OPT-01..12 security done.) SEE Blocked B-01 (re2 — needs your approval). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
+Start cycle 15 at **OPT-16** (MED, perf — DeterministicAssembler runs ~6 sequential queries per target entity, each on its own session (N+1 across 5 assembly steps); collapse per-target steps into UNWIND-driven single queries, `packages/retrieval/src/deterministic.ts:50-155,220-347`). This is a perf/reliability item (no security-reviewer; behavior must be unchanged — the gate's existing deterministic tests pin output). Then OPT-17 (EntityResolver round-trips), OPT-19 (dedup rollback), OPT-20 (embedding cache), … down the table. SEE Blocked B-01 (re2 — needs your approval). If IN PROGRESS, recover partial work or revert to the last gate-green commit first.
 
 ## Session History
 
@@ -280,3 +281,11 @@ Start cycle 14 at **OPT-15** (MED, security-tagged — berry_ingest_codebase pat
 - Verifier: PASS (1514 passed, 0 failed, build exit 0; redis 68→69; RED-confirmed) | reliability item — no security-reviewer needed
 - Metrics: passing 1513→1514 (floor 1514); skipped 16
 - Next: OPT-15
+
+### Cycle 14 — 2026-06-14
+- Commit: `<c14-sha>` OPT-15: confine berry_ingest_codebase path to project root (mirror sibling code tools)
+- Item: OPT-15 — COMPLETED
+- Mode B: clean sweep (residuals already tracked in OPT-74)
+- Verifier: PASS (1518 passed, 0 failed, build exit 0; mcp 136→140; RED-confirmed by reverting the guard) | Security-reviewer: PASS (confined before any fs read; byte-identical to sibling code tools; args.path the only fs input)
+- Metrics: passing 1514→1518 (floor 1518); skipped 16
+- Next: OPT-16

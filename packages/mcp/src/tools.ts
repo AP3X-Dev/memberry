@@ -1,4 +1,5 @@
 // packages/mcp/src/tools.ts
+import path from 'node:path';
 import { z } from 'zod';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
@@ -987,7 +988,14 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
     async berry_ingest_codebase(args) {
       if (!bootstrapService) throw new Error('BootstrapGraphService not initialised');
 
-      const absPath = args.path;
+      // Validate path is within the project root to prevent directory traversal
+      // (mirrors the confinement applied by sibling code tools berry_code_index,
+      // berry_code_ast_grep, and berry_code_watch in packages/code/src/tools.ts).
+      const baseDir = path.resolve(process.cwd());
+      const absPath = path.resolve(args.path);
+      if (!absPath.startsWith(baseDir + path.sep) && absPath !== baseDir) {
+        throw new Error(`Path must be within project root: ${args.path}`);
+      }
 
       // Phase 1: Scan the codebase
       const scan: CodebaseScan = await scanCodebase(absPath, {

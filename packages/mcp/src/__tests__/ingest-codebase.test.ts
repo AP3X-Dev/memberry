@@ -1,8 +1,7 @@
 // packages/mcp/src/__tests__/ingest-codebase.test.ts
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, writeFile, mkdir, rm } from 'fs/promises';
-import { join } from 'path';
-import { tmpdir } from 'os';
+import { join, resolve } from 'path';
 import {
   buildToolHandlers,
   setServiceInstances,
@@ -71,7 +70,10 @@ const mockCodeIndexer: ICodeIndexerService = {
 let tempDir: string;
 
 beforeAll(async () => {
-  tempDir = await mkdtemp(join(tmpdir(), 'amp-ingest-test-'));
+  // berry_ingest_codebase confines `path` to process.cwd() (mirroring the
+  // sibling code tools), so the legitimate fixture project must live under cwd
+  // for ingestion to be accepted.
+  tempDir = await mkdtemp(join(process.cwd(), 'amp-ingest-test-'));
 
   await writeFile(
     join(tempDir, 'package.json'),
@@ -269,5 +271,52 @@ describe('berry_ingest_codebase handler', () => {
     );
     expect(langSeed).toBeDefined();
     expect(langSeed.domain).toBe('technology');
+  });
+
+  // ─── OPT-15: path confinement ────────────────────────────────────────────────
+  // berry_ingest_codebase previously accepted any absolute/relative path with no
+  // restriction, unlike its sibling code tools (berry_code_index,
+  // berry_code_ast_grep, berry_code_watch) which confine `path` to process.cwd().
+  // These mirror the siblings' confinement: same root, same error shape
+  // ("Path must be within project root: <arg>").
+
+  it('OPT-15: rejects a relative `..` traversal path outside the project root', async () => {
+    const handlers = buildToolHandlers();
+    await expect(handlers.berry_ingest_codebase({ path: '../../etc' })).rejects.toThrow(
+      'Path must be within project root',
+    );
+    // Confinement must trip BEFORE any scan/bootstrap/index work happens.
+    expect(mockBootstrapService.bootstrap).not.toHaveBeenCalled();
+    expect(mockCodeIndexer.indexProject).not.toHaveBeenCalled();
+  });
+
+  it('OPT-15: rejects an absolute path outside the project root', async () => {
+    const handlers = buildToolHandlers();
+    // Resolves outside cwd on every platform (parent of cwd + sibling dir).
+    const outside = resolve(process.cwd(), '..', 'totally-outside-amp-opt');
+    await expect(handlers.berry_ingest_codebase({ path: outside })).rejects.toThrow(
+      `Path must be within project root: ${outside}`,
+    );
+    expect(mockBootstrapService.bootstrap).not.toHaveBeenCalled();
+  });
+
+  it('OPT-15: rejects a sibling dir that shares the root as a string prefix', async () => {
+    const handlers = buildToolHandlers();
+    // `${cwd}EVIL` starts with cwd lexically but is NOT inside `cwd + sep`.
+    const lookalike = process.cwd() + 'EVIL';
+    await expect(handlers.berry_ingest_codebase({ path: lookalike })).rejects.toThrow(
+      'Path must be within project root',
+    );
+    expect(mockBootstrapService.bootstrap).not.toHaveBeenCalled();
+  });
+
+  it('OPT-15: accepts a legitimate in-root path (no over-rejection)', async () => {
+    // tempDir lives under process.cwd(), so ingestion must proceed normally.
+    const handlers = buildToolHandlers();
+    const result = await handlers.berry_ingest_codebase({ path: tempDir });
+
+    expect(mockBootstrapService.bootstrap).toHaveBeenCalledTimes(1);
+    expect(mockCodeIndexer.indexProject).toHaveBeenCalledTimes(1);
+    expect(result.content[0].text).toContain('Codebase Ingestion Complete');
   });
 });
