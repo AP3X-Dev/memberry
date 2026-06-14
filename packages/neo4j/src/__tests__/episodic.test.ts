@@ -175,6 +175,34 @@ describe('EpisodicStore', () => {
     }
   });
 
+  it('OPT-44: leaves the embedding property absent when none is provided', async () => {
+    if (!neo4jAvailable) return;
+    const id = 'test-episodic-noembed';
+    await store.create({
+      id,
+      session_id: 'session-001',
+      agent_id: TEST_AGENT_ID,
+      task: 'no embedding',
+      content: 'no embedding content',
+      created_at: new Date().toISOString(),
+    });
+
+    const session = driver.session();
+    try {
+      const result = await session.run(
+        `MATCH (e:Episodic {id: $id}) RETURN (e.embedding IS NULL) AS isNull`,
+        { id },
+      );
+      expect(result.records.length).toBe(1);
+      // The conditional SET means the property is never written → still absent,
+      // identical to the previous CREATE-then-separate-SET path.
+      expect(result.records[0].get('isNull')).toBe(true);
+    } finally {
+      await session.run(`MATCH (e:Episodic {id: $id}) DETACH DELETE e`, { id }).catch(() => {});
+      await session.close();
+    }
+  });
+
   it('should link an episodic node to an agent via GENERATED_BY', async () => {
     if (!neo4jAvailable) return;
 

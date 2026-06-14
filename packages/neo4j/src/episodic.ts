@@ -9,8 +9,12 @@ export class EpisodicStore {
   async create(node: EpisodicNode): Promise<string> {
     const session = this.driver.session();
     try {
-      const result = await session.run(
-        `CREATE (e:Episodic {
+      // OPT-44: inline the embedding SET into the CREATE (one round-trip),
+      // mirroring SemanticStore — was a CREATE followed by a separate MATCH+SET.
+      // The conditional SET keeps the embedding property ABSENT when none is
+      // given, so the persisted node is identical to the previous two-step path.
+      const query = `
+        CREATE (e:Episodic {
           id: $id,
           session_id: $session_id,
           agent_id: $agent_id,
@@ -22,28 +26,23 @@ export class EpisodicStore {
           scope: $scope,
           tags: $tags,
           tenant_id: $tenant_id
-        }) RETURN e.id AS id`,
-        {
-          id: node.id,
-          session_id: node.session_id,
-          agent_id: node.agent_id,
-          task: node.task,
-          content: node.content,
-          outcome: node.outcome ?? null,
-          created_at: node.created_at,
-          ttl: node.ttl ?? null,
-          scope: node.scope ?? null,
-          tags: node.tags ?? [],
-          tenant_id: node.tenant_id ?? null,
-        },
-      );
-
-      if (node.embedding) {
-        await session.run(
-          `MATCH (e:Episodic {id: $id}) SET e.embedding = $embedding`,
-          { id: node.id, embedding: node.embedding },
-        );
-      }
+        })
+        ${node.embedding ? 'SET e.embedding = $embedding' : ''}
+        RETURN e.id AS id`;
+      const result = await session.run(query, {
+        id: node.id,
+        session_id: node.session_id,
+        agent_id: node.agent_id,
+        task: node.task,
+        content: node.content,
+        outcome: node.outcome ?? null,
+        created_at: node.created_at,
+        ttl: node.ttl ?? null,
+        scope: node.scope ?? null,
+        tags: node.tags ?? [],
+        tenant_id: node.tenant_id ?? null,
+        ...(node.embedding ? { embedding: node.embedding } : {}),
+      });
 
       return result.records[0].get('id') as string;
     } finally {
