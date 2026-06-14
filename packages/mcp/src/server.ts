@@ -311,6 +311,16 @@ export function createAMPServer(): AMPMCPServer {
     }
     const multiTenantMode = tokenToTenant.size > 0;
 
+    // OPT-29: fail-closed tenant binding. In multi-tenant mode a token that
+    // authenticates (the global MEMBERRY_API_TOKEN or a per-actor
+    // MEMBERRY_API_TOKENS entry) but is NOT a tenant token would silently
+    // operate on the DEFAULT tenant — reading the default bucket and writing
+    // feedback/cache into the shared default bucket (the residual flagged by the
+    // OPT-26/27 reviews). Such non-tenant tokens are rejected unless the operator
+    // explicitly opts back into the legacy default-tenant fallback.
+    const allowDefaultTenant =
+      (readEnv('MEMBERRY_ALLOW_DEFAULT_TENANT') ?? '').toLowerCase() === 'true';
+
     // effectiveToken is the single-token / "is auth on?" sentinel kept for the
     // status payload; actual validation goes through tokenToActor.
     let effectiveToken: string | null;
@@ -357,24 +367,40 @@ export function createAMPServer(): AMPMCPServer {
       return m ? actorForToken(m[1]) : null;
     }
 
-    /** Resolve the tenant for a request from its bearer token (constant-time). */
-    function tenantFor(req: IncomingMessage): string {
-      if (!multiTenantMode) return DEFAULT_TENANT;
+    /** Extract the bearer token from a request, or null if absent/malformed. */
+    function bearerToken(req: IncomingMessage): string | null {
       const header = req.headers['authorization'] ?? '';
       const m = /^Bearer (.+)$/.exec(header);
-      if (!m) return DEFAULT_TENANT;
-      const a = Buffer.from(m[1]);
+      return m ? m[1] : null;
+    }
+
+    /** Constant-time match of a presented token → tenant name, or null. */
+    function tenantForToken(provided: string): string | null {
+      const a = Buffer.from(provided);
       for (const [tok, tenant] of tokenToTenant) {
         const b = Buffer.from(tok);
         if (a.length === b.length && timingSafeEqual(a, b)) return tenant;
       }
-      return DEFAULT_TENANT;
+      return null;
+    }
+
+    /** Resolve the tenant for a request from its bearer token (constant-time). */
+    function tenantFor(req: IncomingMessage): string {
+      if (!multiTenantMode) return DEFAULT_TENANT;
+      const tok = bearerToken(req);
+      if (tok === null) return DEFAULT_TENANT;
+      return tenantForToken(tok) ?? DEFAULT_TENANT;
     }
 
     if (multiTenantMode) {
       console.error(
         `[memberry] multi-tenant mode ON (${tokenToTenant.size} tenant token(s)) — ` +
         `tenant sessions get the default-deny core tool set (${'berry_load, berry_store, berry_tools'}).`,
+      );
+      console.error(
+        allowDefaultTenant
+          ? '[memberry] WARNING: MEMBERRY_ALLOW_DEFAULT_TENANT=true — non-tenant tokens fall back to the DEFAULT tenant (legacy, not isolated).'
+          : '[memberry] tenant binding REQUIRED — non-tenant tokens are rejected (set MEMBERRY_ALLOW_DEFAULT_TENANT=true to restore the legacy default-tenant fallback).',
       );
     }
 
@@ -394,10 +420,19 @@ export function createAMPServer(): AMPMCPServer {
       return bound.tenant === tenant && bound.actor === actor;
     }
 
-    /** Require a matching Bearer token (any configured actor) unless auth is off. */
+    /** Require a matching Bearer token (any configured actor) unless auth is off.
+     *  In multi-tenant mode the token must ADDITIONALLY be a tenant token (OPT-29
+     *  fail-closed) — otherwise it would silently fall back to DEFAULT_TENANT —
+     *  unless MEMBERRY_ALLOW_DEFAULT_TENANT=true restores the legacy fallback. */
     function isAuthorized(req: IncomingMessage): boolean {
       if (effectiveToken === null) return true; // auth explicitly disabled via opt-out
-      return actorFor(req) !== null;
+      if (actorFor(req) === null) return false; // no / invalid token
+      if (multiTenantMode && !allowDefaultTenant) {
+        const tok = bearerToken(req);
+        // A valid-but-non-tenant token resolves to DEFAULT_TENANT; reject it.
+        if (tok === null || tenantForToken(tok) === null) return false;
+      }
+      return true;
     }
 
     function setCorsHeaders(res: ServerResponse, origin: string | undefined): void {

@@ -90,6 +90,10 @@ services:
       # Multi-tenant isolation (opt-in). Empty = current single-tenant behavior.
       MEMBERRY_TENANT_TOKENS: ${MEMBERRY_TENANT_TOKENS:-}
       MEMBERRY_TENANT_DATASTORES: ${MEMBERRY_TENANT_DATASTORES:-}
+      # When multi-tenant is on, non-tenant tokens are rejected (fail-closed).
+      # Set true ONLY to restore the legacy default-tenant fallback for a global
+      # MEMBERRY_API_TOKEN / per-actor MEMBERRY_API_TOKENS in multi-tenant mode.
+      MEMBERRY_ALLOW_DEFAULT_TENANT: ${MEMBERRY_ALLOW_DEFAULT_TENANT:-}
       # Ingest/compile path confinement (opt-in). This is a path INSIDE the
       # container; pointing it at a non-default dir backed by host data also
       # requires a corresponding volume mount for that path to be meaningful.

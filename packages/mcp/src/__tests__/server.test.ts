@@ -411,6 +411,97 @@ describe('createAMPServer', () => {
     }
   });
 
+  it('OPT-29: in multi-tenant mode a valid NON-tenant token is rejected (fail-closed) unless MEMBERRY_ALLOW_DEFAULT_TENANT=true', async () => {
+    const saved = {
+      tenantTokens: process.env.MEMBERRY_TENANT_TOKENS,
+      apiTokens: process.env.MEMBERRY_API_TOKENS,
+      ampTok: process.env.AMP_API_TOKEN,
+      memTok: process.env.MEMBERRY_API_TOKEN,
+      allowDefault: process.env.MEMBERRY_ALLOW_DEFAULT_TENANT,
+    };
+    delete process.env.AMP_API_TOKEN;
+    delete process.env.MEMBERRY_API_TOKENS;
+    delete process.env.MEMBERRY_ALLOW_DEFAULT_TENANT;
+    // Multi-tenant mode ON, PLUS a global API token that is NOT a tenant token.
+    // Before OPT-29 the admin token authenticated and silently operated on the
+    // DEFAULT tenant; now it must be rejected unless the operator opts back in.
+    process.env.MEMBERRY_TENANT_TOKENS = 'acme:tok-acme,globex:tok-globex';
+    process.env.MEMBERRY_API_TOKEN = 'admin-tok';
+
+    const initBody = (id: number) => JSON.stringify({
+      jsonrpc: '2.0',
+      id,
+      method: 'initialize',
+      params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'opt29', version: '0.0.0' } },
+    });
+
+    try {
+      // (A) Fail-closed: the non-tenant admin token is rejected with 401, while a
+      //     real tenant token still initializes a session (positive control).
+      {
+        const amp = createAMPServer();
+        const handle = await amp.startSSE(0);
+        const address = handle.httpServer.address() as AddressInfo;
+        const baseUrl = `http://127.0.0.1:${address.port}`;
+        try {
+          const rejected = await fetch(`${baseUrl}/mcp`, {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer admin-tok',
+              accept: 'application/json, text/event-stream',
+              'content-type': 'application/json',
+            },
+            body: initBody(1),
+          });
+          expect(rejected.status).toBe(401);
+
+          const ok = await fetch(`${baseUrl}/mcp`, {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer tok-acme',
+              accept: 'application/json, text/event-stream',
+              'content-type': 'application/json',
+            },
+            body: initBody(2),
+          });
+          expect(ok.status).toBe(200);
+        } finally {
+          await closeSSEHandle(handle, 500);
+        }
+      }
+
+      // (B) Explicit opt-in: MEMBERRY_ALLOW_DEFAULT_TENANT=true restores the
+      //     legacy default-tenant fallback, so the same non-tenant token works.
+      process.env.MEMBERRY_ALLOW_DEFAULT_TENANT = 'true';
+      {
+        const amp = createAMPServer();
+        const handle = await amp.startSSE(0);
+        const address = handle.httpServer.address() as AddressInfo;
+        const baseUrl = `http://127.0.0.1:${address.port}`;
+        try {
+          const ok = await fetch(`${baseUrl}/mcp`, {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer admin-tok',
+              accept: 'application/json, text/event-stream',
+              'content-type': 'application/json',
+            },
+            body: initBody(3),
+          });
+          expect(ok.status).toBe(200);
+        } finally {
+          await closeSSEHandle(handle, 500);
+        }
+      }
+    } finally {
+      if (saved.tenantTokens === undefined) delete process.env.MEMBERRY_TENANT_TOKENS; else process.env.MEMBERRY_TENANT_TOKENS = saved.tenantTokens;
+      if (saved.apiTokens === undefined) delete process.env.MEMBERRY_API_TOKENS; else process.env.MEMBERRY_API_TOKENS = saved.apiTokens;
+      if (saved.ampTok === undefined) delete process.env.AMP_API_TOKEN; else process.env.AMP_API_TOKEN = saved.ampTok;
+      if (saved.memTok === undefined) delete process.env.MEMBERRY_API_TOKEN; else process.env.MEMBERRY_API_TOKEN = saved.memTok;
+      if (saved.allowDefault === undefined) delete process.env.MEMBERRY_ALLOW_DEFAULT_TENANT; else process.env.MEMBERRY_ALLOW_DEFAULT_TENANT = saved.allowDefault;
+    }
+  });
+
   it('OPT-08: rejects a /mcp POST body over the cap with HTTP 413 (Content-Length early reject)', async () => {
     // Lower the cap via env so the test stays small/fast. readEnv resolves
     // AMP_MAX_BODY_BYTES via its MEMBERRY_* legacy fallback.
