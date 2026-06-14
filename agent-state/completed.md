@@ -17,4 +17,4 @@
 | OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `c5f871d` | gate green: 1508 passed / 0 failed (core 327), build 0; security-reviewer PASS |
 | OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green: 1513 passed / 0 failed (wiki 287), build 0; security-reviewer PASS |
 | OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `490c3d3` | gate green: 1514 passed / 0 failed (redis 69), build 0; reliability (no sec-review) |
-| OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `<c14-sha>` | gate green: 1518 passed / 0 failed (mcp 140), build 0; security-reviewer PASS |
+| OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `b815f48` | gate green: 1518 passed / 0 failed (mcp 140), build 0; security-reviewer PASS |

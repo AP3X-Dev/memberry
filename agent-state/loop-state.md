@@ -142,7 +142,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-11 | Fence+guard dream prompts + sanitize project_card before core-block persist | 11 | `c5f871d` | gate green 1508 passed / 0 failed (core 327); security-reviewer PASS |
 | OPT-12 | Apply redactSecrets on wiki ingest/braindump when MEMBERRY_REDACT_ON_INGEST | 12 | `cd2bae5` | gate green 1513 passed / 0 failed (wiki 287); security-reviewer PASS |
 | OPT-14 (+OPT-18) | Bound amp:signals Redis stream with approximate MAXLEN on XADD | 13 | `490c3d3` | gate green 1514 passed / 0 failed (redis 69); reliability item (no sec-review) |
-| OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `<c14-sha>` | gate green 1518 passed / 0 failed (mcp 140); security-reviewer PASS |
+| OPT-15 | Confine berry_ingest_codebase path to project root (mirror sibling code tools) | 14 | `b815f48` | gate green 1518 passed / 0 failed (mcp 140); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -283,7 +283,7 @@ Start cycle 15 at **OPT-16** (MED, perf — DeterministicAssembler runs ~6 seque
 - Next: OPT-15
 
 ### Cycle 14 — 2026-06-14
-- Commit: `<c14-sha>` OPT-15: confine berry_ingest_codebase path to project root (mirror sibling code tools)
+- Commit: `b815f48` OPT-15: confine berry_ingest_codebase path to project root (mirror sibling code tools)
 - Item: OPT-15 — COMPLETED
 - Mode B: clean sweep (residuals already tracked in OPT-74)
 - Verifier: PASS (1518 passed, 0 failed, build exit 0; mcp 136→140; RED-confirmed by reverting the guard) | Security-reviewer: PASS (confined before any fs read; byte-identical to sibling code tools; args.path the only fs input)
