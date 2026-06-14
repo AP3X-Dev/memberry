@@ -269,7 +269,7 @@ const AmpLoadSchema = {
   }).optional().describe('Temporal filtering options for fact queries'),
 };
 
-const AmpStoreSchema = {
+export const AmpStoreSchema = {
   session_id: z.string().max(500).describe('Session identifier'),
   task: z.string().max(5000).describe('Task description for this episode'),
   content: z.string().max(10000).describe('Episodic content to store'),
@@ -285,10 +285,16 @@ const AmpStoreSchema = {
     .array(
       z.object({
         type: z.enum(['reinforcement', 'correction', 'contradiction']),
-        target_id: z.string(),
-        detail: z.string(),
+        // OPT-36: bound the per-signal fields and the array length so a single
+        // berry_store call can't attach an unbounded signal payload (the other
+        // string fields in this schema are already .max()-bounded; signals were
+        // the gap). target_id matches the 500-char id convention; detail mirrors
+        // the 2000-char description bound used elsewhere.
+        target_id: z.string().max(500),
+        detail: z.string().max(2000),
       }),
     )
+    .max(50)
     .optional()
     .describe('Signals associated with this episode'),
 };
