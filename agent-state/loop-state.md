@@ -156,7 +156,7 @@ Known duplicates (fix once, mark the twin COMPLETED as no-op): **OPT-08 ≡ OPT-
 | OPT-23 | Batch per-file symbol upserts into one UNWIND MERGE (N→1, graph-identical) | 21 | `17fc63d` | gate green 1540 passed / 0 failed (code 117); perf — graph-identical |
 | OPT-24 | Wire tenant/ingest env vars through docker-compose mcp service | 22 | `907ef57` | gate green 1540 passed / 0 failed (config-only); ops |
 | OPT-25 | In-function rel-type allowlist on invalidateRelationship (close latent injection sink) | 23 | `132426a` | gate green 1543 passed / 0 failed (neo4j 200); security-reviewer PASS |
-| OPT-26 | Namespace retrieval feedback boost keys by tenant (close cross-tenant ranking channel) | 24 | `<c24-sha>` | gate green 1547 passed / 0 failed (retrieval 146); security-reviewer PASS |
+| OPT-26 | Namespace retrieval feedback boost keys by tenant (close cross-tenant ranking channel) | 24 | `2a49cbd` | gate green 1547 passed / 0 failed (retrieval 146); security-reviewer PASS |
 
 ## Failed Attempts
 
@@ -377,7 +377,7 @@ Start cycle 25 at **OPT-27** (LOW, tenant — context-cache dependency sets keye
 - Next: OPT-26
 
 ### Cycle 24 — 2026-06-14
-- Commit: `<c24-sha>` OPT-26: namespace retrieval feedback boost keys by tenant
+- Commit: `2a49cbd` OPT-26: namespace retrieval feedback boost keys by tenant
 - Item: OPT-26 — COMPLETED
 - Mode B: residual folded into existing OPT-29 (non-tenant-token→DEFAULT also pollutes the shared feedback bucket; fail-closed closes both)
 - Verifier: PASS (1547 passed, 0 failed, build exit 0; retrieval 142→146; default back-compat intact; RED-confirmed) | Security-reviewer: PASS (channel closed for named tenants; single key chokepoint; tenant server-resolved/not spoofable; default-bucket only reachable by the OPT-29 misconfig path)
