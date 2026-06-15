@@ -42,7 +42,10 @@ export class SymbolStore {
           signature: node.signature,
           doc_comment: node.doc_comment,
           content_hash: node.content_hash,
-          parent_symbol: node.parent_symbol,
+          // '' sentinel for "no parent": Neo4j rejects a null property in a MERGE
+          // pattern, and parent_symbol is part of the Symbol composite key. Read
+          // back as null in mapSymbol so the string|null contract is preserved.
+          parent_symbol: node.parent_symbol ?? '',
           created_at: node.created_at,
           updated_at: node.updated_at,
         },
@@ -179,7 +182,7 @@ export class SymbolStore {
     const session = this.driver.session();
     try {
       const parentClause = parentSymbol === null
-        ? 'AND s.parent_symbol IS NULL'
+        ? "AND (s.parent_symbol IS NULL OR s.parent_symbol = '')"
         : 'AND s.parent_symbol = $parent';
       const result = await session.run(
         `MATCH (s:Symbol {name: $name, file_path: $path, kind: $kind})
@@ -200,8 +203,10 @@ export class SymbolStore {
    * Reproduces the exact semantics of the prior per-symbol
    * findByCompositeKey -> create/update loop:
    *  - Composite-key identity: MERGE on (name, file_path, kind, parent_symbol).
-   *    Neo4j MERGE matches null property values, so this is equivalent to the
-   *    `parent_symbol IS NULL` clause used by findByCompositeKey.
+   *    Neo4j REJECTS a null property in a MERGE pattern, and top-level symbols
+   *    have no parent, so "no parent" is stored as the '' sentinel (rows coalesce
+   *    null -> ''); mapSymbol normalises '' back to null on read. findByCompositeKey
+   *    matches either form.
    *  - ON CREATE: writes the full property set (incl. id, created_at, updated_at)
    *    plus vector props -- identical to create().
    *  - ON MATCH: writes only the update() field subset plus updated_at = now,
@@ -227,11 +232,13 @@ export class SymbolStore {
       if (node.sparse_values) vectorProps.sparse_values = node.sparse_values;
 
       return {
-        // Composite-key fields (MERGE pattern).
+        // Composite-key fields (MERGE pattern). '' sentinel for "no parent":
+        // a null property is illegal in a MERGE node pattern (mapSymbol reads ''
+        // back as null, preserving the string|null contract).
         name: node.name,
         kind: node.kind,
         file_path: node.file_path,
-        parent_symbol: node.parent_symbol,
+        parent_symbol: node.parent_symbol ?? '',
         // ON CREATE scalar props.
         id: node.id,
         language: node.language,
@@ -465,7 +472,9 @@ function mapSymbol(props: Record<string, unknown>): SymbolNode {
     signature: (props.signature as string) ?? '',
     doc_comment: (props.doc_comment as string) ?? '',
     content_hash: (props.content_hash as string) ?? '',
-    parent_symbol: (props.parent_symbol as string) ?? null,
+    // '' is the "no parent" sentinel written by create()/upsertSymbols (a null
+    // MERGE key is illegal in Neo4j) — normalise it back to null for callers.
+    parent_symbol: (props.parent_symbol as string) || null,
     embedding: props.embedding as number[] | undefined,
     created_at: props.created_at as string,
     updated_at: props.updated_at as string,

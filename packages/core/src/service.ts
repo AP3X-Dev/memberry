@@ -307,7 +307,7 @@ export class AMPService {
         tenantId: scope.tenantId,
         projectScope,
       }),
-      this._vectorSearch(scope.task, 20, scope.tenantId, projectScope),
+      this._vectorSearch(scope.task, 20, scope.tenantId, projectScope, scope.queryVector),
     ]);
 
     // OPT-41: one batched fact fetch (UNWIND ids) instead of one getActive per
@@ -493,19 +493,12 @@ export class AMPService {
     // (unmark) before rethrowing, otherwise a retry of identical content would be
     // silently swallowed as a duplicate for the 24h TTL — losing the memory.
     try {
-    // 2. Generate embedding with cache
-    let embedding: number[] | undefined;
-    const cachedEmb = await this.redis.embeddings.get(input.content);
-    if (cachedEmb) {
-      embedding = cachedEmb;
-    } else {
-      embedding = await this.embedding.embed(input.content);
-      await this.redis.embeddings.set(
-        input.content,
-        embedding,
-        this.config.cache.embeddingTTL,
-      );
-    }
+    // 2. Generate embedding. Caching lives in the injected provider
+    // (CachingEmbeddingProvider over the shared Redis EmbeddingCache; see
+    // services-factory). A manual cache layer here was redundant — same sha256
+    // key, same 86400s TTL — and bypassed the provider's graceful cache-error
+    // fallback, so a transient Redis hiccup could break store().
+    const embedding: number[] = await this.embedding.embed(input.content);
 
     // 3. Resolve project tag (Bucket B enforcement) — required, canonicalize,
     // fuzzy-warn, auto-placeholder. Falls through to legacy scope/tags if
@@ -868,13 +861,18 @@ export class AMPService {
     limit: number,
     tenantId?: string,
     projectScope?: string,
+    queryVector?: number[],
   ): Promise<Array<SemanticNode & { score: number }>> {
     // Skip vector search when embeddings are unavailable (no API key): querying
     // the index with zero vectors yields uniform cosine scores and arbitrary
     // ordering. Returning [] lets scoped + graph-expanded retrieval carry load().
     if (this.embedding.available === false) return [];
     try {
-      const emb = await this._getEmbedding(text);
+      // Shared query embedding: berry_context embeds the task ONCE and threads the
+      // vector in via scope.queryVector so this channel doesn't re-embed the same
+      // string. Deterministic embedding ⇒ identical to embedding it here. Direct
+      // load() callers (no precomputed vector) fall back to embedding the text.
+      const emb = queryVector ?? await this._getEmbedding(text);
       return await this.neo4j.query.byVector(emb, limit, tenantId, projectScope);
     } catch (err: unknown) {
       console.error("[service] Suppressed error:", err);
@@ -883,11 +881,10 @@ export class AMPService {
   }
 
   private async _getEmbedding(text: string): Promise<number[]> {
-    const cached = await this.redis.embeddings.get(text);
-    if (cached) return cached;
-    const emb = await this.embedding.embed(text);
-    await this.redis.embeddings.set(text, emb, this.config.cache.embeddingTTL);
-    return emb;
+    // Caching is handled by the injected provider (CachingEmbeddingProvider over
+    // the shared Redis EmbeddingCache). The previous manual cache layer here
+    // duplicated that with the same key + TTL and swallowed its error fallback.
+    return this.embedding.embed(text);
   }
 
   private async invalidateContextScopes(

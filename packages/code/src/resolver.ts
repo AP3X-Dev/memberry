@@ -55,6 +55,51 @@ export class ImportResolver {
   }
 
   /**
+   * Batched cross-file import resolution. Resolves every import's target path
+   * IN MEMORY against the set of indexed files (falling back to fs.stat only for
+   * candidates outside that set), then creates all SYMBOL_IMPORTS edges in ONE
+   * UNWIND round-trip — instead of one fs.stat-storm + one Neo4j round-trip per
+   * import. Edge set is identical to the per-import resolveImports loop.
+   */
+  async resolveImportsBatch(
+    imports: ImportInfo[],
+    projectRoot: string,
+    indexedPaths: Set<string>,
+  ): Promise<number> {
+    const rows: Array<{ fromPath: string; toPath: string; specifiers: string[]; noSpecifiers: boolean }> = [];
+    for (const imp of imports) {
+      const resolvedPath = await resolveImportPath(imp.source, imp.file_path, projectRoot, indexedPaths);
+      if (!resolvedPath) continue;
+      rows.push({
+        fromPath: imp.file_path,
+        toPath: resolvedPath,
+        specifiers: imp.specifiers.flatMap((s) => s.split(/[{},\s]+/).filter(Boolean)),
+        noSpecifiers: imp.specifiers.length === 0,
+      });
+    }
+    if (rows.length === 0) return 0;
+
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `UNWIND $rows AS row
+         MATCH (from:Symbol {file_path: row.fromPath})
+         WHERE from.kind IN ['function', 'class', 'module', 'variable']
+         MATCH (to:Symbol {file_path: row.toPath})
+         WHERE to.kind IN ['function', 'class', 'module', 'variable']
+           AND (to.name IN row.specifiers OR row.noSpecifiers)
+         MERGE (from)-[:SYMBOL_IMPORTS]->(to)
+         RETURN count(*) AS created`,
+        { rows },
+      );
+      const count = result.records[0]?.get('created');
+      return typeof count === 'number' ? count : count ? (count as { toNumber(): number }).toNumber() : 0;
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
    * Link all symbols in a file to their containing Entity:Component node.
    */
   async linkSymbolsToEntity(filePath: string): Promise<number> {
@@ -101,6 +146,7 @@ async function resolveImportPath(
   importSource: string,
   fromFile: string,
   projectRoot: string,
+  indexedPaths?: Set<string>,
 ): Promise<string | null> {
   // Skip builtins / node_modules
   if (!importSource.startsWith('.') && !importSource.startsWith('/')) {
@@ -128,6 +174,11 @@ async function resolveImportPath(
   ];
 
   for (const candidate of candidates) {
+    // In-memory hit: an indexed file (which is the only thing we can actually
+    // link a SYMBOL_IMPORTS edge to) — same first-existing-candidate priority as
+    // stat, without the disk probe. Falls back to stat for non-indexed candidates
+    // so resolution stays byte-identical to the stat-only path.
+    if (indexedPaths?.has(candidate)) return candidate;
     try {
       const s = await stat(candidate);
       if (s.isFile()) return candidate;

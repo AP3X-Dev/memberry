@@ -36,6 +36,7 @@ export class CodeSearch {
       include_semantics?: boolean;
       expandedTokens?: string[];
       as_of?: string;
+      queryVector?: number[];
     },
   ): Promise<CodeSearchResult[]> {
     const limit = options?.limit ?? 20;
@@ -46,8 +47,13 @@ export class CodeSearch {
     // promise is created here (before the fan-out) so the embed still overlaps
     // fulltext/lexical; both dense channels await this SAME promise instead of
     // issuing a second embed. Deterministic embed → byte-identical query vector.
+    //
+    // Shared query embedding: when the unified assembler already embedded the task
+    // (options.queryVector), reuse it instead of embedding a third time here.
     const queryVectorPromise: Promise<number[] | null> =
-      this.embedding.available === false ? Promise.resolve(null) : this.embedding.embed(query);
+      options?.queryVector !== undefined
+        ? Promise.resolve(options.queryVector)
+        : this.embedding.available === false ? Promise.resolve(null) : this.embedding.embed(query);
 
     // 4-way parallel: fulltext + dense vector + lexical vector + semantic
     const [fulltextResults, vectorResults, lexicalResults, semanticResults] = await Promise.all([

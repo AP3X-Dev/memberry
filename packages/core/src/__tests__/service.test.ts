@@ -416,16 +416,14 @@ describe('AMPService.store', () => {
     expect(neo4j.episodic.linkToModel).toHaveBeenCalledWith(expect.any(String), 'model-gpt4');
   });
 
-  it('uses cached embedding if available', async () => {
-    const cachedEmbedding = new Array(1536).fill(0.5);
-    const redis = makeRedis({
-      embeddings: {
-        get: vi.fn().mockResolvedValue(cachedEmbedding),
-        set: vi.fn().mockResolvedValue(undefined),
-      },
-    });
+  it('delegates embedding to the injected provider (provider owns caching; no manual Redis layer)', async () => {
+    // OPT: the manual redis.embeddings cache layer in store() was redundant with the
+    // injected CachingEmbeddingProvider (same sha256 key, same 86400 TTL) and bypassed
+    // the provider's graceful cache-error fallback. store() now delegates to the provider;
+    // the cache-hit-short-circuit behaviour is covered by caching-embedding.test.ts.
+    const redis = makeRedis();
     const neo4j = makeNeo4j();
-    const embedding = makeEmbedding();
+    const embedding = makeEmbedding(); // embed → [0.1] * 1536
 
     const service = new AMPService(redis, neo4j, embedding, makeConfig());
 
@@ -438,8 +436,14 @@ describe('AMPService.store', () => {
 
     await service.store(input);
 
-    // embedding.embed should NOT be called since cache hit
-    expect(embedding.embed).not.toHaveBeenCalled();
+    // The vector comes from the injected provider…
+    expect(embedding.embed).toHaveBeenCalledOnce();
+    expect(embedding.embed).toHaveBeenCalledWith('Content already embedded');
+    // …and is persisted on the node.
+    const created = vi.mocked(neo4j.episodic.create).mock.calls[0][0];
+    expect(created.embedding).toEqual(new Array(1536).fill(0.1));
+    // store() no longer reaches into the Redis embedding cache directly.
+    expect(redis.embeddings.get).not.toHaveBeenCalled();
     expect(redis.embeddings.set).not.toHaveBeenCalled();
   });
 });
