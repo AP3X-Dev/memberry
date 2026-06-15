@@ -1,0 +1,14 @@
+---
+id: uB6hjZ0FaF75JzN5wYu70
+session_id: session-20260613-ag3ntic-morph
+agent_id: default
+task: Build the WQ-23 Task 16 Infrastructure Service UI on the redesigned console.
+outcome: approved
+created_at: "2026-06-13T10:31:42.643Z"
+---
+
+Built + verified the WQ-23 Task 16 Infrastructure UI on wq23/infra-ui (the original reason the worktree exists) against the backend handoff doc (committed b4c7e3a: docs/superpowers/handoffs/2026-06-13-wq23-infrastructure-ui-handoff.md; copy at _design_src/spec/task16-handoff.md). New route /infrastructure (in System nav) — a tabbed surface: Proposals inbox (GET /workspaces/{ws}/infrastructure/change-proposals, admin-only) with status filters + a deep detail drawer (GET .../{id}) implementing the D8 two-audience split (user Overview: requested_outcome/risk_summary/expected_endpoints/status; admin Technical collapsible: docker_plan image@digest+internal-networks+volumes/mounts, image_references, environment, secret_requirements as mint/resolve LABELS, volume_network_changes, rollback_plan, execution_detail) + Approve/Reject/Withdraw wired to POST accept / reject{reason} / withdraw{reason}; and a Resources tab (GET .../resources + /{id} — these read routes may NOT exist on the backend yet; handled with an honest 'not available yet' empty state, retry:false). Files: lib/types.ts (InfrastructureProposal/DockerPlan/InfrastructureResource/SecretRequirement/ApprovalRequirements/AuthMe), components/infrastructure/InfraViews.tsx (computeApproveGate + renderers), app/(app)/infrastructure/page.tsx, e2e/infrastructure.spec.ts, nav wiring (Sidebar+MobileChrome+navIcons 'infra' glyph + AppContent PORTED + globals ag-drawer-r keyframe).
+
+CHECKER-VERIFIED by me (maker was an opus subagent): build green/TS clean/route registered; approval gate mirrors spec §5 (decidable only proposed|ready else 'already actioned'; non-empty validation_errors blocks accept; self-approval forbidden when currentUserId===requested_by else defer to server 403; approval_requirements.critical→owner-tier label); HARD RULE honored — never displays a plaintext secret, no reveal affordance (secrets are secret:// refs/mint reqs only); 403 role_forbidden / 409 conflict render gracefully via errorEnvelope+ErrorEnvelopeView; project_label tagged display-only. ONE backend follow-up flagged in the handoff: a GET /infrastructure/resources + /resources/{id} read-pair (registry data exists; small add) — request from backend team; UI already wired to degrade gracefully until then.
+
+WHOLE UI2 REDESIGN now complete on wq23/infra-ui (foundation+shell+all pages+chat+operator+mobile+vault+infrastructure), uncommitted in working tree, build-green. Live visual/pixel QA still needs a backend session (app redirects to /connect locally).

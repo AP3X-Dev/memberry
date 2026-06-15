@@ -1,0 +1,14 @@
+---
+id: piC_bq4zJiRkBCYTUv2Aj
+session_id: session-20260613-ag3ntic-morph
+agent_id: default
+task: [project:ag3ntic] Ship WQ-B (the supervisor) — autonomy levels + supervisor core + operator streaming console — through the finish gate and deploy to Cerebro.
+outcome: approved
+created_at: "2026-06-14T04:38:56.675Z"
+---
+
+WQ-B ("the supervisor") is fully shipped and deployed to Cerebro (local main + cerebro/main = 4e02375, 15 commits). Three work-areas: autonomy-tier governance overlay (R-GOV-7/5: pure apply_autonomy_overlay with an un-loosenable manifest floor, shadow-mode hardening, per-employee/workspace tier resolution), supervisor core (R-SUP-1/2/3: four-way routing, dispatch_to_employee via start_run so the acting USER owns the Run, escalation sub-loop spawn_specialist with a narrowed read+one-draft slice and child-token rollup into the parent's single cost booking), and the operator streaming supervision console (R-SUP-6/R-UX-3: SSE chip rail reusing lib/sse.ts, operator.specialist.dispatched/proposed events, operator.tool_result gains a sequence for chip pairing, an operator_job_id back-link on infra + tool-install proposals, and a GET /operator/jobs/{id}/plan composite-plan read where is_composite = >=2 items across >=2 inboxes).
+
+KEY LESSON (correction): the maker≠checker verifier (Sonnet sub-agent on the full branch diff) returned REJECT and caught a CRITICAL blocker that was invisible to the full pytest suite, ruff, AND the cleanliness gate: the new alembic migrations (20260613_2401/2501/2601) had been created under apps/api/platform_core/alembic/versions/ but alembic.ini sets script_location = %(here)s/alembic, so the ONLY real versions dir is apps/api/alembic/versions/. The migrations were orphaned and alembic upgrade head would have silently skipped them — shadow_mode/parent_job_id/operator_job_id columns would never reach prod and the api would crash on them. The suite missed it because tests build the schema via SQLAlchemy create_all, not migrations. Fixed by git mv into apps/api/alembic/versions/ (verified single head via `cd apps/api && python -m alembic heads`). Verifier also caught: the escalation sub-loop's child_run_tool stamped operator_job_id = the child job, so get_job_plan (queries the parent) missed specialist-filed proposals — fixed by adding a backlink_job_id param to run_tool (audit target stays the child, back-link points to the parent). After fixes (commit 4e02375) the re-verifier returned PASS.
+
+Finish gate evidence: full suite 1445 passed/exit 0; ruff + cleanliness M12 clean; frontend tsc + next build exit 0; verifier PASS; deployed to Cerebro (pg_dump first, api/worker restart for the bind-mount, web image rebuild) with migrations applied to prod (alembic head 20260613_2601, all 4 new columns live); E2E-GOLD-01 16/16 + audit rows post-deploy. NEXT: WQ-C (reliability — employee lifecycle upgrade-roll, ACP health gate, Hermes-home volume backup, CI wiring).
