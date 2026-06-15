@@ -77,32 +77,48 @@ export class CodeIndexer {
       : files;
 
     // Phase 1: Parse all files and create symbols. Cache parse results for Phase 2.
+    // Files are independent (disjoint per-file Symbol sets), so index them with
+    // bounded concurrency to overlap each file's Neo4j round-trips instead of
+    // running them strictly one-at-a-time. The cap protects the Neo4j session pool
+    // (each indexFile opens its sessions serially, so peak ≈ FILE_CONCURRENCY).
+    // Result totals are order-independent sums, so the outcome is identical to the
+    // serial loop; per-file errors stay isolated.
+    const FILE_CONCURRENCY = 8;
     const parseCache = new Map<string, Awaited<ReturnType<typeof parseFile>>>();
 
-    for (const filePath of filtered) {
-      const language = detectLanguage(filePath);
-      if (!language) {
-        result.files_skipped++;
-        continue;
-      }
+    for (let i = 0; i < filtered.length; i += FILE_CONCURRENCY) {
+      const chunk = filtered.slice(i, i + FILE_CONCURRENCY);
+      const outcomes = await Promise.all(
+        chunk.map(async (filePath) => {
+          const language = detectLanguage(filePath);
+          if (!language) return { kind: 'skip' as const };
+          try {
+            return { kind: 'ok' as const, filePath, fileResult: await this.indexFile(filePath, language) };
+          } catch (err) {
+            return {
+              kind: 'err' as const,
+              error: { file: relative(rootPath, filePath), error: err instanceof Error ? err.message : String(err) },
+            };
+          }
+        }),
+      );
 
-      try {
-        const fileResult = await this.indexFile(filePath, language);
-        result.files_parsed++;
-        result.symbols_created += fileResult.symbols_created;
-        result.symbols_updated += fileResult.symbols_updated;
-        result.relations_created += fileResult.relations_created;
-
-        // Cache the parse from indexFile for Phase 2 (no re-parsing needed)
-        if (fileResult.parsed.imports.length > 0) {
-          parseCache.set(filePath, fileResult.parsed);
+      for (const outcome of outcomes) {
+        if (outcome.kind === 'skip') {
+          result.files_skipped++;
+        } else if (outcome.kind === 'err') {
+          result.errors.push(outcome.error);
+          result.files_skipped++;
+        } else {
+          result.files_parsed++;
+          result.symbols_created += outcome.fileResult.symbols_created;
+          result.symbols_updated += outcome.fileResult.symbols_updated;
+          result.relations_created += outcome.fileResult.relations_created;
+          // Cache the parse from indexFile for Phase 2 (no re-parsing needed)
+          if (outcome.fileResult.parsed.imports.length > 0) {
+            parseCache.set(outcome.filePath, outcome.fileResult.parsed);
+          }
         }
-      } catch (err) {
-        result.errors.push({
-          file: relative(rootPath, filePath),
-          error: err instanceof Error ? err.message : String(err),
-        });
-        result.files_skipped++;
       }
     }
 
@@ -110,13 +126,15 @@ export class CodeIndexer {
     // Uses cached parse results --- no re-parsing.
     await this.ensureFileEntities(filtered);
 
-    for (const [filePath, parsed] of parseCache) {
-      try {
-        const importEdges = await this.resolver.resolveImports(parsed.imports, rootPath);
-        result.relations_created += importEdges;
-      } catch (err: unknown) {
-        // Import resolution failures are non-fatal
-      }
+    // Resolve ALL imports in one batch: in-memory path resolution against the set
+    // of indexed files + a single UNWIND round-trip, instead of an fs.stat storm
+    // (up to 11 stats/import) plus one Neo4j round-trip per import.
+    const indexedPaths = new Set(filtered.filter((f) => detectLanguage(f)));
+    const allImports = Array.from(parseCache.values()).flatMap((p) => p.imports);
+    try {
+      result.relations_created += await this.resolver.resolveImportsBatch(allImports, rootPath, indexedPaths);
+    } catch (err: unknown) {
+      // Import resolution failures are non-fatal
     }
 
     // Phase 3: Batch link all symbols to their Entity:Component nodes
