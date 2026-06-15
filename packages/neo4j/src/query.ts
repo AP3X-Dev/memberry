@@ -171,12 +171,12 @@ export class ScopedQuery {
         `MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {name: $entityName})
          WHERE ${relFilter}
            AND ${tenantWhere('s', tenant)}
-         RETURN s
+         RETURN s { .*, embedding: null } AS s
          ORDER BY s.confidence DESC, s.updated_at DESC
          LIMIT $limit`,
         params,
       );
-      return result.records.map((r) => mapSemanticNode(r.get('s').properties));
+      return result.records.map((r) => mapSemanticNode(nodeProps(r.get('s'))));
     } finally {
       await session.close();
     }
@@ -192,12 +192,12 @@ export class ScopedQuery {
         `MATCH (s:Semantic)
          WHERE $tag IN s.tags
            AND ${tenantWhere('s', tenant)}
-         RETURN s
+         RETURN s { .*, embedding: null } AS s
          ORDER BY s.confidence DESC, s.updated_at DESC
          LIMIT $limit`,
         { tag, limit: neo4j.int(limit), [TENANT_PARAM]: tenant },
       );
-      return result.records.map((r) => mapSemanticNode(r.get('s').properties));
+      return result.records.map((r) => mapSemanticNode(nodeProps(r.get('s'))));
     } finally {
       await session.close();
     }
@@ -230,7 +230,7 @@ export class ScopedQuery {
           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
           WHERE e.name IN $entities AND ANY(t IN $tags WHERE t IN s.tags)
             AND ${relFilter} AND ${tFilter}${pFilter}
-          RETURN DISTINCT s
+          RETURN DISTINCT s { .*, embedding: null } AS s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
       } else if (entities.length > 0) {
@@ -239,7 +239,7 @@ export class ScopedQuery {
           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
           WHERE e.name IN $entities
             AND ${relFilter} AND ${tFilter}${pFilter}
-          RETURN DISTINCT s
+          RETURN DISTINCT s { .*, embedding: null } AS s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
       } else if (tags.length > 0) {
@@ -247,7 +247,7 @@ export class ScopedQuery {
         cypher = `
           MATCH (s:Semantic)
           WHERE ANY(t IN $tags WHERE t IN s.tags) AND ${tFilter}${pFilter}
-          RETURN DISTINCT s
+          RETURN DISTINCT s { .*, embedding: null } AS s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
       } else {
@@ -255,13 +255,13 @@ export class ScopedQuery {
         cypher = `
           MATCH (s:Semantic)
           WHERE ${tFilter}${pFilter}
-          RETURN s
+          RETURN s { .*, embedding: null } AS s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
       }
 
       const result = await session.run(cypher, params);
-      return result.records.map((r) => mapSemanticNode(r.get('s').properties));
+      return result.records.map((r) => mapSemanticNode(nodeProps(r.get('s'))));
     } finally {
       await session.close();
     }
@@ -296,12 +296,12 @@ export class ScopedQuery {
         `CALL db.index.vector.queryNodes('semantic_embedding', $fetch, $embedding)
          YIELD node, score
          WHERE ${tenantWhere('node', tenant)}${pFilter}
-         RETURN node, score
+         RETURN node { .*, embedding: null } AS node, score
          LIMIT $limit`,
         params,
       );
       return result.records.map((r) => ({
-        ...mapSemanticNode(r.get('node').properties),
+        ...mapSemanticNode(nodeProps(r.get('node'))),
         score: r.get('score') as number,
       }));
     } finally {
@@ -405,12 +405,12 @@ export class ScopedQuery {
         `MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {name: $entityName})
          WHERE ${aboutFilter}
            AND ${tenantWhere('s', tenant)}
-         RETURN s
+         RETURN s { .*, embedding: null } AS s
          ORDER BY s.confidence DESC, s.updated_at DESC`,
         semParams,
       );
       semantics = semanticResult.records.map((r) =>
-        mapSemanticNode(r.get('s').properties),
+        mapSemanticNode(nodeProps(r.get('s'))),
       );
 
       const refFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
@@ -486,8 +486,8 @@ export class ScopedQuery {
              AND r3.invalid_at IS NULL
              AND NOT toLower(e2.name) IN $lowerNames
              AND ${tenantWhere('s2', tenant)}
-           RETURN DISTINCT s2 AS node, 0.2 AS hopScore
-           ORDER BY s2.confidence DESC
+           RETURN DISTINCT s2 { .*, embedding: null } AS node, 0.2 AS hopScore
+           ORDER BY node.confidence DESC
            LIMIT $maxPerHop`
         : `MATCH (e:Entity)<-[r:ABOUT]-(s:Semantic)-[r2:ABOUT]->(e2:Entity)<-[r3:ABOUT]-(s2:Semantic)
            WHERE toLower(e.name) IN $lowerNames
@@ -496,8 +496,8 @@ export class ScopedQuery {
              AND r3.invalid_at IS NULL
              AND NOT toLower(e2.name) IN $lowerNames
              AND ${tenantWhere('s2', tenant)}
-           RETURN DISTINCT s2 AS node, 0.3 AS hopScore
-           ORDER BY s2.confidence DESC
+           RETURN DISTINCT s2 { .*, embedding: null } AS node, 0.3 AS hopScore
+           ORDER BY node.confidence DESC
            LIMIT $maxPerHop`;
 
       // Path 2: Co-extracted fact neighbors — traverse SAME_EPISODE edges on facts
@@ -507,8 +507,8 @@ export class ScopedQuery {
            AND NOT toLower(e2.name) IN $lowerNames
            AND ${relFilter}
            AND ${tenantWhere('s', tenant)}
-         RETURN DISTINCT s AS node, 0.25 AS hopScore
-         ORDER BY s.confidence DESC
+         RETURN DISTINCT s { .*, embedding: null } AS node, 0.25 AS hopScore
+         ORDER BY node.confidence DESC
          LIMIT $maxPerHop`;
 
       const lowerNames = entityNames.map(n => n.toLowerCase());
@@ -527,7 +527,7 @@ export class ScopedQuery {
       const results: SemanticNode[] = [];
 
       for (const record of semResult.records) {
-        const node = mapSemanticNode(record.get('node').properties);
+        const node = mapSemanticNode(nodeProps(record.get('node')));
         if (!seen.has(node.id)) {
           seen.add(node.id);
           results.push(node);
@@ -535,7 +535,7 @@ export class ScopedQuery {
       }
 
       for (const record of factResult.records) {
-        const node = mapSemanticNode(record.get('node').properties);
+        const node = mapSemanticNode(nodeProps(record.get('node')));
         if (!seen.has(node.id)) {
           seen.add(node.id);
           results.push(node);
@@ -600,6 +600,16 @@ export class ScopedQuery {
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+// A semantic read returns either a Node (driver exposes `.properties`) or a map
+// projection — `s {.*, embedding: null}` — used to keep the 1536-float embedding
+// OFF the read wire (no consumer of these reads uses it; GDS reads the stored
+// property via its own Cypher and getById/getByIds keep it). Normalise both to a
+// plain property bag so the mappers (and mock-based unit tests) work either way.
+function nodeProps(v: unknown): Record<string, unknown> {
+  const o = v as { properties?: Record<string, unknown> } | null;
+  return o && o.properties ? o.properties : (v as Record<string, unknown>);
+}
 
 function mapSemanticNode(props: Record<string, unknown>): SemanticNode {
   return {

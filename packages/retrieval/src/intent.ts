@@ -156,6 +156,11 @@ async function getExemplarEmbeddings(embedding: EmbeddingProvider): Promise<Map<
 export async function classifyIntent(
   query: string,
   embedding?: EmbeddingProvider,
+  // Shared query embedding: the unified assembler embeds the task once and passes
+  // this thunk so the embedding-classification path reuses that vector instead of
+  // issuing its own embed(). Invoked lazily — only when the embedding path is
+  // actually reached (rules miss), so rules-matched / GRAPH queries never embed.
+  getQueryVec?: () => Promise<number[] | undefined>,
 ): Promise<IntentResult> {
   // Guard: empty or very short queries
   if (!query || query.trim().length < 2) {
@@ -176,7 +181,7 @@ export async function classifyIntent(
   // similarity to 0, so we skip straight to the deterministic fallback).
   if (embedding && embedding.available !== false) {
     try {
-      const embResult = await classifyByEmbedding(query, embedding);
+      const embResult = await classifyByEmbedding(query, embedding, getQueryVec);
       if (embResult) return embResult;
     } catch (err: unknown) {
       // Embedding failed — fall through
@@ -227,9 +232,12 @@ function classifyByRules(query: string): IntentResult | null {
 async function classifyByEmbedding(
   query: string,
   embedding: EmbeddingProvider,
+  getQueryVec?: () => Promise<number[] | undefined>,
 ): Promise<IntentResult | null> {
   const exemplars = await getExemplarEmbeddings(embedding);
-  const queryVec = await embedding.embed(query);
+  // Reuse the caller's shared query vector when supplied; otherwise embed here.
+  // Deterministic embedding ⇒ identical similarity either way.
+  const queryVec = (getQueryVec ? await getQueryVec() : undefined) ?? await embedding.embed(query);
   const queryNorm = l2Norm(queryVec);
 
   let bestIntent: QueryIntent = 'HYBRID';

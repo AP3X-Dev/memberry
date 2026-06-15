@@ -358,6 +358,27 @@ describe('UnifiedAssembler', () => {
       );
     });
 
+    it('embeds the query once and shares the vector with the code and memory layers', async () => {
+      // Shared query embedding: the assembler embeds the task ONCE and threads the
+      // vector into both dense channels instead of each re-embedding the same string.
+      const vec = Array(384).fill(0.7);
+      embedding.embed = vi.fn().mockResolvedValue(vec);
+
+      await assembler.assemble('find auth code', { strategy: 'ranked', tenantId: 'default' });
+
+      // Exactly one embed for the whole assemble() (not one per channel).
+      expect(embedding.embed).toHaveBeenCalledTimes(1);
+      expect(embedding.embed).toHaveBeenCalledWith('find auth code');
+      // Both dense channels received the SAME shared vector.
+      expect(codeLayer.search).toHaveBeenCalledWith(
+        'find auth code',
+        expect.objectContaining({ queryVector: vec }),
+      );
+      expect(memoryLayer.load).toHaveBeenCalledWith(
+        expect.objectContaining({ queryVector: vec }),
+      );
+    });
+
     it('skips oversized ranked results and keeps later items that fit the token budget', async () => {
       codeLayer.search = vi.fn().mockResolvedValue([
         {

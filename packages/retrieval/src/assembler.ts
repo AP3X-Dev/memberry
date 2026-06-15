@@ -31,13 +31,13 @@ type TenantRetrievalOptions = RetrievalOptions & { tenantId?: string };
 // ─── Dependency interfaces ───────────────────────────────────────────────────
 
 export interface AssemblerCodeLayer {
-  search(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string }): Promise<
+  search(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; queryVector?: number[] }): Promise<
     Array<{ id: string; source_type: string; name: string; kind: string; file_path: string; start_line: number; signature: string; doc_comment: string; score: number }>
   >;
 }
 
 export interface AssemblerMemoryLayer {
-  load(scope: { task: string; entities?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; temporal?: { time_mode?: string; as_of?: string; from?: string; to?: string; include_invalidated?: boolean } }): Promise<{
+  load(scope: { task: string; entities?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; temporal?: { time_mode?: string; as_of?: string; from?: string; to?: string; include_invalidated?: boolean } }): Promise<{
     markdown: string; tokens: number; sources: string[];
   }>;
 }
@@ -260,11 +260,20 @@ export class UnifiedAssembler {
       tenantId: resolveTenant(options?.tenantId),
     };
 
+    // Shared query embedding: embed the task at most ONCE per assemble() and reuse
+    // the vector across intent classification, code search, and memory load (each
+    // of which used to embed the same string independently — up to 3 API calls,
+    // and on a cold cache up to 3 real round-trips since concurrent embeds don't
+    // coalesce). Lazy + memoized: the deterministic / GRAPH route never invokes it,
+    // so it pays nothing. Unavailable provider → undefined, so every consumer keeps
+    // its existing skip/short-circuit behaviour.
+    const getQueryVector = this.makeSharedQueryVector(task);
+
     // Auto strategy: classify intent and route accordingly
     if (opts.strategy === 'auto') {
       let intentResult: { intent: QueryIntent; confidence: number; method: string };
       try {
-        intentResult = await classifyIntent(task, this.embedding);
+        intentResult = await classifyIntent(task, this.embedding, getQueryVector);
       } catch (err) {
         console.error('[amp-retrieval] Intent classification failed:', err instanceof Error ? err.message : err);
         intentResult = { intent: 'HYBRID', confidence: 0.4, method: 'fallback' };
@@ -273,14 +282,36 @@ export class UnifiedAssembler {
       if (intentResult.intent === 'GRAPH') {
         return this.assembleDeterministic(task, opts);
       }
-      return this.assembleRanked(task, opts, intentResult.intent);
+      return this.assembleRanked(task, opts, intentResult.intent, getQueryVector);
     }
 
     if (opts.strategy === 'deterministic') {
       return this.assembleDeterministic(task, opts);
     }
 
-    return this.assembleRanked(task, opts, 'HYBRID');
+    return this.assembleRanked(task, opts, 'HYBRID', getQueryVector);
+  }
+
+  /**
+   * Build a lazy, memoized embedder for `task` shared across the retrieval channels.
+   * The embed fires at most once (first caller), and only if a caller actually needs
+   * it. Returns undefined when embeddings are unavailable or the embed fails, so each
+   * consumer falls back to its own (skip / self-embed) behaviour — output-identical.
+   */
+  private makeSharedQueryVector(task: string): () => Promise<number[] | undefined> {
+    if (this.embedding.available === false) {
+      return () => Promise.resolve(undefined);
+    }
+    let cached: Promise<number[] | undefined> | undefined;
+    return () => {
+      if (!cached) {
+        cached = this.embedding.embed(task).catch((err) => {
+          console.error('[amp-retrieval] Shared query embedding failed:', err instanceof Error ? err.message : err);
+          return undefined;
+        });
+      }
+      return cached;
+    };
   }
 
   /**
@@ -326,6 +357,7 @@ export class UnifiedAssembler {
     task: string,
     opts: TenantRetrievalOptions,
     intent: QueryIntent = 'HYBRID',
+    getQueryVec?: () => Promise<number[] | undefined>,
   ): Promise<UnifiedContext> {
     const lists: RetrievalResult[][] = [];
     const tenant = resolveTenant(opts.tenantId);
@@ -355,6 +387,15 @@ export class UnifiedAssembler {
       );
     }
 
+    // Shared query embedding: resolve the task vector ONCE here (memoized), but
+    // only if a dense channel will actually use it — so a code/memory-disabled
+    // ranked call still embeds nothing. arch + boosts + collectionSize are already
+    // in flight above, so this embed overlaps them rather than adding a tail.
+    const willUseSharedVector =
+      (opts.include_code && this.codeLayer != null && isDefaultTenant(tenant)) ||
+      (opts.include_memory && this.memoryLayer != null);
+    const queryVector = willUseSharedVector && getQueryVec ? await getQueryVec() : undefined;
+
     // Tenant safety: the code-search channel queries Symbol nodes, which are NOT
     // tenant-stamped in the shared graph. For a non-default tenant this would leak
     // every other tenant's indexed code (file paths, signatures, doc comments).
@@ -368,6 +409,7 @@ export class UnifiedAssembler {
           include_semantics: false,
           expandedTokens: expansion.tokens,
           ...(codePathScope ? { file_path: codePathScope } : {}),
+          ...(queryVector ? { queryVector } : {}),
         })
           .then((results) => {
             lists.push(results.map((r) => ({
@@ -391,6 +433,7 @@ export class UnifiedAssembler {
           tags: memoryTagScope,
           max_tokens: Math.floor(opts.max_tokens / 3),
           tenantId: tenant,
+          ...(queryVector ? { queryVector } : {}),
           ...(opts.as_of ? { temporal: { as_of: opts.as_of } } : {}),
         })
           .then((ctx) => { lists.push(parseMemoryMarkdown(ctx.markdown, ctx.sources)); })

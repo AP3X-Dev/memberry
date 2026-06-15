@@ -81,6 +81,13 @@ export interface LoadScope {
   session_id?: string;
   /** Tenant to scope retrieval to (defaults to DEFAULT_TENANT). */
   tenantId?: string;
+  /**
+   * Precomputed embedding of `task`, shared by the caller (e.g. the unified
+   * assembler embeds the query once and reuses it across intent / code / memory).
+   * When present, the vector-search channel uses it instead of re-embedding the
+   * task. Excluded from the load cache key (hashScope) — it's derived from `task`.
+   */
+  queryVector?: number[];
 }
 
 export interface MemoryContext {
