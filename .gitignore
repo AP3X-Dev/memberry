@@ -34,6 +34,13 @@ prp-*.md
 amp-three-tier-architecture.md
 .superpowers/
 
+# === Optimizer-loop working docs (internal bookkeeping — never published) ===
+# The self-hosted hardening loop's state, scaffold, driver, and seed audit. Kept
+# locally for resume but not shipped. (docs/ above already covers the driver +
+# audit; these two are outside docs/.)
+agent-state/
+AGENTS.md
+
 # Temp and data files
 *.csv
 *.csv#
