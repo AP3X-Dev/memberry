@@ -58,7 +58,7 @@ describe('CodeIndexer relation resolution', () => {
     mocks.linkAllSymbolsToEntities.mockResolvedValue(0);
   });
 
-  it('passes parsed symbol fallback metadata when resolving relations for unchanged symbols', async () => {
+  it('batches same-type relations into ONE UNWIND round-trip, carrying per-row fallback metadata', async () => {
     const { CodeIndexer } = await import('../indexer.js');
     const run = makeSymbol({
       id: 'fresh-run-id',
@@ -74,41 +74,64 @@ describe('CodeIndexer relation resolution', () => {
       end_line: 3,
       content_hash: 'hash-helper',
     });
+    const other = makeSymbol({
+      id: 'fresh-other-id',
+      name: 'other',
+      start_line: 9,
+      end_line: 11,
+      content_hash: 'hash-other',
+    });
 
     mocks.parseFile.mockResolvedValue({
       file_path: '/repo/src/sample.ts',
       language: 'typescript',
-      symbols: [helper, run],
+      symbols: [helper, run, other],
       imports: [],
+      // Two relations of the SAME type — the batch must issue ONE query, not two.
       relations: [
         { from_symbol: run.id, to_symbol: 'helper', type: 'SYMBOL_CALLS' },
+        { from_symbol: run.id, to_symbol: 'other', type: 'SYMBOL_CALLS' },
       ],
     });
-    mocks.symbolStore.getHashesByFile.mockResolvedValue(new Set(['hash-run', 'hash-helper']));
-    mocks.symbolStore.getByFile.mockResolvedValue([helper, run]);
+    mocks.symbolStore.getHashesByFile.mockResolvedValue(new Set(['hash-run', 'hash-helper', 'hash-other']));
+    mocks.symbolStore.getByFile.mockResolvedValue([helper, run, other]);
 
     const runCalls: Array<{ query: string; params: Record<string, unknown> }> = [];
     const session = {
       run: vi.fn(async (query: string, params: Record<string, unknown> = {}) => {
         runCalls.push({ query, params });
-        return { records: [{ get: () => 1 }] };
+        return { records: [{ get: () => 2 }] };
       }),
       close: vi.fn(),
     };
     const driver = { session: vi.fn(() => session) };
 
     const indexer = new CodeIndexer(driver as never);
-    await indexer.indexFile('/repo/src/sample.ts', 'typescript');
+    const result = await indexer.indexFile('/repo/src/sample.ts', 'typescript');
 
-    const relationCall = runCalls.find((call) => call.query.includes('SYMBOL_CALLS'));
-    expect(relationCall).toBeDefined();
-    expect(relationCall!.query).toContain('from.name = $fromName');
-    expect(relationCall!.params).toMatchObject({
+    // Exactly ONE relation round-trip for both SYMBOL_CALLS relations (was 2).
+    const relationCalls = runCalls.filter((call) => call.query.includes('MERGE (from)-[:SYMBOL_CALLS]->(to)'));
+    expect(relationCalls).toHaveLength(1);
+
+    const relationCall = relationCalls[0]!;
+    expect(relationCall.query).toContain('UNWIND $rows AS row');
+    expect(relationCall.query).toContain('from.name = row.fromName');
+    expect(relationCall.params.filePath).toBe('/repo/src/sample.ts');
+
+    // Both relations are carried as rows, each with the stable fallback metadata
+    // used when an unchanged symbol's transient parser id can't be matched.
+    const rows = relationCall.params.rows as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
       fromRef: run.id,
       fromName: 'run',
       fromKind: 'function',
       fromStartLine: 5,
       toRef: 'helper',
     });
+    expect(rows[1]).toMatchObject({ fromRef: run.id, toRef: 'other' });
+
+    // count(*) from the batch flows back as relations_created.
+    expect(result.relations_created).toBe(2);
   });
 });

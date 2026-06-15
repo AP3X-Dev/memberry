@@ -173,22 +173,13 @@ export class CodeIndexer {
       updated += upsert.updated;
     }
 
-    // Create intra-file relationships. Parser IDs are transient, so include stable
-    // symbol metadata as a fallback when unchanged symbols are skipped by hash.
+    // Create intra-file relationships in ONE batched round-trip per relationship
+    // type — was one Neo4j round-trip + session PER relation (O(R) for a dense
+    // file, often tens–hundreds). Parser IDs are transient, so include stable
+    // symbol metadata as a fallback when unchanged symbols are skipped by hash;
+    // the per-endpoint ORDER BY tie-break is ported per-row into the batch.
     const symbolById = new Map(parsed.symbols.map((symbol) => [symbol.id, symbol]));
-    for (const rel of parsed.relations) {
-      const resolved = await this.resolveRelation(
-        rel.from_symbol,
-        rel.to_symbol,
-        rel.type,
-        filePath,
-        {
-          from: relationFallback(symbolById.get(rel.from_symbol)),
-          to: relationFallback(symbolById.get(rel.to_symbol)),
-        },
-      );
-      if (resolved) relationsCreated++;
-    }
+    relationsCreated += await this.resolveRelationsBatch(parsed.relations, filePath, symbolById);
 
     // Remove symbols that no longer exist in the file (batch delete).
     // Use composite keys (name+kind+parent_symbol) to correctly identify stale symbols
@@ -238,75 +229,103 @@ export class CodeIndexer {
     }
   }
 
-  private async resolveRelation(
-    fromRef: string,
-    toRef: string,
-    type: string,
+  private async resolveRelationsBatch(
+    relations: Array<{ from_symbol: string; to_symbol: string; type: string }>,
     filePath: string,
-    fallback: RelationResolutionFallback = {},
-  ): Promise<boolean> {
-    // Validate relation type against known symbol relationships --- prevents Cypher injection
+    symbolById: Map<string, SymbolNode>,
+  ): Promise<number> {
+    // Validate relation types against known symbol relationships --- prevents
+    // Cypher injection (the type is interpolated below, never a bind param, since
+    // Neo4j can't parameterise relationship types).
     const VALID_SYMBOL_RELS = new Set(['SYMBOL_CALLS', 'SYMBOL_IMPORTS', 'SYMBOL_INHERITS', 'SYMBOL_IMPLEMENTS', 'SYMBOL_CONTAINS']);
-    if (!VALID_SYMBOL_RELS.has(type)) return false;
 
+    // Group the file's relations by (validated) type. One UNWIND round-trip per
+    // type means ≤5 round-trips/file instead of one per relation.
+    const rowsByType = new Map<string, Array<Record<string, unknown>>>();
+    for (const rel of relations) {
+      if (!VALID_SYMBOL_RELS.has(rel.type)) continue;
+      const fromFb = relationFallback(symbolById.get(rel.from_symbol));
+      const toFb = relationFallback(symbolById.get(rel.to_symbol));
+      const list = rowsByType.get(rel.type) ?? [];
+      list.push({
+        fromRef: rel.from_symbol,
+        toRef: rel.to_symbol,
+        fromName: fromFb?.name ?? null,
+        fromKind: fromFb?.kind ?? null,
+        fromStartLine: fromFb?.start_line ?? null,
+        toName: toFb?.name ?? null,
+        toKind: toFb?.kind ?? null,
+        toStartLine: toFb?.start_line ?? null,
+      });
+      rowsByType.set(rel.type, list);
+    }
+    if (rowsByType.size === 0) return 0;
+
+    let resolved = 0;
     const session = this.driver.session();
     try {
-      // fromRef/toRef are either symbol IDs (from SYMBOL_CONTAINS) or names (from heritage)
-      // Try ID match first, then stable parsed-symbol fallback, then name match.
-      const result = await session.run(
-        `OPTIONAL MATCH (from:Symbol)
-         WHERE from.id = $fromRef
-            OR (
-              $fromName IS NOT NULL
-              AND from.name = $fromName
-              AND from.file_path = $filePath
-              AND ($fromKind IS NULL OR from.kind = $fromKind)
-              AND ($fromStartLine IS NULL OR from.start_line = $fromStartLine)
-            )
-            OR (from.name = $fromRef AND from.file_path = $filePath)
-         WITH from
-         WHERE from IS NOT NULL
-         ORDER BY CASE
-           WHEN from.id = $fromRef THEN 0
-           WHEN $fromStartLine IS NOT NULL AND from.start_line = $fromStartLine THEN 1
-           ELSE 2
-         END
-         LIMIT 1
-         OPTIONAL MATCH (to:Symbol)
-         WHERE to.id = $toRef
-            OR (
-              $toName IS NOT NULL
-              AND to.name = $toName
-              AND to.file_path = $filePath
-              AND ($toKind IS NULL OR to.kind = $toKind)
-              AND ($toStartLine IS NULL OR to.start_line = $toStartLine)
-            )
-            OR (to.name = $toRef AND to.file_path = $filePath)
-            OR to.name = $toRef
-         WITH from, to
-         WHERE to IS NOT NULL
-         ORDER BY CASE
-           WHEN to.id = $toRef THEN 0
-           WHEN $toStartLine IS NOT NULL AND to.file_path = $filePath AND to.start_line = $toStartLine THEN 1
-           WHEN to.file_path = $filePath THEN 2
-           ELSE 3
-         END
-         LIMIT 1
-         MERGE (from)-[:${type}]->(to)
-         RETURN count(*) AS created`,
-        {
-          fromRef,
-          toRef,
-          filePath,
-          fromName: fallback.from?.name ?? null,
-          fromKind: fallback.from?.kind ?? null,
-          fromStartLine: fallback.from?.start_line ?? null,
-          toName: fallback.to?.name ?? null,
-          toKind: fallback.to?.kind ?? null,
-          toStartLine: fallback.to?.start_line ?? null,
-        },
-      );
-      return (result.records[0]?.get('created') ?? 0) > 0;
+      for (const [type, rows] of rowsByType) {
+        // Per-row endpoint resolution + ORDER BY tie-break, identical to the prior
+        // per-relation query, ported into correlated CALL{} subqueries so the whole
+        // batch runs in one round-trip. A row whose from/to can't be resolved is
+        // dropped by its subquery (no edge), exactly as the old OPTIONAL-MATCH +
+        // `WHERE … IS NOT NULL` did.
+        const result = await session.run(
+          `UNWIND $rows AS row
+           CALL {
+             WITH row
+             OPTIONAL MATCH (from:Symbol)
+             WHERE from.id = row.fromRef
+                OR (
+                  row.fromName IS NOT NULL
+                  AND from.name = row.fromName
+                  AND from.file_path = $filePath
+                  AND (row.fromKind IS NULL OR from.kind = row.fromKind)
+                  AND (row.fromStartLine IS NULL OR from.start_line = row.fromStartLine)
+                )
+                OR (from.name = row.fromRef AND from.file_path = $filePath)
+             WITH from, row
+             WHERE from IS NOT NULL
+             RETURN from
+             ORDER BY CASE
+               WHEN from.id = row.fromRef THEN 0
+               WHEN row.fromStartLine IS NOT NULL AND from.start_line = row.fromStartLine THEN 1
+               ELSE 2
+             END
+             LIMIT 1
+           }
+           CALL {
+             WITH row
+             OPTIONAL MATCH (to:Symbol)
+             WHERE to.id = row.toRef
+                OR (
+                  row.toName IS NOT NULL
+                  AND to.name = row.toName
+                  AND to.file_path = $filePath
+                  AND (row.toKind IS NULL OR to.kind = row.toKind)
+                  AND (row.toStartLine IS NULL OR to.start_line = row.toStartLine)
+                )
+                OR (to.name = row.toRef AND to.file_path = $filePath)
+                OR to.name = row.toRef
+             WITH to, row
+             WHERE to IS NOT NULL
+             RETURN to
+             ORDER BY CASE
+               WHEN to.id = row.toRef THEN 0
+               WHEN row.toStartLine IS NOT NULL AND to.file_path = $filePath AND to.start_line = row.toStartLine THEN 1
+               WHEN to.file_path = $filePath THEN 2
+               ELSE 3
+             END
+             LIMIT 1
+           }
+           MERGE (from)-[:${type}]->(to)
+           RETURN count(*) AS created`,
+          { rows, filePath },
+        );
+        const c = result.records[0]?.get('created');
+        resolved += typeof c === 'number' ? c : c ? (c as { toNumber(): number }).toNumber() : 0;
+      }
+      return resolved;
     } finally {
       await session.close();
     }
