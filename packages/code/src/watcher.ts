@@ -354,6 +354,10 @@ export class CodeWatcher {
     }
 
     console.error(`[code-watcher] Re-indexing ${filePath}`);
+    // T5/gap-11: the watcher carries NO project context — indexFile is called
+    // without a projectTag (undefined). upsertSymbols COALESCEs on match, so a
+    // context-free reindex PRESERVES each symbol's existing stored project_tag
+    // rather than clearing it.
     await this.indexer.indexFile(filePath, language);
     this.lastIndexedHash.set(filePath, hash);
   }

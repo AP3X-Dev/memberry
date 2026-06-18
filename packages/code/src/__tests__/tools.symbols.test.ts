@@ -70,9 +70,14 @@ describe('berry_code_symbols tool', () => {
       limit: 5,
     } as never);
 
+    // T5/gap-11: project scope is now driven by the canonical stored project_tag
+    // (resolved to 'project:amp'), passed as a dedicated project_tag option BEFORE
+    // the path heuristic. The explicit file_path is forwarded as a secondary
+    // narrowing filter; the project NAME is no longer folded into file_path.
     expect(symbolStore.findSymbols).toHaveBeenCalledWith({
       name: 'helper',
       file_path: 'packages/code',
+      project_tag: 'project:amp',
       kind: 'function',
       limit: 5,
     });

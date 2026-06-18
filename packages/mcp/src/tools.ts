@@ -5,6 +5,7 @@ import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { LoadScope, MemoryContext, EpisodeInput, MemoryTier, FactTimeline, FactDiff, TemporalOptions } from '@memberry/core';
 import { DEFAULT_TENANT, getAllowedBaseDir } from '@memberry/core';
+import { resolveProjectTag } from '@memberry/code';
 import { parseAmpUri, uriToLoadScope } from './uri.js';
 import { scanCodebase, type CodebaseScan } from './codebase-scanner.js';
 import { assertSafeRegex, capScanText, UnsafeRegexError } from './safe-regex.js';
@@ -86,7 +87,7 @@ export interface IProvenanceTraversal {
 }
 
 export interface ICodeIndexerService {
-  indexProject(rootPath: string, options?: { include?: string[]; exclude?: string[] }): Promise<{
+  indexProject(rootPath: string, options?: { include?: string[]; exclude?: string[]; projectTag?: string }): Promise<{
     files_parsed: number;
     files_skipped: number;
     symbols_created: number;
@@ -1024,7 +1025,9 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
 
       // Resolve final metadata (user overrides > scan detection)
       const projectName = args.project_name ?? scan.name;
-      const projectTag = args.project_tag ?? `project:${projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-')}`;
+      // Canonical tag — matches query-time resolution in @memberry/code so the tag
+      // stamped on Symbol nodes and the bootstrap project entity are byte-identical.
+      const projectTag = resolveProjectTag(args.project_tag, projectName) ?? `project:${projectName}`;
       const description = args.description ?? scan.description;
       const domain = args.domain ?? scan.domain;
 
@@ -1076,8 +1079,11 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
       };
 
       if (codeIndexerService && scan.sourceFiles.length > 0) {
+        // Stamp the canonical project tag (already resolved above) onto every
+        // symbol so later berry_code_search/symbols/deps scope by s.project_tag.
         indexResult = await codeIndexerService.indexProject(absPath, {
           exclude: args.exclude_patterns,
+          projectTag,
         });
       }
 

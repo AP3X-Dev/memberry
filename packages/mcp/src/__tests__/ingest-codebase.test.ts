@@ -160,9 +160,12 @@ describe('berry_ingest_codebase handler', () => {
       exclude_patterns: ['vendor', 'generated'],
     });
 
+    // T5/gap-11: the resolved canonical project tag is threaded into indexProject
+    // so indexed symbols are stamped with s.project_tag. Default project name
+    // 'my-test-app' (from the mock scan) → 'project:my-test-app'.
     expect(mockCodeIndexer.indexProject).toHaveBeenCalledWith(
       tempDir,
-      { exclude: ['vendor', 'generated'] },
+      { exclude: ['vendor', 'generated'], projectTag: 'project:my-test-app' },
     );
   });
 
@@ -214,7 +217,7 @@ describe('berry_ingest_codebase handler', () => {
     });
 
     const bootstrapArgs = (mockBootstrapService.bootstrap as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(bootstrapArgs.project_tag).toBe('project:my-cool-project-');
+    expect(bootstrapArgs.project_tag).toBe('project:my-cool-project');
   });
 
   it('throws when bootstrap service is not initialised', async () => {

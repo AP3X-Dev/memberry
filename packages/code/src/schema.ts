@@ -14,6 +14,7 @@ const CODE_INDEXES: string[] = [
   'CREATE INDEX symbol_kind IF NOT EXISTS FOR (s:Symbol) ON (s.kind)',
   'CREATE INDEX symbol_language IF NOT EXISTS FOR (s:Symbol) ON (s.language)',
   'CREATE INDEX symbol_content_hash IF NOT EXISTS FOR (s:Symbol) ON (s.content_hash)',
+  'CREATE INDEX symbol_project IF NOT EXISTS FOR (s:Symbol) ON (s.project_tag)',
   'CREATE INDEX symbol_file_kind IF NOT EXISTS FOR (s:Symbol) ON (s.file_path, s.kind)',
   'CREATE INDEX symbol_name_kind IF NOT EXISTS FOR (s:Symbol) ON (s.name, s.kind)',
   'CREATE INDEX symbol_name_file_kind IF NOT EXISTS FOR (s:Symbol) ON (s.name, s.file_path, s.kind)',

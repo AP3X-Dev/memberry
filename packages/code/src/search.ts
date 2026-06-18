@@ -11,6 +11,23 @@ interface CodeContextFilters {
   language?: string;
   file_path?: string;
   kind?: string;
+  /** Canonical single-scope project tag (`project:<slug>`) — see SymbolScopeOptions. */
+  project_tag?: string;
+}
+
+/**
+ * The shared symbol-scope filter shape used by the fulltext WHERE and the
+ * vector/lexical post-filters. `project_tag` (T5/gap-11) is the PRIMARY scope:
+ * a symbol matches when its stored `project_tag` equals the tag, OR (as a
+ * FALLBACK for legacy un-stamped symbols) it has no stored tag and matches the
+ * `file_path` substring heuristic. `project_tag` is applied BEFORE the path
+ * heuristic in every channel.
+ */
+interface SymbolScopeOptions {
+  language?: string;
+  file_path?: string;
+  kind?: string;
+  project_tag?: string;
 }
 
 export class CodeSearch {
@@ -32,6 +49,7 @@ export class CodeSearch {
       language?: string;
       file_path?: string;
       kind?: string;
+      project_tag?: string;
       limit?: number;
       include_semantics?: boolean;
       expandedTokens?: string[];
@@ -142,7 +160,7 @@ export class CodeSearch {
   private async fulltextSearch(
     query: string,
     limit: number,
-    options?: { language?: string; file_path?: string; kind?: string },
+    options?: SymbolScopeOptions,
   ): Promise<CodeSearchResult[]> {
     const session = this.driver.session();
     try {
@@ -161,9 +179,14 @@ export class CodeSearch {
         filters.push('s.language = $language');
         params.language = options.language;
       }
-      if (options?.file_path) {
-        filters.push('toLower(s.file_path) CONTAINS toLower($file_path)');
-        params.file_path = options.file_path;
+      // Project scope FIRST (T5/gap-11): the stored canonical tag is the primary
+      // filter; the file_path substring heuristic applies only as a FALLBACK for
+      // symbols with no stored project_tag. When no tag is supplied, the prior
+      // file_path-only behavior is preserved.
+      const scope = buildSymbolScopeCypher('s', options?.project_tag, options?.file_path);
+      if (scope.clause) {
+        filters.push(scope.clause);
+        Object.assign(params, scope.params);
       }
       if (options?.kind) {
         filters.push('s.kind = $kind');
@@ -205,7 +228,7 @@ export class CodeSearch {
   private async vectorSearch(
     query: string,
     limit: number,
-    options?: { language?: string; file_path?: string; kind?: string },
+    options?: SymbolScopeOptions,
     queryVectorPromise?: Promise<number[] | null>,
   ): Promise<CodeSearchResult[]> {
     // No usable embeddings → skip dense vector search; fulltext + deterministic
@@ -239,15 +262,19 @@ export class CodeSearch {
             signature: (props.signature as string) ?? '',
             doc_comment: (props.doc_comment as string) ?? '',
             score: r.get('score') as number,
+            project_tag: (props.project_tag as string) || undefined,
           };
         });
 
-        // Apply post-filters (language matches the symbol's language property, not file extension)
+        // Project scope FIRST (T5/gap-11): filter by the stored canonical tag
+        // BEFORE the file_path path heuristic. The path substring is a FALLBACK
+        // for symbols with no stored project_tag.
+        results = applyScopePostFilter(results, options);
+        // Remaining post-filters (language matches the symbol's language property, not file extension)
         if (options?.language) results = results.filter((r) => r.language === options.language);
-        if (options?.file_path) results = results.filter((r) => includesCaseInsensitive(r.file_path, options.file_path!));
         if (options?.kind) results = results.filter((r) => r.kind === options.kind);
 
-        return results.slice(0, limit);
+        return results.slice(0, limit).map(stripScratch);
       } finally {
         await session.close();
       }
@@ -260,7 +287,7 @@ export class CodeSearch {
   private async lexicalVectorSearch(
     query: string,
     limit: number,
-    options?: { language?: string; file_path?: string; kind?: string },
+    options?: SymbolScopeOptions,
   ): Promise<CodeSearchResult[]> {
     try {
       const lexVec = generateLexicalVector(query);
@@ -287,14 +314,16 @@ export class CodeSearch {
             signature: (props.signature as string) ?? '',
             doc_comment: (props.doc_comment as string) ?? '',
             score: r.get('score') as number,
+            project_tag: (props.project_tag as string) || undefined,
           };
         });
 
+        // Project scope FIRST (T5/gap-11), then the remaining post-filters.
+        results = applyScopePostFilter(results, options);
         if (options?.language) results = results.filter((r) => r.language === options.language);
-        if (options?.file_path) results = results.filter((r) => includesCaseInsensitive(r.file_path, options.file_path!));
         if (options?.kind) results = results.filter((r) => r.kind === options.kind);
 
-        return results.slice(0, limit);
+        return results.slice(0, limit).map(stripScratch);
       } finally {
         await session.close();
       }
@@ -400,10 +429,94 @@ function toNum(val: unknown): number {
 
 function candidateLimitForPostFilters(
   limit: number,
-  options?: { language?: string; file_path?: string; kind?: string },
+  options?: SymbolScopeOptions,
 ): number {
-  if (!options?.language && !options?.file_path && !options?.kind) return limit;
+  if (!options?.language && !options?.file_path && !options?.kind && !options?.project_tag) return limit;
   return boundedOverfetchLimit(limit);
+}
+
+// ─── Project-scope filtering (T5/gap-11) ──────────────────────────────────────
+//
+// A canonical single-scope `project_tag` is the PRIMARY scope filter. A symbol
+// matches a scope when its stored project_tag equals the tag, OR — as a FALLBACK
+// for legacy symbols indexed before scoping (no stored tag) — it has no stored
+// tag and (if a file_path hint is present) matches the path substring. The tag
+// check is always applied BEFORE the path heuristic.
+
+/**
+ * Build the project-scope WHERE fragment for a Cypher symbol alias. Mirrors the
+ * symbol-store helper so the fulltext channel scopes identically to findSymbols.
+ */
+function buildSymbolScopeCypher(
+  alias: string,
+  projectTag: string | undefined,
+  filePath: string | undefined,
+): { clause: string; params: Record<string, unknown> } {
+  const tag = projectTag?.trim();
+  const fp = filePath?.trim();
+
+  if (tag) {
+    const params: Record<string, unknown> = { project_tag: tag };
+    if (fp) {
+      params.file_path = fp;
+      return {
+        clause: `(${alias}.project_tag = $project_tag OR (${alias}.project_tag IS NULL AND toLower(${alias}.file_path) CONTAINS toLower($file_path)))`,
+        params,
+      };
+    }
+    return {
+      clause: `(${alias}.project_tag = $project_tag OR ${alias}.project_tag IS NULL)`,
+      params,
+    };
+  }
+
+  if (fp) {
+    return {
+      clause: `toLower(${alias}.file_path) CONTAINS toLower($file_path)`,
+      params: { file_path: fp },
+    };
+  }
+
+  return { clause: '', params: {} };
+}
+
+/** The scratch fields a candidate carries through scope filtering (dropped before return). */
+interface ScopeScratch {
+  project_tag?: string;
+  file_path: string;
+}
+
+/**
+ * Apply the project scope as the FIRST post-filter on vector/lexical candidates,
+ * BEFORE the file_path path heuristic. Matches buildSymbolScopeCypher semantics:
+ * tag-equality first, path-substring only as a fallback for un-stamped symbols.
+ * When no project_tag is supplied, preserves the prior file_path-only behavior.
+ * Generic over the element type so the caller's literal `source_type` survives.
+ */
+function applyScopePostFilter<T extends ScopeScratch>(
+  results: T[],
+  options?: SymbolScopeOptions,
+): T[] {
+  const tag = options?.project_tag?.trim();
+  const fp = options?.file_path?.trim();
+
+  if (tag) {
+    return results.filter((r) => {
+      if (r.project_tag === tag) return true; // PRIMARY: stored canonical tag
+      if (r.project_tag) return false;         // stamped for a different project
+      // FALLBACK: legacy un-stamped symbol — admit, narrowed by path hint if given.
+      return fp ? includesCaseInsensitive(r.file_path, fp) : true;
+    });
+  }
+
+  if (fp) return results.filter((r) => includesCaseInsensitive(r.file_path, fp));
+  return results;
+}
+
+/** Drop the scratch `project_tag` field so the public CodeSearchResult shape is unchanged. */
+function stripScratch<T extends { project_tag?: string }>(r: T): Omit<T, 'project_tag'> {
+  const { project_tag: _omit, ...rest } = r;
+  return rest;
 }
 
 function candidateLimitForTemporalFilter(limit: number, hasTemporalFilter: boolean): number {

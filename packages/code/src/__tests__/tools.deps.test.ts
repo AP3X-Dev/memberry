@@ -71,8 +71,13 @@ describe('berry_code_deps tool', () => {
       limit: 7,
     } as never);
 
+    // T5/gap-11: project scope is now driven by the canonical stored project_tag
+    // (resolved to 'project:amp'), passed as a dedicated project_tag option BEFORE
+    // the path heuristic. The explicit file_path is still forwarded as a secondary
+    // narrowing filter; the project NAME is no longer folded into file_path.
     expect(symbolStore.getCallers).toHaveBeenCalledWith('helper', {
       file_path: 'packages/code',
+      project_tag: 'project:amp',
       kind: 'function',
       limit: 7,
     });

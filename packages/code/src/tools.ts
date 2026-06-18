@@ -10,20 +10,21 @@ import type { SymbolDependencyOptions, SymbolLookupOptions } from './symbol-stor
 import type { CodeWatcher } from './watcher.js';
 import { getReindexBaseDir } from './watcher.js';
 import { structuralSearch, type StructuralSearchLanguage } from './structural-search.js';
+import { resolveProjectTag } from './project-tag.js';
 
 // ─── Service interfaces (injected) ───────────────────────────────────────────
 
 export interface ICodeIndexer {
-  indexProject(rootPath: string, options?: { include?: string[]; exclude?: string[] }): Promise<IndexResult>;
-  indexFile(filePath: string, language: string): Promise<{ symbols_created: number; symbols_updated: number; relations_created: number }>;
+  indexProject(rootPath: string, options?: { include?: string[]; exclude?: string[]; projectTag?: string }): Promise<IndexResult>;
+  indexFile(filePath: string, language: string, projectTag?: string): Promise<{ symbols_created: number; symbols_updated: number; relations_created: number }>;
 }
 
 export interface ICodeSearch {
   search(query: string, options?: {
-    language?: string; file_path?: string; kind?: string; limit?: number; include_semantics?: boolean; as_of?: string;
+    language?: string; file_path?: string; kind?: string; project_tag?: string; limit?: number; include_semantics?: boolean; as_of?: string;
   }): Promise<CodeSearchResult[]>;
   buildContext(task: string, maxTokens?: number, as_of?: string, filters?: {
-    language?: string; file_path?: string; kind?: string;
+    language?: string; file_path?: string; kind?: string; project_tag?: string;
   }): Promise<{ task: string; symbols: CodeSearchResult[]; semantic_memories: Array<{ id: string; content: string; confidence: number }>; token_count: number }>;
   renderContextMarkdown(ctx: { task: string; symbols: CodeSearchResult[]; semantic_memories: Array<{ id: string; content: string; confidence: number }>; token_count: number }): string;
 }
@@ -116,6 +117,8 @@ export function registerCodeTools(
       language: z.string().max(2000).optional().describe('Language hint for single-file mode (typescript, javascript, python, go, rust)'),
       include: z.array(z.string()).optional().describe('Include patterns (e.g., ["src/", "lib/"])'),
       exclude: z.array(z.string()).optional().describe('Additional directories to exclude'),
+      project_name: z.string().max(2000).optional().describe('Project name to stamp on indexed symbols as a canonical scope (project:<slug>). Used by later berry_code_search/symbols/deps to scope results.'),
+      project_tag: z.string().max(2000).optional().describe('Explicit canonical project tag (e.g. "project:my-app"). Takes precedence over project_name. Normalized to project:<slug>.'),
     },
     { openWorldHint: true } satisfies ToolAnnotations,
     async (args) => {
@@ -130,15 +133,20 @@ export function registerCodeTools(
         throw new Error(`Path must be within project root: ${args.path}`);
       }
 
+      // Normalize the project scope ONCE to project:<slug>; threaded into the
+      // upsert so it lands on s.project_tag. undefined when neither input given.
+      const projectTag = resolveProjectTag(args.project_tag, args.project_name);
+
       if (args.mode === 'file') {
         const lang = args.language ?? 'typescript';
-        const result = await codeIndexer.indexFile(args.path, lang);
+        const result = await codeIndexer.indexFile(args.path, lang, projectTag);
         return textContent(JSON.stringify(result, null, 2));
       }
 
       const result = await codeIndexer.indexProject(args.path, {
         include: args.include,
         exclude: args.exclude,
+        projectTag,
       });
       return textContent(JSON.stringify({
         ...result,
@@ -165,9 +173,15 @@ export function registerCodeTools(
     { readOnlyHint: true } satisfies ToolAnnotations,
     async (args) => {
       if (!codeSearch) throw new Error('Code services not initialised');
+      // Scope FIRST by the canonical stored project_tag (project:<slug>); the
+      // file_path substring is only an explicit user filter / legacy fallback.
+      // When project_name is given we pass ONLY the explicit file_path (not the
+      // project-derived path) so the tag drives scoping, not the path heuristic.
+      const projectTag = resolveProjectTag(undefined, args.project_name);
       const results = await codeSearch.search(args.query, {
         language: args.language,
-        file_path: buildCodePathScope(args.file_path, args.project_name),
+        file_path: scopeFilePath(args.file_path, args.project_name, projectTag),
+        project_tag: projectTag,
         kind: args.kind,
         limit: args.limit,
         include_semantics: args.include_semantics,
@@ -235,11 +249,15 @@ export function registerCodeTools(
     async (args) => {
       if (!symbolStore) throw new Error('Code services not initialised');
 
-      const filePathScope = buildCodePathScope(args.file_path, args.project_name);
-      if (!args.name && !filePathScope) throw new Error('Provide name, file_path, or project_name');
+      // Scope FIRST by the canonical stored project_tag; the file_path substring
+      // is the explicit user filter / legacy fallback (handled in the store).
+      const projectTag = resolveProjectTag(undefined, args.project_name);
+      const filePathScope = scopeFilePath(args.file_path, args.project_name, projectTag);
+      if (!args.name && !filePathScope && !projectTag) throw new Error('Provide name, file_path, or project_name');
       const results = await symbolStore.findSymbols({
         name: args.name,
         file_path: filePathScope,
+        project_tag: projectTag,
         kind: args.kind as SymbolKind | undefined,
         limit: args.limit,
       });
@@ -273,8 +291,12 @@ export function registerCodeTools(
     async (args) => {
       if (!symbolStore) throw new Error('Code services not initialised');
 
+      // Scope FIRST by the canonical stored project_tag; the file_path substring
+      // is the explicit user filter / legacy fallback (handled in the store).
+      const projectTag = resolveProjectTag(undefined, args.project_name);
       const dependencyOptions: SymbolDependencyOptions = {
-        file_path: buildCodePathScope(args.file_path, args.project_name),
+        file_path: scopeFilePath(args.file_path, args.project_name, projectTag),
+        project_tag: projectTag,
         kind: args.kind as SymbolKind | undefined,
         limit: args.limit,
       };
@@ -325,9 +347,13 @@ export function registerCodeTools(
     { readOnlyHint: true } satisfies ToolAnnotations,
     async (args) => {
       if (!codeSearch) throw new Error('Code services not initialised');
+      // Scope FIRST by the canonical stored project_tag; the file_path substring
+      // is the explicit user filter / legacy fallback.
+      const projectTag = resolveProjectTag(undefined, args.project_name);
       const ctx = await codeSearch.buildContext(args.task, args.max_tokens, args.as_of, {
         language: args.language,
-        file_path: buildCodePathScope(args.file_path, args.project_name),
+        file_path: scopeFilePath(args.file_path, args.project_name, projectTag),
+        project_tag: projectTag,
         kind: args.kind,
       });
       const md = codeSearch.renderContextMarkdown(ctx);
@@ -395,4 +421,26 @@ function buildCodePathScope(filePath?: string, projectName?: string): string | u
   if (!trimmed) return undefined;
   const withoutPrefix = trimmed.replace(/^project:/i, '').trim();
   return withoutPrefix || undefined;
+}
+
+/**
+ * Resolve the file_path filter to pass alongside a canonical project scope
+ * (T5/gap-11). The stored `project_tag` is the PRIMARY scope filter, so:
+ *
+ * - When a `projectTag` resolved: pass ONLY the user's explicit `filePath` (an
+ *   additional, optional narrowing). The project NAME is intentionally NOT folded
+ *   into the path here — that would re-apply the old path heuristic on top of the
+ *   tag. The store/search apply the path-substring heuristic only as a FALLBACK
+ *   for symbols that have no stored tag.
+ * - When no `projectTag` resolved (e.g. an unusable project_name, or none given):
+ *   fall back to the legacy path-substring heuristic via buildCodePathScope, so
+ *   behavior is unchanged for unscoped callers.
+ */
+function scopeFilePath(
+  filePath: string | undefined,
+  projectName: string | undefined,
+  projectTag: string | undefined,
+): string | undefined {
+  if (projectTag) return filePath?.trim() || undefined;
+  return buildCodePathScope(filePath, projectName);
 }

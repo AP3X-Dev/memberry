@@ -93,6 +93,13 @@ export interface SymbolNode {
   doc_comment: string;
   content_hash: string;
   parent_symbol: string | null;
+  /**
+   * Canonical single-scope project tag (`project:<slug>`) stamped at index time.
+   * SINGLE-scope (a plain string, not an array) and NOT part of the Symbol
+   * composite identity key — re-indexing under a new tag overwrites it; indexing
+   * with no tag PRESERVES the existing value (COALESCE in upsertSymbols).
+   */
+  project_tag?: string;
   embedding?: number[];
   lexical_vector?: number[];
   mini_vector?: number[];

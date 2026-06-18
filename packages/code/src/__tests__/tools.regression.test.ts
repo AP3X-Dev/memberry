@@ -37,14 +37,35 @@ describe('code tools.ts regression', () => {
 
   it('berry_code_context exposes project and file path scoping for direct code context calls', () => {
     expect(TOOLS_SOURCE).toContain('project_name');
-    expect(TOOLS_SOURCE).toContain('buildCodePathScope');
-    expect(TOOLS_SOURCE).toContain('file_path: buildCodePathScope(args.file_path, args.project_name)');
+    // T5/gap-11: scope is now driven by the canonical stored project_tag FIRST,
+    // resolved via resolveProjectTag and passed as a dedicated project_tag option;
+    // scopeFilePath supplies only the explicit/legacy path filter.
+    expect(TOOLS_SOURCE).toContain('resolveProjectTag(undefined, args.project_name)');
+    expect(TOOLS_SOURCE).toContain('project_tag: projectTag');
+    expect(TOOLS_SOURCE).toContain('file_path: scopeFilePath(args.file_path, args.project_name, projectTag)');
   });
 
-  it('berry_code_search exposes project and file path scoping for direct code search calls', () => {
-    const scopedSearchCalls = TOOLS_SOURCE.match(/file_path: buildCodePathScope\(args\.file_path, args\.project_name\)/g) ?? [];
+  it('berry_code_search/symbols/deps/context all scope by the canonical project_tag before the path heuristic', () => {
+    // Every scoped surface resolves the canonical tag and passes it as project_tag,
+    // with scopeFilePath supplying only the explicit path filter / legacy fallback.
+    const tagResolveCalls = TOOLS_SOURCE.match(/resolveProjectTag\(undefined, args\.project_name\)/g) ?? [];
+    expect(tagResolveCalls.length).toBeGreaterThanOrEqual(4); // search, symbols, deps, context
 
-    expect(scopedSearchCalls.length).toBeGreaterThanOrEqual(2);
+    const scopedPathCalls = TOOLS_SOURCE.match(/scopeFilePath\(args\.file_path, args\.project_name, projectTag\)/g) ?? [];
+    expect(scopedPathCalls.length).toBeGreaterThanOrEqual(4);
+
+    // buildCodePathScope is retained ONLY as the fallback inside scopeFilePath
+    // (when no canonical tag resolved), not wired directly into the tool handlers.
+    expect(TOOLS_SOURCE).toContain('return buildCodePathScope(filePath, projectName);');
+  });
+
+  it('berry_code_index accepts project_name/project_tag and threads the canonical tag into indexing', () => {
+    // The index tool stamps the canonical scope onto symbols at index time.
+    expect(TOOLS_SOURCE).toContain('project_name: z.string()');
+    expect(TOOLS_SOURCE).toContain('project_tag: z.string()');
+    expect(TOOLS_SOURCE).toContain('resolveProjectTag(args.project_tag, args.project_name)');
+    expect(TOOLS_SOURCE).toContain('codeIndexer.indexFile(args.path, lang, projectTag)');
+    expect(TOOLS_SOURCE).toContain('projectTag,');
   });
 
   it('berry_code_ast_grep exposes ast-grep structural search as a read-only code tool', () => {

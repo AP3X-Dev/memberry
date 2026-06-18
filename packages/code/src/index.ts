@@ -47,6 +47,9 @@ export type {
 // Schema
 export { initCodeSchema } from './schema.js';
 
+// Project-tag normalization (canonical project:<slug> scoping for symbols)
+export { canonicalProjectTag, resolveProjectTag } from './project-tag.js';
+
 // Watcher
 export { CodeWatcher, extractFilePaths, confineReindexPath, getReindexBaseDir } from './watcher.js';
 export type { CodeWatcherOptions, IFileIndexer, ISymbolDeleter } from './watcher.js';

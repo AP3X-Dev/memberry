@@ -7,6 +7,13 @@ import type { SymbolNode, SymbolKind, SupportedLanguage } from './types.js';
 export interface SymbolDependencyOptions {
   file_path?: string;
   kind?: SymbolKind;
+  /**
+   * Canonical single-scope project tag (`project:<slug>`). When set, results are
+   * scoped by `s.project_tag = $tag` FIRST; the `file_path` substring heuristic
+   * applies only as a FALLBACK for symbols with no stored project_tag (legacy
+   * rows indexed before scoping). When unset, behavior is unchanged.
+   */
+  project_tag?: string;
   limit?: number;
 }
 
@@ -14,6 +21,12 @@ export interface SymbolLookupOptions {
   name?: string;
   file_path?: string;
   kind?: SymbolKind;
+  /**
+   * Canonical single-scope project tag (`project:<slug>`). When set, results are
+   * scoped by `s.project_tag = $tag` FIRST; the `file_path` substring heuristic
+   * applies only as a FALLBACK for symbols with no stored project_tag.
+   */
+  project_tag?: string;
   limit?: number;
 }
 
@@ -29,6 +42,7 @@ export class SymbolStore {
           file_path: $file_path, start_line: $start_line, end_line: $end_line,
           signature: $signature, doc_comment: $doc_comment,
           content_hash: $content_hash, parent_symbol: $parent_symbol,
+          project_tag: $project_tag,
           created_at: $created_at, updated_at: $updated_at
         })`,
         {
@@ -46,6 +60,8 @@ export class SymbolStore {
           // pattern, and parent_symbol is part of the Symbol composite key. Read
           // back as null in mapSymbol so the string|null contract is preserved.
           parent_symbol: node.parent_symbol ?? '',
+          // Canonical single-scope project tag (null when unscoped).
+          project_tag: node.project_tag ?? null,
           created_at: node.created_at,
           updated_at: node.updated_at,
         },
@@ -215,9 +231,17 @@ export class SymbolStore {
    *    update()'s behavior.
    *
    * Returns counts so the caller can preserve indexFile's created/updated tallies.
+   *
+   * `projectTag` (T5/gap-11): the canonical single-scope `project:<slug>` tag to
+   * stamp on these symbols. NOT part of the composite MERGE key (adding it there
+   * would fork existing nodes). On CREATE the tag is written as-is (null when
+   * unscoped); on MATCH it is COALESCE($projectTag, s.project_tag) so a new tag
+   * OVERWRITES the stored scope, but re-indexing WITHOUT a tag (e.g. the watcher)
+   * PRESERVES the existing scope rather than clearing it.
    */
   async upsertSymbols(
     nodes: SymbolNode[],
+    projectTag?: string,
   ): Promise<{ created: number; updated: number }> {
     if (nodes.length === 0) return { created: 0, updated: 0 };
 
@@ -247,6 +271,11 @@ export class SymbolStore {
         signature: node.signature,
         doc_comment: node.doc_comment,
         content_hash: node.content_hash,
+        // Canonical single-scope project tag. The method-level arg wins (the
+        // caller threads the resolved tag); fall back to a tag pre-set on the
+        // node, else null (unscoped). null + COALESCE-on-match preserves any
+        // existing stored scope on re-index.
+        project_tag: projectTag ?? node.project_tag ?? null,
         created_at: node.created_at,
         updated_at: node.updated_at,
         vectorProps,
@@ -275,6 +304,7 @@ export class SymbolStore {
            s.doc_comment = row.doc_comment,
            s.content_hash = row.content_hash,
            s.parent_symbol = row.parent_symbol,
+           s.project_tag = row.project_tag,
            s.created_at = row.created_at,
            s.updated_at = row.updated_at,
            s += row.vectorProps,
@@ -290,6 +320,7 @@ export class SymbolStore {
            s.doc_comment = row.doc_comment,
            s.content_hash = row.content_hash,
            s.parent_symbol = row.parent_symbol,
+           s.project_tag = COALESCE(row.project_tag, s.project_tag),
            s.updated_at = $now,
            s.\`__upsert_created\` = false
          WITH s, s.\`__upsert_created\` AS wasCreated
@@ -355,9 +386,14 @@ export class SymbolStore {
         filters.push('s.name = $name');
         params.name = options.name.trim();
       }
-      if (options.file_path?.trim()) {
-        filters.push('toLower(s.file_path) CONTAINS toLower($file_path)');
-        params.file_path = options.file_path.trim();
+      // Project scope (T5/gap-11): the stored canonical tag is the PRIMARY filter;
+      // the file_path substring heuristic is a FALLBACK applied only to symbols
+      // with no stored project_tag (legacy rows). Build them together so scope
+      // wins before the path heuristic.
+      const lookupScope = buildSymbolScopeFilter('s', options.project_tag, options.file_path);
+      if (lookupScope.clause) {
+        filters.push(lookupScope.clause);
+        Object.assign(params, lookupScope.params);
       }
       if (options.kind) {
         filters.push('s.kind = $kind');
@@ -475,6 +511,8 @@ function mapSymbol(props: Record<string, unknown>): SymbolNode {
     // '' is the "no parent" sentinel written by create()/upsertSymbols (a null
     // MERGE key is illegal in Neo4j) — normalise it back to null for callers.
     parent_symbol: (props.parent_symbol as string) || null,
+    // Canonical single-scope project tag (undefined when the symbol is unscoped).
+    project_tag: (props.project_tag as string) || undefined,
     embedding: props.embedding as number[] | undefined,
     created_at: props.created_at as string,
     updated_at: props.updated_at as string,
@@ -496,9 +534,12 @@ function buildDependencyFilters(
   const filters: string[] = [];
   const params: Record<string, unknown> = {};
 
-  if (options.file_path?.trim()) {
-    filters.push(`toLower(${alias}.file_path) CONTAINS toLower($file_path)`);
-    params.file_path = options.file_path.trim();
+  // Project scope FIRST (stored canonical tag), with the file_path substring as a
+  // fallback for symbols that have no stored project_tag. See buildSymbolScopeFilter.
+  const scope = buildSymbolScopeFilter(alias, options.project_tag, options.file_path);
+  if (scope.clause) {
+    filters.push(scope.clause);
+    Object.assign(params, scope.params);
   }
   if (options.kind) {
     filters.push(`${alias}.kind = $kind`);
@@ -509,6 +550,57 @@ function buildDependencyFilters(
     whereClause: filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '',
     params,
   };
+}
+
+/**
+ * Build the project-scope WHERE fragment for a symbol alias (T5/gap-11).
+ *
+ * - When a canonical `project_tag` is supplied: the stored tag is the PRIMARY
+ *   filter (`alias.project_tag = $project_tag`). The `file_path` substring
+ *   heuristic is a FALLBACK applied ONLY to symbols with no stored project_tag
+ *   (`alias.project_tag IS NULL AND toLower(alias.file_path) CONTAINS …`) so
+ *   legacy unscoped rows aren't silently excluded. If no file_path is given, the
+ *   fallback admits all unscoped rows.
+ * - When no `project_tag` is supplied: behavior is unchanged — a `file_path`
+ *   substring filter (if any), exactly as before.
+ *
+ * Param names (`$project_tag`, `$file_path`) are unique within a single query.
+ */
+function buildSymbolScopeFilter(
+  alias: string,
+  projectTag: string | undefined,
+  filePath: string | undefined,
+): { clause: string; params: Record<string, unknown> } {
+  const tag = projectTag?.trim();
+  const fp = filePath?.trim();
+
+  if (tag) {
+    const params: Record<string, unknown> = { project_tag: tag };
+    if (fp) {
+      params.file_path = fp;
+      // Scope by stored tag first; fall back to the path heuristic ONLY for rows
+      // that predate scoping (no stored project_tag).
+      return {
+        clause: `(${alias}.project_tag = $project_tag OR (${alias}.project_tag IS NULL AND toLower(${alias}.file_path) CONTAINS toLower($file_path)))`,
+        params,
+      };
+    }
+    // No path hint: scoped rows by tag, plus all legacy unscoped rows.
+    return {
+      clause: `(${alias}.project_tag = $project_tag OR ${alias}.project_tag IS NULL)`,
+      params,
+    };
+  }
+
+  // No project scope — preserve the prior file_path-only behavior.
+  if (fp) {
+    return {
+      clause: `toLower(${alias}.file_path) CONTAINS toLower($file_path)`,
+      params: { file_path: fp },
+    };
+  }
+
+  return { clause: '', params: {} };
 }
 
 function normalizeDependencyLimit(limit: number | undefined): number {

@@ -57,7 +57,7 @@ export class CodeIndexer {
    */
   async indexProject(
     rootPath: string,
-    options?: { include?: string[]; exclude?: string[] },
+    options?: { include?: string[]; exclude?: string[]; projectTag?: string },
   ): Promise<IndexResult> {
     const result: IndexResult = {
       files_parsed: 0,
@@ -93,7 +93,7 @@ export class CodeIndexer {
           const language = detectLanguage(filePath);
           if (!language) return { kind: 'skip' as const };
           try {
-            return { kind: 'ok' as const, filePath, fileResult: await this.indexFile(filePath, language) };
+            return { kind: 'ok' as const, filePath, fileResult: await this.indexFile(filePath, language, options?.projectTag) };
           } catch (err) {
             return {
               kind: 'err' as const,
@@ -146,10 +146,16 @@ export class CodeIndexer {
 
   /**
    * Index a single file. Incremental: checks content_hash to skip unchanged symbols.
+   *
+   * `projectTag` (T5/gap-11): the canonical `project:<slug>` scope to stamp on the
+   * file's symbols. Pass `undefined` (e.g. the watcher's context-free reindex) to
+   * PRESERVE any existing stored scope on the matched symbols (COALESCE in
+   * upsertSymbols), keeping re-indexing scope-safe.
    */
   async indexFile(
     filePath: string,
     language: SupportedLanguage,
+    projectTag?: string,
   ): Promise<{ symbols_created: number; symbols_updated: number; relations_created: number; parsed: Awaited<ReturnType<typeof parseFile>> }> {
     const parsed = await parseFile(filePath, language);
     let created = 0;
@@ -186,7 +192,7 @@ export class CodeIndexer {
     // Single batched UNWIND MERGE: identical composite-key identity, property set,
     // and create-vs-update outcome as the prior per-symbol loop.
     if (changed.length > 0) {
-      const upsert = await this.symbolStore.upsertSymbols(changed);
+      const upsert = await this.symbolStore.upsertSymbols(changed, projectTag);
       created += upsert.created;
       updated += upsert.updated;
     }
