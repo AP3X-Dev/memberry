@@ -53,6 +53,11 @@ import {
 } from '@memberry/wiki';
 import type { CompileInput, CompileV2Result } from '@memberry/wiki';
 import {
+  configureWikiAutorefresh,
+  resolveWikiOutputDir,
+  scheduleWikiRecompile,
+} from './wiki-autorefresh.js';
+import {
   initGraphSchema,
   GraphSnapshotService,
   GraphReportService,
@@ -332,6 +337,14 @@ export async function bootstrap(): Promise<BootstrapHandles> {
       } catch (err: unknown) {
         // Post-store hook failures are non-fatal
       }
+
+      // gap-15 (T10): OPT-IN wiki autorefresh. Schedule a DEBOUNCED full
+      // recompile of the served wiki into the shared /app/wiki volume so the
+      // gap-3 viewer (which fs.watches that dir) picks up the new graph state.
+      // scheduleWikiRecompile() is a STRICT no-op unless MEMBERRY_WIKI_AUTOREFRESH
+      // is truthy AND the output dir exists — so the DEFAULT path is unchanged
+      // from T9 (no compiler, no timer, zero overhead). Non-fatal by contract.
+      scheduleWikiRecompile();
     }
     return result;
   };
@@ -415,6 +428,18 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     ingestionService: ingestionServiceInstance,
     wikiLinter: wikiLinterInstance,
     editReconciler: editReconcilerInstance,
+  });
+
+  // gap-15 (T10): wire the OPT-IN wiki autorefresh trigger with a FULL recompile
+  // (all projects — project_tag omitted). The WikiCompiler is NOT in the MCP
+  // ServiceContainer; we reuse the same `rawWikiCompiler` (built on the main
+  // `driver` above) that backs the berry_compile tool. This only ARMS the
+  // capability — every trigger stays a strict no-op until MEMBERRY_WIKI_AUTOREFRESH
+  // is set (see wiki-autorefresh.ts). resolveWikiOutputDir() honours
+  // MEMBERRY_WIKI_OUTPUT_DIR (default /app/wiki, the shared docker volume).
+  configureWikiAutorefresh({
+    recompile: (outputDir: string) => rawWikiCompiler.compile(outputDir),
+    outputDir: resolveWikiOutputDir(),
   });
 
   console.error('[memberry-mcp] Wiki services initialized');

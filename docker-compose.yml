@@ -103,11 +103,24 @@ services:
       # Defaults to /workspace so code indexing / ingest / compile have a real
       # host-backed root out of the box.
       MEMBERRY_INGEST_ALLOW_DIR: ${MEMBERRY_INGEST_ALLOW_DIR:-/workspace}
+      # gap-15 (T10): OPT-IN wiki autorefresh. When truthy, the MCP server
+      # recompiles the served wiki (gap-3, port 3200) after store/bootstrap/ingest
+      # into the shared wiki_output volume mounted at /app/wiki below. Empty
+      # (default) = OFF = no recompile, behavior unchanged. The wiki viewer's
+      # fs.watch on /app/wiki then picks up the regenerated markdown.
+      MEMBERRY_WIKI_AUTOREFRESH: ${MEMBERRY_WIKI_AUTOREFRESH:-}
+      # Output dir MCP compiles into; must match the wiki viewer's served dir.
+      MEMBERRY_WIKI_OUTPUT_DIR: ${MEMBERRY_WIKI_OUTPUT_DIR:-/app/wiki}
     volumes:
       # Host directory exposed read-only to the MCP server for code indexing /
       # ingest / compile, confined to /workspace via MEMBERRY_INGEST_ALLOW_DIR.
       # Override the host path with MEMBERRY_WORKSPACE_HOST_PATH (default: ./).
       - ${MEMBERRY_WORKSPACE_HOST_PATH:-./}:/workspace:ro
+      # gap-15 (T10): shared wiki output volume. MCP WRITES compiled markdown here
+      # (when MEMBERRY_WIKI_AUTOREFRESH is on); the wiki service mounts the SAME
+      # named volume at /app/wiki and serves/watches it. Read-write here (MCP is
+      # the refresh-time writer); see the wiki service for the reader side.
+      - wiki_output:/app/wiki
     ports:
       # Host publish address restricts reachability: 127.0.0.1 = local-only,
       # 0.0.0.0 = LAN/server. The container itself binds all interfaces (see
@@ -138,7 +151,19 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:-memberry-local-dev}@redis:6379
       # Optional public-URL label for the wiki (e.g. host:3200). Empty by default.
       MEMBERRY_WIKI_PUBLIC_LABEL: ${MEMBERRY_WIKI_PUBLIC_LABEL:-}
+    # The wiki service ALWAYS self-builds (`build` = compile + serve + fs.watch)
+    # so it works with autorefresh OFF. gap-15 (T10) caveat: when
+    # MEMBERRY_WIKI_AUTOREFRESH is ON, MCP also writes /app/wiki on refresh events,
+    # so there are briefly two writers at startup. That's safe — both perform a
+    # FULL whole-dir recompile (never a partial project set) and the fs.watch
+    # below re-reads after writes settle. The command is intentionally NOT made
+    # conditional on the env var (compose can't express that cleanly).
     command: ["node_modules/.bin/tsx", "packages/wiki/src/cli.ts", "build", "--output", "/app/wiki", "--port", "3200"]
+    volumes:
+      # gap-15 (T10): shared wiki output volume — the SAME named volume the mcp
+      # service mounts. The wiki service writes it at startup and serves/watches
+      # it; MCP rewrites it on refresh events when autorefresh is on.
+      - wiki_output:/app/wiki
     ports:
       # Same publish-host gating as the mcp service (gap-1): 127.0.0.1 local, 0.0.0.0 server.
       - "${MEMBERRY_PUBLISH_HOST:-127.0.0.1}:3200:3200"
@@ -154,3 +179,8 @@ volumes:
   neo4j_data:
   neo4j_plugins:
   redis_data:
+  # gap-15 (T10): shared between the mcp (writer on refresh) and wiki (writer at
+  # startup + reader/watcher) services so MCP-side recompiles surface in the
+  # served wiki. Only materializes when the wiki profile (and optionally the app
+  # profile) is up; harmless otherwise.
+  wiki_output:

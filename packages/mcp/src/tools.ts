@@ -9,6 +9,7 @@ import { resolveProjectTag } from '@memberry/code';
 import { parseAmpUri, uriToLoadScope } from './uri.js';
 import { scanCodebase, type CodebaseScan } from './codebase-scanner.js';
 import { assertSafeRegex, capScanText, UnsafeRegexError } from './safe-regex.js';
+import { recompileWikiNow } from './wiki-autorefresh.js';
 
 export type { RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 
@@ -1007,6 +1008,10 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         semantic_seeds: args.semantic_seeds ?? [],
         agents: args.agents ?? [{ id: 'mcp', name: 'Claude Code', type: 'assistant' }],
       });
+      // gap-15 (T10): immediately materialize the wiki for the freshly-set-up
+      // project. Strict no-op unless MEMBERRY_WIKI_AUTOREFRESH is on + the shared
+      // output dir exists; always non-fatal (never propagates a recompile error).
+      await recompileWikiNow();
       return textContent(JSON.stringify(result, null, 2));
     },
 
@@ -1241,6 +1246,10 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         }
       }
 
+      // gap-15 (T10): immediately materialize the wiki for the freshly-ingested
+      // codebase. Strict no-op unless MEMBERRY_WIKI_AUTOREFRESH is on + the shared
+      // output dir exists; always non-fatal.
+      await recompileWikiNow();
       return textContent(lines.join('\n'));
     },
 
