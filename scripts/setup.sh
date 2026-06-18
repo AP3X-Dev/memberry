@@ -227,8 +227,26 @@ else
     fi
     sleep 2
   done
-  if [ "$health_ok" -eq 1 ]; then ok "MemBerry is healthy at http://localhost:${MCP_PORT}/healthz"
-  else warn "Server did not pass the health check in time. Check logs: ${B}docker compose --profile app logs mcp${R}"; fi
+  if [ "$health_ok" -eq 1 ]; then
+    ok "MemBerry is healthy at http://localhost:${MCP_PORT}/healthz"
+
+    # ── Authenticated end-to-end smoke (best-effort, non-fatal) ──────────────
+    # Once the server is up and we have a token, prove the real authenticated
+    # contract (token auth + /mcp handshake + dynamic domain enable). It SKIPS
+    # CLEANLY (exit 0) when no token / unreachable, so it never aborts setup —
+    # but we wrap it anyway so a genuine assertion failure only WARNS under
+    # `set -e` instead of killing the wizard.
+    if [ -n "${MEMBERRY_API_TOKEN:-}" ] && command -v node >/dev/null 2>&1; then
+      log "Running authenticated smoke test (best-effort)..."
+      if node scripts/smoke-auth.mjs; then
+        ok "Authenticated smoke test passed."
+      else
+        warn "Authenticated smoke test reported a problem (non-fatal). See output above."
+      fi
+    fi
+  else
+    warn "Server did not pass the health check in time. Check logs: ${B}docker compose --profile app logs mcp${R}"
+  fi
 fi
 
 # ── Done — connection details ────────────────────────────────────────────────────

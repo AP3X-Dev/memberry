@@ -19,6 +19,7 @@
     "dev": "tsx packages/mcp/src/server.ts",
     "setup": "bash scripts/setup.sh",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:auth": "node scripts/smoke-auth.mjs",
     "start": "tsx packages/mcp/src/server.ts",
     "stack:up": "docker compose --profile app up -d --build",
     "stack:down": "docker compose --profile app down",
