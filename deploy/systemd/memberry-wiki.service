@@ -2,12 +2,14 @@
 Description=MemBerry Wiki Viewer
 After=network.target docker.service memberry-mcp.service
 
+# Template — substitute <USER>, <INSTALL_DIR>, and the EnvironmentFile path.
+# See guides/install-systemd.md.
 [Service]
 Type=simple
-User=cerebro
-WorkingDirectory=/home/cerebro/projects/amp
-ExecStartPre=/usr/bin/npx tsx packages/wiki/src/cli.ts compile --output /home/cerebro/projects/amp/wiki
-ExecStart=/usr/bin/npx tsx packages/wiki/src/cli.ts serve --output /home/cerebro/projects/amp/wiki --port 3200
+User=<USER>
+WorkingDirectory=<INSTALL_DIR>
+ExecStartPre=/usr/bin/npx tsx packages/wiki/src/cli.ts compile --output <INSTALL_DIR>/wiki
+ExecStart=/usr/bin/npx tsx packages/wiki/src/cli.ts serve --output <INSTALL_DIR>/wiki --port 3200
 Restart=always
 RestartSec=10
 EnvironmentFile=/etc/memberry/env

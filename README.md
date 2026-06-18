@@ -75,24 +75,30 @@ server — in Docker. **Only Docker is required** (Docker Engine + the Compose v
 ```bash
 git clone https://github.com/AP3X-Dev/memberry.git
 cd memberry
-./setup.sh
+./scripts/setup.sh
 ```
 
-`./setup.sh` is a guided wizard: it checks Docker, generates a `.env` (a random
-API token + database passwords; the OpenAI key is optional), builds and starts
-the full stack via `docker compose --profile app`, waits until it's healthy, and
-prints the exact MCP config to paste into your agent — including your generated
-bearer token. It's idempotent — safe to re-run.
+`./scripts/setup.sh` is a guided wizard: it checks Docker, generates a `.env` (a
+random API token + database passwords; the OpenAI key is optional), builds and
+starts the full stack via `docker compose --profile app`, waits until it's
+healthy, and prints the exact MCP config to paste into your agent — including
+your generated bearer token. It's idempotent — safe to re-run.
+
+Then point your agent at the running server (writes the correct, `"type":
+"http"` MCP config — see [Connect to your agent](#connect-to-your-agent)):
 
 ```bash
-./setup.sh --yes          # non-interactive (CI) — accept all defaults
-./setup.sh --db-only      # start only Neo4j + Redis (run the server yourself)
-./setup.sh --reconfigure  # re-run the wizard even if .env exists
+npx tsx packages/core/src/cli.ts configure claude --write   # Claude Code
+npx tsx packages/core/src/cli.ts configure codex --write    # Codex
 ```
 
 > **No OpenAI key?** MemBerry still runs — retrieval falls back to deterministic
 > lexical + fulltext ranking (no random results). Add `OPENAI_API_KEY` to `.env`
 > and `npm run stack:up` to enable embeddings.
+
+For the full walkthrough — flags, the `.env`, the wiki viewer, LAN/server
+exposure, systemd, and the AMP upgrade — see [Documentation](#documentation)
+below.
 
 ### Manage the stack
 
@@ -103,25 +109,25 @@ npm run stack:down    # stop everything
 curl http://localhost:3101/healthz
 ```
 
-### Run from source instead (development)
-
-Hacking on MemBerry itself? Start just the databases and run the server on the
-host (needs Node.js 20+):
-
-```bash
-./setup.sh --db-only
-npm install
-npm run dev           # tsx, hot reload  (or: npm start)
-```
-
 ### Connect to Your Agent
 
-After setup, paste the printed config (with your token) into your MCP client:
+The supported transport is **streamable HTTP at `/mcp`**. The easiest way to
+wire a client up is the `configure` command, which emits (and with `--write`
+persists) the correct config and resolves the URL/token from your environment:
+
+```bash
+npx tsx packages/core/src/cli.ts configure claude --write   # ~/.claude/settings.json
+npx tsx packages/core/src/cli.ts configure codex --write    # ~/.codex/config.toml
+```
+
+The Claude Code entry it writes — the `"type": "http"` discriminator is
+mandatory, or Claude treats it as the legacy stdio/SSE shape and never connects:
 
 ```json
 {
   "mcpServers": {
     "memberry": {
+      "type": "http",
       "url": "http://localhost:3101/mcp",
       "headers": { "Authorization": "Bearer <token-from-setup>" }
     }
@@ -137,6 +143,17 @@ codex mcp add memberry --url http://localhost:3101/mcp --bearer-token-env-var ME
 stdio transport is also supported (`tsx packages/mcp/src/server.ts --stdio`).
 
 **Works with any MCP-compatible agent:** Claude Code, Cursor, Windsurf, Cline, Codex, or custom agents. See [SECURITY.md](SECURITY.md) for the auth model and token management.
+
+## Documentation
+
+Step-by-step install and upgrade guides live in [`guides/`](guides/):
+
+| Guide | When to use it |
+|-------|----------------|
+| [Local Docker](guides/install-local-docker.md) | Default — agent and MemBerry on the **same machine** (`127.0.0.1`). |
+| [Remote / LAN Server](guides/install-remote-server.md) | MemBerry on a server, agents on **other machines**. Covers the publish-layer security model, the `/workspace` mount, and **dynamic tool exposure** across clients. |
+| [systemd Production](guides/install-systemd.md) | Run under **systemd** (services + dream/snapshot/wiki-compile timers) outside Docker. |
+| [Migration from AMP](guides/migration-from-amp.md) | Upgrading an older **AMP** install — the retained `AMP_*` / `amp://` / `/sse` aliases and the user-facing renames. |
 
 ### Hooks — a deterministic context floor (optional)
 
@@ -162,7 +179,7 @@ npx tsx packages/core/src/cli.ts hooks uninstall --agent claude
 
 Only **Claude Code** gets live per-turn injection; **Codex** and **Hermes** read a static file at startup, so they get a refreshed start-of-session block (the wrapper keeps it from going stale). Every load hook is **fail-open** with an 800ms timeout — a slow or down MemBerry never blocks a turn.
 
-Prefer a UI? The wiki has a **Settings** page (`/settings`, port 3200) to enable/disable hooks per agent and tune timeouts/token budgets — tuning is written to `~/.config/amp/settings.json` and read live by hook processes (no restart). The same page shows the rest of MemBerry's effective config (cache TTLs, consolidation, decay half-lives, project-tag enforcement, embedding mode).
+Prefer a UI? The wiki has a **Settings** page (`/settings`, port 3200) to enable/disable hooks per agent and tune timeouts/token budgets — tuning is written to `~/.config/memberry/settings.json` and read live by hook processes (no restart). The same page shows the rest of MemBerry's effective config (cache TTLs, consolidation, decay half-lives, project-tag enforcement, embedding mode).
 
 ### Bootstrap Your Project
 
@@ -276,11 +293,11 @@ The wiki round-trips: edit a compiled article in the viewer (Edit button) or syn
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection |
 | `OPENAI_API_KEY` | — | For embedding-based semantic search (optional — works without) |
 | `MCP_PORT` | `3101` | MCP server port |
-| `MEMBERRY_API_TOKEN` | — | Optional Bearer token for SSE endpoint auth |
+| `MEMBERRY_API_TOKEN` | — | Optional Bearer token gating MCP access (the `/mcp` HTTP transport) |
 
 ## MCP Health Checks
 
-When running the SSE server, MemBerry exposes two non-streaming HTTP checks:
+When running the MCP server, MemBerry exposes two non-streaming HTTP checks:
 
 ```bash
 curl http://localhost:3101/healthz
@@ -288,7 +305,7 @@ curl -H "Authorization: Bearer $MEMBERRY_API_TOKEN" http://localhost:3101/readyz
 ```
 
 - `GET /healthz` is unauthenticated liveness. It returns process status only and never includes token material.
-- `GET /readyz` is authenticated readiness. It verifies the same Bearer token gate as `/sse` without opening an SSE stream.
+- `GET /readyz` is authenticated readiness. It verifies the same Bearer token gate as the streamable-HTTP `/mcp` endpoint without opening a stream. (The legacy `/sse` transport is still served for older clients — see the [AMP migration guide](guides/migration-from-amp.md).)
 
 ## Development
 

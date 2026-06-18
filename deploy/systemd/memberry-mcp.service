@@ -2,16 +2,18 @@
 Description=MemBerry MCP Server
 After=network.target docker.service
 
+# Template — substitute <USER>, <INSTALL_DIR>, and the EnvironmentFile path.
+# See guides/install-systemd.md.
 [Service]
 Type=simple
-User=cerebro
-WorkingDirectory=/home/cerebro/projects/amp
+User=<USER>
+WorkingDirectory=<INSTALL_DIR>
 ExecStart=/usr/bin/npx tsx packages/mcp/src/server.ts
 Restart=always
 RestartSec=5
 EnvironmentFile=/etc/memberry/env
 Environment=NODE_ENV=production
-Environment=MEMBERRY_EXPORT_PATH=/home/cerebro/projects/amp/.memberry
+Environment=MEMBERRY_EXPORT_PATH=<INSTALL_DIR>/.memberry
 Environment=MCP_PORT=3101
 Environment=HOST=0.0.0.0
 

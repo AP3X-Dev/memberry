@@ -2,9 +2,11 @@
 Description=MemBerry Wiki Recompile
 After=network.target docker.service
 
+# Template — substitute <USER>, <INSTALL_DIR>, and the EnvironmentFile path.
+# See guides/install-systemd.md.
 [Service]
 Type=oneshot
-User=cerebro
-WorkingDirectory=/home/cerebro/projects/amp
-ExecStart=/usr/bin/npx tsx packages/wiki/src/cli.ts compile --output /home/cerebro/projects/amp/wiki
+User=<USER>
+WorkingDirectory=<INSTALL_DIR>
+ExecStart=/usr/bin/npx tsx packages/wiki/src/cli.ts compile --output <INSTALL_DIR>/wiki
 EnvironmentFile=/etc/memberry/env

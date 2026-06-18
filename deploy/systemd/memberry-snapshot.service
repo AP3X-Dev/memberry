@@ -1,9 +1,11 @@
 [Unit]
 Description=MemBerry Nightly Snapshot
 
+# Template — substitute <USER>, <INSTALL_DIR>, and the EnvironmentFile path.
+# See guides/install-systemd.md.
 [Service]
 Type=oneshot
-User=cerebro
-WorkingDirectory=/home/cerebro/projects/amp
+User=<USER>
+WorkingDirectory=<INSTALL_DIR>
 ExecStart=/usr/bin/npx tsx packages/core/src/cli.ts snapshot --path ./.memberry --commit
 EnvironmentFile=/etc/memberry/env
