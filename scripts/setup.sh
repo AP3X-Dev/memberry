@@ -13,6 +13,11 @@
 #   ./setup.sh --reconfigure   # re-run the wizard even if .env already exists
 #   ./setup.sh --mode local    # local-only access (publish on 127.0.0.1)
 #   ./setup.sh --mode server   # LAN/server access (publish on 0.0.0.0)
+#   ./setup.sh --workspace PATH    # set MEMBERRY_WORKSPACE_HOST_PATH
+#   ./setup.sh --configure-claude  # after setup, write Claude Code MCP config
+#   ./setup.sh --configure-codex   # after setup, write Codex MCP config
+#   ./setup.sh --token-from-env    # reuse MEMBERRY_API_TOKEN from the env (don't mint one)
+#   ./setup.sh --print-env-snippets  # print Bash + PowerShell client env snippets
 #
 set -euo pipefail
 
@@ -32,12 +37,22 @@ fail() { printf '%s[setup]%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
 
 # ── Flags ───────────────────────────────────────────────────────────────────────
 ASSUME_YES=0; DB_ONLY=0; RECONFIGURE=0; MODE=''; WITH_WIKI=0
+WORKSPACE=''; CONFIGURE_CLAUDE=0; CONFIGURE_CODEX=0; TOKEN_FROM_ENV=0; PRINT_ENV_SNIPPETS=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --yes|-y) ASSUME_YES=1 ;;
     --db-only) DB_ONLY=1 ;;
     --with-wiki) WITH_WIKI=1 ;;
     --reconfigure) RECONFIGURE=1 ;;
+    --configure-claude) CONFIGURE_CLAUDE=1 ;;
+    --configure-codex) CONFIGURE_CODEX=1 ;;
+    --token-from-env) TOKEN_FROM_ENV=1 ;;
+    --print-env-snippets) PRINT_ENV_SNIPPETS=1 ;;
+    --workspace)
+      shift; WORKSPACE="${1:-}"
+      [ -n "$WORKSPACE" ] || fail "--workspace requires a path" ;;
+    --workspace=*) WORKSPACE="${1#--workspace=}"
+      [ -n "$WORKSPACE" ] || fail "--workspace requires a path" ;;
     --mode)
       shift; MODE="${1:-}"
       [ "$MODE" = "local" ] || [ "$MODE" = "server" ] \
@@ -111,7 +126,14 @@ else
 
   prompt PORT_VAL "MCP server port:" "3101"
 
-  API_TOKEN="mbry_$(gen_secret 24)"
+  # Mint a fresh token, unless --token-from-env was passed AND the env already
+  # carries one (lets CI / re-provisioning reuse a known token instead of rotating).
+  if [ "$TOKEN_FROM_ENV" -eq 1 ] && [ -n "${MEMBERRY_API_TOKEN:-}" ]; then
+    API_TOKEN="$MEMBERRY_API_TOKEN"
+    log "Reusing MEMBERRY_API_TOKEN from the environment (--token-from-env)."
+  else
+    API_TOKEN="mbry_$(gen_secret 24)"
+  fi
   NEO_PW="$(gen_secret 16)"
   REDIS_PW="$(gen_secret 16)"
 
@@ -160,6 +182,12 @@ else
   set_env MEMBERRY_PUBLISH_HOST "$PUBLISH_HOST"
   set_env MEMBERRY_PUBLIC_HOST "$PUBLIC_HOST"
   ok "Wrote .env (API token generated; DB passwords randomized; access mode: ${RESOLVED_MODE})."
+fi
+
+# --workspace overrides the host workspace path independently of .env (re)generation.
+if [ -n "$WORKSPACE" ]; then
+  set_env MEMBERRY_WORKSPACE_HOST_PATH "$WORKSPACE"
+  log "Set MEMBERRY_WORKSPACE_HOST_PATH=${WORKSPACE}"
 fi
 
 # Load .env so we can report the token/port and poll health.
@@ -215,6 +243,7 @@ ${B}Connect an agent${R} — add this to your MCP client config:
   {
     "mcpServers": {
       "memberry": {
+        "type": "http",
         "url": "http://${MEMBERRY_PUBLIC_HOST}:${MCP_PORT}/mcp",
         "headers": { "Authorization": "Bearer ${MEMBERRY_API_TOKEN}" }
       }
@@ -233,6 +262,39 @@ EOF
   if [ "$MEMBERRY_PUBLISH_HOST" = "0.0.0.0" ]; then
     warn "SERVER MODE: MemBerry is published on 0.0.0.0 and is reachable by ANY host on the LAN."
     warn "The bearer token is the ONLY thing gating access — keep MEMBERRY_API_TOKEN secret and rotate it if leaked."
+  fi
+
+  # ── Optional: wire up the agent client config (best-effort, non-fatal) ─────────
+  # The CLI `configure` reads MEMBERRY_MCP_URL / MEMBERRY_API_TOKEN from the env,
+  # both of which are loaded from .env above. Build the URL it would compute so
+  # the printed fallback command matches exactly.
+  MCP_URL="http://${MEMBERRY_PUBLIC_HOST}:${MCP_PORT}/mcp"
+  configure_client() { # configure_client <claude|codex>
+    local client="$1"
+    printf '\n%s[setup]%s Configuring %s MCP client...\n' "$BLUE" "$R" "$client"
+    if MEMBERRY_MCP_URL="$MCP_URL" npx tsx packages/core/src/cli.ts configure "$client" --write; then
+      ok "Configured $client (mcpServers.memberry / [mcp_servers.memberry])."
+    else
+      warn "Could not auto-configure $client. Run it yourself:"
+      warn "  MEMBERRY_MCP_URL=$MCP_URL npx tsx packages/core/src/cli.ts configure $client --write"
+    fi
+  }
+  [ "$CONFIGURE_CLAUDE" -eq 1 ] && configure_client claude
+  [ "$CONFIGURE_CODEX" -eq 1 ] && configure_client codex
+
+  if [ "$PRINT_ENV_SNIPPETS" -eq 1 ]; then
+    cat <<EOF
+
+${B}Environment variable snippets${R}
+
+Bash / zsh:
+export MEMBERRY_API_TOKEN=${MEMBERRY_API_TOKEN:-<your-token>}
+export MEMBERRY_MCP_URL=${MCP_URL}
+
+PowerShell:
+[Environment]::SetEnvironmentVariable('MEMBERRY_API_TOKEN','${MEMBERRY_API_TOKEN:-<your-token>}','User')
+[Environment]::SetEnvironmentVariable('MEMBERRY_MCP_URL','${MCP_URL}','User')
+EOF
   fi
 fi
 [ -z "${OPENAI_API_KEY:-}" ] && warn "No OPENAI_API_KEY set — running with lexical/fulltext retrieval only. Add one to .env and restart to enable embeddings."
