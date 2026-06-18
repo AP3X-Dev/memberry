@@ -36,4 +36,19 @@ describe('cli.ts regression', () => {
     expect(CLI_SOURCE).toContain("execFileSync('git', ['diff', '--cached', '--quiet', '--', snapshotPath]");
     expect(CLI_SOURCE).toContain("execFileSync('git', ['commit', '-m', message, '--', snapshotPath]");
   });
+
+  it('wires the setup/configure/project/doctor spine into the dispatcher', () => {
+    // Source-pin the new top-level command tokens so the dispatcher can't silently
+    // lose them. Their full behavior lands in follow-up tasks; the routing is here.
+    for (const token of ["case 'setup'", "case 'configure'", "case 'project'", "case 'doctor'"]) {
+      expect(CLI_SOURCE, `cli.ts must handle ${token}`).toContain(token);
+    }
+  });
+
+  it('delegates the new commands to their modules', () => {
+    expect(CLI_SOURCE).toContain('await runSetup(flags)');
+    expect(CLI_SOURCE).toContain('await runConfigure(positionals, flags)');
+    expect(CLI_SOURCE).toContain('await runProject(positionals, flags)');
+    expect(CLI_SOURCE).toContain('await runDoctor(flags)');
+  });
 });

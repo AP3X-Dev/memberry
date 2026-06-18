@@ -14,7 +14,16 @@ const cliSource = fs.readFileSync(path.resolve(__dirname, '../cli.ts'), 'utf-8')
 
 describe('hooks CLI drift guard', () => {
   it('routes every new top-level command', () => {
-    for (const token of ["case 'hook'", "case 'context'", "case 'hooks'", "=== 'run'"]) {
+    for (const token of [
+      "case 'hook'",
+      "case 'context'",
+      "case 'hooks'",
+      "=== 'run'",
+      "case 'setup'",
+      "case 'configure'",
+      "case 'project'",
+      "case 'doctor'",
+    ]) {
       expect(cliSource, `cli.ts must handle ${token}`).toContain(token);
     }
   });

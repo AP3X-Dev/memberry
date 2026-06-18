@@ -14,6 +14,10 @@ import { runHookCommand } from './cli/hook.js';
 import { runContextCommand } from './cli/context.js';
 import { runHooksCommand } from './cli/install.js';
 import { runRunCommand } from './cli/run.js';
+import { runSetup } from './cli/setup.js';
+import { runConfigure } from './cli/configure.js';
+import { runProject } from './cli/project.js';
+import { runDoctor } from './cli/doctor.js';
 import { createCoreServices, buildDreamEngine } from './services-factory.js';
 
 // ─── Arg parsing ──────────────────────────────────────────────────────────────
@@ -267,6 +271,26 @@ async function main(): Promise<void> {
       await runTenant(positionals, flags);
       break;
 
+    case 'setup':
+      // `memberry setup [flags]` — shell out to scripts/setup.sh (the guided installer).
+      await runSetup(flags);
+      break;
+
+    case 'configure':
+      // `memberry configure <claude|codex>` — point an agent at a running server.
+      await runConfigure(positionals, flags);
+      break;
+
+    case 'project':
+      // `memberry project setup <path>` — per-project setup (dispatches on positionals[0]).
+      await runProject(positionals, flags);
+      break;
+
+    case 'doctor':
+      // `memberry doctor` — diagnose a MemBerry install and report fixes.
+      await runDoctor(flags);
+      break;
+
     case 'hook':
       // `memberry hook <agent> <event>` — harness-driven, JSON over stdin/stdout.
       await runHookCommand(positionals);
@@ -285,6 +309,12 @@ async function main(): Promise<void> {
     default:
       console.error(`Unknown command: "${command}"`);
       console.error('Usage: memberry <command> [options]');
+      console.error('');
+      console.error('Setup & diagnostics commands:');
+      console.error('  setup      [--mode local|server] [--with-wiki] [--db-only] [--yes] [--reconfigure] ...   (stand up the stack via scripts/setup.sh)');
+      console.error('  configure  <claude|codex>   (point an agent at a running MemBerry server)');
+      console.error('  project    setup <path>     (per-project MemBerry setup)');
+      console.error('  doctor                      (diagnose a MemBerry install)');
       console.error('');
       console.error('Memory snapshot commands:');
       console.error('  export    [--path ./.memberry] [--entity Name] [--tag tag]');
