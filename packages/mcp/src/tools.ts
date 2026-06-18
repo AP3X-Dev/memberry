@@ -95,6 +95,13 @@ export interface ICodeIndexerService {
     relations_created: number;
     errors: Array<{ file: string; error: string }>;
   }>;
+  /**
+   * T6/gap-12 bridge: link the just-indexed Component file nodes (created by
+   * indexProject's ensureFileEntities) to their module Entities and the project,
+   * so the wiki compiler's CONTAINS traversal discovers them. Idempotent; scoped
+   * to files under `rootPath`. Returns the number of file→module links processed.
+   */
+  linkComponentsToProject?(rootPath: string, projectName: string): Promise<number>;
 }
 
 // ─── Service container ────────────────────────────────────────────────────────
@@ -1085,6 +1092,21 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
           exclude: args.exclude_patterns,
           projectTag,
         });
+
+        // Bridge (T6/gap-12): indexProject's ensureFileEntities created
+        // `(:Entity:Component {path})` nodes but left them unlinked, so the wiki
+        // compiler's `(project)-[:CONTAINS*1..]->(e)` traversal can't see them.
+        // Wire each file node to its module Entity and the project here — where
+        // the resolved projectName + this run's indexed files are both in scope.
+        // Idempotent and scoped to files under absPath; non-fatal (the rest of
+        // ingestion already succeeded if this throws).
+        if (codeIndexerService.linkComponentsToProject) {
+          try {
+            await codeIndexerService.linkComponentsToProject(absPath, projectName);
+          } catch (err: unknown) {
+            console.error('[berry_ingest_codebase] component→project bridge failed (non-fatal):', err);
+          }
+        }
       }
 
       // Phase 4: Seed memory blocks

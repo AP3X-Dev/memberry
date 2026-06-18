@@ -63,6 +63,10 @@ const mockCodeIndexer: ICodeIndexerService = {
     relations_created: 30,
     errors: [],
   }),
+  // T6/gap-12: bridge that links indexed Component file nodes to module/project
+  // entities so the wiki can discover them. Mocked here to keep these unit tests
+  // service-free; the real bridge is live-tested in component-project-bridge.live.test.ts.
+  linkComponentsToProject: vi.fn().mockResolvedValue(2),
 };
 
 // ─── Temp project ─────────────────────────────────────────────────────────────
@@ -123,6 +127,11 @@ describe('berry_ingest_codebase handler', () => {
 
     // Should have called code indexer
     expect(mockCodeIndexer.indexProject).toHaveBeenCalledTimes(1);
+
+    // T6/gap-12: should have run the component→project wiki bridge with the
+    // resolved project name so indexed file nodes become wiki-discoverable.
+    expect(mockCodeIndexer.linkComponentsToProject).toHaveBeenCalledTimes(1);
+    expect(mockCodeIndexer.linkComponentsToProject).toHaveBeenCalledWith(tempDir, 'my-test-app');
 
     // Should have seeded memory blocks
     expect(mockMemoryBlockService.insert).toHaveBeenCalledTimes(2);

@@ -2,7 +2,7 @@
 // Project and file indexing pipeline.
 
 import { readdir, stat } from 'fs/promises';
-import { resolve, extname, relative } from 'path';
+import { resolve, extname, relative, sep } from 'path';
 import { type Driver } from 'neo4j-driver';
 import { parseFile } from './parser.js';
 import { ImportResolver } from './resolver.js';
@@ -253,6 +253,92 @@ export class CodeIndexer {
     }
   }
 
+  /**
+   * Bridge (T6/gap-12): make a freshly-indexed project's file nodes
+   * wiki-discoverable.
+   *
+   * `ensureFileEntities` creates `(:Entity:Component {path})` nodes for each
+   * indexed file but never links them to a project, so the wiki compiler's
+   * `fetchProjectEntities` — which discovers entities via
+   * `(project:Entity{type:'project'})-[:CONTAINS*1..]->(e)` — can't see them.
+   * This links each Component to its MODULE (its top-level directory relative to
+   * `absPath`, matching the codebase-scanner's module naming) and wires
+   * `(project)-[:CONTAINS]->(module)-[:CONTAINS]->(component)`.
+   *
+   * Scoped to THIS run: only Component nodes whose `path` starts with `absPath`
+   * are touched — never global/unscoped component nodes. Fully idempotent
+   * (MERGE everywhere); re-ingesting the same project creates no duplicate edges.
+   * The module Entity's `type` is set ON CREATE only, so a module the bootstrap
+   * already created with `type:'module'` is never clobbered.
+   *
+   * @returns the number of {module, component} link pairs processed.
+   */
+  async linkComponentsToProject(absPath: string, projectName: string): Promise<number> {
+    const session = this.driver.session();
+    try {
+      // Read back the EXACT `path` values ensureFileEntities stored for this run.
+      // Scope by a SEPARATOR-BOUNDED prefix so a sibling dir (e.g. `/x/proj2`)
+      // can't be over-matched when this root is `/x/proj` — confines the bridge
+      // to the files just indexed under this root (never unscoped/global nodes).
+      const absPathPrefix = absPath.endsWith(sep) ? absPath : absPath + sep;
+      const found = await session.run(
+        `MATCH (c:Entity:Component)
+         WHERE c.path = $absPath OR c.path STARTS WITH $absPathPrefix
+         RETURN c.path AS path`,
+        { absPath, absPathPrefix },
+      );
+      const componentPaths = found.records.map((r) => r.get('path') as string);
+      const links = computeComponentModuleLinks(absPath, projectName, componentPaths);
+      if (links.length === 0) return 0;
+
+      // A root-level file's module IS the project (the "sensible default"); attach
+      // those components straight to the project (no project→project self-loop).
+      const moduleLinks = links.filter((l) => l.moduleName !== projectName);
+      const rootLinks = links.filter((l) => l.moduleName === projectName);
+      const now = new Date().toISOString();
+
+      // ONE batched, idempotent UNWIND for module-backed files. project + module
+      // entities are MERGEd by name; module.type is set ON CREATE only (never
+      // overwrites a bootstrap 'module'); project.type is a safety-net ON CREATE.
+      // All edges are MERGE → re-ingest can't fork edges.
+      if (moduleLinks.length > 0) {
+        await session.run(
+          `MERGE (project:Entity {name: $projectName})
+             ON CREATE SET project.id = randomUUID(), project.type = 'project',
+                           project.created_at = $now
+           WITH project
+           UNWIND $links AS link
+           MERGE (m:Entity {name: link.moduleName})
+             ON CREATE SET m.id = randomUUID(), m.type = 'module',
+                           m.description = 'Source module: ' + link.moduleName,
+                           m.created_at = $now
+           MERGE (project)-[:CONTAINS]->(m)
+           WITH m, link
+           MATCH (c:Entity:Component {path: link.componentPath})
+           MERGE (m)-[:CONTAINS]->(c)`,
+          { projectName, links: moduleLinks, now },
+        );
+      }
+
+      // Root-level files: link directly to the project (no module hop, no self-loop).
+      if (rootLinks.length > 0) {
+        await session.run(
+          `MERGE (project:Entity {name: $projectName})
+             ON CREATE SET project.id = randomUUID(), project.type = 'project',
+                           project.created_at = $now
+           WITH project
+           UNWIND $links AS link
+           MATCH (c:Entity:Component {path: link.componentPath})
+           MERGE (project)-[:CONTAINS]->(c)`,
+          { projectName, links: rootLinks, now },
+        );
+      }
+      return links.length;
+    } finally {
+      await session.close();
+    }
+  }
+
   private async resolveRelationsBatch(
     relations: Array<{ from_symbol: string; to_symbol: string; type: string }>,
     filePath: string,
@@ -394,4 +480,46 @@ function relationFallback(symbol: SymbolNode | undefined): RelationSymbolFallbac
     kind: symbol.kind,
     start_line: symbol.start_line,
   };
+}
+
+/** One file→module link the wiki bridge will MERGE into the graph. */
+export interface ComponentModuleLink {
+  /** The module Entity name = the file's top-level dir relative to the project root. */
+  moduleName: string;
+  /** The exact `path` value stored on the `:Entity:Component` node. */
+  componentPath: string;
+}
+
+/**
+ * Pure mapping used by {@link CodeIndexer.linkComponentsToProject} (T6/gap-12).
+ * For each indexed Component `path`, derive its MODULE: the first path segment of
+ * `path` relative to `absPath` — i.e. the file's TOP-LEVEL directory under the
+ * project root. This matches the codebase-scanner's module naming (workspace dir
+ * basenames + top-level source dirs like `src`/`lib`), so a derived module links
+ * to the SAME Entity the bootstrap created instead of forking a new one.
+ *
+ * A file directly under the root (no subdirectory) has no module dir, so it is
+ * attached to the project itself (moduleName = projectName) — a sensible default
+ * rather than minting a junk module from a bare filename.
+ *
+ * Exported (and side-effect-free) so the bridge can be live-tested directly.
+ */
+export function computeComponentModuleLinks(
+  absPath: string,
+  projectName: string,
+  componentPaths: string[],
+): ComponentModuleLink[] {
+  const links: ComponentModuleLink[] = [];
+  for (const componentPath of componentPaths) {
+    // `relative` is platform-correct (uses the same `path` module the indexer
+    // walked with), so this works whether the stored path uses '/' or '\'.
+    const rel = relative(absPath, componentPath);
+    // Outside the root (shouldn't happen — caller scopes by STARTS WITH) → skip.
+    if (!rel || rel.startsWith('..')) continue;
+    const segments = rel.split(/[\\/]/).filter(Boolean);
+    // A bare filename (no dir segment) → no module → attach to the project.
+    const moduleName = segments.length > 1 ? segments[0] : projectName;
+    links.push({ moduleName, componentPath });
+  }
+  return links;
 }
