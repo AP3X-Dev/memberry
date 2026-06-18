@@ -38,7 +38,7 @@ export function renderCacheSize(): number {
 // Hidden round-trip claim anchors emitted by the compiler. Stripped before render
 // and before search indexing so they never surface to the reader. Stateless (no
 // shared lastIndex) — safe to reuse with String.replace.
-const ANCHOR_STRIP_RE = /<!--\s*amp:sem-[A-Za-z0-9_-]+\s*-->/g;
+const ANCHOR_STRIP_RE = /<!--\s*(?:amp|memberry):sem-[A-Za-z0-9_-]+\s*-->/g;
 const MEMBERRY_LOGO_ASSET = new URL('./assets/memberry-logo.png', import.meta.url);
 
 // Driver for the editable round-trip. Null = strictly read-only viewer.
@@ -1971,38 +1971,38 @@ function buildEditor(slugPath: string, rawContent: string): string {
   const slugJson = JSON.stringify(slugPath);
   return `
   <style>
-    .amp-edit { margin-top: 2rem; border-top: 1px solid var(--border); padding-top: 1rem; }
-    .amp-edit-btn { background: #1a1a1a; color: var(--fg, #eee); border: 1px solid var(--border, #2a2a2a);
+    .memberry-edit { margin-top: 2rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+    .memberry-edit-btn { background: #1a1a1a; color: var(--fg, #eee); border: 1px solid var(--border, #2a2a2a);
       padding: 0.4rem 0.8rem; cursor: pointer; font-family: inherit; font-size: 0.8rem; letter-spacing: 0.05em; }
-    .amp-edit-btn.primary { background: var(--accent, #9b35ff); color: #ffffff; border-color: var(--accent, #9b35ff); font-weight: 600; }
-    .amp-edit-btn:hover { filter: brightness(1.15); }
-    .amp-edit-hint { color: var(--fg-faint, #888); font-size: 0.8rem; margin: 0.5rem 0; }
-    #amp-edit-text { width: 100%; min-height: 420px; background: #0d0d0d; color: #ddd; border: 1px solid var(--border, #2a2a2a);
+    .memberry-edit-btn.primary { background: var(--accent, #9b35ff); color: #ffffff; border-color: var(--accent, #9b35ff); font-weight: 600; }
+    .memberry-edit-btn:hover { filter: brightness(1.15); }
+    .memberry-edit-hint { color: var(--fg-faint, #888); font-size: 0.8rem; margin: 0.5rem 0; }
+    #memberry-edit-text { width: 100%; min-height: 420px; background: #0d0d0d; color: #ddd; border: 1px solid var(--border, #2a2a2a);
       font-family: ui-monospace, monospace; font-size: 0.82rem; line-height: 1.5; padding: 0.75rem; box-sizing: border-box; }
-    .amp-edit-actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
-    #amp-edit-status { color: var(--fg-faint, #888); font-size: 0.8rem; }
+    .memberry-edit-actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+    #memberry-edit-status { color: var(--fg-faint, #888); font-size: 0.8rem; }
   </style>
-  <div class="amp-edit">
-    <button id="amp-edit-toggle" class="amp-edit-btn">EDIT THIS PAGE</button>
-    <div id="amp-edit-panel" hidden>
-      <p class="amp-edit-hint">Edit the markdown below. Changed claims become corrections, new lines become new memories, and removed claims are de-emphasised (never deleted). Saving updates the knowledge graph.</p>
-      <textarea id="amp-edit-text" spellcheck="false">${escapeHtml(rawContent)}</textarea>
-      <div class="amp-edit-actions">
-        <button id="amp-edit-save" class="amp-edit-btn primary">SAVE TO GRAPH</button>
-        <button id="amp-edit-cancel" class="amp-edit-btn">CANCEL</button>
-        <span id="amp-edit-status"></span>
+  <div class="memberry-edit">
+    <button id="memberry-edit-toggle" class="memberry-edit-btn">EDIT THIS PAGE</button>
+    <div id="memberry-edit-panel" hidden>
+      <p class="memberry-edit-hint">Edit the markdown below. Changed claims become corrections, new lines become new memories, and removed claims are de-emphasised (never deleted). Saving updates the knowledge graph.</p>
+      <textarea id="memberry-edit-text" spellcheck="false">${escapeHtml(rawContent)}</textarea>
+      <div class="memberry-edit-actions">
+        <button id="memberry-edit-save" class="memberry-edit-btn primary">SAVE TO GRAPH</button>
+        <button id="memberry-edit-cancel" class="memberry-edit-btn">CANCEL</button>
+        <span id="memberry-edit-status"></span>
       </div>
     </div>
   </div>
   <script>
   (function(){
     var slug = ${slugJson};
-    var toggle = document.getElementById('amp-edit-toggle');
-    var panel = document.getElementById('amp-edit-panel');
-    var save = document.getElementById('amp-edit-save');
-    var cancel = document.getElementById('amp-edit-cancel');
-    var text = document.getElementById('amp-edit-text');
-    var status = document.getElementById('amp-edit-status');
+    var toggle = document.getElementById('memberry-edit-toggle');
+    var panel = document.getElementById('memberry-edit-panel');
+    var save = document.getElementById('memberry-edit-save');
+    var cancel = document.getElementById('memberry-edit-cancel');
+    var text = document.getElementById('memberry-edit-text');
+    var status = document.getElementById('memberry-edit-status');
     toggle.addEventListener('click', function(){ panel.hidden = !panel.hidden; toggle.hidden = !panel.hidden; });
     cancel.addEventListener('click', function(){ panel.hidden = true; toggle.hidden = false; status.textContent=''; });
     save.addEventListener('click', async function(){

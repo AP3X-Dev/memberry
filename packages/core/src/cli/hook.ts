@@ -71,14 +71,14 @@ export async function runHookCommand(argv: string[]): Promise<void> {
       if (CLAUDE_EVENTS.includes(event as ClaudeHookEvent)) {
         output = await dispatchClaude(event as ClaudeHookEvent, input);
       } else {
-        process.stderr.write(`[amp-hook] unknown claude event: ${event}\n`);
+        process.stderr.write(`[memberry-hook] unknown claude event: ${event}\n`);
       }
     } else {
-      process.stderr.write(`[amp-hook] unknown agent: ${agent} (expected: claude)\n`);
+      process.stderr.write(`[memberry-hook] unknown agent: ${agent} (expected: claude)\n`);
     }
   } catch (err) {
     // Fail-open: log to stderr, emit empty context, exit 0.
-    process.stderr.write(`[amp-hook] error: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`[memberry-hook] error: ${err instanceof Error ? err.message : String(err)}\n`);
     output = {};
   }
 

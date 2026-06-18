@@ -38,12 +38,12 @@ const SNAP: AmpGraphSnapshot = {
 // ─── JSON export ─────────────────────────────────────────────────────────────
 
 describe('exportJson', () => {
-  it('emits a valid, deterministic amp-graph document', () => {
+  it('emits a valid, deterministic memberry-graph document', () => {
     const out1 = exportJson(SNAP);
     const out2 = exportJson(SNAP);
     expect(out1).toBe(out2);
     const parsed = JSON.parse(out1);
-    expect(parsed.format).toBe('amp-graph');
+    expect(parsed.format).toBe('memberry-graph');
     expect(parsed.version).toBe(1);
     expect(parsed.nodes).toHaveLength(3);
     expect(parsed.edges).toHaveLength(2);
@@ -92,7 +92,7 @@ describe('exportHtml XSS safety', () => {
   it('produces a self-contained document with embedded data', () => {
     const { html } = exportHtml(SNAP);
     expect(html.startsWith('<!doctype html>')).toBe(true);
-    expect(html).toContain('id="amp-graph-data"');
+    expect(html).toContain('id="memberry-graph-data"');
     expect(html).toContain('id="cv"'); // canvas
     expect(html).not.toContain('http://');
     expect(html).not.toContain('https://'); // no external resources
@@ -100,7 +100,7 @@ describe('exportHtml XSS safety', () => {
 
   it('embeds knowledge-area membership and a color-by-area toggle', () => {
     const { html } = exportHtml(SNAP);
-    expect(html).toContain('id="amp-graph-communities"');
+    expect(html).toContain('id="memberry-graph-communities"');
     expect(html).toContain('id="mode"'); // toggle button
   });
 });
@@ -149,10 +149,10 @@ describe('selectRenderNodes (render cap)', () => {
 // ─── Path safety ─────────────────────────────────────────────────────────────
 
 describe('resolveSafeOutputPath', () => {
-  const base = '/tmp/amp-graph-out';
+  const base = '/tmp/memberry-graph-out';
   it('resolves a relative path inside the base', () => {
-    expect(resolveSafeOutputPath('graph.html', base)).toBe('/tmp/amp-graph-out/graph.html');
-    expect(resolveSafeOutputPath('sub/graph.json', base)).toBe('/tmp/amp-graph-out/sub/graph.json');
+    expect(resolveSafeOutputPath('graph.html', base)).toBe('/tmp/memberry-graph-out/graph.html');
+    expect(resolveSafeOutputPath('sub/graph.json', base)).toBe('/tmp/memberry-graph-out/sub/graph.json');
   });
   it('rejects absolute paths and traversal', () => {
     expect(() => resolveSafeOutputPath('/etc/passwd', base)).toThrow();
@@ -205,11 +205,11 @@ describe('GraphExportService', () => {
     expect(res.output_path).toBeUndefined();
     expect(res.content).toBeDefined();
     expect(res.node_count).toBe(1);
-    expect(JSON.parse(res.content!).format).toBe('amp-graph');
+    expect(JSON.parse(res.content!).format).toBe('memberry-graph');
   });
 
   it('writes a file under the allowed base dir and reports the path', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'amp-graph-export-'));
+    const dir = await mkdtemp(path.join(tmpdir(), 'memberry-graph-export-'));
     const svc = new GraphExportService(new GraphSnapshotService(mockDriver()), dir);
     const res = await svc.export({ project_name: 'amp', format: 'html', output_path: 'g.html' });
     expect(res.output_path).toBe(path.join(dir, 'g.html'));
@@ -219,7 +219,7 @@ describe('GraphExportService', () => {
   });
 
   it('refuses to write outside the allowed base dir', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'amp-graph-export-'));
+    const dir = await mkdtemp(path.join(tmpdir(), 'memberry-graph-export-'));
     const svc = new GraphExportService(new GraphSnapshotService(mockDriver()), dir);
     await expect(svc.export({ project_name: 'amp', output_path: '../escape.json' })).rejects.toThrow();
   });

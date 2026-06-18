@@ -275,7 +275,7 @@ export class UnifiedAssembler {
       try {
         intentResult = await classifyIntent(task, this.embedding, getQueryVector);
       } catch (err) {
-        console.error('[amp-retrieval] Intent classification failed:', err instanceof Error ? err.message : err);
+        console.error('[memberry-retrieval] Intent classification failed:', err instanceof Error ? err.message : err);
         intentResult = { intent: 'HYBRID', confidence: 0.4, method: 'fallback' };
       }
 
@@ -306,7 +306,7 @@ export class UnifiedAssembler {
     return () => {
       if (!cached) {
         cached = this.embedding.embed(task).catch((err) => {
-          console.error('[amp-retrieval] Shared query embedding failed:', err instanceof Error ? err.message : err);
+          console.error('[memberry-retrieval] Shared query embedding failed:', err instanceof Error ? err.message : err);
           return undefined;
         });
       }
@@ -383,7 +383,7 @@ export class UnifiedAssembler {
       promises.push(
         this.searchArchEntities(archQuery, opts)
           .then((results) => { lists.push(results); })
-          .catch((err) => { console.error('[amp-retrieval] Arch search failed:', err instanceof Error ? err.message : err); }),
+          .catch((err) => { console.error('[memberry-retrieval] Arch search failed:', err instanceof Error ? err.message : err); }),
       );
     }
 
@@ -421,7 +421,7 @@ export class UnifiedAssembler {
               metadata: { kind: r.kind, file_path: r.file_path },
             })));
           })
-          .catch((err) => { console.error('[amp-retrieval] Code search failed:', err instanceof Error ? err.message : err); }),
+          .catch((err) => { console.error('[memberry-retrieval] Code search failed:', err instanceof Error ? err.message : err); }),
       );
     }
 
@@ -437,7 +437,7 @@ export class UnifiedAssembler {
           ...(opts.as_of ? { temporal: { as_of: opts.as_of } } : {}),
         })
           .then((ctx) => { lists.push(parseMemoryMarkdown(ctx.markdown, ctx.sources)); })
-          .catch((err) => { console.error('[amp-retrieval] Memory layer failed:', err instanceof Error ? err.message : err); }),
+          .catch((err) => { console.error('[memberry-retrieval] Memory layer failed:', err instanceof Error ? err.message : err); }),
       );
     }
 
@@ -569,7 +569,7 @@ export class UnifiedAssembler {
         };
       });
     } catch (err) {
-      console.error('[amp-retrieval] Arch entity search failed (index may not exist):', err instanceof Error ? err.message : err);
+      console.error('[memberry-retrieval] Arch entity search failed (index may not exist):', err instanceof Error ? err.message : err);
       return [];
     } finally {
       await session.close();

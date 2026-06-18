@@ -440,7 +440,7 @@ export async function fetchClaimsForSource(driver: Driver, sourceId: string): Pr
     return result.records.map((r) => ({
       content: r.get('content') as string,
       confidence: r.get('confidence') as number,
-      amp_id: r.get('id') as string,
+      memberry_id: r.get('id') as string,
       source_refs: [sourceId],
       entity_refs: (r.get('entity_refs') as string[]).filter(Boolean),
     }));

@@ -16,7 +16,7 @@ export function createRedisClient(url: string, overrides?: Partial<RedisOptions>
   client.on('error', (err: Error) => {
     if (!client.listenerCount('error') || client.listenerCount('error') <= 1) {
       // Only log if no other error listeners are attached
-      console.error(`[amp-redis] Connection error: ${err.message}`);
+      console.error(`[memberry-redis] Connection error: ${err.message}`);
     }
   });
 

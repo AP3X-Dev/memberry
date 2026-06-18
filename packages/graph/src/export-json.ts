@@ -6,7 +6,7 @@
 import type { AmpGraphEdge, AmpGraphNode, AmpGraphSnapshot } from './types.js';
 
 export interface GraphJsonDocument {
-  format: 'amp-graph';
+  format: 'memberry-graph';
   version: 1;
   generated_at: string;
   project_tag?: string;
@@ -19,7 +19,7 @@ export interface GraphJsonDocument {
 
 export function buildJsonDocument(graph: AmpGraphSnapshot): GraphJsonDocument {
   const doc: GraphJsonDocument = {
-    format: 'amp-graph',
+    format: 'memberry-graph',
     version: 1,
     generated_at: graph.generated_at,
     truncated: graph.truncated,

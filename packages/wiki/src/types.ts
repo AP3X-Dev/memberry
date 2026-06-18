@@ -54,7 +54,7 @@ export interface ArticleFrontmatter {
   sources: number;
   inbound_links: number;
   last_compiled: string;
-  amp_id: string;
+  memberry_id: string;
   aliases: string[];
   tags: string[];
   parent?: string;
@@ -72,7 +72,7 @@ export interface ArticleSection {
 export interface ResolvedClaim {
   content: string;
   confidence: number;
-  amp_id: string;
+  memberry_id: string;
   source_refs: string[];
   /** Entity names referenced inline (for link resolution) */
   entity_refs: string[];

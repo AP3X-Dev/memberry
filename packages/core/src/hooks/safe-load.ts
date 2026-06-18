@@ -45,7 +45,7 @@ export async function safeLoad(
     return result ?? null;
   } catch (err) {
     process.stderr.write(
-      `[amp-hook] load failed, continuing with empty context: ${err instanceof Error ? err.message : String(err)}\n`,
+      `[memberry-hook] load failed, continuing with empty context: ${err instanceof Error ? err.message : String(err)}\n`,
     );
     return null;
   } finally {

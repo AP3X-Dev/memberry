@@ -172,7 +172,7 @@ export class AMPService {
   /**
    * Resolve and validate the project tag for an episode. Behavior:
    * 1. Derive tag from input.tags (first 'project:' tag) or [project:xxx] prefix.
-   * 2. If none, throw (unless AMP_REQUIRE_PROJECT_TAG=false).
+   * 2. If none, throw (unless MEMBERRY_REQUIRE_PROJECT_TAG=false).
    * 3. Canonicalize lowercase.
    * 4. If new (not in known projects) and a fuzzy collision exists (Levenshtein <= 2),
    *    log a warning so the user can catch typos.
@@ -189,7 +189,7 @@ export class AMPService {
       if (readEnv('MEMBERRY_REQUIRE_PROJECT_TAG') === 'false') return { tag: '', isNew: false };
       throw new Error(
         'berry_store: a project tag is required. Pass tags: ["project:<name>"] or prefix the task/content with [project:<name>]. ' +
-        'Set AMP_REQUIRE_PROJECT_TAG=false to disable this check.',
+        'Set MEMBERRY_REQUIRE_PROJECT_TAG=false to disable this check.',
       );
     }
 
@@ -204,7 +204,7 @@ export class AMPService {
       const dist = levenshteinDistance(projectName, knownName);
       if (dist > 0 && dist <= 2) {
         console.error(
-          `[amp-store] WARN: new project tag "${canonical}" is suspiciously close to existing "${knownTag}" ` +
+          `[memberry-store] WARN: new project tag "${canonical}" is suspiciously close to existing "${knownTag}" ` +
           `(Levenshtein=${dist}). If this is a typo, fix the prefix/tag before retrying.`,
         );
         break;
@@ -215,10 +215,10 @@ export class AMPService {
     if (this.neo4j.entity) {
       try {
         await this.neo4j.entity.upsertProject(projectName, 'Auto-created from berry_store on first reference');
-        console.error(`[amp-store] INFO: auto-bootstrapped placeholder project Entity for "${canonical}". Run berry_bootstrap with full module list when ready.`);
+        console.error(`[memberry-store] INFO: auto-bootstrapped placeholder project Entity for "${canonical}". Run berry_bootstrap with full module list when ready.`);
         this.knownProjectsCache = null; // invalidate
       } catch (err) {
-        console.error(`[amp-store] WARN: failed to auto-create placeholder for "${canonical}":`, err instanceof Error ? err.message : err);
+        console.error(`[memberry-store] WARN: failed to auto-create placeholder for "${canonical}":`, err instanceof Error ? err.message : err);
       }
     }
     return { tag: canonical, isNew: true };
@@ -235,7 +235,7 @@ export class AMPService {
         const names = await this.neo4j.entity.listProjectNames();
         for (const n of names) tags.add(`project:${n.toLowerCase()}`);
       } catch (err) {
-        console.error('[amp-store] WARN: could not load known project tags:', err instanceof Error ? err.message : err);
+        console.error('[memberry-store] WARN: could not load known project tags:', err instanceof Error ? err.message : err);
       }
     }
     this.knownProjectsCache = { tags, expiresAt: now + 60_000 };
@@ -502,7 +502,7 @@ export class AMPService {
 
     // 3. Resolve project tag (Bucket B enforcement) — required, canonicalize,
     // fuzzy-warn, auto-placeholder. Falls through to legacy scope/tags if
-    // AMP_REQUIRE_PROJECT_TAG=false.
+    // MEMBERRY_REQUIRE_PROJECT_TAG=false.
     const projectInfo = await this.resolveProjectTag(input);
     const id = nanoid();
     const scope = input.scope ?? projectInfo.tag ?? undefined;
@@ -595,7 +595,7 @@ export class AMPService {
         // One XADD, persisted before we return. On enqueue failure, fall back
         // to in-process so a transient Redis hiccup doesn't lose the facts.
         this.redis.extraction.enqueue({ episodeId, content: contentForExtraction, tenantId }).catch((err) => {
-          console.error('[amp-store] extraction enqueue failed; running in-process fallback:', err instanceof Error ? err.message : err);
+          console.error('[memberry-store] extraction enqueue failed; running in-process fallback:', err instanceof Error ? err.message : err);
           void this._extractFactsBackground(factLayer, apiKey, contentForExtraction, episodeId, tenantId);
         });
       } else {
@@ -664,10 +664,10 @@ export class AMPService {
       } catch (err) {
         if (attempt < MAX_RETRIES && isTransientError(err)) {
           const delay = Math.pow(3, attempt) * 1000; // 1s, 3s
-          console.warn(`[amp-store] Fact extraction attempt ${attempt + 1} failed, retrying in ${delay}ms:`, err instanceof Error ? err.message : err);
+          console.warn(`[memberry-store] Fact extraction attempt ${attempt + 1} failed, retrying in ${delay}ms:`, err instanceof Error ? err.message : err);
           await new Promise(r => setTimeout(r, delay));
         } else {
-          console.error('[amp-store] Fact extraction failed after retries (non-fatal):', err instanceof Error ? err.message : err);
+          console.error('[memberry-store] Fact extraction failed after retries (non-fatal):', err instanceof Error ? err.message : err);
           return; // Give up — episode is already persisted
         }
       }
@@ -902,7 +902,7 @@ export class AMPService {
         await this.redis.cache.invalidateByScope(scope, tenantId);
       } catch (err) {
         console.warn(
-          `[amp-cache] Context cache invalidation failed for scope "${scope}":`,
+          `[memberry-cache] Context cache invalidation failed for scope "${scope}":`,
           err instanceof Error ? err.message : err,
         );
       }

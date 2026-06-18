@@ -16,7 +16,7 @@ function article(claims: Array<{ text: string; id?: string }>, extra = ''): stri
   return `---
 entity: my-role
 type: concept
-amp_id: ent-role1
+memberry_id: ent-role1
 tags: [project:user-personal, role]
 ---
 
@@ -67,12 +67,20 @@ function createDriver(graph: Map<string, GraphNode>): { driver: Driver; calls: (
 // ─── parseFrontmatter ────────────────────────────────────────────────────────
 
 describe('parseFrontmatter', () => {
-  it('reads entity, amp_id, and tags', () => {
+  it('reads entity, memberry_id, and tags', () => {
     const fm = parseFrontmatter(article([{ text: 'x', id: 'sem-1' }]));
     expect(fm.entity).toBe('my-role');
-    expect(fm.amp_id).toBe('ent-role1');
+    expect(fm.memberry_id).toBe('ent-role1');
     expect(fm.tags).toContain('project:user-personal');
     expect(fm.tags).toContain('role');
+  });
+
+  it('still parses a legacy amp_id frontmatter key into memberry_id (back-compat)', () => {
+    const md = `---\nentity: legacy-role\namp_id: ent-legacy1\ntags: [project:user-personal]\n---\n\n# Legacy\n`;
+    const fm = parseFrontmatter(md);
+    expect(fm.entity).toBe('legacy-role');
+    expect(fm.memberry_id).toBe('ent-legacy1');
+    expect(fm.tags).toContain('project:user-personal');
   });
 
   it('returns empty tags when no frontmatter', () => {
@@ -101,7 +109,7 @@ describe('parseClaimBlocks', () => {
   });
 
   it('ignores blockquotes and headings (history/hierarchy)', () => {
-    const md = `---\nentity: x\namp_id: ent-1\ntags: []\n---\n\n# X\n\n## History\n\n> **2026-01-01** -- did a thing\n`;
+    const md = `---\nentity: x\nmemberry_id: ent-1\ntags: []\n---\n\n# X\n\n## History\n\n> **2026-01-01** -- did a thing\n`;
     expect(parseClaimBlocks(md)).toHaveLength(0);
   });
 });

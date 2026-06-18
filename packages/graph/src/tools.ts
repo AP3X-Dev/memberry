@@ -144,7 +144,7 @@ const AmpGraphExportSchema = {
     .string()
     .max(300)
     .optional()
-    .describe('Relative path under the amp-graph-out/ directory to write the artifact to. Omit to return inline.'),
+    .describe('Relative path under the memberry-graph-out/ directory to write the artifact to. Omit to return inline.'),
   include_symbols: z.boolean().optional().describe('Include code symbols (default true).'),
   include_semantics: z.boolean().optional().describe('Include semantic memories (default true).'),
   include_facts: z.boolean().optional().describe('Include temporal facts (default true).'),
@@ -216,7 +216,7 @@ export function registerGraphTools(
   handles.push(
     server.tool(
       'berry_graph_export',
-      'Export the MemBerry knowledge graph as a portable artifact: "json" (the secret-safe graph snapshot) or "html" (a self-contained, offline, interactive force-directed viewer you open in a browser — pan/zoom/drag, click a node to inspect its properties). Works for any memory graph (code, people, orgs, topics). Project-scoped; writes to amp-graph-out/ when output_path is given, otherwise returns the artifact inline.',
+      'Export the MemBerry knowledge graph as a portable artifact: "json" (the secret-safe graph snapshot) or "html" (a self-contained, offline, interactive force-directed viewer you open in a browser — pan/zoom/drag, click a node to inspect its properties). Works for any memory graph (code, people, orgs, topics). Project-scoped; writes to memberry-graph-out/ when output_path is given, otherwise returns the artifact inline.',
       AmpGraphExportSchema,
       // Writes a file when output_path is set, so this is not purely read-only.
       // Non-empty annotations are MANDATORY (empty {} re-triggers the SDK bug).

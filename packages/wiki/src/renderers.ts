@@ -28,11 +28,11 @@ function truncate(text: string, max: number): string {
 // See reconcile.ts (parseClaimBlocks) and viewer.ts (anchors stripped before render).
 
 /** Matches a claim anchor and captures the semantic id. Global+multiline for scanning. */
-export const CLAIM_ANCHOR_RE = /<!--\s*amp:(sem-[A-Za-z0-9_-]+)\s*-->/g;
+export const CLAIM_ANCHOR_RE = /<!--\s*(?:amp|memberry):(sem-[A-Za-z0-9_-]+)\s*-->/g;
 
 /** Render a hidden anchor that ties a rendered claim to its Semantic node id. */
 export function claimAnchor(id: string): string {
-  return `<!-- amp:${id} -->`;
+  return `<!-- memberry:${id} -->`;
 }
 
 function formatDate(iso: string): string {
@@ -127,7 +127,7 @@ export function renderEntityArticle(
     sources: frontmatter.sources,
     inbound_links: frontmatter.inbound_links,
     last_compiled: frontmatter.last_compiled,
-    amp_id: frontmatter.amp_id,
+    memberry_id: frontmatter.memberry_id,
     aliases: frontmatter.aliases,
     tags: frontmatter.tags,
     parent: frontmatter.parent,
@@ -184,8 +184,8 @@ export function renderEntityArticle(
       if (claim.confidence < 1.0) {
         lines.push(`*(confidence: ${claim.confidence.toFixed(2)})*`);
       }
-      if (claim.amp_id) {
-        lines.push(claimAnchor(claim.amp_id));
+      if (claim.memberry_id) {
+        lines.push(claimAnchor(claim.memberry_id));
       }
       lines.push('');
     }

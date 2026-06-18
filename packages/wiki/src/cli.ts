@@ -4,6 +4,7 @@
 // Usage: npx tsx packages/wiki/src/cli.ts <command> [options]
 
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { createNeo4jDriver } from '@memberry/neo4j';
 import { WikiCompiler } from './compile.js';
 import { initWikiSchema } from './ingest.js';
@@ -59,7 +60,7 @@ Commands:
   sync      Reconcile a human-edited wiki file back into the graph
 
 Options:
-  --output    Output directory (default: /home/cerebro/projects/amp/wiki)
+  --output    Output directory (default: ./wiki)
   --port      Viewer port (default: 3200)
   --project   Project tag for compile/lint/sync (default compile: all)
   --file      Edited markdown file to reconcile (sync)
@@ -75,7 +76,7 @@ Options:
 
     await initWikiSchema(driver);
 
-    const outputDir = (flags['output'] as string) ?? '/home/cerebro/projects/amp/wiki';
+    const outputDir = (flags['output'] as string) ?? path.resolve(process.cwd(), 'wiki');
     const port = parseInt((flags['port'] as string) ?? '3200', 10);
     const projectTag = (flags['project'] as string) ?? 'all';
 

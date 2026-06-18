@@ -430,7 +430,7 @@ export class WikiCompiler {
           const claim: ResolvedClaim = {
             content: resolveInlineLinks(sem.content, otherRefs, projectSlug),
             confidence: sem.confidence,
-            amp_id: sem.id,
+            memberry_id: sem.id,
             source_refs: [],
             entity_refs: otherRefs,
           };
@@ -459,7 +459,7 @@ export class WikiCompiler {
           sources: sources.length,
           inbound_links: inboundCount,
           last_compiled: new Date().toISOString().split('T')[0],
-          amp_id: entity.id,
+          memberry_id: entity.id,
           aliases: entity.aliases ?? [],
           tags: allTags,
           parent: hierarchy.parent,

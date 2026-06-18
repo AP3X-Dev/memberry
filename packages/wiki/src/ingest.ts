@@ -133,9 +133,9 @@ export class IngestionService {
           confidence: c.confidence,
           tags: c.tags,
         }));
-        console.error(`[amp-ingest] Auto-extracted ${result.entities.length} entities, ${result.claims.length} claims from ${source_path}`);
+        console.error(`[memberry-ingest] Auto-extracted ${result.entities.length} entities, ${result.claims.length} claims from ${source_path}`);
       } catch (err) {
-        console.error('[amp-ingest] Auto-extraction failed (non-critical):', err instanceof Error ? err.message : err);
+        console.error('[memberry-ingest] Auto-extraction failed (non-critical):', err instanceof Error ? err.message : err);
       }
     }
 

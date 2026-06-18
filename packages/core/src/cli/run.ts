@@ -50,7 +50,7 @@ export async function runRunCommand(rest: string[]): Promise<void> {
       await core.close();
     }
   } catch (err) {
-    process.stderr.write(`[amp-run] context refresh skipped: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`[memberry-run] context refresh skipped: ${err instanceof Error ? err.message : String(err)}\n`);
   }
 
   // Exec the wrapped command, inheriting stdio; propagate its exit code.
@@ -60,7 +60,7 @@ export async function runRunCommand(rest: string[]): Promise<void> {
     else process.exit(code ?? 0);
   });
   child.on('error', (err) => {
-    process.stderr.write(`[amp-run] failed to launch ${command[0]}: ${err.message}\n`);
+    process.stderr.write(`[memberry-run] failed to launch ${command[0]}: ${err.message}\n`);
     process.exit(127);
   });
 }

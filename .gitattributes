@@ -1,0 +1,7 @@
+# Author on Windows, build/run on Linux (Docker + the Cerebro server).
+# Let git normalize text to LF in the repo; keep executable scripts LF in the
+# working tree too, so they run under bash/node after a Windows checkout.
+* text=auto
+*.sh   text eol=lf
+*.mjs  text eol=lf
+*.bash text eol=lf

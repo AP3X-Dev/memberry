@@ -67,7 +67,7 @@ describe('renderEntityArticle', () => {
       sources: 2,
       inbound_links: 3,
       last_compiled: '2026-04-09',
-      amp_id: 'ent-1',
+      memberry_id: 'ent-1',
       aliases: [],
       tags: ['architecture'],
       parent: 'ParentSystem',
@@ -80,7 +80,7 @@ describe('renderEntityArticle', () => {
           {
             content: 'TestWidget uses a reactive pattern',
             confidence: 0.9,
-            amp_id: 'sem-1',
+            memberry_id: 'sem-1',
             source_refs: [],
             entity_refs: [],
           },
@@ -573,7 +573,7 @@ describe('renderLibraryPage', () => {
         {
           content: 'RESTful APIs should be versioned',
           confidence: 0.8,
-          amp_id: 'sem-c1',
+          memberry_id: 'sem-c1',
           source_refs: ['src-1'],
           entity_refs: ['API', 'Versioning'],
         },
@@ -603,7 +603,7 @@ describe('renderLibraryPage', () => {
         {
           content: 'RESTful APIs should be versioned',
           confidence: 0.8,
-          amp_id: 'sem-c1',
+          memberry_id: 'sem-c1',
           source_refs: ['src-1'],
           entity_refs: ['API', 'Versioning'],
         },
@@ -661,11 +661,11 @@ describe('renderTopicIndex', () => {
 // Round-trip claim anchors
 
 describe('claim anchors (round-trip)', () => {
-  const articleWith = (claims: Array<{ content: string; confidence: number; amp_id: string }>) => ({
+  const articleWith = (claims: Array<{ content: string; confidence: number; memberry_id: string }>) => ({
     entity: { id: 'ent-1', name: 'Role', type: 'concept', slug: 'role', description: '', created_at: 't' },
     frontmatter: {
       entity: 'role', type: 'concept', confidence: 0.8, sources: 0, inbound_links: 0,
-      last_compiled: 't', amp_id: 'ent-1', aliases: [], tags: ['project:user-personal'],
+      last_compiled: 't', memberry_id: 'ent-1', aliases: [], tags: ['project:user-personal'],
     },
     sections: [{ heading: 'Architecture', claims: claims.map((c) => ({ ...c, source_refs: [], entity_refs: [] })) }],
     backlinks: [], see_also: [], sources: [],
@@ -674,27 +674,31 @@ describe('claim anchors (round-trip)', () => {
 
   it('emits a hidden anchor after each canonical section claim', () => {
     const md = renderEntityArticle(articleWith([
-      { content: 'Low-confidence note', confidence: 0.4, amp_id: 'sem-aaa' },
+      { content: 'Low-confidence note', confidence: 0.4, memberry_id: 'sem-aaa' },
     ]), []);
     expect(md).toContain(claimAnchor('sem-aaa'));
-    expect(md).toContain('<!-- amp:sem-aaa -->');
+    expect(md).toContain('<!-- memberry:sem-aaa -->');
   });
 
   it('does NOT anchor the derived Key Decisions block (only the canonical section)', () => {
     // confidence >= 0.8 means this claim is ALSO duplicated into Key Decisions —
     // the anchor must appear exactly once (the canonical section), never twice.
     const md = renderEntityArticle(articleWith([
-      { content: 'High-confidence decision', confidence: 0.95, amp_id: 'sem-bbb' },
+      { content: 'High-confidence decision', confidence: 0.95, memberry_id: 'sem-bbb' },
     ]), []);
     expect(md).toContain('## Key Decisions');
     const matches = md.match(CLAIM_ANCHOR_RE) ?? [];
     expect(matches).toHaveLength(1);
   });
 
-  it('omits an anchor when a claim has no amp_id', () => {
+  it('omits an anchor when a claim has no memberry_id', () => {
     const md = renderEntityArticle(articleWith([
-      { content: 'orphan', confidence: 0.4, amp_id: '' },
+      { content: 'orphan', confidence: 0.4, memberry_id: '' },
     ]), []);
     expect(md.match(CLAIM_ANCHOR_RE) ?? []).toHaveLength(0);
+  });
+
+  it('CLAIM_ANCHOR_RE still matches legacy amp: anchors (back-compat read)', () => {
+    expect('x\n<!-- amp:sem-legacy1 -->'.match(CLAIM_ANCHOR_RE) ?? []).toHaveLength(1);
   });
 });

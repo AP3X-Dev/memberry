@@ -298,7 +298,7 @@ export function buildWikiToolHandlers(container: WikiServiceContainer = defaultC
       let compiled: string | undefined;
       if (args.compile && wikiCompiler) {
         try {
-          await wikiCompiler.compile({ project_tag: scope, output_dir: '/home/cerebro/projects/amp/wiki', format: 'obsidian', emit_graph: true });
+          await wikiCompiler.compile({ project_tag: scope, output_dir: path.resolve(process.cwd(), 'wiki'), format: 'obsidian', emit_graph: true });
           compiled = scope;
         } catch (err) {
           compiled = `compile failed: ${err instanceof Error ? err.message : 'unknown'}`;

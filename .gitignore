@@ -12,7 +12,7 @@ dist/
 /wiki/
 
 # Graph analysis/export artifacts (generated, not source)
-amp-graph-out/
+memberry-graph-out/
 
 # Claude Code runtime state (logs, trackers, etc.)
 .claude/

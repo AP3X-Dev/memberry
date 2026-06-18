@@ -1383,7 +1383,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     expect(neo4j.episodic.create).toHaveBeenCalledOnce();
     // Error was logged (non-transient: no retries, immediate failure)
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('[amp-store] Fact extraction failed after retries'),
+      expect.stringContaining('[memberry-store] Fact extraction failed after retries'),
       expect.stringContaining('Invalid API key'),
     );
     // extractFacts called exactly once (no retries for non-transient errors)

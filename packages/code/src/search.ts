@@ -252,7 +252,7 @@ export class CodeSearch {
         await session.close();
       }
     } catch (err) {
-      console.error('[amp-code] Symbol vector search failed (falling back to fulltext):', err instanceof Error ? err.message : err);
+      console.error('[memberry-code] Symbol vector search failed (falling back to fulltext):', err instanceof Error ? err.message : err);
       return [];
     }
   }
@@ -299,7 +299,7 @@ export class CodeSearch {
         await session.close();
       }
     } catch (err) {
-      console.error('[amp-code] Lexical vector search failed:', err instanceof Error ? err.message : err);
+      console.error('[memberry-code] Lexical vector search failed:', err instanceof Error ? err.message : err);
       return [];
     }
   }
@@ -348,7 +348,7 @@ export class CodeSearch {
         await session.close();
       }
     } catch (err) {
-      console.error('[amp-code] Semantic vector search failed:', err instanceof Error ? err.message : err);
+      console.error('[memberry-code] Semantic vector search failed:', err instanceof Error ? err.message : err);
       return [];
     }
   }

@@ -4,7 +4,7 @@
  * an allowed output directory.
  *
  * Side effects: when `output_path` is given, writes one file under `baseDir`
- * (default `<cwd>/amp-graph-out`, which is gitignored). Path is resolved
+ * (default `<cwd>/memberry-graph-out`, which is gitignored). Path is resolved
  * defensively — no absolute paths, no `..`, must stay within `baseDir`.
  */
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -75,7 +75,7 @@ export class GraphExportService {
     };
 
     if (input.output_path) {
-      const baseDir = this.baseDir ?? path.resolve(process.cwd(), 'amp-graph-out');
+      const baseDir = this.baseDir ?? path.resolve(process.cwd(), 'memberry-graph-out');
       const target = resolveSafeOutputPath(input.output_path, baseDir);
       await mkdir(path.dirname(target), { recursive: true });
       await writeFile(target, content, 'utf8');

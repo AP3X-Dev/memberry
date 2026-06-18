@@ -117,10 +117,10 @@ html, body { margin: 0; height: 100%; background: #0f1117; color: #d7dce5;
 const VIEWER_JS = `
 (function () {
   'use strict';
-  var data = JSON.parse(document.getElementById('amp-graph-data').textContent);
+  var data = JSON.parse(document.getElementById('memberry-graph-data').textContent);
   var nodes = data.nodes || [], edges = data.edges || [];
-  var colors = JSON.parse(document.getElementById('amp-graph-colors').textContent);
-  var community = JSON.parse(document.getElementById('amp-graph-communities').textContent);
+  var colors = JSON.parse(document.getElementById('memberry-graph-colors').textContent);
+  var community = JSON.parse(document.getElementById('memberry-graph-communities').textContent);
   var colorMode = 'type';
   function communityColor(cid) {
     if (cid === undefined || cid === null || cid < 0) return '#9aa3b2';
@@ -277,9 +277,9 @@ export function exportHtml(
     '<div id="info"></div>\n' +
     '<button id="mode">Color: type</button>\n' +
     '<div id="hint">drag to pan · scroll to zoom · click a node</div>\n' +
-    `<script type="application/json" id="amp-graph-data">${dataJson}</script>\n` +
-    `<script type="application/json" id="amp-graph-colors">${colorsJson}</script>\n` +
-    `<script type="application/json" id="amp-graph-communities">${communitiesJson}</script>\n` +
+    `<script type="application/json" id="memberry-graph-data">${dataJson}</script>\n` +
+    `<script type="application/json" id="memberry-graph-colors">${colorsJson}</script>\n` +
+    `<script type="application/json" id="memberry-graph-communities">${communitiesJson}</script>\n` +
     `<script>${VIEWER_JS}</script>\n` +
     '</body>\n</html>\n';
 

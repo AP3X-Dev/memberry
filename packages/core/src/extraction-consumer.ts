@@ -96,7 +96,7 @@ export class ExtractionConsumer {
         const n = await this.drainOnce();
         if (n === 0) await this.sleep(this.pollMs);
       } catch (err) {
-        console.error('[amp-extraction] consumer loop error:', err instanceof Error ? err.message : err);
+        console.error('[memberry-extraction] consumer loop error:', err instanceof Error ? err.message : err);
         await this.sleep(this.pollMs);
       }
     }
@@ -110,7 +110,7 @@ export class ExtractionConsumer {
       const msg = err instanceof Error ? err.message : String(err);
       if (job.attempt + 1 >= this.maxAttempts) {
         console.error(
-          `[amp-extraction] job ${job.id} (episode ${job.episodeId}) failed permanently ` +
+          `[memberry-extraction] job ${job.id} (episode ${job.episodeId}) failed permanently ` +
           `after ${job.attempt + 1} attempt(s); dead-lettering:`, msg,
         );
         // OPT-56: atomic dead-letter+ack when supported (no duplicate on a crash
@@ -122,7 +122,7 @@ export class ExtractionConsumer {
           await this.queue.ack(job.id);
         }
       } else {
-        console.warn(`[amp-extraction] job ${job.id} attempt ${job.attempt + 1} failed; re-enqueuing:`, msg);
+        console.warn(`[memberry-extraction] job ${job.id} attempt ${job.attempt + 1} failed; re-enqueuing:`, msg);
         // OPT-56: atomic requeue (enqueue retry + ack original in ONE tx) closes
         // the crash-window where the original was re-delivered on top of the
         // re-enqueued copy → duplicate extraction. Falls back to the prior

@@ -66,7 +66,7 @@ interface ClaimBlock {
 
 interface Frontmatter {
   entity?: string;
-  amp_id?: string;
+  memberry_id?: string;
   tags: string[];
 }
 
@@ -81,7 +81,7 @@ export function parseFrontmatter(md: string): Frontmatter {
     const key = line.slice(0, colon).trim();
     const value = line.slice(colon + 1).trim();
     if (key === 'entity') fm.entity = value;
-    else if (key === 'amp_id') fm.amp_id = value;
+    else if (key === 'memberry_id' || key === 'amp_id') fm.memberry_id = value;
     else if (key === 'tags') {
       const inner = value.replace(/^\[/, '').replace(/\]$/, '');
       fm.tags = inner.split(',').map((t) => t.trim()).filter(Boolean);
@@ -174,7 +174,7 @@ export class WikiEditReconciler {
   async reconcile(input: ReconcileInput): Promise<ReconcileResult> {
     const { project_tag, edited_md, original_md } = input;
     const fm = parseFrontmatter(edited_md);
-    const entityId = fm.amp_id ?? null;
+    const entityId = fm.memberry_id ?? null;
     const sessionId = input.session_id ?? `wiki-edit-${nanoid(8)}`;
 
     const edited = parseClaimBlocks(edited_md);

@@ -867,7 +867,7 @@ Deterministic graph audit: corpus summary, node/relation counts, memory-confiden
 
 ### berry_graph_export
 
-Export the graph as portable JSON, or as a self-contained offline interactive HTML graph map (pan/zoom/drag, click a node to inspect, color by type or knowledge area). Secret-safe + XSS-escaped. Optionally writes a file under `amp-graph-out/`.
+Export the graph as portable JSON, or as a self-contained offline interactive HTML graph map (pan/zoom/drag, click a node to inspect, color by type or knowledge area). Secret-safe + XSS-escaped. Optionally writes a file under `memberry-graph-out/`.
 
 ```json
 { "project_tag": "project:my-api", "format": "html" }
