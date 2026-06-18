@@ -58,7 +58,11 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/packages ./packages
 
-RUN chown -R memberry:memberry /app
+# Create the wiki output dir so it exists in the image and is owned by the
+# non-root runtime user. A fresh named volume mounted at /app/wiki (the gap-15
+# shared wiki_output volume) inherits the image dir's ownership on first init,
+# so the wiki/mcp processes can write to it without an EACCES.
+RUN mkdir -p /app/wiki && chown -R memberry:memberry /app
 USER memberry
 
 EXPOSE 3101
