@@ -4,6 +4,57 @@
 import neo4j, { type Driver } from 'neo4j-driver';
 import type { LintInput, LintResult, LintCheckResult, LintIssue, LintCheck } from './types.js';
 
+// ─── Shared report formatter ─────────────────────────────────────────────────
+//
+// gap-17: a single formatter shared by the wiki CLI `lint` command and the MCP
+// `berry_lint` handler, so the two surfaces can't drift. Previously the CLI
+// printed only summary counts while the MCP handler had its own inline detail
+// renderer.
+
+/** Map a LintIssue severity to its short uppercase prefix. */
+function severityPrefix(severity: LintIssue['severity']): string {
+  return severity === 'error' ? 'ERROR' : severity === 'warning' ? 'WARN' : 'INFO';
+}
+
+/**
+ * Render a LintResult as a human-readable report.
+ *
+ * Default (summaryOnly falsy): one header per check —
+ *   `[PASS] <check>` for clean checks, `[ISSUES] <check> (N)` otherwise —
+ * followed by each issue indented as `  [ERROR|WARN|INFO] <message>` with an
+ * optional `    Suggestion: <...>` line; the overall summary + total close it.
+ *
+ * summaryOnly true: the terse summary + total only (the legacy CLI behavior).
+ */
+export function formatLintReport(result: LintResult, opts?: { summaryOnly?: boolean }): string {
+  const summaryBlock = [result.summary, `Total issues: ${result.total_issues}`];
+
+  if (opts?.summaryOnly) {
+    return summaryBlock.join('\n');
+  }
+
+  const lines: string[] = [];
+
+  for (const [name, checkResult] of Object.entries(result.checks)) {
+    if (checkResult.issues.length === 0) {
+      lines.push(`[PASS] ${name}`);
+    } else {
+      lines.push(`[ISSUES] ${name} (${checkResult.issues.length})`);
+      for (const issue of checkResult.issues) {
+        lines.push(`  [${severityPrefix(issue.severity)}] ${issue.message}`);
+        if (issue.suggestion) {
+          lines.push(`    Suggestion: ${issue.suggestion}`);
+        }
+      }
+    }
+  }
+
+  lines.push('');
+  lines.push(...summaryBlock);
+
+  return lines.join('\n');
+}
+
 // ─── Individual check implementations ───────────────────────────────────────
 
 type CheckFn = (driver: Driver, projectName: string, thresholds: Required<NonNullable<LintInput['thresholds']>>) => Promise<LintCheckResult>;

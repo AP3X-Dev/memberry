@@ -7,6 +7,7 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { CompileInput, CompileResult, CompileV2Result, IngestInput, IngestResult, LintInput, LintResult, LintCheck } from './types.js';
 import type { ReconcileInput, ReconcileResult } from './reconcile.js';
 import { parseFrontmatter } from './reconcile.js';
+import { formatLintReport } from './lint.js';
 import { isRealpathWithinBase, getAllowedBaseDir } from '@memberry/core';
 
 // ─── Service interfaces (injected, no concrete imports) ──────────────────────
@@ -329,33 +330,9 @@ export function buildWikiToolHandlers(container: WikiServiceContainer = defaultC
       };
       const result = await wikiLinter.lint(input);
 
-      // Format as readable markdown
-      const lines: string[] = [
-        `# Wiki Lint Report`,
-        '',
-        result.summary,
-        '',
-      ];
-
-      for (const [name, checkResult] of Object.entries(result.checks)) {
-        const icon = checkResult.passed ? 'PASS' : 'ISSUES';
-        lines.push(`## [${icon}] ${name}`);
-        lines.push('');
-        if (checkResult.issues.length === 0) {
-          lines.push('No issues found.');
-        } else {
-          for (const issue of checkResult.issues) {
-            const prefix = issue.severity === 'error' ? 'ERROR' : issue.severity === 'warning' ? 'WARN' : 'INFO';
-            lines.push(`- **[${prefix}]** ${issue.message}`);
-            if (issue.suggestion) {
-              lines.push(`  - Suggestion: ${issue.suggestion}`);
-            }
-          }
-        }
-        lines.push('');
-      }
-
-      return textContent(lines.join('\n'));
+      // Shared formatter (gap-17): the CLI `lint` command and this MCP handler
+      // render identical reports via formatLintReport, so they can't drift.
+      return textContent(formatLintReport(result));
     },
   };
 }

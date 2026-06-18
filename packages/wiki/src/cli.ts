@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createNeo4jDriver } from '@memberry/neo4j';
 import { WikiCompiler } from './compile.js';
 import { initWikiSchema } from './ingest.js';
-import { WikiLinter } from './lint.js';
+import { WikiLinter, formatLintReport } from './lint.js';
 import { startWikiViewer } from './viewer.js';
 import { WikiEditReconciler, parseFrontmatter } from './reconcile.js';
 
@@ -60,10 +60,12 @@ Commands:
   sync      Reconcile a human-edited wiki file back into the graph
 
 Options:
-  --output    Output directory (default: ./wiki)
-  --port      Viewer port (default: 3200)
-  --project   Project tag for compile/lint/sync (default compile: all)
-  --file      Edited markdown file to reconcile (sync)
+  --output         Output directory (default: ./wiki)
+  --port           Viewer port (default: 3200)
+  --project        Project tag for compile/lint/sync (default compile: all)
+  --checks         Comma-separated lint checks to run (default: all)
+  --summary-only   lint: print summary counts only (default: full issue detail)
+  --file           Edited markdown file to reconcile (sync)
 `);
     process.exit(0);
   }
@@ -146,8 +148,10 @@ Options:
           project_tag: lintProjectTag,
           checks,
         });
-        console.log(result.summary);
-        console.log(`Total issues: ${result.total_issues}`);
+        // gap-17: print per-issue detail by default; --summary-only for the
+        // terse counts. Shares formatLintReport with the MCP berry_lint handler.
+        const summaryOnly = flags['summary-only'] === true;
+        console.log(formatLintReport(result, { summaryOnly }));
         break;
       }
 

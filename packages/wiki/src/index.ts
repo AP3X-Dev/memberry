@@ -40,7 +40,7 @@ export {
 } from './document-converter.js';
 export type { DocumentConverter, ConvertResult } from './document-converter.js';
 export { CachingDocumentConverter } from './document-cache.js';
-export { WikiLinter } from './lint.js';
+export { WikiLinter, formatLintReport } from './lint.js';
 export { startWikiViewer, escapeHtml, sanitizeHtml, resetViewerCache, renderMarkdown } from './viewer.js';
 export { WikiEditReconciler, parseClaimBlocks, parseFrontmatter } from './reconcile.js';
 export type { ReconcileInput, ReconcileResult, ReconcileChange } from './reconcile.js';
