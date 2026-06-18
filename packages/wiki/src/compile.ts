@@ -3,7 +3,7 @@
 // subdirectory layout, episodic history, library, topics, and portal homepage.
 
 import type { Driver } from 'neo4j-driver';
-import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { writeFile, mkdir, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   CompileV2Result,
@@ -259,9 +259,14 @@ export class WikiCompiler {
       output_dir: outputDir,
     };
 
-    // Clean output directory
-    await rm(outputDir, { recursive: true, force: true });
+    // Clean the output directory's CONTENTS without removing the directory
+    // itself. `outputDir` may be a Docker volume MOUNT POINT (the gap-15 shared
+    // wiki_output volume); rm-ing a mount point fails with EBUSY. Clearing the
+    // children is mount-point-safe and equivalent to starting from a fresh dir.
     await mkdir(outputDir, { recursive: true });
+    for (const entry of await readdir(outputDir)) {
+      await rm(join(outputDir, entry), { recursive: true, force: true });
+    }
 
     // ── Phase 0: Pre-fetch shared data ─────────────────────────────
 

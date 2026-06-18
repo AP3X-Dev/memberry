@@ -28,4 +28,13 @@ describe('compile.ts regression', () => {
     expect(COMPILE_SRC).toContain('entityEpisodicsByName');
     expect(COMPILE_SRC).toMatch(/entityEpisodicsByName\.get\(entity\.name\)/);
   });
+
+  it('gap-15: clears the output dir CONTENTS (mount-point-safe), never rm-s the dir itself', () => {
+    // outputDir may be a Docker volume MOUNT POINT (the shared wiki_output
+    // volume); rm-ing a mount point fails with EBUSY and crash-loops the wiki
+    // container. The compiler must clear the dir's children, not remove the dir.
+    expect(COMPILE_SRC).not.toMatch(/\brm\(outputDir\s*,/); // never rm the dir/mount itself
+    expect(COMPILE_SRC).toContain('readdir(outputDir)'); // enumerate children
+    expect(COMPILE_SRC).toMatch(/rm\(join\(outputDir, entry\)/); // remove each child
+  });
 });
