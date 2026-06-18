@@ -8,7 +8,7 @@ import type { CompileInput, CompileResult, CompileV2Result, IngestInput, IngestR
 import type { ReconcileInput, ReconcileResult } from './reconcile.js';
 import { parseFrontmatter } from './reconcile.js';
 import { formatLintReport } from './lint.js';
-import { isRealpathWithinBase, getAllowedBaseDir } from '@memberry/core';
+import { isRealpathWithinBase, getAllowedBaseDir, readEnv } from '@memberry/core';
 
 // ─── Service interfaces (injected, no concrete imports) ──────────────────────
 
@@ -78,7 +78,7 @@ export const WIKI_TOOL_NAMES = ['berry_compile', 'berry_ingest', 'berry_lint', '
 
 const AmpCompileSchema = {
   project_tag: z.string().max(500).describe('Project tag to scope compilation (e.g. "project:oni-core")'),
-  output_dir: z.string().max(1000).describe('Output directory for compiled wiki'),
+  output_dir: z.string().max(1000).optional().describe('Output directory for the compiled wiki (defaults to MEMBERRY_WIKI_OUTPUT_DIR or ./wiki)'),
   format: z.enum(['obsidian', 'plain']).optional().default('obsidian').describe('Output format'),
   emit_graph: z.boolean().optional().default(true).describe('Also emit graph metadata files (_graph/)'),
   entities: z.array(z.string()).optional().describe('Only compile specific entities (empty = all)'),
@@ -191,7 +191,7 @@ function textContent(text: string): { content: Array<{ type: 'text'; text: strin
 export type WikiToolHandlers = {
   berry_compile: (args: {
     project_tag: string;
-    output_dir: string;
+    output_dir?: string;
     format?: 'obsidian' | 'plain';
     emit_graph?: boolean;
     entities?: string[];
@@ -241,12 +241,14 @@ export function buildWikiToolHandlers(container: WikiServiceContainer = defaultC
     async berry_compile(args) {
       if (!wikiCompiler) throw new Error('WikiCompiler not initialised');
 
-      // Validate output_dir is within allowed directory
-      validatePath(args.output_dir);
+      // output_dir defaults to the server's configured wiki dir — a client need
+      // not (and should not) know the server's filesystem layout. Then confine it.
+      const outputDir = args.output_dir ?? readEnv('MEMBERRY_WIKI_OUTPUT_DIR') ?? path.resolve(process.cwd(), 'wiki');
+      validatePath(outputDir);
 
       const input: CompileInput = {
         project_tag: args.project_tag,
-        output_dir: args.output_dir,
+        output_dir: outputDir,
         format: args.format ?? 'obsidian',
         emit_graph: args.emit_graph ?? true,
         entities: args.entities,

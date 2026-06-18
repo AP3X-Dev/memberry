@@ -157,9 +157,17 @@ async function runProjectSetup(positionals: string[], flags: Flags): Promise<voi
       if (projectTag) compileArgs.project_tag = projectTag;
       else if (projectName) compileArgs.project_tag = `project:${projectName}`;
       console.log('Compiling wiki (berry_compile) ...');
-      const compileResult = await mcpCall(session, 'berry_compile', compileArgs);
-      wikiSummary = toolCallText(compileResult);
-      wikiCompiled = true;
+      try {
+        const compileResult = await mcpCall(session, 'berry_compile', compileArgs);
+        wikiSummary = toolCallText(compileResult);
+        wikiCompiled = true;
+      } catch (err) {
+        // Non-fatal: when the server's wiki dir is outside the ingest-allow-dir
+        // (e.g. /app/wiki in docker), an explicit compile is rejected by path
+        // confinement — the server's MEMBERRY_WIKI_AUTOREFRESH recompiles the
+        // served wiki instead. The ingest itself already succeeded.
+        console.warn(`  (explicit wiki compile skipped: ${err instanceof Error ? err.message.split('\n')[0] : String(err)})`);
+      }
       // Best-effort viewer refresh — non-fatal whether reachable or not.
       wikiRefreshed = await refreshWikiViewer(wikiBaseUrl(url));
     }
