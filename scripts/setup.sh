@@ -9,6 +9,7 @@
 #   ./setup.sh                 # guided (prompts when run in a terminal)
 #   ./setup.sh --yes           # non-interactive, accept all defaults
 #   ./setup.sh --db-only       # start only Neo4j + Redis (run the server yourself)
+#   ./setup.sh --with-wiki     # also start the wiki viewer (port 3200, "wiki" profile)
 #   ./setup.sh --reconfigure   # re-run the wizard even if .env already exists
 #   ./setup.sh --mode local    # local-only access (publish on 127.0.0.1)
 #   ./setup.sh --mode server   # LAN/server access (publish on 0.0.0.0)
@@ -30,11 +31,12 @@ warn() { printf '%s[setup]%s %s\n' "$YEL" "$R" "$*" >&2; }
 fail() { printf '%s[setup]%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
 
 # ── Flags ───────────────────────────────────────────────────────────────────────
-ASSUME_YES=0; DB_ONLY=0; RECONFIGURE=0; MODE=''
+ASSUME_YES=0; DB_ONLY=0; RECONFIGURE=0; MODE=''; WITH_WIKI=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --yes|-y) ASSUME_YES=1 ;;
     --db-only) DB_ONLY=1 ;;
+    --with-wiki) WITH_WIKI=1 ;;
     --reconfigure) RECONFIGURE=1 ;;
     --mode)
       shift; MODE="${1:-}"
@@ -175,7 +177,9 @@ if [ "$DB_ONLY" -eq 1 ]; then
 else
   log "Building and starting the full stack (Neo4j + Redis + MemBerry)..."
   log "The first build compiles all packages in Docker and may take a few minutes."
-  docker compose --profile app up -d --build
+  profiles="--profile app"
+  [ "$WITH_WIKI" = "1" ] && profiles="$profiles --profile wiki" && log "Wiki viewer enabled (--with-wiki): will publish on port 3200."
+  docker compose $profiles up -d --build
 fi
 
 # ── Wait for health ─────────────────────────────────────────────────────────────
@@ -222,6 +226,10 @@ ${B}Handy commands${R}
   Stop:    docker compose --profile app down
   Status:  curl http://localhost:${MCP_PORT}/healthz
 EOF
+  if [ "$WITH_WIKI" = "1" ]; then
+    printf '\n%sWiki viewer is running:%s\n  URL:    http://%s:3200/wiki/_index\n' \
+      "$B" "$R" "${MEMBERRY_PUBLIC_HOST}"
+  fi
   if [ "$MEMBERRY_PUBLISH_HOST" = "0.0.0.0" ]; then
     warn "SERVER MODE: MemBerry is published on 0.0.0.0 and is reachable by ANY host on the LAN."
     warn "The bearer token is the ONLY thing gating access — keep MEMBERRY_API_TOKEN secret and rotate it if leaked."
