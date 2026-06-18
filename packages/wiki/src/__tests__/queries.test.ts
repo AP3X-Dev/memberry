@@ -159,6 +159,112 @@ describe('fetchEpisodicProjectScopes', () => {
 
     expect(scopes).toEqual(['agent-assist', 'client-portal']);
   });
+
+  // gap-13: scopes are also discovered from the structured ep.scope / ep.tags,
+  // not only the legacy task-prefix split.
+  it('discovers scopes from structured ep.scope and ep.tags as well as the task prefix', async () => {
+    const { fetchEpisodicProjectScopes } = await import('../queries.js');
+
+    const mockSession = {
+      run: vi.fn(async () => mockResult([])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+    const driver = { session: vi.fn(() => mockSession) } as unknown as Driver;
+
+    await fetchEpisodicProjectScopes(driver);
+
+    const cypher = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    // structured scope: strip the 'project:' prefix (8 chars) from ep.scope
+    expect(cypher).toContain("ep.scope STARTS WITH 'project:'");
+    expect(cypher).toContain('substring(ep.scope, 8)');
+    // structured tags: every 'project:*' tag contributes a bare name
+    expect(cypher).toContain("[t IN coalesce(ep.tags, []) WHERE t STARTS WITH 'project:' | substring(t, 8)]");
+    // FALLBACK: legacy task-prefix split is retained
+    expect(cypher).toContain("ep.task STARTS WITH '[project:'");
+    // existing "no project Entity yet" filter preserved
+    expect(cypher).toContain("OPTIONAL MATCH (e:Entity {type: 'project'})");
+    expect(cypher).toContain('WITH proj WHERE e IS NULL');
+  });
+});
+
+// ─── gap-13: structured scope/tags WHERE + RETURN (pinned query text) ─────────
+
+describe('fetchEpisodicsForProject (gap-13 structured scope)', () => {
+  it('matches episodes by ep.scope, ep.tags, OR the task-prefix fallback', async () => {
+    const { fetchEpisodicsForProject } = await import('../queries.js');
+
+    const mockSession = {
+      run: vi.fn(async () => mockResult([])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+    const driver = { session: vi.fn(() => mockSession) } as unknown as Driver;
+
+    await fetchEpisodicsForProject(driver, 'agent-assist-cr');
+
+    const call = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0];
+    const cypher = call[0] as string;
+    const params = call[1] as { canonTag: string; taskTag: string };
+
+    // WHERE now matches structured scope/tags PLUS the task-prefix fallback.
+    expect(cypher).toContain('ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag');
+    // RETURN surfaces the structured fields for compile.ts.
+    expect(cypher).toContain('ep.scope AS scope, ep.tags AS tags');
+    // canonTag is the project tag lowercased to match berry_store (NOT slugified);
+    // taskTag is the legacy bracketed prefix used for back-compat.
+    expect(params.canonTag).toBe('project:agent-assist-cr');
+    expect(params.taskTag).toBe('[project:agent-assist-cr]');
+  });
+
+  it('surfaces ep.scope and ep.tags onto each returned EpisodicEntry', async () => {
+    const { fetchEpisodicsForProject } = await import('../queries.js');
+
+    const mockSession = {
+      run: vi.fn(async () => mockResult([
+        mockRecord({
+          id: 'ep-1',
+          task: 'did a thing',
+          content: 'no prefix here',
+          outcome: 'approved',
+          session_id: 'sess-1',
+          created_at: '2026-04-09T12:00:00Z',
+          scope: 'project:agent-assist-cr',
+          tags: ['project:agent-assist-cr'],
+        }),
+      ])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+    const driver = { session: vi.fn(() => mockSession) } as unknown as Driver;
+
+    const episodes = await fetchEpisodicsForProject(driver, 'agent-assist-cr');
+
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0].scope).toBe('project:agent-assist-cr');
+    expect(episodes[0].tags).toEqual(['project:agent-assist-cr']);
+    expect(episodes[0].project_scope).toBe('agent-assist-cr');
+  });
+});
+
+describe('fetchEntitiesModifiedByProject (gap-13 structured scope)', () => {
+  it('matches MODIFIED episodes by ep.scope, ep.tags, OR the task-prefix fallback', async () => {
+    const { fetchEntitiesModifiedByProject } = await import('../queries.js');
+
+    const mockSession = {
+      run: vi.fn(async () => mockResult([])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+    const driver = { session: vi.fn(() => mockSession) } as unknown as Driver;
+
+    await fetchEntitiesModifiedByProject(driver, 'agent-assist-cr');
+
+    const call = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0];
+    const cypher = call[0] as string;
+    const params = call[1] as { canonTag: string; taskTag: string };
+
+    expect(cypher).toContain('(ep:Episodic)-[:MODIFIED]->(e:Entity)');
+    expect(cypher).toContain('ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag');
+    expect(params.canonTag).toBe('project:agent-assist-cr');
+    expect(params.taskTag).toBe('[project:agent-assist-cr]');
+  });
 });
 
 describe('fetchAllTags', () => {

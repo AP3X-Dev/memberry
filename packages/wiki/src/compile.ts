@@ -68,12 +68,29 @@ function escapeRegExp(s: string): string {
 }
 
 /**
- * Best-effort project attribution for an episode that wasn't stored with a
- * `[project:…]` task prefix: fall back to a `[project:…]` prefix in its content,
- * then to a known project name appearing as a token in its session_id
+ * gap-13: extract the bare project name from the STRUCTURED fields berry_store
+ * persists — `ep.scope` (e.g. "project:agent-assist-cr") first, then any
+ * `project:*` entry in `ep.tags`. Returns '' if neither carries a project scope.
+ * This is the canonical association; the task/content `[project:…]` prefix and
+ * the session_id heuristic remain only as fallbacks (see deriveEpisodicScope).
+ */
+export function structuredEpisodicScope(ep: EpisodicEntry): string {
+  if (ep.scope && /^project:/i.test(ep.scope)) return ep.scope.replace(/^project:/i, '');
+  const tag = (ep.tags ?? []).find((t) => /^project:/i.test(t));
+  if (tag) return tag.replace(/^project:/i, '');
+  return '';
+}
+
+/**
+ * Best-effort project attribution for an episode. gap-13: PREFER the structured
+ * `ep.scope`/`ep.tags` (canonical, set by berry_store); only when absent fall
+ * back to the `[project:…]` task prefix, then a `[project:…]` prefix in content,
+ * then a known project name appearing as a token in its session_id
  * (e.g. session-20260608-ag3ntic-morph → ag3ntic). Returns '' if none match.
  */
 export function deriveEpisodicScope(ep: EpisodicEntry, knownSlugs: string[]): string {
+  const structured = structuredEpisodicScope(ep);
+  if (structured) return structured;
   if (ep.project_scope) return ep.project_scope;
   const fromContent = (ep.content ?? '').match(/^\[project:([^\]]+)\]/);
   if (fromContent) return fromContent[1];
@@ -208,7 +225,15 @@ function entityMatchesScope(entity: EntityInfo, projectScope: string | null): bo
 }
 
 function episodicMatchesScope(ep: EpisodicEntry, projectScope: string | null): boolean {
-  return !projectScope || (ep.project_scope != null && sameProjectScope(ep.project_scope, projectScope));
+  if (!projectScope) return true;
+  // gap-13: structured `ep.scope`/`ep.tags` is the primary association; the
+  // task-prefix-derived `project_scope` stays as a back-compat fallback. Both
+  // sides are normalized through sameProjectScope (lowercase + slugify) so
+  // `project:agent-assist-cr` compares equal regardless of which source it came
+  // from.
+  const structured = structuredEpisodicScope(ep);
+  if (structured && sameProjectScope(structured, projectScope)) return true;
+  return ep.project_scope != null && sameProjectScope(ep.project_scope, projectScope);
 }
 
 function sourceMatchesScope(source: SourceInfo, projectScope: string | null): boolean {

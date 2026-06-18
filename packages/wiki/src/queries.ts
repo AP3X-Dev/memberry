@@ -45,14 +45,26 @@ export async function fetchAllProjects(driver: Driver): Promise<EntityInfo[]> {
   }
 }
 
-/** Discover projects that exist only in episodic task prefixes but have no Entity node */
+/** Discover projects that exist only in episodics but have no Entity node.
+ * gap-13: scopes come from the structured `ep.scope` and `ep.tags` (the canonical
+ * project association set by berry_store, stripped of the `project:` prefix) AS
+ * WELL AS the legacy `[project:…]` task prefix (FALLBACK). The "only those with no
+ * Entity{type:'project'} yet" filter is preserved; distinct scope slugs returned. */
 export async function fetchEpisodicProjectScopes(driver: Driver): Promise<string[]> {
   const session = driver.session();
   try {
     const result = await session.run(
       `MATCH (ep:Episodic)
-       WHERE ep.task STARTS WITH '[project:'
-       WITH DISTINCT split(split(ep.task, ']')[0], ':')[1] AS proj
+       // structured: ep.scope (e.g. 'project:agent-assist-cr') + any 'project:*' tag,
+       // plus the legacy task-prefix split — all reduced to the bare project name.
+       WITH ep,
+            CASE WHEN ep.scope IS NOT NULL AND ep.scope STARTS WITH 'project:'
+                 THEN [substring(ep.scope, 8)] ELSE [] END AS scopeNames,
+            [t IN coalesce(ep.tags, []) WHERE t STARTS WITH 'project:' | substring(t, 8)] AS tagNames,
+            CASE WHEN ep.task STARTS WITH '[project:'
+                 THEN [split(split(ep.task, ']')[0], ':')[1]] ELSE [] END AS taskNames
+       UNWIND (scopeNames + tagNames + taskNames) AS proj
+       WITH DISTINCT proj WHERE proj IS NOT NULL AND proj <> ''
        OPTIONAL MATCH (e:Entity {type: 'project'})
        WHERE toLower(e.name) = toLower(proj)
        WITH proj WHERE e IS NULL
@@ -95,13 +107,22 @@ export async function fetchProjectEntities(driver: Driver, projectName: string):
 export async function fetchEntitiesModifiedByProject(driver: Driver, projectScope: string): Promise<EntityInfo[]> {
   const session = driver.session();
   try {
+    // gap-13: structured `ep.scope`/`ep.tags` (the canonical project association
+    // set by berry_store) is the primary match; the `[project:…]` task prefix is
+    // kept only as a back-compat FALLBACK for episodes stored before structured
+    // scoping. `canonTag` must match berry_store EXACTLY, which persists
+    // `ep.scope`/`ep.tags` as `rawTag.toLowerCase()` (lowercase only — NOT
+    // slugified), so we lowercase here too. (slugify would turn `my_project`
+    // into `my-project` and silently never match.)
+    const canonTag = `project:${projectScope.replace(/^project:/i, '').toLowerCase()}`;
+    const taskTag = `[project:${projectScope}]`;
     const result = await session.run(
       `MATCH (ep:Episodic)-[:MODIFIED]->(e:Entity)
-       WHERE ep.task CONTAINS $tag
+       WHERE ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag
        RETURN DISTINCT e.id AS id, e.name AS name, e.type AS type, e.description AS description,
               e.aliases AS aliases, e.created_at AS created_at
        ORDER BY e.name`,
-      { tag: `[project:${projectScope}]` },
+      { canonTag, taskTag },
     );
     return result.records.map((r) => ({
       id: r.get('id') as string,
@@ -190,13 +211,25 @@ export async function fetchAllSemantics(driver: Driver): Promise<Array<{
 export async function fetchEpisodicsForProject(driver: Driver, projectScope: string): Promise<EpisodicEntry[]> {
   const session = driver.session();
   try {
+    // gap-13: an episode belongs to this project when ANY of these hold —
+    //   1. `ep.scope` equals the canonical project tag (structured, primary),
+    //   2. the canonical tag is in `ep.tags` (structured, primary),
+    //   3. the legacy `[project:…]` task prefix is present (FALLBACK).
+    // berry_store sets scope/tags but does NOT prepend the task prefix, so an
+    // episode stored with scope='project:x'/tags=['project:x'] and no prefix was
+    // previously invisible here. `canonTag` must match berry_store EXACTLY, which
+    // persists scope/tags as `rawTag.toLowerCase()` (lowercase only — NOT slugified),
+    // so we lowercase here too. (slugify would turn `my_project` → `my-project`.)
+    const canonTag = `project:${projectScope.replace(/^project:/i, '').toLowerCase()}`;
+    const taskTag = `[project:${projectScope}]`;
     const result = await session.run(
       `MATCH (ep:Episodic)
-       WHERE ep.task CONTAINS $tag
+       WHERE ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag
        RETURN ep.id AS id, ep.task AS task, ep.content AS content,
-              ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at
+              ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at,
+              ep.scope AS scope, ep.tags AS tags
        ORDER BY ep.created_at DESC`,
-      { tag: `[project:${projectScope}]` },
+      { canonTag, taskTag },
     );
     return result.records.map((r) => ({
       id: r.get('id') as string,
@@ -206,6 +239,8 @@ export async function fetchEpisodicsForProject(driver: Driver, projectScope: str
       session_id: r.get('session_id') as string,
       created_at: r.get('created_at') as string,
       project_scope: projectScope,
+      scope: (r.get('scope') as string | null) ?? undefined,
+      tags: (r.get('tags') as string[] | null) ?? undefined,
     }));
   } finally {
     await session.close();

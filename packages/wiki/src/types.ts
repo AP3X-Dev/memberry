@@ -239,6 +239,17 @@ export interface EpisodicEntry {
   created_at: string;
   /** Project tag extracted from task prefix, e.g. "agent-assist" */
   project_scope: string | null;
+  /**
+   * gap-13: structured canonical project scope as persisted by berry_store
+   * (e.g. "project:agent-assist-cr"). Preferred over the task-prefix derivation
+   * when present. Surfaced from `ep.scope` by the episodic queries.
+   */
+  scope?: string;
+  /**
+   * gap-13: structured tags as persisted by berry_store, including the canonical
+   * `project:<slug>` tag. Used as a structured scope source alongside `scope`.
+   */
+  tags?: string[];
 }
 
 // ─── Project-scoped compilation ──────────────────────────────────────────────
