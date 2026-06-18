@@ -23,7 +23,11 @@ export class EntityStore {
   /**
    * Idempotent upsert of a project Entity. Used to auto-create a placeholder
    * when berry_store sees a never-before-seen project tag.
-   * - If an Entity with the same name (case-insensitive) and any type exists, leave it alone.
+   * - If an Entity with the same name already exists, PROMOTE it to type='project'
+   *   (gap-14) so it becomes visible to wiki/lint, which only match
+   *   Entity{type:'project'}. It only ever sets type TO 'project' (a same-named
+   *   module/concept IS promoted, since that name is now serving as a project
+   *   root); it never sets the type to anything else.
    * - Otherwise create a new Entity with type='project'.
    */
   async upsertProject(name: string, description?: string): Promise<void> {
@@ -38,7 +42,8 @@ export class EntityStore {
            e.created_at = datetime(),
            e.auto_created = true
          ON MATCH SET
-           e.last_seen = datetime()`,
+           e.last_seen = datetime(),
+           e.type = 'project'`,
         {
           name,
           id: `auto-proj-${name.toLowerCase().replace(/[^\w-]/g, '-')}-${Date.now()}`,

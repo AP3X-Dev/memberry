@@ -276,6 +276,7 @@ export class IngestionService {
       const result = await session.run(
         `MERGE (e:Entity {name: $name})
          ON CREATE SET e.id = $id, e.type = $type, e.created_at = $now
+         ON MATCH SET e.type = CASE WHEN $type = 'project' THEN 'project' ELSE e.type END
          RETURN e.id AS id, e.created_at = $now AS created`,
         {
           name,
@@ -361,7 +362,8 @@ export class IngestionService {
     try {
       await session.run(
         `MERGE (e:Entity {name: $name})
-         ON CREATE SET e.id = $id, e.type = 'project', e.created_at = $now`,
+         ON CREATE SET e.id = $id, e.type = 'project', e.created_at = $now
+         ON MATCH SET e.type = 'project'`,
         { name: projectName, id: `ent-${nanoid(12)}`, now: new Date().toISOString() },
       );
     } finally {

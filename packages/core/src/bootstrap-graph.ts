@@ -228,7 +228,8 @@ export class BootstrapGraphService {
     const res = await session.run(
       `MERGE (e:Entity {name: $name})
        ON CREATE SET e.id = $id, e.type = $type, e.description = $description, e.created_at = $now
-       ON MATCH SET e.description = CASE WHEN $description IS NOT NULL THEN $description ELSE e.description END
+       ON MATCH SET e.description = CASE WHEN $description IS NOT NULL THEN $description ELSE e.description END,
+                    e.type = CASE WHEN $type = 'project' THEN 'project' ELSE e.type END
        RETURN e.id AS id, e.created_at = $now AS isNew`,
       {
         name: entity.name,
