@@ -13,11 +13,13 @@ describe('code tools.ts regression', () => {
     // Before the fix, the berry_code_index MCP tool accepted any absolute
     // filesystem path with no restriction, allowing any MCP client to walk
     // and parse arbitrary directories (e.g. /, /etc) on the server.
-    // The fix adds path.resolve + baseDir+sep prefix matching to reject
-    // paths outside process.cwd().
+    // The fix confines paths to an allowed base + baseDir+sep prefix matching.
+    // The base now comes from the shared getReindexBaseDir() helper (which
+    // delegates to @memberry/core, honoring MEMBERRY_INGEST_ALLOW_DIR, e.g.
+    // /workspace in docker) instead of a hardcoded path.resolve(process.cwd()).
 
-    // Verify baseDir is set from process.cwd()
-    expect(TOOLS_SOURCE).toContain('path.resolve(process.cwd())');
+    // Verify baseDir is sourced from the shared confinement helper
+    expect(TOOLS_SOURCE).toContain('getReindexBaseDir()');
 
     // Verify the resolved path is checked against baseDir with separator
     expect(TOOLS_SOURCE).toContain('baseDir + path.sep');

@@ -6,7 +6,7 @@ import { readFile } from 'fs/promises';
 import { createHash } from 'crypto';
 import { extname, resolve, sep } from 'path';
 import type { FSWatcher } from 'fs';
-import { readEnv, isRealpathWithinBase } from '@memberry/core';
+import { isRealpathWithinBase, getAllowedBaseDir } from '@memberry/core';
 import { LANGUAGE_EXTENSIONS } from './types.js';
 
 // ─── Injected interfaces ───────────────────────────────────────────────────
@@ -68,12 +68,13 @@ export function extractFilePaths(content: string): string[] {
 
 /**
  * Returns the base directory that re-index paths must be confined to.
- * Mirrors the wiki ingest confinement base: MEMBERRY_INGEST_ALLOW_DIR if set,
- * otherwise the process working directory (the same root the code MCP tools
- * confine to via process.cwd()).
+ * Delegates to the shared @memberry/core helper (single source of truth) so the
+ * confinement base — MEMBERRY_INGEST_ALLOW_DIR if set, otherwise the process
+ * working directory — is identical across the wiki, code, and mcp packages.
+ * Exported name is kept stable for existing importers (code/src/index.ts).
  */
 export function getReindexBaseDir(): string {
-  return resolve(readEnv('MEMBERRY_INGEST_ALLOW_DIR') ?? process.cwd());
+  return getAllowedBaseDir();
 }
 
 /**

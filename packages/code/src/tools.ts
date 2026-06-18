@@ -8,6 +8,7 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { IndexResult, CodeSearchResult, SymbolNode, SymbolKind } from './types.js';
 import type { SymbolDependencyOptions, SymbolLookupOptions } from './symbol-store.js';
 import type { CodeWatcher } from './watcher.js';
+import { getReindexBaseDir } from './watcher.js';
 import { structuralSearch, type StructuralSearchLanguage } from './structural-search.js';
 
 // ─── Service interfaces (injected) ───────────────────────────────────────────
@@ -120,8 +121,10 @@ export function registerCodeTools(
     async (args) => {
       if (!codeIndexer) throw new Error('Code services not initialised');
 
-      // Validate path is within the project root to prevent directory traversal
-      const baseDir = path.resolve(process.cwd());
+      // Validate path is within the allowed base dir to prevent directory
+      // traversal. The base honors MEMBERRY_INGEST_ALLOW_DIR (e.g. /workspace
+      // in docker) via the shared @memberry/core helper.
+      const baseDir = getReindexBaseDir();
       const resolved = path.resolve(args.path);
       if (!resolved.startsWith(baseDir + path.sep) && resolved !== baseDir) {
         throw new Error(`Path must be within project root: ${args.path}`);
@@ -199,7 +202,7 @@ export function registerCodeTools(
     },
     { readOnlyHint: true } satisfies ToolAnnotations,
     async (args) => {
-      const baseDir = path.resolve(process.cwd());
+      const baseDir = getReindexBaseDir();
       const resolved = path.resolve(args.path ?? '.');
       if (!resolved.startsWith(baseDir + path.sep) && resolved !== baseDir) {
         throw new Error(`Path must be within project root: ${args.path}`);
@@ -348,8 +351,9 @@ export function registerCodeTools(
         case 'start': {
           if (!args.path) throw new Error('path is required for start action');
 
-          // Validate path is within project root
-          const baseDir = path.resolve(process.cwd());
+          // Validate path is within the allowed base dir (honors
+          // MEMBERRY_INGEST_ALLOW_DIR, e.g. /workspace in docker).
+          const baseDir = getReindexBaseDir();
           const resolved = path.resolve(args.path);
           if (!resolved.startsWith(baseDir + path.sep) && resolved !== baseDir) {
             throw new Error(`Path must be within project root: ${args.path}`);

@@ -7,7 +7,7 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { CompileInput, CompileResult, CompileV2Result, IngestInput, IngestResult, LintInput, LintResult, LintCheck } from './types.js';
 import type { ReconcileInput, ReconcileResult } from './reconcile.js';
 import { parseFrontmatter } from './reconcile.js';
-import { readEnv, isRealpathWithinBase } from '@memberry/core';
+import { isRealpathWithinBase, getAllowedBaseDir } from '@memberry/core';
 
 // ─── Service interfaces (injected, no concrete imports) ──────────────────────
 
@@ -138,12 +138,12 @@ const AmpLintSchema = {
 // ─── Path validation ─────────────────────────────────────────────────────────
 
 /**
- * Returns the allowed base directory for file access.
- * Uses MEMBERRY_INGEST_ALLOW_DIR env var if set, otherwise falls back to cwd.
+ * Allowed base directory for file access — the single source of truth now lives
+ * in @memberry/core (so MEMBERRY_INGEST_ALLOW_DIR is honored uniformly across
+ * wiki/code/mcp). Re-exported here so existing importers of this module (wiki
+ * index, path-validation.test) keep working unchanged.
  */
-export function getAllowedBaseDir(): string {
-  return path.resolve(readEnv('MEMBERRY_INGEST_ALLOW_DIR') ?? process.cwd());
-}
+export { getAllowedBaseDir };
 
 /**
  * Validates that a resolved path is within the allowed base directory.

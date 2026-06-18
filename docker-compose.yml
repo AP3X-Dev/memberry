@@ -94,10 +94,16 @@ services:
       # Set true ONLY to restore the legacy default-tenant fallback for a global
       # MEMBERRY_API_TOKEN / per-actor MEMBERRY_API_TOKENS in multi-tenant mode.
       MEMBERRY_ALLOW_DEFAULT_TENANT: ${MEMBERRY_ALLOW_DEFAULT_TENANT:-}
-      # Ingest/compile path confinement (opt-in). This is a path INSIDE the
-      # container; pointing it at a non-default dir backed by host data also
-      # requires a corresponding volume mount for that path to be meaningful.
-      MEMBERRY_INGEST_ALLOW_DIR: ${MEMBERRY_INGEST_ALLOW_DIR:-}
+      # Ingest/compile/index path confinement. This is a path INSIDE the
+      # container; it is mounted read-only from the host below (see volumes).
+      # Defaults to /workspace so code indexing / ingest / compile have a real
+      # host-backed root out of the box.
+      MEMBERRY_INGEST_ALLOW_DIR: ${MEMBERRY_INGEST_ALLOW_DIR:-/workspace}
+    volumes:
+      # Host directory exposed read-only to the MCP server for code indexing /
+      # ingest / compile, confined to /workspace via MEMBERRY_INGEST_ALLOW_DIR.
+      # Override the host path with MEMBERRY_WORKSPACE_HOST_PATH (default: ./).
+      - ${MEMBERRY_WORKSPACE_HOST_PATH:-./}:/workspace:ro
     ports:
       - "127.0.0.1:3101:3101"
     restart: unless-stopped

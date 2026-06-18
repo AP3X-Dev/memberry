@@ -42,6 +42,7 @@ export {
 export type { AmpSettings, HookSettings, ResolvedNumber, SettingSource } from './config/settings.js';
 export { getConfigStatus } from './config/status.js';
 export type { ConfigStatus } from './config/status.js';
+export { getAllowedBaseDir } from './config/paths.js';
 export { getHooksStatus } from './cli/install.js';
 export type { HooksStatus } from './cli/install.js';
 export { isRealpathWithinBase, realpathNearestExisting } from './path-confine.js';

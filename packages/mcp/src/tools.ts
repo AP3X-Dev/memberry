@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { LoadScope, MemoryContext, EpisodeInput, MemoryTier, FactTimeline, FactDiff, TemporalOptions } from '@memberry/core';
-import { DEFAULT_TENANT } from '@memberry/core';
+import { DEFAULT_TENANT, getAllowedBaseDir } from '@memberry/core';
 import { parseAmpUri, uriToLoadScope } from './uri.js';
 import { scanCodebase, type CodebaseScan } from './codebase-scanner.js';
 import { assertSafeRegex, capScanText, UnsafeRegexError } from './safe-regex.js';
@@ -1005,10 +1005,12 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
     async berry_ingest_codebase(args) {
       if (!bootstrapService) throw new Error('BootstrapGraphService not initialised');
 
-      // Validate path is within the project root to prevent directory traversal
-      // (mirrors the confinement applied by sibling code tools berry_code_index,
-      // berry_code_ast_grep, and berry_code_watch in packages/code/src/tools.ts).
-      const baseDir = path.resolve(process.cwd());
+      // Validate path is within the allowed base dir to prevent directory
+      // traversal (mirrors the confinement applied by sibling code tools
+      // berry_code_index, berry_code_ast_grep, and berry_code_watch in
+      // packages/code/src/tools.ts). The base honors MEMBERRY_INGEST_ALLOW_DIR
+      // (e.g. /workspace in docker) via the shared @memberry/core helper.
+      const baseDir = getAllowedBaseDir();
       const absPath = path.resolve(args.path);
       if (!absPath.startsWith(baseDir + path.sep) && absPath !== baseDir) {
         throw new Error(`Path must be within project root: ${args.path}`);
