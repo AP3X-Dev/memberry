@@ -76,6 +76,10 @@ services:
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-memberry-local-dev}
       REDIS_URL: redis://:${REDIS_PASSWORD:-memberry-local-dev}@redis:6379
       MCP_PORT: "3101"
+      # Bind host INSIDE the container. Default 0.0.0.0 so the server is reachable
+      # through Docker's port proxy; access is restricted at the publish layer
+      # (the host port binding below), not inside the container.
+      MEMBERRY_HOST: ${MEMBERRY_BIND_HOST:-0.0.0.0}
       # App config — sourced from .env (compose interpolation), safe defaults otherwise.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MEMBERRY_API_TOKEN: ${MEMBERRY_API_TOKEN:-}
@@ -105,7 +109,10 @@ services:
       # Override the host path with MEMBERRY_WORKSPACE_HOST_PATH (default: ./).
       - ${MEMBERRY_WORKSPACE_HOST_PATH:-./}:/workspace:ro
     ports:
-      - "127.0.0.1:3101:3101"
+      # Host publish address restricts reachability: 127.0.0.1 = local-only,
+      # 0.0.0.0 = LAN/server. The container itself binds all interfaces (see
+      # MEMBERRY_HOST above); this line is the actual access gate.
+      - "${MEMBERRY_PUBLISH_HOST:-127.0.0.1}:${MCP_PORT:-3101}:3101"
     restart: unless-stopped
 
 volumes:

@@ -10,6 +10,8 @@
 #   ./setup.sh --yes           # non-interactive, accept all defaults
 #   ./setup.sh --db-only       # start only Neo4j + Redis (run the server yourself)
 #   ./setup.sh --reconfigure   # re-run the wizard even if .env already exists
+#   ./setup.sh --mode local    # local-only access (publish on 127.0.0.1)
+#   ./setup.sh --mode server   # LAN/server access (publish on 0.0.0.0)
 #
 set -euo pipefail
 
@@ -28,15 +30,23 @@ warn() { printf '%s[setup]%s %s\n' "$YEL" "$R" "$*" >&2; }
 fail() { printf '%s[setup]%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
 
 # ── Flags ───────────────────────────────────────────────────────────────────────
-ASSUME_YES=0; DB_ONLY=0; RECONFIGURE=0
-for arg in "$@"; do
-  case "$arg" in
+ASSUME_YES=0; DB_ONLY=0; RECONFIGURE=0; MODE=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --yes|-y) ASSUME_YES=1 ;;
     --db-only) DB_ONLY=1 ;;
     --reconfigure) RECONFIGURE=1 ;;
+    --mode)
+      shift; MODE="${1:-}"
+      [ "$MODE" = "local" ] || [ "$MODE" = "server" ] \
+        || fail "--mode must be 'local' or 'server' (got: '${MODE:-<missing>}')" ;;
+    --mode=*) MODE="${1#--mode=}"
+      [ "$MODE" = "local" ] || [ "$MODE" = "server" ] \
+        || fail "--mode must be 'local' or 'server' (got: '$MODE')" ;;
     -h|--help) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) fail "Unknown option: $arg (try --help)" ;;
+    *) fail "Unknown option: $1 (try --help)" ;;
   esac
+  shift
 done
 
 INTERACTIVE=0
@@ -111,7 +121,43 @@ else
   # these with service-DNS URLs in docker-compose.yml.
   set_env REDIS_URL "redis://:${REDIS_PW}@localhost:6379"
   set_env MCP_PORT "$PORT_VAL"
-  ok "Wrote .env (API token generated; DB passwords randomized)."
+
+  # ── Access mode (local vs LAN/server) ───────────────────────────────────────
+  # Decide the publish address and the host shown in printed URLs. The container
+  # always binds 0.0.0.0 (MEMBERRY_BIND_HOST); the publish layer is the gate.
+  RESOLVED_MODE="$MODE"
+  if [ -z "$RESOLVED_MODE" ]; then
+    if [ "$INTERACTIVE" -eq 1 ]; then
+      prompt MODE_CHOICE "Access mode — [1] local-only (127.0.0.1)  [2] LAN/server (0.0.0.0):" "1"
+      case "$MODE_CHOICE" in
+        2|server) RESOLVED_MODE="server" ;;
+        *)        RESOLVED_MODE="local" ;;
+      esac
+    else
+      RESOLVED_MODE="local"
+    fi
+  fi
+
+  if [ "$RESOLVED_MODE" = "server" ]; then
+    PUBLISH_HOST="0.0.0.0"
+    # Best-effort LAN IP detection: first address from `hostname -I`, falling
+    # back to `hostname` if that yields nothing.
+    ip_guess="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [ -n "$ip_guess" ] || ip_guess="$(hostname 2>/dev/null || true)"
+    if [ "$INTERACTIVE" -eq 1 ]; then
+      prompt PUBLIC_HOST "Public host shown in client URLs (LAN IP or hostname):" "${ip_guess:-localhost}"
+    else
+      PUBLIC_HOST="${ip_guess:-localhost}"
+    fi
+  else
+    PUBLISH_HOST="127.0.0.1"
+    PUBLIC_HOST="localhost"
+  fi
+
+  set_env MEMBERRY_BIND_HOST "0.0.0.0"
+  set_env MEMBERRY_PUBLISH_HOST "$PUBLISH_HOST"
+  set_env MEMBERRY_PUBLIC_HOST "$PUBLIC_HOST"
+  ok "Wrote .env (API token generated; DB passwords randomized; access mode: ${RESOLVED_MODE})."
 fi
 
 # Load .env so we can report the token/port and poll health.
@@ -119,6 +165,8 @@ set -a; # shellcheck disable=SC1091
 . ./.env; set +a
 : "${MCP_PORT:=3101}"
 : "${MEMBERRY_API_TOKEN:=}"
+: "${MEMBERRY_PUBLIC_HOST:=localhost}"
+: "${MEMBERRY_PUBLISH_HOST:=127.0.0.1}"
 
 # ── Bring up the stack ──────────────────────────────────────────────────────────
 if [ "$DB_ONLY" -eq 1 ]; then
@@ -156,14 +204,14 @@ printf '\n%s== Setup complete ==%s\n\n' "$GRN" "$R"
 if [ "$DB_ONLY" -eq 0 ]; then
   cat <<EOF
 ${B}Your MemBerry MCP server is running:${R}
-  URL:    http://localhost:${MCP_PORT}/mcp
+  URL:    http://${MEMBERRY_PUBLIC_HOST}:${MCP_PORT}/mcp
   Token:  ${MEMBERRY_API_TOKEN:-<none — set MEMBERRY_API_TOKEN in .env>}
 
 ${B}Connect an agent${R} — add this to your MCP client config:
   {
     "mcpServers": {
       "memberry": {
-        "url": "http://localhost:${MCP_PORT}/mcp",
+        "url": "http://${MEMBERRY_PUBLIC_HOST}:${MCP_PORT}/mcp",
         "headers": { "Authorization": "Bearer ${MEMBERRY_API_TOKEN}" }
       }
     }
@@ -174,6 +222,10 @@ ${B}Handy commands${R}
   Stop:    docker compose --profile app down
   Status:  curl http://localhost:${MCP_PORT}/healthz
 EOF
+  if [ "$MEMBERRY_PUBLISH_HOST" = "0.0.0.0" ]; then
+    warn "SERVER MODE: MemBerry is published on 0.0.0.0 and is reachable by ANY host on the LAN."
+    warn "The bearer token is the ONLY thing gating access — keep MEMBERRY_API_TOKEN secret and rotate it if leaked."
+  fi
 fi
 [ -z "${OPENAI_API_KEY:-}" ] && warn "No OPENAI_API_KEY set — running with lexical/fulltext retrieval only. Add one to .env and restart to enable embeddings."
 exit 0
