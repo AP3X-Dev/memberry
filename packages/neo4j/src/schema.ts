@@ -14,6 +14,13 @@ const CONSTRAINTS: string[] = [
   // existing graphs; fresh graphs get this one directly.
   'CREATE CONSTRAINT memblock_scope_name_tenant IF NOT EXISTS FOR (b:MemoryBlock) REQUIRE (b.scope, b.name, b.tenant_id) IS UNIQUE',
   'CREATE CONSTRAINT fact_id IF NOT EXISTS FOR (f:Fact) REQUIRE f.id IS UNIQUE',
+  // gap-16: bootstrap seed dedupe. A UNIQUE constraint (not a plain index) is
+  // required so the idempotent MERGE in BootstrapGraphService.createSemantic is
+  // concurrency-safe — without uniqueness, two concurrent MERGEs on the same
+  // dedupe_key can both create. Existing semantics have no dedupe_key (null is
+  // exempt from uniqueness), so no migration is needed; the constraint also
+  // backs the MERGE lookup with an index.
+  'CREATE CONSTRAINT semantic_dedupe_unique IF NOT EXISTS FOR (s:Semantic) REQUIRE s.dedupe_key IS UNIQUE',
 ];
 
 const INDEXES: string[] = [

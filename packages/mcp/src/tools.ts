@@ -1047,21 +1047,93 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         parent: m.parent === scan.name ? projectName : m.parent,
       }));
 
-      const semanticSeeds = [];
-      if (description) {
-        semanticSeeds.push({
-          claim: description,
+      // gap-16: generate human-readable baseline semantic seeds for the project
+      // root AND for every bootstrapped module, so wiki module pages are no longer
+      // bare stubs. Seeds are low-confidence priors (~0.3) the consolidation pass
+      // can later reinforce or supersede. A run-local dedupe guard skips any
+      // exact-duplicate claim string; the createSemantic MERGE handles cross-run
+      // idempotency.
+      type Seed = { claim: string; domain: string; confidence?: number; about?: string[] };
+      const semanticSeeds: Seed[] = [];
+      const seenClaims = new Set<string>();
+      const pushSeed = (seed: Seed): void => {
+        const claim = seed.claim.trim();
+        if (!claim || seenClaims.has(claim)) return;
+        seenClaims.add(claim);
+        semanticSeeds.push({ ...seed, claim });
+      };
+
+      // Relative entry-point paths (project-root-relative, forward slashes) — used
+      // both for the enriched overview seed and for per-module entry-point seeds.
+      const relEntryPoints = scan.entryPoints.map((e) =>
+        path.relative(absPath, e).split(path.sep).join('/'),
+      );
+      const languageList = scan.languages.join(', ');
+
+      // 1. Project-overview seed — enriched with the module list (and entry points)
+      //    so the project page is substantive, not a one-liner.
+      if (description || scan.modules.length > 0) {
+        const overviewParts: string[] = [];
+        if (description) overviewParts.push(description);
+        if (scan.modules.length > 0) {
+          overviewParts.push(`Modules: ${scan.modules.map((m) => m.name).join(', ')}`);
+        }
+        if (relEntryPoints.length > 0) {
+          overviewParts.push(`Entry points: ${relEntryPoints.join(', ')}`);
+        }
+        pushSeed({
+          claim: overviewParts.join('. ') + '.',
           domain: 'project-overview',
           confidence: 0.3,
           about: [projectName],
         });
       }
+
+      // 2. Languages seed (root).
       if (scan.languages.length > 0) {
-        semanticSeeds.push({
-          claim: `${projectName} is built with ${scan.languages.join(', ')}`,
+        pushSeed({
+          claim: `${projectName} is built with ${languageList}`,
           domain: 'technology',
           confidence: 0.5,
           about: [projectName],
+        });
+      }
+
+      // 3. Per-module seeds — RESPONSIBILITY, ENTRY-POINT, RELATIONSHIP-SUMMARY.
+      for (const m of scan.modules) {
+        // RESPONSIBILITY
+        const desc = (m.description ?? '').trim();
+        pushSeed({
+          claim: `${m.name} is a ${m.type} module` + (desc ? `: ${desc}` : ''),
+          domain: 'architecture',
+          confidence: 0.3,
+          about: [m.name],
+        });
+
+        // ENTRY-POINT — only when this module owns an entry point. A relative
+        // entry path is "under" the module when it has a path segment equal to
+        // the module name (matches workspace dirs, top-level source dirs, and
+        // src/<name> subdirs without needing the scanner to expose module paths).
+        const moduleEntries = relEntryPoints.filter((p) =>
+          p.split('/').includes(m.name),
+        );
+        if (moduleEntries.length > 0) {
+          pushSeed({
+            claim: `${m.name} entry point(s): ${moduleEntries.join(', ')}`,
+            domain: 'architecture',
+            confidence: 0.3,
+            about: [m.name],
+          });
+        }
+
+        // RELATIONSHIP-SUMMARY
+        pushSeed({
+          claim:
+            `${m.name} is part of ${projectName}` +
+            (languageList ? ` and is written in ${languageList}` : ''),
+          domain: 'architecture',
+          confidence: 0.3,
+          about: [m.name],
         });
       }
 

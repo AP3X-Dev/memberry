@@ -164,3 +164,101 @@ describe('BootstrapGraphService gap-14 (promote to project, never demote)', () =
     }
   });
 });
+
+// gap-16: BootstrapGraphService.createSemantic must be idempotent — re-ingesting
+// the SAME seeds must NOT duplicate Semantic nodes (the MERGE on the stable
+// dedupe_key). Module seeds guarantee module pages have content.
+describe('BootstrapGraphService gap-16 (per-module seeds + dedupe guard)', () => {
+  let neo4jAvailable = false;
+  const driver = createNeo4jDriver(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
+  let service: BootstrapGraphService;
+  const tag = `project:${TEST_PREFIX}-g16`;
+
+  beforeAll(async () => {
+    neo4jAvailable = await isNeo4jReachable(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
+    if (!neo4jAvailable) {
+      console.warn(`[skip] Neo4j not reachable at ${NEO4J_URI} — skipping gap-16 tests`);
+      return;
+    }
+    service = new BootstrapGraphService(driver);
+  });
+
+  afterAll(async () => {
+    if (neo4jAvailable) {
+      const session = driver.session();
+      try {
+        await session.run(
+          `MATCH (e:Entity) WHERE e.name STARTS WITH $prefix OR e.id STARTS WITH $prefix DETACH DELETE e`,
+          { prefix: `${TEST_PREFIX}-g16` },
+        );
+        await session.run(
+          `MATCH (s:Semantic) WHERE $tag IN s.tags DETACH DELETE s`,
+          { tag },
+        );
+      } finally {
+        await session.close();
+      }
+    }
+    await driver.close().catch(() => {});
+  });
+
+  function g16Input(): BootstrapInput {
+    return {
+      project_name: `${TEST_PREFIX}-g16-proj`,
+      project_tag: tag,
+      description: 'gap-16 dedupe project',
+      domain: 'test',
+      entities: [
+        { name: `${TEST_PREFIX}-g16-modA`, type: 'module', parent: `${TEST_PREFIX}-g16-proj` },
+        { name: `${TEST_PREFIX}-g16-modB`, type: 'module', parent: `${TEST_PREFIX}-g16-proj` },
+      ],
+      semantic_seeds: [
+        { claim: `${TEST_PREFIX}-g16-modA is a module`, domain: 'architecture', confidence: 0.3, about: [`${TEST_PREFIX}-g16-modA`] },
+        { claim: `${TEST_PREFIX}-g16-modB is a module`, domain: 'architecture', confidence: 0.3, about: [`${TEST_PREFIX}-g16-modB`] },
+      ],
+      agents: [],
+    };
+  }
+
+  async function semanticCountFor(about: string): Promise<number> {
+    const session = driver.session();
+    try {
+      const res = await session.run(
+        `MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: $name}) RETURN count(s) AS cnt`,
+        { name: about },
+      );
+      const cnt = res.records[0].get('cnt') as { toNumber: () => number } | number;
+      return typeof cnt === 'object' ? cnt.toNumber() : cnt;
+    } finally {
+      await session.close();
+    }
+  }
+
+  it('seeds ≥1 Semantic per module (module pages get content)', async () => {
+    if (!neo4jAvailable) return;
+    await service.bootstrap(g16Input());
+
+    expect(await semanticCountFor(`${TEST_PREFIX}-g16-modA`)).toBeGreaterThanOrEqual(1);
+    expect(await semanticCountFor(`${TEST_PREFIX}-g16-modB`)).toBeGreaterThanOrEqual(1);
+  });
+
+  it('re-ingesting the same fixture does NOT double the per-module Semantic count', async () => {
+    if (!neo4jAvailable) return;
+
+    // First ingest establishes the baseline.
+    await service.bootstrap(g16Input());
+    const beforeA = await semanticCountFor(`${TEST_PREFIX}-g16-modA`);
+    const beforeB = await semanticCountFor(`${TEST_PREFIX}-g16-modB`);
+    expect(beforeA).toBeGreaterThanOrEqual(1);
+
+    // Re-ingest the identical input — MERGE on dedupe_key must be idempotent.
+    const result = await service.bootstrap(g16Input());
+
+    const afterA = await semanticCountFor(`${TEST_PREFIX}-g16-modA`);
+    const afterB = await semanticCountFor(`${TEST_PREFIX}-g16-modB`);
+    expect(afterA).toBe(beforeA);
+    expect(afterB).toBe(beforeB);
+    // The matched re-ingest reports zero NEW semantics (no count inflation).
+    expect(result.semantics_created).toBe(0);
+  });
+});

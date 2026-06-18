@@ -272,17 +272,65 @@ describe('berry_ingest_codebase handler', () => {
     const bootstrapArgs = (mockBootstrapService.bootstrap as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(bootstrapArgs.semantic_seeds.length).toBeGreaterThanOrEqual(2);
 
+    // gap-16: the project-overview seed now leads with the description but is
+    // enriched with the module list (the fixture's src/ becomes a 'src' module),
+    // so it is substantive rather than a bare one-liner.
     const descSeed = bootstrapArgs.semantic_seeds.find(
-      (s: { claim: string }) => s.claim === 'A test application',
+      (s: { domain: string }) => s.domain === 'project-overview',
     );
     expect(descSeed).toBeDefined();
-    expect(descSeed.domain).toBe('project-overview');
+    expect(descSeed.claim).toContain('A test application');
+    expect(descSeed.claim).toContain('Modules:');
+    expect(descSeed.about).toEqual(['my-test-app']);
 
     const langSeed = bootstrapArgs.semantic_seeds.find(
       (s: { claim: string }) => s.claim.includes('built with'),
     );
     expect(langSeed).toBeDefined();
     expect(langSeed.domain).toBe('technology');
+  });
+
+  it('gap-16: generates per-module semantic seeds so module pages are not stubs', async () => {
+    const handlers = buildToolHandlers();
+    await handlers.berry_ingest_codebase({ path: tempDir });
+
+    const bootstrapArgs = (mockBootstrapService.bootstrap as ReturnType<typeof vi.fn>).mock.calls[0][0];
+
+    // The real scanner discovers the fixture's src/ as a module. Every module
+    // entity must own at least one ABOUT seed (responsibility + relationship).
+    const moduleEntities = bootstrapArgs.entities.filter(
+      (e: { type: string }) => e.type !== 'project',
+    );
+    expect(moduleEntities.length).toBeGreaterThanOrEqual(1);
+
+    for (const mod of moduleEntities) {
+      const moduleSeeds = bootstrapArgs.semantic_seeds.filter(
+        (s: { about?: string[] }) => (s.about ?? []).includes(mod.name),
+      );
+      expect(moduleSeeds.length).toBeGreaterThanOrEqual(1);
+
+      // RESPONSIBILITY seed: "<name> is a <type> module".
+      const responsibility = moduleSeeds.find((s: { claim: string }) =>
+        s.claim.startsWith(`${mod.name} is a `) && s.claim.includes('module'),
+      );
+      expect(responsibility).toBeDefined();
+      expect(responsibility.domain).toBe('architecture');
+
+      // RELATIONSHIP-SUMMARY seed: "<name> is part of <project>".
+      const relationship = moduleSeeds.find((s: { claim: string }) =>
+        s.claim.includes(`is part of ${bootstrapArgs.project_name}`),
+      );
+      expect(relationship).toBeDefined();
+    }
+  });
+
+  it('gap-16: skips exact-duplicate claim strings within one run', async () => {
+    const handlers = buildToolHandlers();
+    await handlers.berry_ingest_codebase({ path: tempDir });
+
+    const bootstrapArgs = (mockBootstrapService.bootstrap as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const claims = bootstrapArgs.semantic_seeds.map((s: { claim: string }) => s.claim);
+    expect(new Set(claims).size).toBe(claims.length);
   });
 
   // ─── OPT-15: path confinement ────────────────────────────────────────────────

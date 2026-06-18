@@ -5,6 +5,19 @@
 
 import { type Driver } from 'neo4j-driver';
 import { nanoid } from 'nanoid';
+import { createHash } from 'crypto';
+
+/**
+ * Stable content-addressed key for a bootstrap seed Semantic. Hashing
+ * `scope|about[0]|claim` (rather than storing a long raw string) gives a short,
+ * index-friendly key that is identical across re-ingest for the same logical
+ * seed — so MERGE on it makes seed creation idempotent. `nanoid()`-based `id`
+ * can't dedupe (it's random every run); this key is derived purely from the
+ * seed's semantic identity, so the SAME seed re-ingested produces the SAME key.
+ */
+export function semanticDedupeKey(scope: string, about: string | undefined, claim: string): string {
+  return createHash('sha1').update(`${scope}|${about ?? ''}|${claim}`).digest('hex');
+}
 
 // ─── Input types ─────────────────────────────────────────────────────────────
 
@@ -269,31 +282,44 @@ export class BootstrapGraphService {
   ): Promise<string> {
     const id = `sem-${nanoid(10)}`;
     const now = new Date().toISOString();
+    const scope = projectTag.toLowerCase();
     const tags = [projectTag, seed.domain, ...(seed.tags ?? [])];
+    // Dedupe key is computed in JS (a short hash, not a long raw string) and used
+    // as the MERGE anchor so re-ingesting the SAME seed does not duplicate it.
+    const dedupeKey = semanticDedupeKey(scope, seed.about?.[0], seed.claim);
 
-    await session.run(
-      `CREATE (s:Semantic {
-        id: $id,
-        content: $content,
-        confidence: $confidence,
-        signal_count: 0,
-        created_at: $now,
-        updated_at: $now,
-        decay_class: 'stable',
-        tags: $tags,
-        scope: $scope
-      })`,
+    // MERGE (not CREATE) on the stable dedupe_key: ON CREATE seeds all props with
+    // a fresh id; ON MATCH only touches updated_at (no new id, no signal_count
+    // bump, no duplicate node). `isNew` lets us count creations only — matched
+    // re-ingests don't inflate semantics_created. The MERGE returns the existing
+    // node's id when matched, so ABOUT linking (in bootstrap()) targets the right
+    // node either way.
+    const res = await session.run(
+      `MERGE (s:Semantic {dedupe_key: $dedupeKey})
+       ON CREATE SET s.id = $id,
+                     s.content = $content,
+                     s.confidence = $confidence,
+                     s.signal_count = 0,
+                     s.created_at = $now,
+                     s.updated_at = $now,
+                     s.decay_class = 'stable',
+                     s.tags = $tags,
+                     s.scope = $scope
+       ON MATCH SET s.updated_at = $now
+       RETURN s.id AS id, s.created_at = $now AS isNew`,
       {
+        dedupeKey,
         id,
         content: seed.claim,
         confidence: seed.confidence ?? 0.3,
         now,
         tags,
-        scope: projectTag.toLowerCase(),
+        scope,
       },
     );
-    result.semantics_created++;
-    return id;
+    const isNew = res.records[0].get('isNew') as boolean;
+    if (isNew) result.semantics_created++;
+    return res.records[0].get('id') as string;
   }
 
   private async mergeRelationship(
