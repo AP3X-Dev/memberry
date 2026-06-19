@@ -72,3 +72,6 @@ serviceAccountKey.json
 # === Environment files (keep the example template) ===
 .env.*
 !.env.example
+
+# Internal planning doc (PRP) — never ships; preserved in git history
+SETUP_GAPS.md
