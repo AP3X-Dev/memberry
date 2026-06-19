@@ -3,7 +3,7 @@
 // subdirectory layout, episodic history, library, topics, and portal homepage.
 
 import type { Driver } from 'neo4j-driver';
-import { writeFile, mkdir, rm, readdir } from 'node:fs/promises';
+import { writeFile, mkdir, rm, readdir, open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   CompileV2Result,
@@ -65,6 +65,113 @@ export function slugify(name: string): string {
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ─── OPT-9: cross-process compile lock ───────────────────────────────────────
+//
+// The served wiki dir (`/app/wiki`) is a Docker named-volume MOUNT POINT shared
+// by TWO writers, each of which calls WikiCompiler.compile():
+//   1. the wiki SERVICE container's startup `build` (compile + serve + watch), and
+//   2. the MCP container's autorefresh recompile on ingest.
+// Both clear-then-rebuild the same directory. Without a lock their child-rm /
+// re-emit phases interleave, so one writer deletes files the other just wrote and
+// the served wiki is transiently structurally incomplete. An advisory lockfile in
+// the output dir, acquired with O_EXCL, serializes the two compiles: whichever
+// acquires first runs to completion, the other waits and then runs. Because the
+// guard lives INSIDE compile() (which both writers call), one change protects both.
+
+/**
+ * OPT-10: top-level sentinel the compiler rewrites LAST on every compile. The
+ * served viewer watches for changes to this single top-level file (reliable under
+ * fs.watch, unlike the nested project dirs) to trigger a full cache rebuild after
+ * an MCP-side recompile. Exported so the viewer references the exact same name.
+ */
+export const COMPILED_MARKER_FILENAME = '.compiled';
+
+const COMPILE_LOCK_FILENAME = '.compile.lock';
+/** A lock older than this (no longer being held by a live compile) is stale → broken. */
+const COMPILE_LOCK_STALE_MS = 60_000;
+/** Give up acquiring after this long and proceed anyway (don't deadlock a compile). */
+const COMPILE_LOCK_TIMEOUT_MS = 120_000;
+/** Poll interval while waiting for the holder to release. */
+const COMPILE_LOCK_RETRY_MS = 250;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Lockfile payload: pid + ISO timestamp, so a stale lock can be detected/broken. */
+function lockPayload(): string {
+  return JSON.stringify({ pid: process.pid, at: new Date().toISOString() });
+}
+
+/** Parse a lockfile body; returns null if unreadable/corrupt (treated as stale). */
+function parseLockAgeMs(body: string): number | null {
+  try {
+    const parsed = JSON.parse(body) as { at?: unknown };
+    if (typeof parsed.at !== 'string') return null;
+    const ts = Date.parse(parsed.at);
+    if (Number.isNaN(ts)) return null;
+    return Date.now() - ts;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Acquire the cross-process compile lock for `outputDir`. Resolves once held.
+ * Uses `open(path, 'wx')` (O_EXCL) as the atomic create-or-fail primitive. On
+ * contention it waits and retries; if the existing lock is older than the stale
+ * threshold (or its timestamp is unreadable), it breaks the lock and retries. After
+ * the overall timeout it proceeds without the lock rather than deadlocking — a
+ * degraded-but-live recompile beats a hung one. The dir is created first so the
+ * lockfile has somewhere to live; this is mount-safe (no rmdir/rename of the mount).
+ */
+async function acquireCompileLock(outputDir: string): Promise<void> {
+  await mkdir(outputDir, { recursive: true });
+  const lockPath = join(outputDir, COMPILE_LOCK_FILENAME);
+  const deadline = Date.now() + COMPILE_LOCK_TIMEOUT_MS;
+
+  for (;;) {
+    try {
+      const handle = await open(lockPath, 'wx');
+      try {
+        await handle.writeFile(lockPayload(), 'utf-8');
+      } finally {
+        await handle.close();
+      }
+      return; // lock held
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+
+      // Contention: inspect the holder. Break it if it looks stale.
+      let ageMs: number | null = null;
+      try {
+        ageMs = parseLockAgeMs(await readFile(lockPath, 'utf-8'));
+      } catch {
+        ageMs = null; // unreadable (e.g. removed mid-read) → retry below
+      }
+      if (ageMs === null || ageMs > COMPILE_LOCK_STALE_MS) {
+        // Stale or corrupt lock — remove and retry immediately. force:true so a
+        // concurrent breaker that already removed it doesn't make us throw.
+        await rm(lockPath, { force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) return; // give up waiting; proceed lock-less
+      await sleep(COMPILE_LOCK_RETRY_MS);
+    }
+  }
+}
+
+/** Release the compile lock. Best-effort; a missing lockfile is not an error. */
+async function releaseCompileLock(outputDir: string): Promise<void> {
+  try {
+    await unlink(join(outputDir, COMPILE_LOCK_FILENAME));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.error('[wiki-compile] Failed to release compile lock:', err instanceof Error ? err.message : err);
+    }
+  }
 }
 
 /**
@@ -259,12 +366,32 @@ export class WikiCompiler {
       output_dir: outputDir,
     };
 
+    // OPT-9: serialize the clear-then-rebuild against any other writer (the MCP
+    // autorefresh vs the wiki-service startup build both call compile() on the
+    // shared mount). Acquired before the clear, released in the finally below, so
+    // an overlapping compile waits its turn instead of deleting files mid-write.
+    await acquireCompileLock(outputDir);
+    try {
+      return await this.compileLocked(outputDir, projectScope, result);
+    } finally {
+      await releaseCompileLock(outputDir);
+    }
+  }
+
+  private async compileLocked(
+    outputDir: string,
+    projectScope: string | null,
+    result: CompileV2Result,
+  ): Promise<CompileV2Result> {
     // Clean the output directory's CONTENTS without removing the directory
     // itself. `outputDir` may be a Docker volume MOUNT POINT (the gap-15 shared
     // wiki_output volume); rm-ing a mount point fails with EBUSY. Clearing the
     // children is mount-point-safe and equivalent to starting from a fresh dir.
+    // Skip the lockfile itself — it's how we hold this run's exclusivity, and
+    // deleting it mid-compile would let an overlapping writer barge in.
     await mkdir(outputDir, { recursive: true });
     for (const entry of await readdir(outputDir)) {
+      if (entry === COMPILE_LOCK_FILENAME) continue;
       await rm(join(outputDir, entry), { recursive: true, force: true });
     }
 
@@ -753,6 +880,14 @@ export class WikiCompiler {
 
     const portalMarkdown = renderPortalHomepage(portalData);
     await writeMarkdown(join(outputDir, '_index.md'), portalMarkdown);
+
+    // OPT-10: write a SINGLE TOP-LEVEL sentinel LAST, after every page is on disk.
+    // The served viewer watches the wiki dir with fs.watch, which is unreliable for
+    // nested dirs (projects/<slug>/<entity>.md) on Linux — so an MCP-side recompile
+    // could leave the viewer's sidebar/search cache stale. A top-level file is the
+    // one path fs.watch reliably reports; the viewer rebuilds its full cache when
+    // this marker changes. Written last so its mtime bump means "compile is done".
+    await writeFile(join(outputDir, COMPILED_MARKER_FILENAME), new Date().toISOString(), 'utf-8');
 
     return result;
   }

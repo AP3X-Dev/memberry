@@ -189,6 +189,24 @@ function createParamAwareMockDriver(
   } as unknown as Driver;
 }
 
+/** Like createParamAwareMockDriver but the handler may be async (e.g. to delay). */
+function createAsyncMockDriver(
+  handler: (query: string, params?: Record<string, unknown>) => Promise<ReturnType<typeof mockResult>>,
+): Driver {
+  const mockSession = {
+    run: vi.fn(async (query: string, params?: Record<string, unknown>) => handler(query, params)),
+    close: vi.fn(async () => {}),
+  } as unknown as Session;
+
+  return {
+    session: vi.fn(() => mockSession),
+  } as unknown as Driver;
+}
+
+async function fileExists(fs: typeof import('node:fs/promises'), p: string): Promise<boolean> {
+  try { await fs.access(p); return true; } catch { return false; }
+}
+
 // WikiCompiler tests
 
 describe('WikiCompiler', () => {
@@ -481,6 +499,91 @@ describe('WikiCompiler', () => {
 
       // The compile should complete well under 500ms with batched queries
       expect(elapsed).toBeLessThan(500);
+    } finally {
+      await fs.rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('OPT-9: serializes two overlapping compile() calls on the same dir', async () => {
+    const os = await import('node:os');
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const outputDir = path.join(os.tmpdir(), `amp-wiki-lock-${Date.now()}`);
+    const lockPath = path.join(outputDir, '.compile.lock');
+
+    // Concurrency monitor. The driver's first query (fetchAllSemantics) only runs
+    // AFTER acquireCompileLock succeeds, because the clear+all phases live inside
+    // compileLocked. We open a "critical section active" window there, hold it
+    // open across a real delay so the two compiles would genuinely overlap if NOT
+    // serialized, then close it. If the lock works, the two windows never overlap.
+    let active = 0;
+    let maxActive = 0;
+    let lockPresentDuringCriticalSection = false;
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    const makeDriver = (): Driver => {
+      let firstQuery = true;
+      return createAsyncMockDriver(async (query) => {
+        if (firstQuery && query.includes('collect(DISTINCT e.name) AS entities')) {
+          firstQuery = false;
+          active++;
+          maxActive = Math.max(maxActive, active);
+          // The lockfile we hold must exist on disk right now.
+          lockPresentDuringCriticalSection ||= await fileExists(fs, lockPath);
+          await delay(80); // widen the window so a broken lock would interleave
+          active--;
+        }
+        return mockResult([]);
+      });
+    };
+
+    const c1 = new WikiCompiler(makeDriver());
+    const c2 = new WikiCompiler(makeDriver());
+
+    try {
+      const [r1, r2] = await Promise.all([c1.compile(outputDir), c2.compile(outputDir)]);
+
+      // Both completed and produced a full, structurally-complete wiki.
+      expect(r1.cross_project_pages).toBe(3);
+      expect(r2.cross_project_pages).toBe(3);
+
+      // The critical sections never overlapped (the lock serialized them).
+      expect(maxActive).toBe(1);
+      // The lock was genuinely held on disk while a compile did its work.
+      expect(lockPresentDuringCriticalSection).toBe(true);
+      // Both runs' finally blocks released the lock (none left behind).
+      await expect(fs.access(lockPath)).rejects.toThrow();
+
+      // Final wiki is intact: the cross-project pages a complete compile emits.
+      for (const f of ['_index.md', '_decisions.md', '_patterns.md', '_recent.md']) {
+        const st = await fs.stat(path.join(outputDir, f));
+        expect(st.isFile()).toBe(true);
+      }
+    } finally {
+      await fs.rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('OPT-9: a stale lock left by a crashed compile is broken and acquired', async () => {
+    const os = await import('node:os');
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const outputDir = path.join(os.tmpdir(), `amp-wiki-stalelock-${Date.now()}`);
+    const lockPath = path.join(outputDir, '.compile.lock');
+
+    try {
+      await fs.mkdir(outputDir, { recursive: true });
+      // Simulate a crashed prior compile: a lockfile whose timestamp is well past
+      // the 60s stale threshold. A new compile must break it rather than hang.
+      const stale = new Date(Date.now() - 10 * 60_000).toISOString();
+      await fs.writeFile(lockPath, JSON.stringify({ pid: 999999, at: stale }), 'utf-8');
+
+      const compiler = new WikiCompiler(createMockDriver(new Map()));
+      const result = await compiler.compile(outputDir);
+
+      expect(result.cross_project_pages).toBe(3);
+      // The stale lock was broken and the new run released its own lock at the end.
+      await expect(fs.access(lockPath)).rejects.toThrow();
     } finally {
       await fs.rm(outputDir, { recursive: true, force: true });
     }

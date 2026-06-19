@@ -4,7 +4,7 @@
 // the logic for unit testing. Since they are private, we test via the public API.
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { startWikiViewer, confineToDir, resetViewerCache } from '../viewer.js';
+import { startWikiViewer, confineToDir, resetViewerCache, __rebuildCacheForTest } from '../viewer.js';
 import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs';
 import { join, sep } from 'node:path';
@@ -697,6 +697,56 @@ describe('WikiViewer cache', () => {
   it('GET /api/refresh returns 404 (must be POST)', async () => {
     const res = await fetch(`http://localhost:${CACHE_PORT}/api/refresh`);
     expect(res.status).toBe(404);
+  });
+});
+
+// ─── OPT-10: cache backstop / self-heal on a missed fs event ──────────────────
+//
+// The periodic backstop and the .compiled-sentinel watch handler both funnel
+// through the same rebuildCacheNow path. __rebuildCacheForTest exercises that exact
+// path synchronously, so we can prove "a file the watcher never reported still
+// becomes visible after a rebuild" without spinning a long-lived server or waiting
+// on a real interval timer.
+
+describe('WikiViewer cache backstop (OPT-10)', () => {
+  const backstopDir = join(tmpdir(), `amp-wiki-backstop-test-${Date.now()}`);
+
+  beforeAll(async () => {
+    resetViewerCache();
+    await mkdir(join(backstopDir, 'projects', 'alpha'), { recursive: true });
+    await writeFile(
+      join(backstopDir, '_index.md'),
+      '---\ntitle: Backstop Test\n---\n\n# Backstop Portal\n',
+      'utf-8',
+    );
+    await writeFile(
+      join(backstopDir, 'projects', 'alpha', '_index.md'),
+      '---\nproject: alpha\n---\n\n# Alpha\n',
+      'utf-8',
+    );
+  });
+
+  afterAll(async () => {
+    resetViewerCache();
+    await rm(backstopDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('a rebuild pass picks up a nested file the watcher never reported', async () => {
+    // Baseline: 2 files indexed.
+    const before = await __rebuildCacheForTest(backstopDir);
+    expect(before).toBe(2);
+
+    // Simulate an MCP-side recompile that wrote a DEEPLY NESTED file whose fs.watch
+    // event was dropped (the OPT-10 failure mode). No watch event is fired here.
+    await writeFile(
+      join(backstopDir, 'projects', 'alpha', 'deep-entity.md'),
+      '---\nentity: deep\n---\n\n# Deep Entity\n\nWould be invisible if the cache never rebuilt.\n',
+      'utf-8',
+    );
+
+    // The backstop's rebuild path (same code the interval runs) self-heals the cache.
+    const after = await __rebuildCacheForTest(backstopDir);
+    expect(after).toBe(3);
   });
 });
 

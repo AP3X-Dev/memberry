@@ -172,7 +172,11 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 60s
+      # OPT-23b: the build compiles the FULL graph BEFORE opening port 3200, and a
+      # cold full-graph compile can exceed 60s — so a 60s start_period could mark the
+      # service unhealthy and trigger a restart loop before the port is ever served.
+      # Widen to a safer cold-compile window.
+      start_period: 180s
     restart: unless-stopped
 
 volumes:

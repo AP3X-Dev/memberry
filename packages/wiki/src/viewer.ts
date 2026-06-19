@@ -13,7 +13,7 @@ import type { Driver } from 'neo4j-driver';
 import type { ViewerConfig } from './types.js';
 import { renderSettingsBody, applyHooksTuning, runHooksInstall, getSettingsData, type InstallRequest, type TuningPatch } from './settings.js';
 import { WikiEditReconciler } from './reconcile.js';
-import { WikiCompiler } from './compile.js';
+import { WikiCompiler, COMPILED_MARKER_FILENAME } from './compile.js';
 
 // ─── Markdown rendering with [[wikilink]] support ───────────────────────────
 
@@ -1552,8 +1552,16 @@ interface WikiCache {
 let wikiCache: WikiCache | null = null;
 let cacheWatcher: FSWatcher | null = null;
 let cacheRebuildTimer: ReturnType<typeof setTimeout> | null = null;
+let cacheBackstopTimer: ReturnType<typeof setInterval> | null = null;
 
 const DEBOUNCE_MS = 500;
+
+// OPT-10: low-frequency safety net. Even with the top-level .compiled sentinel,
+// a fully-missed fs event (watcher hiccup, an NFS/overlay mount that drops events)
+// would otherwise leave the cache stale until someone POSTs /api/refresh. A periodic
+// rebuild self-heals that. Cheap relative to its interval (a sidebar + search-index
+// scan of a few hundred files), and unref'd so it never keeps the process alive.
+const CACHE_BACKSTOP_MS = 45_000;
 
 function extractProjectSlug(wikiPath: string): string | null {
   return wikiPath.match(/^projects\/([^/]+)\//)?.[1] ?? null;
@@ -1615,13 +1623,24 @@ async function buildCache(wikiDir: string): Promise<WikiCache> {
   return { sidebarHtml, searchIndex, wikiDir };
 }
 
+/**
+ * Rebuild the sidebar/search cache from disk now and drop stale rendered HTML.
+ * The single rebuild path shared by the debounced watcher, the periodic backstop,
+ * and POST /api/refresh, so all three stay consistent. Throws are the caller's to
+ * handle (the watcher/backstop log-and-continue; /api/refresh surfaces a 500).
+ */
+async function rebuildCacheNow(wikiDir: string): Promise<WikiCache> {
+  wikiCache = await buildCache(wikiDir);
+  renderCache.clear(); // OPT-57: drop rendered HTML for now-edited/removed pages
+  return wikiCache;
+}
+
 /** Invalidate the cache and schedule a debounced rebuild. */
 function scheduleCacheRebuild(wikiDir: string): void {
   if (cacheRebuildTimer) clearTimeout(cacheRebuildTimer);
   cacheRebuildTimer = setTimeout(async () => {
     try {
-      wikiCache = await buildCache(wikiDir);
-      renderCache.clear(); // OPT-57: drop rendered HTML for now-edited/removed pages
+      await rebuildCacheNow(wikiDir);
       console.error('[wiki-viewer] Cache rebuilt after file change');
     } catch (err) {
       console.error('[wiki-viewer] Cache rebuild failed:', err instanceof Error ? err.message : err);
@@ -1629,13 +1648,58 @@ function scheduleCacheRebuild(wikiDir: string): void {
   }, DEBOUNCE_MS);
 }
 
+/**
+ * OPT-10: start the low-frequency backstop that rebuilds the cache on an interval,
+ * so a fully-missed fs.watch event self-heals without a manual /api/refresh. Idempotent
+ * (clears any prior timer first). The interval is unref'd so it never holds the
+ * event loop open. Exported period override exists only for tests.
+ */
+function startCacheBackstop(wikiDir: string, periodMs: number = CACHE_BACKSTOP_MS): void {
+  stopCacheBackstop();
+  cacheBackstopTimer = setInterval(async () => {
+    try {
+      await rebuildCacheNow(wikiDir);
+    } catch (err) {
+      console.error('[wiki-viewer] Periodic cache backstop rebuild failed:', err instanceof Error ? err.message : err);
+    }
+  }, periodMs);
+  // Don't let the backstop keep the process alive (e.g. on shutdown / in tests).
+  cacheBackstopTimer.unref?.();
+}
+
+/** Stop the periodic cache backstop. */
+function stopCacheBackstop(): void {
+  if (cacheBackstopTimer) {
+    clearInterval(cacheBackstopTimer);
+    cacheBackstopTimer = null;
+  }
+}
+
+/**
+ * @internal test-only: run one cache-rebuild pass synchronously (awaitable),
+ * exercising the exact path the periodic backstop and watcher use. Lets a test
+ * assert "a missed fs event self-heals via a rebuild" without spinning a server or
+ * waiting on a real interval.
+ */
+export async function __rebuildCacheForTest(wikiDir: string): Promise<number> {
+  const cache = await rebuildCacheNow(wikiDir);
+  return cache.searchIndex.size;
+}
+
 /** Start watching the wiki directory for changes. */
 function startWatching(wikiDir: string): void {
   stopWatching();
   try {
     cacheWatcher = watch(wikiDir, { recursive: true }, (_eventType, filename) => {
-      // Only rebuild for markdown file changes
-      if (filename && filename.endsWith('.md')) {
+      if (!filename) return;
+      // Rebuild for markdown changes (direct edits) OR when the compiler's
+      // top-level .compiled sentinel changes. OPT-10: recursive fs.watch is
+      // unreliable for the nested project dirs an MCP-side recompile rewrites, so
+      // those .md events can be missed — but the single top-level marker, rewritten
+      // LAST on every compile, is the one path fs.watch reports reliably. Catching
+      // it guarantees a full cache rebuild after every recompile.
+      const base = filename.split(/[\\/]/).pop() ?? filename;
+      if (filename.endsWith('.md') || base === COMPILED_MARKER_FILENAME) {
         scheduleCacheRebuild(wikiDir);
       }
     });
@@ -1645,9 +1709,12 @@ function startWatching(wikiDir: string): void {
   } catch (err) {
     console.error('[wiki-viewer] Failed to start file watcher (cache will require manual refresh):', err instanceof Error ? err.message : err);
   }
+  // OPT-10: always run the periodic backstop alongside the watcher, so even a
+  // total watcher failure (the catch above) or a silently-dropped event self-heals.
+  startCacheBackstop(wikiDir);
 }
 
-/** Stop watching and cancel any pending rebuild timer. */
+/** Stop watching and cancel any pending rebuild timer + the periodic backstop. */
 function stopWatching(): void {
   if (cacheWatcher) {
     cacheWatcher.close();
@@ -1657,6 +1724,7 @@ function stopWatching(): void {
     clearTimeout(cacheRebuildTimer);
     cacheRebuildTimer = null;
   }
+  stopCacheBackstop();
 }
 
 /** Get the current cache, building it on first call or when wikiDir changes. */
@@ -2270,11 +2338,11 @@ export function startWikiViewer(config: ViewerConfig): Promise<ReturnType<typeof
         }
         res.end(cssBuf);
       } else if (path === '/api/refresh' && req.method === 'POST') {
-        // Manual cache refresh endpoint
+        // Manual cache refresh endpoint — same rebuild path as the watcher/backstop.
         try {
-          wikiCache = await buildCache(wiki_dir);
+          const cache = await rebuildCacheNow(wiki_dir);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, files: wikiCache.searchIndex.size }));
+          res.end(JSON.stringify({ ok: true, files: cache.searchIndex.size }));
         } catch (err) {
           console.error('[wiki-viewer] Manual refresh failed:', err instanceof Error ? err.message : err);
           res.writeHead(500, { 'Content-Type': 'application/json' });
