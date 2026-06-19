@@ -100,9 +100,17 @@ export interface ICodeIndexerService {
    * T6/gap-12 bridge: link the just-indexed Component file nodes (created by
    * indexProject's ensureFileEntities) to their module Entities and the project,
    * so the wiki compiler's CONTAINS traversal discovers them. Idempotent; scoped
-   * to files under `rootPath`. Returns the number of file→module links processed.
+   * to files under `rootPath`. `knownModules` is the scanner's authoritative
+   * module list ({name, relPath}); each component is mapped to a module by
+   * LONGEST directory-prefix so module names agree byte-for-byte with the
+   * bootstrap (a monorepo file under `packages/core/...` → module `core`, not
+   * `packages`). Returns the number of file→module links processed.
    */
-  linkComponentsToProject?(rootPath: string, projectName: string): Promise<number>;
+  linkComponentsToProject?(
+    rootPath: string,
+    projectName: string,
+    knownModules?: Array<{ name: string; relPath: string }>,
+  ): Promise<number>;
 }
 
 // ─── Service container ────────────────────────────────────────────────────────
@@ -1179,7 +1187,14 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         // ingestion already succeeded if this throws).
         if (codeIndexerService.linkComponentsToProject) {
           try {
-            await codeIndexerService.linkComponentsToProject(absPath, projectName);
+            // Pass the scanner's authoritative module dirs so the bridge maps
+            // each component to a module by LONGEST directory-prefix — e.g. a
+            // file under `packages/core/...` resolves to module `core` (the name
+            // the bootstrap created), not the `packages` workspace root.
+            const knownModules = scan.modules
+              .filter((m): m is typeof m & { relPath: string } => typeof m.relPath === 'string' && m.relPath.length > 0)
+              .map((m) => ({ name: m.name, relPath: m.relPath }));
+            await codeIndexerService.linkComponentsToProject(absPath, projectName, knownModules);
           } catch (err: unknown) {
             console.error('[berry_ingest_codebase] component→project bridge failed (non-fatal):', err);
           }

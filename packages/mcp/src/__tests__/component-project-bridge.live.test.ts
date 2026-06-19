@@ -204,3 +204,138 @@ describe('berry_ingest_codebase — component→project wiki bridge (live Neo4j)
     }
   });
 });
+
+// OPT-2 regression — NESTED workspace layout (top-level dir ≠ module name).
+//
+// The audit found the bridge derived a component's MODULE from the TOP-LEVEL
+// directory. That passed CI only because the existing fixture above put each
+// module in its OWN top-level dir (`mod_a`, `mod_b`) where the top-level dir
+// name coincidentally equalled the module name. In a real monorepo the modules
+// live UNDER a workspace root (`packages/<pkg>`), so top-level-dir derivation
+// minted a single junk `packages` module that captured ALL components while the
+// real per-package modules (`core`, `mcp`, …) got none.
+//
+// This fixture is a `pkgs/*` workspace: the top-level dir (`pkgs`) differs from
+// the module names (`<run>-alpha`, `<run>-beta`, named by the scanner from each
+// workspace package's DIRECTORY). Module + package dir names are unique per run
+// so cleanup never clobbers shared graph data.
+const NESTED_RUN = `opt2-nested-${Date.now()}`;
+const NESTED_PROJECT = `${NESTED_RUN}-proj`;
+const NESTED_MOD_A = `${NESTED_RUN}-alpha`;
+const NESTED_MOD_B = `${NESTED_RUN}-beta`;
+
+describe('berry_ingest_codebase — nested workspace component→module bridge (live Neo4j)', () => {
+  let available = false;
+  const driver = createNeo4jDriver(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
+  let fixtureDir = '';
+
+  async function wipe(): Promise<void> {
+    const s = driver.session();
+    try {
+      // Delete by UNIQUE per-run names only (never bare shared names).
+      await s.run('MATCH (e:Entity {name: $name}) DETACH DELETE e', { name: NESTED_PROJECT });
+      await s.run('MATCH (e:Entity {name: $name}) DETACH DELETE e', { name: NESTED_MOD_A });
+      await s.run('MATCH (e:Entity {name: $name}) DETACH DELETE e', { name: NESTED_MOD_B });
+      if (fixtureDir) {
+        await s.run('MATCH (c:Entity:Component) WHERE c.path STARTS WITH $d DETACH DELETE c', { d: fixtureDir });
+        await s.run('MATCH (sym:Symbol) WHERE sym.file_path STARTS WITH $d DETACH DELETE sym', { d: fixtureDir });
+      }
+    } finally {
+      await s.close();
+    }
+  }
+
+  beforeAll(async () => {
+    available = await isNeo4jReachable();
+    if (!available) {
+      console.warn(`[skip] Neo4j not reachable at ${NEO4J_URI} — skipping OPT-2 nested-workspace test`);
+      return;
+    }
+    fixtureDir = await mkdtemp(join(process.cwd(), 'opt2-nested-fixture-'));
+    // Root manifest declares a `pkgs/*` workspace so the scanner names modules by
+    // each workspace package's DIRECTORY (NOT the `pkgs` root).
+    await writeFile(
+      join(fixtureDir, 'package.json'),
+      JSON.stringify({ name: NESTED_PROJECT, description: 'OPT-2 nested fixture', workspaces: ['pkgs/*'] }),
+    );
+    // Two workspace packages UNDER `pkgs/` — top-level dir (`pkgs`) ≠ module name.
+    // Each package's source lives a further level down (`src/`), so the component
+    // dir is `pkgs/<mod>/src` — only a longest-prefix match resolves the module.
+    await mkdir(join(fixtureDir, 'pkgs', NESTED_MOD_A, 'src'), { recursive: true });
+    await mkdir(join(fixtureDir, 'pkgs', NESTED_MOD_B, 'src'), { recursive: true });
+    await writeFile(
+      join(fixtureDir, 'pkgs', NESTED_MOD_A, 'package.json'),
+      JSON.stringify({ name: `@${NESTED_RUN}/alpha` }),
+    );
+    await writeFile(
+      join(fixtureDir, 'pkgs', NESTED_MOD_B, 'package.json'),
+      JSON.stringify({ name: `@${NESTED_RUN}/beta` }),
+    );
+    await writeFile(join(fixtureDir, 'pkgs', NESTED_MOD_A, 'src', 'a.ts'), 'export const a = () => 1;\n');
+    await writeFile(join(fixtureDir, 'pkgs', NESTED_MOD_B, 'src', 'b.ts'), 'export const b = () => 2;\n');
+    await wipe();
+  });
+
+  afterAll(async () => {
+    if (available) await wipe();
+    if (fixtureDir) await rm(fixtureDir, { recursive: true, force: true }).catch(() => {});
+    await driver.close().catch(() => {});
+  });
+
+  it('maps each component to its workspace module, not the top-level workspace dir', async () => {
+    if (!available) return;
+
+    const container = createServiceContainer({
+      ampService: ampStub,
+      scopedQuery: scopedQueryStub,
+      bootstrapService: new BootstrapGraphService(driver),
+      memoryBlockService: memoryBlockStub,
+      codeIndexerService: new CodeIndexer(driver),
+    });
+    const handlers = buildToolHandlers(container);
+
+    const result = await handlers.berry_ingest_codebase({ path: fixtureDir });
+    expect(result.content[0].text).toContain('Codebase Ingestion Complete');
+
+    const s = driver.session();
+    try {
+      // The two-hop project → module → component shape must use the REAL
+      // per-package module names. Against the OLD top-level-dir logic the bridge
+      // would attach both files under a junk `pkgs` module (which the bootstrap
+      // never created), so this query — keyed on the real module names — returns
+      // nothing and the assertion fails.
+      const twoHop = await s.run(
+        `MATCH (p:Entity {type: 'project', name: $projectName})-[:CONTAINS]->(m:Entity {type: 'module'})-[:CONTAINS]->(c:Entity:Component)
+         WHERE c.path STARTS WITH $d
+         RETURN m.name AS module, c.path AS path`,
+        { projectName: NESTED_PROJECT, d: fixtureDir },
+      );
+      const byModule = new Map<string, string[]>();
+      for (const r of twoHop.records) {
+        const mod = r.get('module') as string;
+        const list = byModule.get(mod) ?? [];
+        list.push(r.get('path') as string);
+        byModule.set(mod, list);
+      }
+
+      // Each component hangs under its OWN workspace module (longest-prefix match).
+      expect(new Set(byModule.keys())).toEqual(new Set([NESTED_MOD_A, NESTED_MOD_B]));
+      expect((byModule.get(NESTED_MOD_A) ?? []).some((p) => p.endsWith('a.ts'))).toBe(true);
+      expect((byModule.get(NESTED_MOD_B) ?? []).some((p) => p.endsWith('b.ts'))).toBe(true);
+      // The alpha file must NOT be filed under beta (and vice-versa).
+      expect((byModule.get(NESTED_MOD_A) ?? []).some((p) => p.endsWith('b.ts'))).toBe(false);
+
+      // No junk `pkgs` workspace-root module captured the components — the exact
+      // failure mode of the old top-level-dir derivation.
+      const junk = await s.run(
+        `MATCH (p:Entity {type: 'project', name: $projectName})-[:CONTAINS]->(m:Entity {name: 'pkgs'})-[:CONTAINS]->(c:Entity:Component)
+         WHERE c.path STARTS WITH $d
+         RETURN count(c) AS n`,
+        { projectName: NESTED_PROJECT, d: fixtureDir },
+      );
+      expect(junk.records[0].get('n').toNumber()).toBe(0);
+    } finally {
+      await s.close();
+    }
+  });
+});

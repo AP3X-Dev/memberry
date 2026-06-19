@@ -261,9 +261,11 @@ export class CodeIndexer {
    * indexed file but never links them to a project, so the wiki compiler's
    * `fetchProjectEntities` — which discovers entities via
    * `(project:Entity{type:'project'})-[:CONTAINS*1..]->(e)` — can't see them.
-   * This links each Component to its MODULE (its top-level directory relative to
-   * `absPath`, matching the codebase-scanner's module naming) and wires
-   * `(project)-[:CONTAINS]->(module)-[:CONTAINS]->(component)`.
+   * This links each Component to its MODULE — matched by LONGEST directory-prefix
+   * against the codebase-scanner's `knownModules` (so a monorepo file under
+   * `packages/core/...` maps to module `core`, not the `packages` workspace root)
+   * — and wires `(project)-[:CONTAINS]->(module)-[:CONTAINS]->(component)`. With
+   * no `knownModules` it falls back to the file's top-level directory.
    *
    * Scoped to THIS run: only Component nodes whose `path` starts with `absPath`
    * are touched — never global/unscoped component nodes. Fully idempotent
@@ -273,7 +275,11 @@ export class CodeIndexer {
    *
    * @returns the number of {module, component} link pairs processed.
    */
-  async linkComponentsToProject(absPath: string, projectName: string): Promise<number> {
+  async linkComponentsToProject(
+    absPath: string,
+    projectName: string,
+    knownModules?: KnownModule[],
+  ): Promise<number> {
     const session = this.driver.session();
     try {
       // Read back the EXACT `path` values ensureFileEntities stored for this run.
@@ -288,7 +294,7 @@ export class CodeIndexer {
         { absPath, absPathPrefix },
       );
       const componentPaths = found.records.map((r) => r.get('path') as string);
-      const links = computeComponentModuleLinks(absPath, projectName, componentPaths);
+      const links = computeComponentModuleLinks(absPath, projectName, componentPaths, knownModules);
       if (links.length === 0) return 0;
 
       // A root-level file's module IS the project (the "sensible default"); attach
@@ -484,31 +490,63 @@ function relationFallback(symbol: SymbolNode | undefined): RelationSymbolFallbac
 
 /** One file→module link the wiki bridge will MERGE into the graph. */
 export interface ComponentModuleLink {
-  /** The module Entity name = the file's top-level dir relative to the project root. */
+  /** The module Entity name a component belongs to (or projectName for root files). */
   moduleName: string;
   /** The exact `path` value stored on the `:Entity:Component` node. */
   componentPath: string;
 }
 
 /**
+ * A workspace/source module the codebase-scanner discovered, as the bridge needs
+ * it: the Entity `name` the bootstrap created, plus the module's directory
+ * `relPath` (project-root-relative, forward slashes — e.g. `packages/core`,
+ * `src`, `src/auth`). The bridge matches each component to a module by LONGEST
+ * `relPath` prefix, so module names agree byte-for-byte with the bootstrap.
+ */
+export interface KnownModule {
+  name: string;
+  relPath: string;
+}
+
+/**
  * Pure mapping used by {@link CodeIndexer.linkComponentsToProject} (T6/gap-12).
- * For each indexed Component `path`, derive its MODULE: the first path segment of
- * `path` relative to `absPath` — i.e. the file's TOP-LEVEL directory under the
- * project root. This matches the codebase-scanner's module naming (workspace dir
- * basenames + top-level source dirs like `src`/`lib`), so a derived module links
- * to the SAME Entity the bootstrap created instead of forking a new one.
  *
- * A file directly under the root (no subdirectory) has no module dir, so it is
- * attached to the project itself (moduleName = projectName) — a sensible default
- * rather than minting a junk module from a bare filename.
+ * For each indexed Component `path`, derive its MODULE so the file links to the
+ * SAME module Entity the bootstrap created (not a forked junk one):
  *
- * Exported (and side-effect-free) so the bridge can be live-tested directly.
+ * 1. When `knownModules` is supplied (the ingest path — the scanner's
+ *    authoritative module list is in scope), match the component to the module
+ *    whose directory `relPath` is the LONGEST prefix of the component's
+ *    directory. In a monorepo a file at `packages/core/src/x.ts` thus maps to
+ *    module `core` (relPath `packages/core`), NOT the `packages` workspace root.
+ *    This is the fix for the reader/writer mismatch: the scanner names a
+ *    `packages/*` module by its leaf dir (`core`), so deriving the module from
+ *    the TOP-LEVEL dir (`packages`) minted a junk module that captured every
+ *    component while the real per-package modules got none.
+ *
+ * 2. With no `knownModules` (e.g. the watcher's context-free reindex), fall back
+ *    to the file's first path segment under the root — preserves the prior
+ *    single-level layout behaviour.
+ *
+ * A file with no matching module and no subdirectory is attached to the project
+ * itself (moduleName = projectName) — a sensible default rather than minting a
+ * junk module from a bare filename.
+ *
+ * Exported (and side-effect-free) so the bridge can be unit/live-tested directly.
  */
 export function computeComponentModuleLinks(
   absPath: string,
   projectName: string,
   componentPaths: string[],
+  knownModules?: KnownModule[],
 ): ComponentModuleLink[] {
+  // Pre-split each known module's relPath into directory segments once, and sort
+  // longest-first so the FIRST prefix match is the most specific (longest) one.
+  const modules = (knownModules ?? [])
+    .map((m) => ({ name: m.name, segments: m.relPath.split(/[\\/]/).filter(Boolean) }))
+    .filter((m) => m.segments.length > 0)
+    .sort((a, b) => b.segments.length - a.segments.length);
+
   const links: ComponentModuleLink[] = [];
   for (const componentPath of componentPaths) {
     // `relative` is platform-correct (uses the same `path` module the indexer
@@ -517,9 +555,37 @@ export function computeComponentModuleLinks(
     // Outside the root (shouldn't happen — caller scopes by STARTS WITH) → skip.
     if (!rel || rel.startsWith('..')) continue;
     const segments = rel.split(/[\\/]/).filter(Boolean);
-    // A bare filename (no dir segment) → no module → attach to the project.
-    const moduleName = segments.length > 1 ? segments[0] : projectName;
+    // The component's DIRECTORY segments (drop the filename).
+    const dirSegments = segments.slice(0, -1);
+
+    let moduleName: string | undefined;
+    if (modules.length > 0) {
+      // Longest-prefix match against the scanner's known module directories.
+      for (const m of modules) {
+        if (isPrefix(m.segments, dirSegments)) {
+          moduleName = m.name;
+          break;
+        }
+      }
+    }
+
+    // Fallback (no known modules, or no module owns this file): use the first
+    // directory segment if present, else attach the bare-filename file to the
+    // project.
+    if (moduleName === undefined) {
+      moduleName = dirSegments.length > 0 ? dirSegments[0] : projectName;
+    }
+
     links.push({ moduleName, componentPath });
   }
   return links;
+}
+
+/** True when `prefix` is a leading run of directory segments of `segments`. */
+function isPrefix(prefix: string[], segments: string[]): boolean {
+  if (prefix.length > segments.length) return false;
+  for (let i = 0; i < prefix.length; i++) {
+    if (prefix[i] !== segments[i]) return false;
+  }
+  return true;
 }

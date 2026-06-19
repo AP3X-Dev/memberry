@@ -131,7 +131,9 @@ describe('berry_ingest_codebase handler', () => {
     // T6/gap-12: should have run the component→project wiki bridge with the
     // resolved project name so indexed file nodes become wiki-discoverable.
     expect(mockCodeIndexer.linkComponentsToProject).toHaveBeenCalledTimes(1);
-    expect(mockCodeIndexer.linkComponentsToProject).toHaveBeenCalledWith(tempDir, 'my-test-app');
+    // OPT-2: the bridge now also receives the scanner's module list (with relPath)
+    // so it can map components to the real per-package module by longest dir prefix.
+    expect(mockCodeIndexer.linkComponentsToProject).toHaveBeenCalledWith(tempDir, 'my-test-app', expect.any(Array));
 
     // Should have seeded memory blocks
     expect(mockMemoryBlockService.insert).toHaveBeenCalledTimes(2);

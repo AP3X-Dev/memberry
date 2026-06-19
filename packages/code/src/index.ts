@@ -33,7 +33,7 @@ export { SymbolStore } from './symbol-store.js';
 
 // Services
 export { CodeIndexer, computeComponentModuleLinks } from './indexer.js';
-export type { ComponentModuleLink } from './indexer.js';
+export type { ComponentModuleLink, KnownModule } from './indexer.js';
 export { ImportResolver } from './resolver.js';
 export { CodeSearch } from './search.js';
 export { structuralSearch } from './structural-search.js';

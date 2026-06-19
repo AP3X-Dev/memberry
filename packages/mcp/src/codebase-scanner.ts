@@ -22,6 +22,14 @@ export interface DiscoveredModule {
   type: string;
   description: string;
   parent?: string;
+  /**
+   * The module's directory relative to the project root, normalized to forward
+   * slashes (e.g. `packages/core`, `src`, `src/auth`). Used by the code→wiki
+   * bridge to map an indexed Component file to THIS module by longest
+   * directory-prefix — so a component under `packages/core/...` resolves to the
+   * `core` module the scanner named here, not the `packages` workspace root.
+   */
+  relPath?: string;
 }
 
 export interface CodebaseScan {
@@ -228,6 +236,10 @@ async function discoverModules(
               type: 'module',
               description: desc,
               parent: metadata.name,
+              // Directory the module lives in (e.g. `packages/core`), so the
+              // code→wiki bridge maps files under it to THIS module, not the
+              // `packages` workspace root.
+              relPath: toRelPath(rootPath, join(wsPath, entry.name)),
             });
           }
         }
@@ -253,6 +265,7 @@ async function discoverModules(
           type: 'module',
           description: `Source directory: ${entry.name}/`,
           parent: metadata.name,
+          relPath: toRelPath(rootPath, join(rootPath, entry.name)),
         });
       }
     }
@@ -278,6 +291,7 @@ async function discoverModules(
             type: 'component',
             description: `Component: ${entry.name}/ (${filesInDir.length} source files)`,
             parent: metadata.name,
+            relPath: toRelPath(rootPath, dirPath),
           });
         }
       }
@@ -335,6 +349,14 @@ async function walkSourceFiles(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * The directory `dirPath` relative to `rootPath`, normalized to forward slashes
+ * so the code→wiki bridge's prefix match is platform-independent.
+ */
+function toRelPath(rootPath: string, dirPath: string): string {
+  return relative(rootPath, dirPath).split(/[\\/]/).filter(Boolean).join('/');
+}
 
 function detectLanguages(files: string[]): SupportedLanguage[] {
   const counts = new Map<SupportedLanguage, number>();
