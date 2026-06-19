@@ -94,25 +94,36 @@ export class BootstrapGraphService {
       }, result);
       result.project_entity_id = projectId;
 
-      // 2. Create all entities
+      // 2. Create all entities FIRST (parent-linking is a separate pass below).
+      //    OPT-21: the parent CONTAINS link used to run inline in this loop, so a
+      //    module naming a parent that appears LATER in `entities` got no parent
+      //    edge — the parent wasn't MERGEd yet when the child looked it up. MERGE
+      //    every entity before any parent link so order in the array no longer
+      //    matters. Remember each entity's id for the linking pass.
+      const entityIds: string[] = [];
       for (const entity of input.entities) {
         const entityId = await this.mergeEntity(session, entity, result);
+        entityIds.push(entityId);
 
         // Link to project (all entities belong to the project)
         if (entity.type !== 'project') {
           await this.mergeRelationship(session, projectId, entityId, 'CONTAINS', result);
         }
+      }
 
-        // Link to parent if specified
-        if (entity.parent) {
-          const parentResult = await session.run(
-            'MATCH (e:Entity {name: $parent}) RETURN e.id AS id',
-            { parent: entity.parent },
-          );
-          if (parentResult.records.length > 0) {
-            const parentId = parentResult.records[0].get('id') as string;
-            await this.mergeRelationship(session, parentId, entityId, 'CONTAINS', result);
-          }
+      // 2b. Parent-linking pass — now that ALL entities exist, a parent listed
+      //     later than its child still resolves. `LIMIT 1` makes the match
+      //     deterministic when several entities share a name (one CONTAINS edge).
+      for (let i = 0; i < input.entities.length; i++) {
+        const entity = input.entities[i];
+        if (!entity.parent) continue;
+        const parentResult = await session.run(
+          'MATCH (e:Entity {name: $parent}) RETURN e.id AS id LIMIT 1',
+          { parent: entity.parent },
+        );
+        if (parentResult.records.length > 0) {
+          const parentId = parentResult.records[0].get('id') as string;
+          await this.mergeRelationship(session, parentId, entityIds[i], 'CONTAINS', result);
         }
       }
 
@@ -122,24 +133,40 @@ export class BootstrapGraphService {
       }
 
       // 4. Create semantic seeds
+      //    OPT-8: each seed's work (createSemantic + its ABOUT links) is wrapped in
+      //    its own try/catch so one bad/contended seed can't reject bootstrap() and
+      //    abort the downstream phases (code indexing, component bridge, block
+      //    seeding) the ingest handler runs AFTER bootstrap. ENTITY and AGENT
+      //    merges above stay hard-fail — only seeding is best-effort. The result
+      //    still reflects exactly the seeds that succeeded.
       for (const seed of input.semantic_seeds) {
-        const semId = await this.createSemantic(session, seed, input.project_tag, result);
+        try {
+          const semId = await this.createSemantic(session, seed, input.project_tag, result);
 
-        // Link ABOUT relationships to named entities
-        for (const entityName of seed.about ?? []) {
-          const entityResult = await session.run(
-            'MATCH (e:Entity {name: $name}) RETURN e.id AS id',
-            { name: entityName },
-          );
-          if (entityResult.records.length > 0) {
-            const entityId = entityResult.records[0].get('id') as string;
-            await session.run(
-              `MATCH (s:Semantic {id: $semId}), (e:Entity {id: $entityId})
-               MERGE (s)-[:ABOUT]->(e)`,
-              { semId, entityId },
+          // Link ABOUT relationships to named entities
+          for (const entityName of seed.about ?? []) {
+            const entityResult = await session.run(
+              'MATCH (e:Entity {name: $name}) RETURN e.id AS id',
+              { name: entityName },
             );
-            result.relationships_created++;
+            if (entityResult.records.length > 0) {
+              const entityId = entityResult.records[0].get('id') as string;
+              await session.run(
+                `MATCH (s:Semantic {id: $semId}), (e:Entity {id: $entityId})
+                 MERGE (s)-[:ABOUT]->(e)`,
+                { semId, entityId },
+              );
+              result.relationships_created++;
+            }
           }
+        } catch (err) {
+          // Skip this seed and continue with the rest. A single failed seed must
+          // not take down the whole bootstrap (and the phases that follow it).
+          console.warn(
+            `[bootstrap] semantic seed failed, skipping: ${seed.claim?.slice(0, 80) ?? '<no claim>'} — ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
         }
       }
 
