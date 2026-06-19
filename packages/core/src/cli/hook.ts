@@ -17,8 +17,19 @@ import {
 
 const CLAUDE_EVENTS: ClaudeHookEvent[] = ['session-start', 'user-prompt', 'pre-compact', 'session-end'];
 
-/** Read all of stdin as a string. Returns '' immediately if stdin is a TTY. */
-function readStdin(): Promise<string> {
+/** Idle window (ms): how long stdin may stay silent before we give up waiting. */
+const STDIN_IDLE_MS = 1000;
+
+/**
+ * Read all of stdin as a string. Returns '' immediately if stdin is a TTY.
+ *
+ * The guard is an IDLE timeout, not an absolute cap: every incoming chunk resets
+ * it, so a large payload that streams in slowly (each chunk < the idle window) is
+ * read in full. The timer only fires when stdin is genuinely silent — i.e. the
+ * upstream never closes the pipe. This prevents the silent truncation that an
+ * absolute setTimeout caused for slow/large payloads.
+ */
+export function readStdin(): Promise<string> {
   return new Promise((resolve) => {
     if (process.stdin.isTTY) {
       resolve('');
@@ -26,18 +37,25 @@ function readStdin(): Promise<string> {
     }
     let data = '';
     let settled = false;
+    let guard: ReturnType<typeof setTimeout>;
     const done = (): void => {
       if (settled) return;
       settled = true;
+      clearTimeout(guard);
       resolve(data);
     };
-    // Guard against a stdin that never closes.
-    const guard = setTimeout(done, 1000);
-    guard.unref?.();
+    const arm = (): void => {
+      clearTimeout(guard);
+      guard = setTimeout(done, STDIN_IDLE_MS);
+      guard.unref?.();
+    };
+    // Arm the idle guard, then reset it on every chunk so an in-flight payload is
+    // never cut off mid-stream.
+    arm();
     process.stdin.setEncoding('utf-8');
-    process.stdin.on('data', (chunk) => { data += chunk; });
-    process.stdin.on('end', () => { clearTimeout(guard); done(); });
-    process.stdin.on('error', () => { clearTimeout(guard); done(); });
+    process.stdin.on('data', (chunk) => { data += chunk; arm(); });
+    process.stdin.on('end', done);
+    process.stdin.on('error', done);
   });
 }
 

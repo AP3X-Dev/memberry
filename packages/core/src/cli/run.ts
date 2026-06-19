@@ -53,8 +53,13 @@ export async function runRunCommand(rest: string[]): Promise<void> {
     process.stderr.write(`[memberry-run] context refresh skipped: ${err instanceof Error ? err.message : String(err)}\n`);
   }
 
-  // Exec the wrapped command, inheriting stdio; propagate its exit code.
-  const child = spawn(command[0], command.slice(1), { stdio: 'inherit' });
+  // Exec the wrapped command, inheriting stdio; propagate its exit code. On
+  // Windows, agent shims (codex/npx/npm) are .cmd/.bat files that node can't exec
+  // directly, so spawn through a shell there.
+  const child = spawn(command[0], command.slice(1), {
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  });
   child.on('exit', (code, signal) => {
     if (signal) process.kill(process.pid, signal);
     else process.exit(code ?? 0);

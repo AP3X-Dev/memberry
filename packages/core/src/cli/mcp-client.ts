@@ -85,6 +85,32 @@ interface JsonRpcEnvelope {
   error?: { code?: number; message?: string; data?: unknown };
 }
 
+/**
+ * Build the message for a non-2xx `/mcp` response. The server returns a
+ * descriptive JSON-RPC error envelope even on HTTP failures (e.g. 404 "Session
+ * not found" after a long ingest, 400 "Bad Request", 413 "Payload too large"),
+ * so we read the body and try to surface that message rather than discarding it.
+ * Falls back to the bare status string when the body isn't a JSON-RPC error.
+ */
+async function httpErrorMessage(ctx: string, res: Response): Promise<string> {
+  const base = `${ctx}: server responded HTTP ${res.status}.`;
+  let text: string;
+  try {
+    text = await res.text();
+  } catch {
+    return base;
+  }
+  try {
+    const env = parseJsonRpcBody(res.headers.get('content-type'), text) as JsonRpcEnvelope;
+    if (env && typeof env === 'object' && env.error && env.error.message) {
+      return `${base} ${env.error.message}`;
+    }
+  } catch {
+    // Body wasn't a parseable JSON-RPC envelope — keep the bare status string.
+  }
+  return base;
+}
+
 /** Extract `result` from a JSON-RPC envelope, surfacing a JSON-RPC `error` cleanly. */
 function unwrapResult(envelope: unknown, ctx: string): unknown {
   const env = envelope as JsonRpcEnvelope;
@@ -156,7 +182,7 @@ export async function mcpInitialize(url: string, token: string): Promise<McpSess
     );
   }
   if (!initRes.ok) {
-    throw new McpClientError(`initialize: server responded HTTP ${initRes.status}.`);
+    throw new McpClientError(await httpErrorMessage('initialize', initRes));
   }
 
   const sessionId = initRes.headers.get('mcp-session-id');
@@ -223,7 +249,7 @@ export async function mcpCall(
     `tools/call ${toolName}`,
   );
   if (!res.ok) {
-    throw new McpClientError(`tools/call ${toolName}: server responded HTTP ${res.status}.`);
+    throw new McpClientError(await httpErrorMessage(`tools/call ${toolName}`, res));
   }
   const envelope = parseJsonRpcBody(res.headers.get('content-type'), await res.text());
   const result = unwrapResult(envelope, `tools/call ${toolName}`) as ToolCallResult;

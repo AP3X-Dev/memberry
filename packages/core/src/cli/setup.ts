@@ -33,6 +33,19 @@ const FORWARDED_FLAGS = [
 type Flags = Record<string, string | boolean>;
 
 /**
+ * This module's own filesystem path (…/packages/core/src/cli/setup.ts, or /dist/…),
+ * or '' if import.meta.url is unavailable (shouldn't happen under Node16 ESM). Kept
+ * separate so resolveRepoRoot can be exercised with a fabricated path in tests.
+ */
+function safeModulePath(): string {
+  try {
+    return fileURLToPath(import.meta.url);
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Resolve the repo root that owns scripts/setup.sh.
  *
  * Primary strategy: derive it from this module's own location. At runtime the CLI
@@ -43,16 +56,13 @@ type Flags = Record<string, string | boolean>;
  * We never trust a single guess: the caller verifies scripts/setup.sh exists at
  * the resolved root before exec, and tries the cwd fallback if it doesn't.
  */
-export function resolveRepoRoot(): string {
+export function resolveRepoRoot(here: string = safeModulePath()): string {
   const candidates: string[] = [];
 
-  try {
-    const here = fileURLToPath(import.meta.url); // …/packages/core/src/cli/setup.ts (or /dist/…)
+  if (here) {
     const marker = `${path.sep}packages${path.sep}`;
     const idx = here.indexOf(marker);
     if (idx !== -1) candidates.push(here.slice(0, idx));
-  } catch {
-    // import.meta.url unavailable (shouldn't happen under Node16 ESM) — fall through.
   }
 
   candidates.push(process.cwd());
