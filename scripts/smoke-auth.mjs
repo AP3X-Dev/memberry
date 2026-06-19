@@ -41,7 +41,9 @@ const TOKEN =
 const HOST = process.env.MEMBERRY_PUBLIC_HOST || '127.0.0.1';
 const PORT = process.env.MCP_PORT || process.env.PORT || '3101';
 const BASE = `http://${HOST}:${PORT}`;
-const WIKI_PORT = process.env.MEMBERRY_WIKI_PORT || '3200';
+// Wiki viewer port is fixed at 3200 (hardcoded in docker-compose.yml — there is
+// no MEMBERRY_WIKI_PORT env var anywhere else, so the indirection was dead).
+const WIKI_PORT = '3200';
 const WIKI_BASE = `http://${HOST}:${WIKI_PORT}`;
 const REQUIRE_WIKI =
   (process.env.MEMBERRY_SMOKE_REQUIRE_WIKI || '').toLowerCase() === 'true';

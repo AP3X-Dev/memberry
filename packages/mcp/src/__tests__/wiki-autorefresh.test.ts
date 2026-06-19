@@ -149,6 +149,10 @@ describe('wiki autorefresh guard (gap-15)', () => {
   });
 
   it('accepts common truthy spellings and rejects falsey ones', () => {
+    // Configure so state.outputDir (the single source the guard checks) is the
+    // real temp dir that exists — the guard no longer re-reads the env dir.
+    const recompile = vi.fn(async () => {});
+    configureWikiAutorefresh({ recompile, outputDir });
     for (const truthy of ['1', 'true', 'TRUE', 'yes', 'on']) {
       setEnv(truthy, outputDir);
       expect(isWikiAutorefreshEnabled()).toBe(true);
@@ -164,5 +168,73 @@ describe('wiki autorefresh guard (gap-15)', () => {
     expect(resolveWikiOutputDir()).toBe(DEFAULT_WIKI_OUTPUT_DIR);
     setEnv(undefined, '/custom/wiki/dir');
     expect(resolveWikiOutputDir()).toBe('/custom/wiki/dir');
+  });
+});
+
+// OPT-18 — the dir-existence check must NOT re-stat on every store. The mount
+// point doesn't appear/disappear during the process lifetime, so the guard
+// resolves it ONCE and caches it. Spy statSync, fire N stores, assert the call
+// count is bounded (independent of N).
+describe('wiki autorefresh dir-check is cached, not per-store (OPT-18)', () => {
+  it('statSync is called at most once across many store-path guard hits', () => {
+    vi.useFakeTimers();
+    const recompile = vi.fn(async () => {});
+    configureWikiAutorefresh({ recompile, outputDir });
+    setEnv('true', outputDir);
+
+    const statSpy = vi.spyOn(fs, 'statSync');
+
+    // Fire many store-triggered schedules (each calls the guard) plus direct
+    // guard calls — the existence check is resolved once and reused.
+    const N = 50;
+    for (let i = 0; i < N; i++) {
+      scheduleWikiRecompile();
+      isWikiAutorefreshEnabled();
+    }
+
+    // Count ONLY stats of the configured output dir (ignore unrelated temp-dir
+    // stats some environments make). Must be ≤ 1 regardless of N.
+    const dirStats = statSpy.mock.calls.filter(([p]) => p === outputDir).length;
+    expect(dirStats).toBeLessThanOrEqual(1);
+
+    statSpy.mockRestore();
+  });
+
+  it('the default-OFF path performs ZERO stats (strict short-circuit before stat)', () => {
+    const recompile = vi.fn(async () => {});
+    configureWikiAutorefresh({ recompile, outputDir });
+    setEnv(undefined, outputDir); // flag OFF
+
+    const statSpy = vi.spyOn(fs, 'statSync');
+    for (let i = 0; i < 20; i++) isWikiAutorefreshEnabled();
+    const dirStats = statSpy.mock.calls.filter(([p]) => p === outputDir).length;
+    expect(dirStats).toBe(0);
+    statSpy.mockRestore();
+  });
+});
+
+// OPT-19 — the recompile target and the guard's existence check must read ONE
+// source (state.outputDir set at configure time), so they can never diverge.
+// Pin that the dir handed to the recompiler == the dir whose existence gates it,
+// and that flipping the env AFTER configure changes neither.
+describe('wiki autorefresh output dir is single-sourced (OPT-19)', () => {
+  it('recompiles the SAME dir the guard checks; env changes after configure are ignored', async () => {
+    const recompile = vi.fn(async () => {});
+    // Configure with the real (existing) temp dir as the single source.
+    configureWikiAutorefresh({ recompile, outputDir });
+    // Flag on; point the ENV at a DIFFERENT, non-existent dir to prove the guard
+    // does not re-resolve from env — it uses state.outputDir.
+    const divergent = path.join(outputDir, 'env-divergent-not-checked');
+    setEnv('true', divergent);
+
+    // Guard still true (state.outputDir exists), unaffected by the divergent env.
+    expect(isWikiAutorefreshEnabled()).toBe(true);
+
+    await recompileWikiNow();
+    expect(recompile).toHaveBeenCalledTimes(1);
+    // The recompile target is state.outputDir — the SAME dir the guard checked,
+    // never the divergent env value.
+    expect(recompile).toHaveBeenCalledWith(outputDir);
+    expect(recompile).not.toHaveBeenCalledWith(divergent);
   });
 });

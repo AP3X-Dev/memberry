@@ -62,8 +62,15 @@ export type WikiRecompileFn = (outputDir: string) => Promise<unknown>;
 interface AutorefreshState {
   /** Injected full-recompile function (wraps WikiCompiler.compile). Null until configured. */
   recompile: WikiRecompileFn | null;
-  /** Resolved output dir (env override or DEFAULT_WIKI_OUTPUT_DIR). */
+  /** Resolved output dir (env override or DEFAULT_WIKI_OUTPUT_DIR). The single
+   *  source of truth for BOTH the recompile target and the guard's existence
+   *  check — they can never diverge. */
   outputDir: string;
+  /** Cached result of stat-ing `outputDir` (does it exist as a directory?).
+   *  Resolved ONCE (lazily, on first guard call, or eagerly at configure time)
+   *  and reused thereafter — the mount point doesn't appear/disappear during the
+   *  process lifetime, so the per-store hot path never re-stats. */
+  dirExists: boolean | null;
   /** Pending debounce timer for store-triggered recompiles. */
   timer: ReturnType<typeof setTimeout> | null;
   /** True while a recompile is in flight (so a debounce fire doesn't overlap one). */
@@ -75,10 +82,29 @@ interface AutorefreshState {
 const state: AutorefreshState = {
   recompile: null,
   outputDir: DEFAULT_WIKI_OUTPUT_DIR,
+  dirExists: null,
   timer: null,
   inFlight: false,
   rerunQueued: false,
 };
+
+/**
+ * Stat `state.outputDir` ONCE and cache the result. Subsequent calls return the
+ * cached value (no syscall). The mount point doesn't appear/disappear during the
+ * process lifetime, so a single resolution is correct and keeps the store hot
+ * path free of a per-store `statSync`.
+ */
+function resolveDirExists(): boolean {
+  if (state.dirExists === null) {
+    try {
+      state.dirExists = fs.statSync(state.outputDir).isDirectory();
+    } catch {
+      // Dir missing / not stat-able ⇒ treat as absent (non-fatal).
+      state.dirExists = false;
+    }
+  }
+  return state.dirExists;
+}
 
 /**
  * Resolve the configured output dir from env (MEMBERRY_WIKI_OUTPUT_DIR), falling
@@ -91,21 +117,17 @@ export function resolveWikiOutputDir(): string {
 
 /**
  * The opt-in guard. Returns true ONLY when MEMBERRY_WIKI_AUTOREFRESH is truthy
- * AND the resolved output dir currently exists as a directory. Unset/false env
- * ⇒ false ⇒ every caller is a strict no-op (the key safety property). The dir
- * check means a misconfigured deployment (env on, no shared volume) also no-ops
- * rather than erroring.
+ * AND `state.outputDir` (the SAME dir the recompile targets) exists as a
+ * directory. Unset/false env ⇒ false ⇒ every caller is a strict no-op (the key
+ * safety property) — the truthiness check short-circuits BEFORE any stat, so the
+ * default-OFF path is zero-syscall. The dir check (cached after the first call)
+ * means a misconfigured deployment (env on, no shared volume) also no-ops rather
+ * than erroring, without re-stat-ing on every store.
  */
 export function isWikiAutorefreshEnabled(): boolean {
   const flag = readEnv('MEMBERRY_WIKI_AUTOREFRESH');
-  if (!isTruthy(flag)) return false;
-  const dir = resolveWikiOutputDir();
-  try {
-    return fs.statSync(dir).isDirectory();
-  } catch {
-    // Dir missing / not stat-able ⇒ treat as disabled (non-fatal).
-    return false;
-  }
+  if (!isTruthy(flag)) return false; // strict short-circuit: no stat when OFF
+  return resolveDirExists();
 }
 
 function isTruthy(v: string | undefined): boolean {
@@ -122,7 +144,12 @@ function isTruthy(v: string | undefined): boolean {
  */
 export function configureWikiAutorefresh(opts: { recompile: WikiRecompileFn; outputDir?: string }): void {
   state.recompile = opts.recompile;
-  if (opts.outputDir) state.outputDir = opts.outputDir;
+  // Resolve the output dir from a SINGLE source here. Both the recompile target
+  // (state.outputDir) and the guard's existence check read this same value, so
+  // they can never diverge. Falls back to the env-resolved dir when omitted.
+  state.outputDir = opts.outputDir ?? resolveWikiOutputDir();
+  // Re-prime the cached existence check against the (possibly new) outputDir.
+  state.dirExists = null;
 }
 
 /** Test seam: clear timer + injected fn so suites don't leak across cases. */
@@ -133,6 +160,7 @@ export function resetWikiAutorefresh(): void {
   }
   state.recompile = null;
   state.outputDir = DEFAULT_WIKI_OUTPUT_DIR;
+  state.dirExists = null;
   state.inFlight = false;
   state.rerunQueued = false;
 }

@@ -40,7 +40,16 @@ async function isNeo4jReachable(): Promise<boolean> {
 }
 
 // Unique per-run project name so assertions never collide with other graph data.
-const PROJECT_NAME = `t6-bridge-${Date.now()}`;
+const RUN = `t6-bridge-${Date.now()}`;
+const PROJECT_NAME = RUN;
+// Unique per-run MODULE names. In this fixture each module lives in its OWN
+// top-level dir, so the scanner derives the module name from that dir name —
+// the dir name and the entity name are the SAME string. Making them run-unique
+// (instead of bare `mod_a`/`mod_b`) means the wipe() below only ever deletes
+// THIS run's fixture entities, never a real shared entity literally named
+// `mod_a`/`mod_b` on a shared dev/CI Neo4j.
+const MOD_A = `${RUN}-mod_a`;
+const MOD_B = `${RUN}-mod_b`;
 
 // Inert stubs for services the handler calls but the bridge path doesn't need.
 const ampStub: IAMPService = {
@@ -65,10 +74,12 @@ describe('berry_ingest_codebase — component→project wiki bridge (live Neo4j)
   async function wipe(): Promise<void> {
     const s = driver.session();
     try {
-      // Remove the project + its modules + the run's component nodes.
+      // Remove the project + its modules + the run's component nodes. Module
+      // names are UNIQUE per run (never bare shared names) so we only ever
+      // delete this run's fixture entities.
       await s.run('MATCH (e:Entity {name: $name}) DETACH DELETE e', { name: PROJECT_NAME });
-      await s.run('MATCH (e:Entity {name: "mod_a"}) DETACH DELETE e');
-      await s.run('MATCH (e:Entity {name: "mod_b"}) DETACH DELETE e');
+      await s.run('MATCH (e:Entity {name: $name}) DETACH DELETE e', { name: MOD_A });
+      await s.run('MATCH (e:Entity {name: $name}) DETACH DELETE e', { name: MOD_B });
       if (fixtureDir) {
         await s.run('MATCH (c:Entity:Component) WHERE c.path STARTS WITH $d DETACH DELETE c', { d: fixtureDir });
         await s.run('MATCH (sym:Symbol) WHERE sym.file_path STARTS WITH $d DETACH DELETE sym', { d: fixtureDir });
@@ -93,10 +104,11 @@ describe('berry_ingest_codebase — component→project wiki bridge (live Neo4j)
       JSON.stringify({ name: PROJECT_NAME, description: 'T6 bridge fixture' }),
     );
     // Two source files in two DIFFERENT top-level dirs → two derived modules.
-    await mkdir(join(fixtureDir, 'mod_a'), { recursive: true });
-    await mkdir(join(fixtureDir, 'mod_b'), { recursive: true });
-    await writeFile(join(fixtureDir, 'mod_a', 'x.ts'), 'export const x = () => 1;\n');
-    await writeFile(join(fixtureDir, 'mod_b', 'y.ts'), 'export const y = () => 2;\n');
+    // The dir name IS the derived module name, so use the run-unique names.
+    await mkdir(join(fixtureDir, MOD_A), { recursive: true });
+    await mkdir(join(fixtureDir, MOD_B), { recursive: true });
+    await writeFile(join(fixtureDir, MOD_A, 'x.ts'), 'export const x = () => 1;\n');
+    await writeFile(join(fixtureDir, MOD_B, 'y.ts'), 'export const y = () => 2;\n');
     await wipe();
   });
 
@@ -136,9 +148,9 @@ describe('berry_ingest_codebase — component→project wiki bridge (live Neo4j)
 
       // Both module entities are reachable (created by the bridge — they're not in
       // the scanner's SOURCE_DIRS, so only the bridge can have made them).
-      expect(names).toEqual(expect.arrayContaining(['mod_a', 'mod_b']));
-      expect(types.get('mod_a')).toBe('module');
-      expect(types.get('mod_b')).toBe('module');
+      expect(names).toEqual(expect.arrayContaining([MOD_A, MOD_B]));
+      expect(types.get(MOD_A)).toBe('module');
+      expect(types.get(MOD_B)).toBe('module');
 
       // Both component file nodes are reachable via module → component CONTAINS.
       const componentPaths = reached.records
@@ -156,7 +168,7 @@ describe('berry_ingest_codebase — component→project wiki bridge (live Neo4j)
         { projectName: PROJECT_NAME, d: fixtureDir },
       );
       const modulesWithFiles = new Set(twoHop.records.map((r) => r.get('module') as string));
-      expect(modulesWithFiles).toEqual(new Set(['mod_a', 'mod_b']));
+      expect(modulesWithFiles).toEqual(new Set([MOD_A, MOD_B]));
     } finally {
       await s.close();
     }
@@ -181,9 +193,9 @@ describe('berry_ingest_codebase — component→project wiki bridge (live Neo4j)
     try {
       const dup = await s.run(
         `MATCH (p:Entity {type: 'project', name: $projectName})-[r:CONTAINS]->(m:Entity {type: 'module'})
-         WHERE m.name IN ['mod_a', 'mod_b']
+         WHERE m.name IN [$modA, $modB]
          RETURN m.name AS module, count(r) AS edges`,
-        { projectName: PROJECT_NAME },
+        { projectName: PROJECT_NAME, modA: MOD_A, modB: MOD_B },
       );
       for (const rec of dup.records) {
         expect(rec.get('edges').toNumber()).toBe(1);

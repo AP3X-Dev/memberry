@@ -294,6 +294,8 @@ The wiki round-trips: edit a compiled article in the viewer (Edit button) or syn
 | `OPENAI_API_KEY` | — | For embedding-based semantic search (optional — works without) |
 | `MCP_PORT` | `3101` | MCP server port |
 | `MEMBERRY_API_TOKEN` | — | Optional Bearer token gating MCP access (the `/mcp` HTTP transport) |
+| `MEMBERRY_WIKI_AUTOREFRESH` | off | Opt-in: recompile the served wiki (all projects) after each store/bootstrap/ingest |
+| `MEMBERRY_WIKI_OUTPUT_DIR` | `/app/wiki` | Directory the MCP server compiles the wiki into for autorefresh (must match the wiki viewer's dir) |
 
 ## MCP Health Checks
 
