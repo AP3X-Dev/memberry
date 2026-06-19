@@ -238,6 +238,16 @@ export class SymbolStore {
    * unscoped); on MATCH it is COALESCE($projectTag, s.project_tag) so a new tag
    * OVERWRITES the stored scope, but re-indexing WITHOUT a tag (e.g. the watcher)
    * PRESERVES the existing scope rather than clearing it.
+   *
+   * Sibling-tag inheritance (OPT-7): when a NEW symbol is created during a
+   * context-free reindex (no `projectTag`, e.g. the watcher), its same-file
+   * siblings already carry the file's stored `project_tag` (preserved via the
+   * COALESCE-on-match above). Without inheritance the new node would be stamped
+   * null, so a tag-scoped query would miss it while its siblings match. Before the
+   * MERGE we therefore look up an existing sibling's tag for the row's file_path
+   * and, on CREATE only, fall back to it when the row carries no explicit tag. The
+   * MERGE key and the ON MATCH COALESCE are unchanged; only the ON CREATE tag
+   * source gains the sibling fallback.
    */
   async upsertSymbols(
     nodes: SymbolNode[],
@@ -286,6 +296,19 @@ export class SymbolStore {
     try {
       const result = await session.run(
         `UNWIND $rows AS row
+         // OPT-7: resolve a sibling's stored project_tag for this file BEFORE the
+         // MERGE, so a NEW symbol created during a context-free reindex (row tag
+         // null) inherits the scope its same-file siblings already carry instead
+         // of being stamped null (which a tag-scoped query would miss). Reads an
+         // existing scoped sibling only; null when the file has no scoped symbol.
+         CALL {
+           WITH row
+           OPTIONAL MATCH (sib:Symbol {file_path: row.file_path})
+           WHERE sib.project_tag IS NOT NULL
+           RETURN sib.project_tag AS siblingTag
+           LIMIT 1
+         }
+         WITH row, COALESCE(row.project_tag, siblingTag) AS createTag
          MERGE (s:Symbol {
            name: row.name,
            file_path: row.file_path,
@@ -304,7 +327,7 @@ export class SymbolStore {
            s.doc_comment = row.doc_comment,
            s.content_hash = row.content_hash,
            s.parent_symbol = row.parent_symbol,
-           s.project_tag = row.project_tag,
+           s.project_tag = createTag,
            s.created_at = row.created_at,
            s.updated_at = row.updated_at,
            s += row.vectorProps,
