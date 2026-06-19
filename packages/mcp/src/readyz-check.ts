@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { resolvePort } from '@memberry/core';
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -31,7 +32,7 @@ function pick(env: Record<string, string | undefined>, canonical: string): strin
 export function buildReadyzCheckOptions(env: Record<string, string | undefined> = process.env): ReadyzCheckOptions {
   const protocol = pick(env, 'MEMBERRY_READYZ_PROTOCOL') ?? 'http';
   const host = pick(env, 'MEMBERRY_READYZ_HOST') ?? '127.0.0.1';
-  const port = env['MCP_PORT'] ?? env['PORT'] ?? '3101';
+  const port = resolvePort(env);
   const url = pick(env, 'MEMBERRY_READYZ_URL') ?? `${protocol}://${host}:${port}/readyz`;
 
   return {

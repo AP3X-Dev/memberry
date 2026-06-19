@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { resolvePort } from '../config/port.js';
 
 type Flags = Record<string, string | boolean>;
 
@@ -35,7 +36,7 @@ export function resolveUrl(flags: Flags, env: NodeJS.ProcessEnv = process.env): 
   if (typeof flags['url'] === 'string' && flags['url']) return flags['url'];
   if (env['MEMBERRY_MCP_URL']) return env['MEMBERRY_MCP_URL'];
   const host = env['MEMBERRY_PUBLIC_HOST'] || 'localhost';
-  const port = env['MCP_PORT'] || '3101';
+  const port = resolvePort(env);
   return `http://${host}:${port}/mcp`;
 }
 

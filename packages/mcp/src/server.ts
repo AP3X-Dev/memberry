@@ -15,7 +15,7 @@ import { registerCodeTools, CODE_TOOL_NAMES } from '@memberry/code';
 import { registerRetrievalTools, retrievalContainerForTenant, RETRIEVAL_TOOL_NAMES } from '@memberry/retrieval';
 import { registerWikiTools, WIKI_TOOL_NAMES } from '@memberry/wiki';
 import { registerGraphTools, GRAPH_TOOL_NAMES } from '@memberry/graph';
-import { readEnv } from '@memberry/core';
+import { readEnv, resolvePort } from '@memberry/core';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -891,7 +891,7 @@ if (isMain) {
       if (useStdio) {
         await amp.startStdio();
       } else {
-        const port = parseInt(process.env['PORT'] ?? process.env['MCP_PORT'] ?? '3101', 10);
+        const port = resolvePort(process.env);
         sseHandle = await amp.startSSE(port);
       }
 
