@@ -259,9 +259,12 @@ export class IngestionService {
     const session = this.driver.session();
     try {
       await session.run(
+        // EXACT match: the project Entity is created under its EXACT name (see
+        // ensureProjectEntity / ensureEntity in this file). A CONTAINS substring
+        // match cross-linked unrelated projects (ingesting "app" also linked
+        // "myapp"), so match the name the writer actually stored.
         `MATCH (s:Source {id: $sourceId})
-         MATCH (p:Entity {type: 'project'})
-         WHERE p.name CONTAINS $projectName
+         MATCH (p:Entity {name: $projectName, type: 'project'})
          MERGE (p)-[:HAS_SOURCE]->(s)`,
         { sourceId, projectName },
       );
@@ -346,7 +349,10 @@ export class IngestionService {
     const session = this.driver.session();
     try {
       await session.run(
-        `MATCH (p:Entity {type: 'project'}) WHERE p.name CONTAINS $projectName
+        // EXACT match (see linkSourceToProject): the project Entity is stored
+        // under its EXACT name, so a CONTAINS substring match cross-linked the
+        // dump's entities under unrelated projects whose name shares a substring.
+        `MATCH (p:Entity {name: $projectName, type: 'project'})
          MATCH (e:Entity {name: $entityName})
          MERGE (p)-[:CONTAINS]->(e)`,
         { projectName, entityName },

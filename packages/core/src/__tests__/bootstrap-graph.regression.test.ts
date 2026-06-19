@@ -262,3 +262,183 @@ describe('BootstrapGraphService gap-16 (per-module seeds + dedupe guard)', () =>
     expect(result.semantics_created).toBe(0);
   });
 });
+
+// OPT-3: the orphan-Episodic linker must NOT substring-match a sibling project
+// whose tag merely CONTAINS this project's tag. Before the fix the linker used
+// `ep.task CONTAINS $tag` (with $tag = 'project:foo'), so bootstrapping 'foo'
+// REFERENCES-linked episodes belonging to 'project:foobar'. The fix mirrors the
+// wiki gap-13/T7 structured match (ep.scope/ep.tags equality + a BRACKETED task
+// fallback), so a sibling whose tag is a strict superstring is never matched.
+describe('BootstrapGraphService OPT-3 (orphan linker: no substring cross-link)', () => {
+  let neo4jAvailable = false;
+  const driver = createNeo4jDriver(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
+  let service: BootstrapGraphService;
+
+  // Unique per-run slugs so names can't collide with other runs/tests. `sub` is a
+  // strict superstring of `base` (base is a substring of sub) — the cross-link trap.
+  const RUN = `opt3-${Date.now()}`;
+  const BASE_NAME = `${RUN}foo`;
+  const SUB_NAME = `${RUN}foobar`; // BASE_NAME is a substring of SUB_NAME
+  const BASE_TAG = `project:${BASE_NAME.toLowerCase()}`;
+  const SUB_TAG = `project:${SUB_NAME.toLowerCase()}`;
+  const SUB_EP_ID = `${TEST_PREFIX}-${RUN}-foobar-ep`;
+  const BASE_EP_ID = `${TEST_PREFIX}-${RUN}-foo-ep`;
+
+  beforeAll(async () => {
+    neo4jAvailable = await isNeo4jReachable(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
+    if (!neo4jAvailable) {
+      console.warn(`[skip] Neo4j not reachable at ${NEO4J_URI} — skipping OPT-3 tests`);
+      return;
+    }
+    service = new BootstrapGraphService(driver);
+
+    const session = driver.session();
+    try {
+      // Episode that belongs to the DISTINCT 'foobar' project, stored exactly as
+      // berry_store would: scope/tags = lowercased canonical tag, NO task prefix.
+      await session.run(
+        `CREATE (ep:Episodic {
+           id: $id, session_id: $sid, task: $task, content: $content,
+           created_at: $now, scope: $scope, tags: $tags
+         })`,
+        {
+          id: SUB_EP_ID,
+          sid: `sess-${RUN}-foobar`,
+          task: 'unrelated foobar work', // deliberately NO [project:...] prefix
+          content: 'belongs to foobar, must NOT link to foo',
+          now: new Date().toISOString(),
+          scope: SUB_TAG,
+          tags: [SUB_TAG],
+        },
+      );
+      // Episode that genuinely belongs to 'foo' (the control: it MUST link).
+      await session.run(
+        `CREATE (ep:Episodic {
+           id: $id, session_id: $sid, task: $task, content: $content,
+           created_at: $now, scope: $scope, tags: $tags
+         })`,
+        {
+          id: BASE_EP_ID,
+          sid: `sess-${RUN}-foo`,
+          task: 'real foo work',
+          content: 'belongs to foo, must link',
+          now: new Date().toISOString(),
+          scope: BASE_TAG,
+          tags: [BASE_TAG],
+        },
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  afterAll(async () => {
+    if (neo4jAvailable) {
+      const session = driver.session();
+      try {
+        await session.run(
+          `MATCH (e:Entity) WHERE e.name STARTS WITH $run DETACH DELETE e`,
+          { run: RUN },
+        );
+        await session.run(
+          `MATCH (ep:Episodic) WHERE ep.id = $a OR ep.id = $b DETACH DELETE ep`,
+          { a: SUB_EP_ID, b: BASE_EP_ID },
+        );
+      } finally {
+        await session.close();
+      }
+    }
+    await driver.close().catch(() => {});
+  });
+
+  async function isLinked(episodeId: string, projectName: string): Promise<boolean> {
+    const session = driver.session();
+    try {
+      const res = await session.run(
+        `MATCH (ep:Episodic {id: $epId})-[:REFERENCES]->(p:Entity {name: $name})
+         RETURN count(*) AS cnt`,
+        { epId: episodeId, name: projectName },
+      );
+      const cnt = res.records[0].get('cnt') as { toNumber: () => number } | number;
+      return (typeof cnt === 'object' ? cnt.toNumber() : cnt) > 0;
+    } finally {
+      await session.close();
+    }
+  }
+
+  it('does NOT REFERENCES-link a substring-sibling project\'s episode (foobar ↛ foo)', async () => {
+    if (!neo4jAvailable) return;
+
+    // Bootstrap ONLY the 'foo' project. The pre-seeded foobar episode shares the
+    // 'foo' substring but must stay unlinked. The old `ep.task CONTAINS 'project:foo'`
+    // logic would NOT match here anyway (no task prefix) — but the prior code only
+    // matched the task, so the real regression is that the new structured match
+    // must use EQUALITY on scope/tags, not membership of a superstring tag.
+    await service.bootstrap({
+      project_name: BASE_NAME,
+      project_tag: BASE_TAG,
+      description: 'OPT-3 base project',
+      domain: 'test',
+      entities: [],
+      semantic_seeds: [],
+      agents: [],
+    });
+
+    // The foobar episode must NOT be linked to the foo project entity.
+    expect(await isLinked(SUB_EP_ID, BASE_NAME)).toBe(false);
+    // The genuine foo episode MUST be linked (proves the structured match works).
+    expect(await isLinked(BASE_EP_ID, BASE_NAME)).toBe(true);
+  });
+
+  it('matches via the legacy [project:foo] task prefix but not a [project:foobar] one', async () => {
+    if (!neo4jAvailable) return;
+
+    // Two legacy prefix-only episodes: one for foo, one for foobar. The old code
+    // `ep.task CONTAINS 'project:foo'` matched BOTH (foobar's task contains the
+    // substring 'project:foo'); the bracketed fallback '[project:<foo>]' matches
+    // only the foo one.
+    const legacyFooId = `${TEST_PREFIX}-${RUN}-legacy-foo`;
+    const legacyFoobarId = `${TEST_PREFIX}-${RUN}-legacy-foobar`;
+    const seed = driver.session();
+    try {
+      await seed.run(
+        `CREATE (ep:Episodic { id: $id, session_id: $sid, task: $task, content: 'c', created_at: $now })`,
+        { id: legacyFooId, sid: `sess-${RUN}-lfoo`, task: `[project:${BASE_NAME}] legacy foo`, now: new Date().toISOString() },
+      );
+      await seed.run(
+        `CREATE (ep:Episodic { id: $id, session_id: $sid, task: $task, content: 'c', created_at: $now })`,
+        { id: legacyFoobarId, sid: `sess-${RUN}-lfoobar`, task: `[project:${SUB_NAME}] legacy foobar`, now: new Date().toISOString() },
+      );
+    } finally {
+      await seed.close();
+    }
+
+    try {
+      // Re-bootstrap foo (idempotent) to run the orphan linker over the new episodes.
+      await service.bootstrap({
+        project_name: BASE_NAME,
+        project_tag: BASE_TAG,
+        description: 'OPT-3 base project',
+        domain: 'test',
+        entities: [],
+        semantic_seeds: [],
+        agents: [],
+      });
+
+      expect(await isLinked(legacyFooId, BASE_NAME)).toBe(true);
+      // foobar's task contains the substring 'project:<run>foo' but the bracketed
+      // token '[project:<run>foo]' is NOT a substring of '[project:<run>foobar] …'.
+      expect(await isLinked(legacyFoobarId, BASE_NAME)).toBe(false);
+    } finally {
+      const cleanup = driver.session();
+      try {
+        await cleanup.run(
+          `MATCH (ep:Episodic) WHERE ep.id = $a OR ep.id = $b DETACH DELETE ep`,
+          { a: legacyFooId, b: legacyFoobarId },
+        );
+      } finally {
+        await cleanup.close();
+      }
+    }
+  });
+});

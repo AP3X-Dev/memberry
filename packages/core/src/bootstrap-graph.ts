@@ -143,16 +143,30 @@ export class BootstrapGraphService {
         }
       }
 
-      // 5. Link all existing orphaned Episodic nodes for this project to the project entity
+      // 5. Link all existing orphaned Episodic nodes for this project to the
+      //    project entity. Use the STRUCTURED match the wiki queries (gap-13/T7)
+      //    already use — `ep.task CONTAINS $tag` substring-matched unrelated
+      //    projects ('foo' bootstrap linked 'project:foobar' episodes).
+      //    An episode belongs here when ANY holds:
+      //      1. ep.scope equals the canonical project tag (structured, primary),
+      //      2. the canonical tag is in ep.tags (structured, primary),
+      //      3. the legacy `[project:…]` task prefix is present (FALLBACK).
+      //    `canonTag` must match berry_store byte-for-byte: store persists
+      //    ep.scope/ep.tags as `rawTag.toLowerCase()` (lowercase, NOT slugified),
+      //    so we lowercase here too. `input.project_tag` may arrive mixed-case
+      //    (berry_bootstrap passes it through un-normalized), hence the explicit
+      //    fold. The task fallback uses a BRACKETED token, never a bare substring.
+      const canonTag = `project:${input.project_tag.replace(/^project:/i, '').toLowerCase()}`;
+      const taskTag = `[project:${input.project_name}]`;
       const orphanResult = await session.run(
         `MATCH (ep:Episodic)
-         WHERE ep.task CONTAINS $tag
+         WHERE (ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag)
            AND NOT (ep)-[:REFERENCES]->(:Entity {name: $projectName})
          WITH ep
          MATCH (proj:Entity {name: $projectName})
          CREATE (ep)-[:REFERENCES]->(proj)
          RETURN count(ep) AS linked`,
-        { tag: input.project_tag, projectName: input.project_name },
+        { canonTag, taskTag, projectName: input.project_name },
       );
       const linked = orphanResult.records[0]?.get('linked');
       if (linked) {
