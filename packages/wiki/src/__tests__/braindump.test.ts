@@ -22,6 +22,7 @@ function createMockDriver(): { driver: Driver; calls: () => RunCall[] } {
       calls.push({ query, params });
       if (query.includes('MERGE (e:Entity')) return mockResult([mockRecord({ id: 'ent-x', created: true })]);
       if (query.includes('RETURN e.id AS id')) return mockResult([mockRecord({ id: 'ent-x' })]);
+      if (query.includes('MERGE (s:Semantic')) return mockResult([mockRecord({ id: 'sem-x', isNew: true })]);
       return mockResult([]);
     }),
     close: vi.fn(async () => {}),
@@ -42,9 +43,9 @@ describe('IngestionService — brain dumps', () => {
     });
     expect(result.source_id).toMatch(/^src-/);
     // verbatim text retained as a Source
-    expect(calls().some((c) => c.query.includes('CREATE (s:Source'))).toBe(true);
+    expect(calls().some((c) => c.query.includes('MERGE (s:Source'))).toBe(true);
     // path falls back to 'inline'
-    const src = calls().find((c) => c.query.includes('CREATE (s:Source'));
+    const src = calls().find((c) => c.query.includes('MERGE (s:Source'));
     expect(src?.params.path).toBe('inline');
   });
 
@@ -67,7 +68,7 @@ describe('IngestionService — brain dumps', () => {
     });
     // two paragraphs -> two claims
     expect(result.claims_stored).toBe(2);
-    const semCalls = calls().filter((c) => c.query.includes('CREATE (s:Semantic'));
+    const semCalls = calls().filter((c) => c.query.includes('MERGE (s:Semantic'));
     expect(semCalls).toHaveLength(2);
     // human dumps are durable (stable) and tagged for provenance
     expect(semCalls[0].params.decayClass).toBe('stable');
@@ -82,7 +83,7 @@ describe('IngestionService — brain dumps', () => {
       content: 'one durable fact', source_type: 'note',
       project_tag: 'project:user-personal', author: 'human',
     });
-    const sem = calls().find((c) => c.query.includes('CREATE (s:Semantic'));
+    const sem = calls().find((c) => c.query.includes('MERGE (s:Semantic'));
     expect(sem?.params.confidence).toBe(0.7);
   });
 
@@ -93,6 +94,6 @@ describe('IngestionService — brain dumps', () => {
     });
     // no author=human, no pre-claims, no extractor -> no synthetic claims
     expect(result.claims_stored).toBe(0);
-    expect(calls().some((c) => c.query.includes('CREATE (s:Semantic'))).toBe(false);
+    expect(calls().some((c) => c.query.includes('MERGE (s:Semantic'))).toBe(false);
   });
 });

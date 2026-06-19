@@ -46,6 +46,11 @@ function createMockDriver(): { driver: Driver; getCalls: () => RunCall[] } {
       if (query.includes('MATCH (e:Entity {name:')) {
         return mockResult([mockRecord({ id: 'ent-mock123' })]);
       }
+      // OPT-11: createSemanticNode now MERGEs on dedupe_key and RETURNs
+      // `id`/`isNew`; the mock must supply that record or claims_stored stays 0.
+      if (query.includes('MERGE (s:Semantic')) {
+        return mockResult([mockRecord({ id: 'sem-mock123', isNew: true })]);
+      }
       return mockResult([]);
     }),
     close: vi.fn(async () => {}),
@@ -101,7 +106,7 @@ describe('IngestionService', () => {
       expect(result.citations_created).toBeTypeOf('number');
 
       // Should have created a Source node
-      const createSourceCall = getCalls().find(c => c.query.includes('CREATE (s:Source'));
+      const createSourceCall = getCalls().find(c => c.query.includes('MERGE (s:Source'));
       expect(createSourceCall).toBeDefined();
     });
 
@@ -143,7 +148,7 @@ describe('IngestionService', () => {
         title: 'Custom Title',
       });
 
-      const createSourceCall = getCalls().find(c => c.query.includes('CREATE (s:Source'));
+      const createSourceCall = getCalls().find(c => c.query.includes('MERGE (s:Source'));
       const params = createSourceCall?.params as Record<string, unknown>;
       expect(params?.title).toBe('Custom Title');
     });
@@ -159,7 +164,7 @@ describe('IngestionService', () => {
         project_tag: 'project:test',
       });
 
-      const createSourceCall = getCalls().find(c => c.query.includes('CREATE (s:Source'));
+      const createSourceCall = getCalls().find(c => c.query.includes('MERGE (s:Source'));
       const params = createSourceCall?.params as Record<string, unknown>;
       expect(params?.title).toBe('My Great Article');
     });
@@ -175,7 +180,7 @@ describe('IngestionService', () => {
         project_tag: 'project:test',
       });
 
-      const createSourceCall = getCalls().find(c => c.query.includes('CREATE (s:Source'));
+      const createSourceCall = getCalls().find(c => c.query.includes('MERGE (s:Source'));
       const params = createSourceCall?.params as Record<string, unknown>;
       expect(params?.title).toBe('my document');
     });
@@ -246,7 +251,7 @@ describe('IngestionService', () => {
       expect(result.citations_created).toBe(2);
 
       // Verify semantic nodes were created
-      const semanticCalls = getCalls().filter(c => c.query.includes('CREATE (s:Semantic'));
+      const semanticCalls = getCalls().filter(c => c.query.includes('MERGE (s:Semantic'));
       expect(semanticCalls).toHaveLength(2);
 
       // Verify CITES relationships
@@ -273,7 +278,7 @@ describe('IngestionService', () => {
         ],
       });
 
-      const semanticCall = getCalls().find(c => c.query.includes('CREATE (s:Semantic'));
+      const semanticCall = getCalls().find(c => c.query.includes('MERGE (s:Semantic'));
       const params = semanticCall?.params as Record<string, unknown>;
       const tags = params?.tags as string[];
       expect(tags).toContain('claim-tag');
@@ -293,7 +298,7 @@ describe('IngestionService', () => {
         claims: [{ content: 'A claim', about: [] }],
       });
 
-      const semanticCall = getCalls().find(c => c.query.includes('CREATE (s:Semantic'));
+      const semanticCall = getCalls().find(c => c.query.includes('MERGE (s:Semantic'));
       const params = semanticCall?.params as Record<string, unknown>;
       expect(params?.confidence).toBe(0.3);
     });

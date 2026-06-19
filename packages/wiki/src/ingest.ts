@@ -5,9 +5,10 @@
 import neo4j, { type Driver } from 'neo4j-driver';
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
+import { createHash } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import type { ExtractionProvider } from '@memberry/core';
-import { readEnv, redactSecrets } from '@memberry/core';
+import { readEnv, redactSecrets, semanticDedupeKey } from '@memberry/core';
 import type { IngestInput, IngestResult } from './types.js';
 import { needsConversion, type DocumentConverter } from './document-converter.js';
 
@@ -107,9 +108,14 @@ export class IngestionService {
     // 2. Determine title
     const title = inputTitle ?? extractTitle(content, source_path ?? 'brain-dump');
 
-    // 3. Create Source node
-    const sourceId = `src-${nanoid(12)}`;
-    await this.createSourceNode(sourceId, title, source_type, source_path ?? 'inline', project_tag);
+    // 3. Create (or reuse) the Source node. OPT-11: the id is content-addressed —
+    // a hash of source_path|source_type|project_tag — so re-ingesting the SAME
+    // source MERGEs onto the existing node instead of CREATE-ing a duplicate with
+    // a fresh random id every run. `path` here is the same value the original
+    // ingest stored, so the second ingest derives the same id and matches.
+    const sourcePath = source_path ?? 'inline';
+    const sourceId = sourceNodeId(sourcePath, source_type, project_tag);
+    await this.createSourceNode(sourceId, title, source_type, sourcePath, project_tag);
 
     // 4. Ensure project entity exists, link source
     if (ensure_project) {
@@ -181,11 +187,32 @@ export class IngestionService {
       // derived from the (already-redacted) `content` string, so they need their
       // own pass. Brain-dump fallback claims are redacted transitively via content.
       const claimContent = this.redactOnIngest ? redactSecrets(claim.content) : claim.content;
-      await this.createSemanticNode(semanticId, claimContent, claim.confidence ?? baseConfidence, tags, decayClass);
-      claimsStored++;
 
-      // Link CITES → Source
-      await this.createRelation(semanticId, 'Semantic', sourceId, 'Source', 'CITES');
+      // OPT-11: content-addressed dedupe so re-ingesting the SAME source does not
+      // duplicate its claim Semantics. Mirrors BootstrapGraphService.createSemantic:
+      // dedupe_key = semanticDedupeKey(scope, about[0], content) drives a MERGE
+      // backed by the `semantic_dedupe_unique` UNIQUE constraint (race-safe). Use
+      // the project_tag (lowercased to match bootstrap's `scope`) and the first
+      // ABOUT entity as the identity coordinates. Only count nodes actually created
+      // — a matched re-ingest must not inflate claims_stored.
+      const scope = project_tag.toLowerCase();
+      const dedupeKey = semanticDedupeKey(scope, claim.about?.[0], claimContent);
+      const { created: semCreated, id: resolvedSemanticId } = await this.createSemanticNode(
+        semanticId,
+        claimContent,
+        claim.confidence ?? baseConfidence,
+        tags,
+        decayClass,
+        dedupeKey,
+        scope,
+      );
+      if (semCreated) claimsStored++;
+
+      // Link CITES → Source. Use the RESOLVED id (the existing node's id on a
+      // matched re-ingest, the new id on create) — the random `semanticId` only
+      // sticks when the MERGE actually creates. MERGE on the relation keeps
+      // re-ingest from double-linking.
+      await this.createRelation(resolvedSemanticId, 'Semantic', sourceId, 'Source', 'CITES');
       citationsCreated++;
 
       // Link ABOUT → Entities
@@ -199,7 +226,7 @@ export class IngestionService {
 
         const entityId = await this.getEntityId(entityName);
         if (entityId) {
-          await this.createRelation(semanticId, 'Semantic', entityId, 'Entity', 'ABOUT');
+          await this.createRelation(resolvedSemanticId, 'Semantic', entityId, 'Entity', 'ABOUT');
         }
       }
     }
@@ -232,15 +259,24 @@ export class IngestionService {
   ): Promise<void> {
     const session = this.driver.session();
     try {
+      // OPT-11: MERGE on the content-addressed id (derived in `ingest` from
+      // source_path|source_type|project_tag) so re-ingesting the same source
+      // reuses the node instead of CREATE-ing a duplicate. ON CREATE seeds all
+      // props; ON MATCH refreshes title/path (the source may have been re-titled
+      // or moved) and stamps updated_at. There is no Source uniqueness constraint
+      // today — single-writer ingest MERGE is sufficient (a follow-up could add a
+      // `source_dedupe_unique` constraint for race safety; deferred — schema
+      // changes need separate sign-off).
       await session.run(
-        `CREATE (s:Source {
-          id: $id,
-          title: $title,
-          source_type: $sourceType,
-          path: $path,
-          project_tag: $projectTag,
-          created_at: $now
-        })`,
+        `MERGE (s:Source {id: $id})
+         ON CREATE SET s.title = $title,
+                       s.source_type = $sourceType,
+                       s.path = $path,
+                       s.project_tag = $projectTag,
+                       s.created_at = $now
+         ON MATCH SET s.title = $title,
+                      s.path = $path,
+                      s.updated_at = $now`,
         {
           id,
           title,
@@ -309,35 +345,56 @@ export class IngestionService {
     }
   }
 
+  /**
+   * OPT-11: MERGE a claim Semantic on its content-addressed `dedupe_key` instead
+   * of CREATE-ing with a random id, mirroring BootstrapGraphService.createSemantic.
+   * Re-ingesting the SAME source therefore reuses the existing claim node (no
+   * duplicate). Backed by the `semantic_dedupe_unique` UNIQUE constraint so two
+   * concurrent MERGEs can't both create. Returns whether the node was newly
+   * created (so the caller counts creations only) and the resolved node id (the
+   * existing id on a match, `id` on a create) so CITES/ABOUT target the right node.
+   */
   private async createSemanticNode(
     id: string,
     content: string,
     confidence: number,
     tags: string[],
     decayClass: 'volatile' | 'stable' | 'permanent' = 'volatile',
-  ): Promise<void> {
+    dedupeKey?: string,
+    scope?: string,
+  ): Promise<{ created: boolean; id: string }> {
     const session = this.driver.session();
     try {
-      await session.run(
-        `CREATE (s:Semantic {
-          id: $id,
-          content: $content,
-          confidence: $confidence,
-          signal_count: 0,
-          created_at: $now,
-          updated_at: $now,
-          decay_class: $decayClass,
-          tags: $tags
-        })`,
+      const now = new Date().toISOString();
+      const res = await session.run(
+        `MERGE (s:Semantic {dedupe_key: $dedupeKey})
+         ON CREATE SET s.id = $id,
+                       s.content = $content,
+                       s.confidence = $confidence,
+                       s.signal_count = 0,
+                       s.created_at = $now,
+                       s.updated_at = $now,
+                       s.decay_class = $decayClass,
+                       s.tags = $tags,
+                       s.scope = $scope
+         ON MATCH SET s.updated_at = $now
+         RETURN s.id AS id, s.created_at = $now AS isNew`,
         {
           id,
           content,
           confidence,
           tags,
           decayClass,
-          now: new Date().toISOString(),
+          scope: scope ?? null,
+          dedupeKey: dedupeKey ?? `sem-${id}`,
+          now,
         },
       );
+      const record = res.records[0];
+      return {
+        created: record ? (record.get('isNew') as boolean) : false,
+        id: (record?.get('id') as string) ?? id,
+      };
     } finally {
       await session.close();
     }
@@ -401,6 +458,20 @@ export class IngestionService {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * OPT-11: deterministic, content-addressed id for a Source node. Hashing
+ * `path|source_type|project_tag` (the source's stable identity) gives the SAME
+ * id across re-ingest of the same source, so a MERGE on it dedupes instead of
+ * CREATE-ing a new node with a random nanoid every run. Mirrors the dedupe-key
+ * approach BootstrapGraphService uses for seed Semantics (sha1 of the identity
+ * coordinates), keeping the id short and index-friendly. The `src-` prefix
+ * preserves the existing id shape.
+ */
+export function sourceNodeId(path: string, sourceType: string, projectTag: string): string {
+  const digest = createHash('sha1').update(`${path}|${sourceType}|${projectTag}`).digest('hex');
+  return `src-${digest.slice(0, 24)}`;
+}
 
 function extractTitle(content: string, path: string): string {
   // Try to extract from markdown H1

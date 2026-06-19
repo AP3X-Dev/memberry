@@ -2173,6 +2173,45 @@ async function handleSearch(wikiDir: string, query: string, projectFilter: strin
 
 // ─── Server ─────────────────────────────────────────────────────────────────
 
+/**
+ * OPT-12: resolve the network interface the wiki viewer binds to. Previously
+ * `server.listen(port, cb)` was called with no host, so Node bound ALL interfaces
+ * (0.0.0.0). Under Docker the compose publish address gates exposure, but the
+ * systemd `memberry-wiki.service` runs the viewer directly with no publish layer —
+ * so a loopback-only deployment was still LAN-reachable on :3200 with no auth.
+ *
+ * Precedence: MEMBERRY_WIKI_HOST (viewer-specific override) → MEMBERRY_HOST
+ * (shared with the MCP server's resolveListenHost, AMP_* legacy honored) → the
+ * generic HOST env. The DEFAULT is `undefined`, which PRESERVES the prior
+ * all-interfaces bind — so existing Docker behavior (which relies on binding
+ * 0.0.0.0 inside the container) is unchanged. An operator restricting a systemd
+ * deploy sets MEMBERRY_WIKI_HOST=127.0.0.1 for loopback-only.
+ *
+ * Pure function of its `env` argument (defaults to process.env) so it's
+ * directly unit-testable without spinning a server.
+ */
+export function resolveWikiHost(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  // Honor the AMP_* legacy aliases the same way @memberry/core readEnv does, so
+  // MEMBERRY_* and their AMP_* predecessors both work. Viewer-specific override
+  // wins, then the shared host, then the generic HOST.
+  const pick = (canonical: string): string | undefined => {
+    const direct = env[canonical];
+    if (direct !== undefined && direct.trim() !== '') return direct;
+    if (canonical.startsWith('MEMBERRY_')) {
+      const legacy = `AMP_${canonical.slice('MEMBERRY_'.length)}`;
+      const old = env[legacy];
+      if (old !== undefined && old.trim() !== '') return old;
+    }
+    return undefined;
+  };
+  const raw =
+    pick('MEMBERRY_WIKI_HOST') ?? pick('MEMBERRY_HOST') ?? env['HOST'];
+  const trimmed = raw?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 export function startWikiViewer(config: ViewerConfig): Promise<ReturnType<typeof createServer>> {
   const { port, wiki_dir } = config;
 
@@ -2326,14 +2365,20 @@ export function startWikiViewer(config: ViewerConfig): Promise<ReturnType<typeof
 
     server.once('error', onError);
 
-    server.listen(port, () => {
+    // OPT-12: bind to the resolved host when one is configured (MEMBERRY_WIKI_HOST
+    // / MEMBERRY_HOST / HOST), else keep the prior no-host bind so Docker's
+    // all-interfaces (0.0.0.0) behavior is unchanged.
+    const host = resolveWikiHost();
+    const onListening = () => {
       // Remove the one-shot error listener to avoid a leak — runtime errors
       // after successful startup should be handled by the caller if needed.
       server.removeListener('error', onError);
       // Start file watcher only after successful bind
       startWatching(wiki_dir);
-      console.error(`[wiki-viewer] Serving wiki from ${wiki_dir} on http://localhost:${port}`);
+      console.error(`[wiki-viewer] Serving wiki from ${wiki_dir} on http://${host ?? 'localhost'}:${port}`);
       resolve(server);
-    });
+    };
+    if (host) server.listen(port, host, onListening);
+    else server.listen(port, onListening);
   });
 }

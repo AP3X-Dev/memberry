@@ -125,6 +125,10 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 ```
 
+By default the viewer binds all interfaces (`0.0.0.0`), so a systemd deploy is
+LAN-reachable on `:3200`. Set `MEMBERRY_WIKI_HOST=127.0.0.1` in `<ENV_FILE>` to
+restrict it to loopback-only (falls back to `MEMBERRY_HOST`, then `HOST`).
+
 ## 5. The background timers
 
 Three periodic jobs ship as `oneshot` services paired with timers. Each unit

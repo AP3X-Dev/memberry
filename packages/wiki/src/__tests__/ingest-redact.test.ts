@@ -24,6 +24,7 @@ function createMockDriver(): { driver: Driver; calls: () => RunCall[] } {
       calls.push({ query, params });
       if (query.includes('MERGE (e:Entity')) return mockResult([mockRecord({ id: 'ent-x', created: true })]);
       if (query.includes('RETURN e.id AS id')) return mockResult([mockRecord({ id: 'ent-x' })]);
+      if (query.includes('MERGE (s:Semantic')) return mockResult([mockRecord({ id: 'sem-x', isNew: true })]);
       return mockResult([]);
     }),
     close: vi.fn(async () => {}),
@@ -35,7 +36,7 @@ function createMockDriver(): { driver: Driver; calls: () => RunCall[] } {
 /** All content strings persisted onto Semantic nodes. */
 function semanticContents(calls: RunCall[]): string[] {
   return calls
-    .filter((c) => c.query.includes('CREATE (s:Semantic'))
+    .filter((c) => c.query.includes('MERGE (s:Semantic'))
     .map((c) => String(c.params.content));
 }
 
