@@ -85,7 +85,7 @@ export async function fetchProjectEntities(driver: Driver, projectName: string):
       `MATCH (project:Entity {type: 'project'})-[:CONTAINS*1..]->(e:Entity)
        WHERE project.name = $projectName
        RETURN e.id AS id, e.name AS name, e.type AS type, e.description AS description,
-              e.aliases AS aliases, e.created_at AS created_at
+              e.aliases AS aliases, e.created_at AS created_at, e.path AS path
        ORDER BY e.name`,
       { projectName },
     );
@@ -97,6 +97,7 @@ export async function fetchProjectEntities(driver: Driver, projectName: string):
       description: r.get('description') as string | undefined,
       aliases: r.get('aliases') as string[] | undefined,
       created_at: r.get('created_at') as string,
+      path: (r.get('path') as string | null) ?? undefined,
     }));
   } finally {
     await session.close();
@@ -120,7 +121,7 @@ export async function fetchEntitiesModifiedByProject(driver: Driver, projectScop
       `MATCH (ep:Episodic)-[:MODIFIED]->(e:Entity)
        WHERE ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag
        RETURN DISTINCT e.id AS id, e.name AS name, e.type AS type, e.description AS description,
-              e.aliases AS aliases, e.created_at AS created_at
+              e.aliases AS aliases, e.created_at AS created_at, e.path AS path
        ORDER BY e.name`,
       { canonTag, taskTag },
     );
@@ -132,6 +133,7 @@ export async function fetchEntitiesModifiedByProject(driver: Driver, projectScop
       description: r.get('description') as string | undefined,
       aliases: r.get('aliases') as string[] | undefined,
       created_at: r.get('created_at') as string,
+      path: (r.get('path') as string | null) ?? undefined,
     }));
   } finally {
     await session.close();
@@ -292,6 +294,12 @@ export async function fetchEpisodicsForEntities(
 ): Promise<Map<string, EpisodicEntry[]>> {
   const grouped = new Map<string, EpisodicEntry[]>();
   if (entityNames.length === 0) return grouped;
+  // Callers may pass the same name once per same-named entity node (e.g. 65
+  // distinct '__init__.py' file entities under one project). Deduplicate before
+  // UNWIND: otherwise the per-name subquery runs once per duplicate and the
+  // regroup below appends the same episodic many times, producing duplicated
+  // wiki "History" rows.
+  const uniqueNames = [...new Set(entityNames)];
   const session = driver.session();
   try {
     const result = await session.run(
@@ -307,7 +315,7 @@ export async function fetchEpisodicsForEntities(
          LIMIT 20
        }
        RETURN name AS name, id, task, content, outcome, session_id, created_at`,
-      { names: entityNames },
+      { names: uniqueNames },
     );
     for (const r of result.records) {
       const name = r.get('name') as string;
@@ -321,8 +329,12 @@ export async function fetchEpisodicsForEntities(
         project_scope: extractProjectScope(r.get('task') as string),
       };
       const existing = grouped.get(name);
-      if (existing) existing.push(entry);
-      else grouped.set(name, [entry]);
+      if (existing) {
+        // Defense-in-depth: never store the same episodic twice for one name.
+        if (!existing.some((e) => e.id === entry.id)) existing.push(entry);
+      } else {
+        grouped.set(name, [entry]);
+      }
     }
     return grouped;
   } finally {
@@ -357,25 +369,46 @@ export async function fetchRecentEpisodics(driver: Driver, limit: number): Promi
 
 // ─── Hierarchy ──────────────────────────────────────────────────────────────
 
-export async function fetchHierarchy(driver: Driver, entityName: string): Promise<{ parent?: string; children: string[] }> {
+export interface HierarchyRef {
+  id: string;
+  name: string;
+  path?: string;
+}
+
+// Matched by the current entity's ID (not its name) so a basename shared by many
+// nodes — e.g. 65 `__init__.py` — doesn't pull in every same-named node's
+// relatives. Returns each relative's id+name+path so the caller can resolve it to
+// a path-disambiguated link (or plain text when it has no page).
+export async function fetchHierarchy(driver: Driver, entityId: string): Promise<{ parent?: HierarchyRef; children: HierarchyRef[] }> {
   const sessionA = driver.session();
   const sessionB = driver.session();
   try {
     const [parentResult, childrenResult] = await Promise.all([
       sessionA.run(
-        `MATCH (parent:Entity)-[:CONTAINS]->(e:Entity {name: $name})
-         RETURN parent.name AS name LIMIT 1`,
-        { name: entityName },
+        `MATCH (parent:Entity)-[:CONTAINS]->(e:Entity {id: $id})
+         RETURN parent.id AS id, parent.name AS name, parent.path AS path LIMIT 1`,
+        { id: entityId },
       ),
       sessionB.run(
-        `MATCH (e:Entity {name: $name})-[:CONTAINS]->(child:Entity)
-         RETURN child.name AS name ORDER BY name`,
-        { name: entityName },
+        `MATCH (e:Entity {id: $id})-[:CONTAINS]->(child:Entity)
+         RETURN child.id AS id, child.name AS name, child.path AS path ORDER BY child.name`,
+        { id: entityId },
       ),
     ]);
+    const parentRec = parentResult.records[0];
     return {
-      parent: parentResult.records.length > 0 ? parentResult.records[0].get('name') as string : undefined,
-      children: childrenResult.records.map((r) => r.get('name') as string),
+      parent: parentRec
+        ? {
+            id: parentRec.get('id') as string,
+            name: parentRec.get('name') as string,
+            path: (parentRec.get('path') as string | null) ?? undefined,
+          }
+        : undefined,
+      children: childrenResult.records.map((r) => ({
+        id: r.get('id') as string,
+        name: r.get('name') as string,
+        path: (r.get('path') as string | null) ?? undefined,
+      })),
     };
   } finally {
     await Promise.all([sessionA.close(), sessionB.close()]);

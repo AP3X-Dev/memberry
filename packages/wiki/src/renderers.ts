@@ -12,7 +12,7 @@ import type {
   PortalData,
   ResolvedClaim,
 } from './types.js';
-import { slugify } from './compile.js';
+import { slugify, relativeEntityPath } from './compile.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -52,7 +52,52 @@ function stripProjectPrefix(text: string): string {
 function projectEntityLink(projectSlug: string, entityName: string, display?: string): string {
   const entitySlug = slugify(entityName);
   const label = display ?? entityName;
-  return `[[projects/${projectSlug}/${entitySlug}|${label}]]`;
+  // A reference to the project entity itself resolves to the project index page,
+  // not a nonexistent `<project>.md`.
+  const target = entitySlug === projectSlug ? '_index' : entitySlug;
+  return `[[projects/${projectSlug}/${target}|${label}]]`;
+}
+
+/** Link straight to a resolved entity slug, used where the entity's unique,
+ *  path-disambiguated slug is already known (so we don't re-derive it from the
+ *  name, which may collide). */
+function projectEntitySlugLink(projectSlug: string, slug: string, display: string): string {
+  return `[[projects/${projectSlug}/${slug}|${display}]]`;
+}
+
+/** A resolved hierarchy relative: a page-bearing entity (rendered as a link) or a
+ *  pageless one (rendered as plain text, so it never dead-ends). */
+type HierarchyLink = { slug?: string; display: string; hasPage: boolean };
+
+function hierLink(projectSlug: string, ref: HierarchyLink): string {
+  return ref.hasPage && ref.slug
+    ? projectEntitySlugLink(projectSlug, ref.slug, ref.display)
+    : ref.display;
+}
+
+/** A short index page emitted at a name-slug shared by 2+ entities, linking to
+ *  each path-disambiguated variant so name-based links never dead-end. */
+export function renderDisambiguationStub(
+  projectSlug: string,
+  name: string,
+  variants: Array<{ slug: string; display: string; type: string }>,
+): string {
+  const lines: string[] = [];
+  lines.push(renderFrontmatter({
+    entity: slugify(name),
+    type: 'disambiguation',
+    variants: variants.length,
+  }));
+  lines.push('');
+  lines.push(`# ${name}`);
+  lines.push('');
+  lines.push(`> ${variants.length} files share this name -- pick one:`);
+  lines.push('');
+  for (const v of [...variants].sort((a, b) => a.display.localeCompare(b.display))) {
+    lines.push(`- ${projectEntitySlugLink(projectSlug, v.slug, v.display)} *(${v.type})*`);
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 function projectIndexLink(projectSlug: string, display?: string): string {
@@ -111,7 +156,7 @@ export function renderEntityArticle(
     backlinks: Array<{ entity_name: string; context: string }>;
     see_also: Array<{ entity_name: string; context: string }>;
     sources: Array<{ title: string; source_type: string; slug: string }>;
-    hierarchy: { parent?: string; children: string[] };
+    hierarchy: { parent?: HierarchyLink; children: HierarchyLink[] };
     projectSlug: string;
   },
   episodics: EpisodicEntry[],
@@ -135,16 +180,17 @@ export function renderEntityArticle(
   }));
   lines.push('');
 
-  // Title
-  lines.push(`# ${entity.name}`);
+  // Title (repo-relative path for code entities, so same-named files are
+  // distinguishable; plain name for concepts/projects with no path).
+  lines.push(`# ${relativeEntityPath(entity.path) || entity.name}`);
   lines.push('');
 
   // Hierarchy
   if (hierarchy.parent) {
-    lines.push(`> Part of: ${projectEntityLink(projectSlug, hierarchy.parent)}`);
+    lines.push(`> Part of: ${hierLink(projectSlug, hierarchy.parent)}`);
   }
   if (hierarchy.children.length > 0) {
-    const childLinks = hierarchy.children.map((c) => projectEntityLink(projectSlug, c)).join(', ');
+    const childLinks = hierarchy.children.map((c) => hierLink(projectSlug, c)).join(', ');
     lines.push(`> Contains: ${childLinks}`);
   }
   if (hierarchy.parent || hierarchy.children.length > 0) {
@@ -191,11 +237,14 @@ export function renderEntityArticle(
     }
   }
 
-  // History (episodic entries)
-  if (episodics.length > 0) {
+  // History (episodic entries). Dedup by id as a final guard so a single
+  // episodic can never render more than once even if upstream assembly passes
+  // duplicates (e.g. same-named entities sharing one matching episodic).
+  const uniqueEpisodics = [...new Map(episodics.map((e) => [e.id, e])).values()];
+  if (uniqueEpisodics.length > 0) {
     lines.push('## History');
     lines.push('');
-    for (const ep of episodics.slice(0, 15)) {
+    for (const ep of uniqueEpisodics.slice(0, 15)) {
       const date = formatDate(ep.created_at);
       const badge = outcomeBadge(ep.outcome);
       const task = truncate(stripProjectPrefix(ep.task), 120);
@@ -288,9 +337,10 @@ export function renderProjectIndex(project: ProjectData): string {
     for (const [type, entities] of [...byType].sort(([a], [b]) => a.localeCompare(b))) {
       lines.push(`## ${type.charAt(0).toUpperCase() + type.slice(1)}s`);
       lines.push('');
-      for (const e of entities.sort((a, b) => a.name.localeCompare(b.name))) {
+      const labeled = entities.map((e) => ({ e, display: relativeEntityPath(e.path) || e.name }));
+      for (const { e, display } of labeled.sort((a, b) => a.display.localeCompare(b.display))) {
         const desc = e.description ? ` -- ${truncate(e.description, 80)}` : '';
-        lines.push(`- ${projectEntityLink(projectSlug, e.name)}${desc}`);
+        lines.push(`- ${projectEntitySlugLink(projectSlug, e.slug, display)}${desc}`);
       }
       lines.push('');
     }
@@ -301,8 +351,9 @@ export function renderProjectIndex(project: ProjectData): string {
     lines.push('## Other Entities');
     lines.push('');
     const names = project.sparse_entities
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((e) => `**${e.name}** *(${e.type})*`);
+      .map((e) => ({ e, display: relativeEntityPath(e.path) || e.name }))
+      .sort((a, b) => a.display.localeCompare(b.display))
+      .map(({ e, display }) => `**${display}** *(${e.type})*`);
     lines.push(names.join(' \u00b7 '));
     lines.push('');
   }

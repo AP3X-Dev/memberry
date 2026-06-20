@@ -109,6 +109,10 @@ export interface EntityInfo {
   description?: string;
   aliases?: string[];
   created_at: string;
+  /** Indexed source-file path for code entities (absolute, container-side).
+   *  Used to disambiguate same-named files in the wiki. Absent for non-file
+   *  entities (concepts, projects). */
+  path?: string;
 }
 
 // ─── Ingestion ───────────────────────────────────────────────────────────────

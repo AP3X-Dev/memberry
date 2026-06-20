@@ -37,6 +37,7 @@ import {
   fetchGraphStats,
   fetchRecentEpisodics,
 } from './queries.js';
+import type { HierarchyRef } from './queries.js';
 import {
   renderFrontmatter,
   renderEntityArticle,
@@ -50,6 +51,7 @@ import {
   renderPatternsPage,
   renderRecentChanges,
   renderProjectGraph,
+  renderDisambiguationStub,
   crossProjectPatternTags,
   DECISION_CONFIDENCE_THRESHOLD,
 } from './renderers.js';
@@ -61,6 +63,64 @@ export function slugify(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Repo-relative path for a code entity. Indexed file paths look like
+ * `/app/<repo>-index-<hash>/<relative>`; strip the container + index-root prefix
+ * so the wiki can display and disambiguate by `src/engine/__init__.py` instead of
+ * a bare, collision-prone basename. Falls back to the input if there is no
+ * index-root segment.
+ */
+export function relativeEntityPath(path: string | undefined | null): string {
+  if (!path) return '';
+  const segs = path.replace(/\\/g, '/').split('/').filter(Boolean);
+  const idx = segs.findIndex((s) => s.includes('-index-'));
+  const rel = idx >= 0 ? segs.slice(idx + 1) : segs;
+  return rel.join('/') || path;
+}
+
+/** Reserve a unique slug, suffixing `-2`, `-3`, … on collision. */
+function uniquifySlug(slug: string, used: Set<string>): string {
+  const base = slug || 'entity';
+  let candidate = base;
+  let n = 2;
+  while (used.has(candidate)) candidate = `${base}-${n++}`;
+  used.add(candidate);
+  return candidate;
+}
+
+/**
+ * Give every entity a unique `slug`. Names that are unique within the set keep
+ * their plain name-slug (so existing name-based wikilinks keep resolving); names
+ * shared by 2+ entities (e.g. 36 distinct `__init__.py` files) are disambiguated
+ * by their repo-relative path. The bare name-slug of a colliding group is reserved
+ * for a disambiguation stub (written by the compile loop), so residual name-based
+ * links never dead-end.
+ */
+function assignUniqueSlugs(entities: EntityInfo[]): void {
+  const byBase = new Map<string, EntityInfo[]>();
+  for (const e of entities) {
+    const base = slugify(e.name);
+    const list = byBase.get(base);
+    if (list) list.push(e);
+    else byBase.set(base, [e]);
+  }
+  const used = new Set<string>();
+  // Pass 1: reserve every unique name-slug and every colliding base (the latter
+  // for its stub) BEFORE assigning any path-slug, so path-slugs can't steal them.
+  for (const [base, group] of byBase) {
+    if (group.length === 1) group[0].slug = uniquifySlug(base, used);
+    else used.add(base);
+  }
+  // Pass 2: colliding names disambiguate by repo-relative path.
+  for (const [base, group] of byBase) {
+    if (group.length <= 1) continue;
+    for (const e of group) {
+      const rel = relativeEntityPath(e.path);
+      e.slug = uniquifySlug(rel ? slugify(rel) : base, used);
+    }
+  }
 }
 
 function escapeRegExp(s: string): string {
@@ -217,7 +277,10 @@ export function resolveInlineLinks(text: string, entityRefs: string[], projectSl
     const escaped = ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const re = new RegExp(`\\b${escaped}\\b`, 'gi');
     const entitySlug = slugify(ref);
-    const wikilink = `[[projects/${projectSlug}/${entitySlug}|${ref}]]`;
+    // Self-reference to the project entity resolves to its index page, not a
+    // nonexistent `<project>.md`.
+    const target = entitySlug === projectSlug ? '_index' : entitySlug;
+    const wikilink = `[[projects/${projectSlug}/${target}|${ref}]]`;
     resolved = resolved.replace(re, (match, offset) => {
       // Avoid double-linking: skip if this match is inside an existing [[wikilink]]
       const before = resolved.slice(0, offset);
@@ -484,7 +547,7 @@ export class WikiCompiler {
       // scan (vs one full-label scan per entity). Same per-entity ORDER/LIMIT.
       const entityEpisodicMap = await fetchEpisodicsForEntities(
         this.driver,
-        entities.map((e) => e.name),
+        [...new Set(entities.map((e) => e.name))],
       );
       // OPT-58: feed the global map so Phase 2 reuses these results.
       for (const [name, eps] of entityEpisodicMap) entityEpisodicsByName.set(name, eps);
@@ -561,6 +624,16 @@ export class WikiCompiler {
       const projectSlug = slugify(project.entity.name);
       const projectDir = join(outputDir, 'projects', projectSlug);
 
+      // Disambiguate per-file articles by path so same-named files (e.g. 36
+      // '__init__.py') each get their own reachable page instead of colliding
+      // onto one overwritten slug. Runs post-canonicalization on the final set.
+      assignUniqueSlugs(project.substantive_entities);
+
+      // Index substantive entities by id so hierarchy refs can resolve to the
+      // page-bearing entity's disambiguated slug; everything else renders as
+      // plain text (no dead link).
+      const substantiveById = new Map(project.substantive_entities.map((e) => [e.id, e] as const));
+
       // Build articles for substantive entities
       for (const entity of project.substantive_entities) {
         // OPT-58: reuse the Phase-1 batched episodics (identical per-entity result)
@@ -569,7 +642,7 @@ export class WikiCompiler {
         const [entitySemantics, hierarchy, backlinks, seeAlso, sources, inboundCount] =
           await Promise.all([
             fetchSemanticsForEntity(this.driver, entity.name),
-            fetchHierarchy(this.driver, entity.name),
+            fetchHierarchy(this.driver, entity.id),
             fetchBacklinks(this.driver, entity.name),
             fetchRelatedEntities(this.driver, entity.name),
             fetchSourcesForEntity(this.driver, entity.name),
@@ -609,8 +682,23 @@ export class WikiCompiler {
         const allTags = [...new Set(semantics.flatMap((s) => s.tags))];
         const avgConfidence = confidenceCount > 0 ? totalConfidence / confidenceCount : 0;
 
+        // Resolve hierarchy refs to render descriptors: a child/parent that has
+        // its own page links to that page's path-disambiguated slug; pageless
+        // (sparse or cross-project) relatives render as plain path text so they
+        // never dead-end.
+        const resolveRef = (ref: HierarchyRef) => {
+          const sub = substantiveById.get(ref.id);
+          return sub
+            ? { slug: sub.slug, display: relativeEntityPath(sub.path) || sub.name, hasPage: true }
+            : { display: relativeEntityPath(ref.path) || ref.name, hasPage: false };
+        };
+        const resolvedHierarchy = {
+          parent: hierarchy.parent ? resolveRef(hierarchy.parent) : undefined,
+          children: hierarchy.children.map(resolveRef),
+        };
+
         const frontmatter: ArticleFrontmatter = {
-          entity: slugify(entity.name),
+          entity: entity.slug,
           type: entity.type,
           confidence: avgConfidence,
           sources: sources.length,
@@ -619,8 +707,10 @@ export class WikiCompiler {
           memberry_id: entity.id,
           aliases: entity.aliases ?? [],
           tags: allTags,
-          parent: hierarchy.parent,
-          children: hierarchy.children.length > 0 ? hierarchy.children : undefined,
+          parent: resolvedHierarchy.parent?.display,
+          children: resolvedHierarchy.children.length > 0
+            ? resolvedHierarchy.children.map((c) => c.display)
+            : undefined,
         };
 
         const articleData = {
@@ -630,14 +720,37 @@ export class WikiCompiler {
           backlinks,
           see_also: seeAlso,
           sources,
-          hierarchy,
+          hierarchy: resolvedHierarchy,
           projectSlug,
         };
 
         const markdown = renderEntityArticle(articleData, entityEpisodics);
-        await writeMarkdown(join(projectDir, `${slugify(entity.name)}.md`), markdown);
+        await writeMarkdown(join(projectDir, `${entity.slug}.md`), markdown);
         result.articles_compiled++;
         result.episodics_rendered += entityEpisodics.length;
+      }
+
+      // Disambiguation stubs: when 2+ substantive entities shared a name-slug,
+      // their articles now live at path-based slugs, leaving the bare name-slug
+      // free. Emit a stub there so residual name-based links (hierarchy,
+      // backlinks, inline) still resolve and route to the specific file.
+      const bySharedSlug = new Map<string, EntityInfo[]>();
+      for (const entity of project.substantive_entities) {
+        const base = slugify(entity.name);
+        const list = bySharedSlug.get(base);
+        if (list) list.push(entity);
+        else bySharedSlug.set(base, [entity]);
+      }
+      for (const [base, group] of bySharedSlug) {
+        if (group.length <= 1) continue;
+        const variants = group.map((e) => ({
+          slug: e.slug,
+          display: relativeEntityPath(e.path) || e.name,
+          type: e.type,
+        }));
+        const stub = renderDisambiguationStub(projectSlug, group[0].name, variants);
+        await writeMarkdown(join(projectDir, `${base}.md`), stub);
+        result.articles_compiled++;
       }
 
       // Graph page
