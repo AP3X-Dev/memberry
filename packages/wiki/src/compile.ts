@@ -277,10 +277,7 @@ export function resolveInlineLinks(text: string, entityRefs: string[], projectSl
     const escaped = ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const re = new RegExp(`\\b${escaped}\\b`, 'gi');
     const entitySlug = slugify(ref);
-    // Self-reference to the project entity resolves to its index page, not a
-    // nonexistent `<project>.md`.
-    const target = entitySlug === projectSlug ? '_index' : entitySlug;
-    const wikilink = `[[projects/${projectSlug}/${target}|${ref}]]`;
+    const wikilink = `[[projects/${projectSlug}/${entitySlug}|${ref}]]`;
     resolved = resolved.replace(re, (match, offset) => {
       // Avoid double-linking: skip if this match is inside an existing [[wikilink]]
       const before = resolved.slice(0, offset);

@@ -52,10 +52,7 @@ function stripProjectPrefix(text: string): string {
 function projectEntityLink(projectSlug: string, entityName: string, display?: string): string {
   const entitySlug = slugify(entityName);
   const label = display ?? entityName;
-  // A reference to the project entity itself resolves to the project index page,
-  // not a nonexistent `<project>.md`.
-  const target = entitySlug === projectSlug ? '_index' : entitySlug;
-  return `[[projects/${projectSlug}/${target}|${label}]]`;
+  return `[[projects/${projectSlug}/${entitySlug}|${label}]]`;
 }
 
 /** Link straight to a resolved entity slug, used where the entity's unique,
