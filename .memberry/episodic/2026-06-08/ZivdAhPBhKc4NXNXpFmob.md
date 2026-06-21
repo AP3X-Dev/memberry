@@ -1,9 +1,0 @@
----
-id: ZivdAhPBhKc4NXNXpFmob
-session_id: session-20260608-ag3ntic-phase45
-agent_id: mcp
-task: [project:ag3ntic] Phase-1 gap fixes outcome: 4 landed on morph/opt-hardening; 3 folded into phase 2.
-created_at: "2026-06-08T21:37:33.435Z"
----
-
-PHASE-1 QUICK GAP FIXES outcome (branch morph/opt-hardening, NOT pushed). LANDED + verified (290 tests green, gate PASS): ad3ea21 PermissionPolicy flat-shape + §17.2 clamp so per-employee overrides reach the PDP (fixes gap #4, refines opt item #9); b1b7fde Role Authority Matrix enforced on approvals (gap #3 — viewer can't approve, critical owner-only) [BONUS]; 9365e93 HermesRuntimeAdapter.close best-effort per session [BONUS]; 5c7a042 orchestrator.reconcile_runtimes() swept from worker.sweep_once so RESUMABLE-state instances self-heal (gap #7 reconciler wiring). DID NOT LAND (folded into phase 2): Q3 Idempotency-Key middleware, Q4 DB CHECK/UNIQUE/ck_grant_target/uq_runtime_live constraints, Q5 seed sec-30 capability catalog + sec-29 templates. The fix-cycle Workflow STALLED on the seed-catalog item (mis-scoped as 'quick' — it's a spec-driven feature build); I stopped it. LESSONS: (1) do NOT launch multiple concurrent pytest runs — they contend on the shared session-wide SQLite test DB (conftest ag3ntic_pytest_{pid}.db) and deadlock; run pytest once. (2) tests that call reconcile_runtimes must assert on THEIR instances not global counts (shared DB accumulates rows across tests). (3) worker.sweep_once binds reconcile_runtimes at import, so monkeypatch worker.reconcile_runtimes not orchestrator's. NEXT: phase 2 = golden-path implementation plan (gap items 1-8 + 11 + the folded Q3/Q4/Q5).
