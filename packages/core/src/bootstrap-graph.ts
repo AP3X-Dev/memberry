@@ -6,6 +6,7 @@
 import { type Driver } from 'neo4j-driver';
 import { nanoid } from 'nanoid';
 import { createHash } from 'crypto';
+import type { EmbeddingProvider } from './types.js';
 
 /**
  * Stable content-addressed key for a bootstrap seed Semantic. Hashing
@@ -67,7 +68,12 @@ export interface BootstrapResult {
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 export class BootstrapGraphService {
-  constructor(private driver: Driver) {}
+  /**
+   * @param embedding Optional provider; when wired, each seeded Semantic gets a
+   *   content embedding so it lands in the semantic_embedding vector index and
+   *   is recallable by vector search (not just tag/scope lookup).
+   */
+  constructor(private driver: Driver, private embedding?: EmbeddingProvider) {}
 
   /**
    * Seed the graph with foundational nodes for a project.
@@ -324,10 +330,28 @@ export class BootstrapGraphService {
     const id = `sem-${nanoid(10)}`;
     const now = new Date().toISOString();
     const scope = projectTag.toLowerCase();
-    const tags = [projectTag, seed.domain, ...(seed.tags ?? [])];
+    // The project tag is stored lowercase to match `scope`; without this the
+    // tag-scoped retrieval channel can't match a canonical lowercase project tag
+    // against an upper-cased stored tag (the casing-fragmentation bug).
+    const tags = [scope, seed.domain, ...(seed.tags ?? [])];
     // Dedupe key is computed in JS (a short hash, not a long raw string) and used
     // as the MERGE anchor so re-ingesting the SAME seed does not duplicate it.
     const dedupeKey = semanticDedupeKey(scope, seed.about?.[0], seed.claim);
+
+    // Embed the claim so the seeded semantic is vector-recallable. Best-effort:
+    // a missing/degraded provider or an embed failure just yields a non-vector
+    // (still tag/scope-recallable) seed rather than failing the bootstrap.
+    let embedding: number[] | undefined;
+    if (this.embedding && this.embedding.available !== false && seed.claim) {
+      try {
+        embedding = await this.embedding.embed(seed.claim);
+      } catch (err: unknown) {
+        console.error(
+          '[bootstrap-graph] seed embedding failed; semantic will not be vector-recallable:',
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
 
     // MERGE (not CREATE) on the stable dedupe_key: ON CREATE seeds all props with
     // a fresh id; ON MATCH only touches updated_at (no new id, no signal_count
@@ -345,8 +369,8 @@ export class BootstrapGraphService {
                      s.updated_at = $now,
                      s.decay_class = 'stable',
                      s.tags = $tags,
-                     s.scope = $scope
-       ON MATCH SET s.updated_at = $now
+                     s.scope = $scope${embedding ? ',\n                     s.embedding = $embedding' : ''}
+       ON MATCH SET s.updated_at = $now${embedding ? ', s.embedding = coalesce(s.embedding, $embedding)' : ''}
        RETURN s.id AS id, s.created_at = $now AS isNew`,
       {
         dedupeKey,
@@ -356,6 +380,7 @@ export class BootstrapGraphService {
         now,
         tags,
         scope,
+        ...(embedding ? { embedding } : {}),
       },
     );
     const isNew = res.records[0].get('isNew') as boolean;

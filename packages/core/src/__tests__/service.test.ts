@@ -205,6 +205,69 @@ describe('AMPService.load', () => {
     expect(result.sources).toContain('unique');
   });
 
+  // Regression: episodic recall channel. The episodic_embedding index was
+  // populated at store() time but queried by NOTHING, so captured episodes were
+  // unrecallable ("write-only memory"). load() now pulls them via byVectorEpisodic.
+  it('surfaces episodic vector hits in load() (episodic recall channel)', async () => {
+    const episode = {
+      id: 'ep-vec-1',
+      session_id: 's1',
+      agent_id: 'a1',
+      task: 'Owner decision about the roadmap',
+      content: 'E'.repeat(40),
+      created_at: new Date().toISOString(),
+      tags: ['decision'],
+      tenant_id: 'default',
+      score: 0.88,
+    };
+    const redis = makeRedis();
+    const neo4j = makeNeo4j({
+      query: {
+        byScope: vi.fn().mockResolvedValue([]),
+        byVector: vi.fn().mockResolvedValue([]),
+        byVectorEpisodic: vi.fn().mockResolvedValue([episode]),
+      },
+    });
+    const service = new AMPService(redis, neo4j, makeEmbedding(), makeConfig());
+
+    const result = await service.load({ task: 'roadmap decision', max_tokens: 2000 });
+
+    expect(neo4j.query.byVectorEpisodic).toHaveBeenCalledOnce();
+    expect(result.sources).toContain('ep-vec-1');
+    expect(result.markdown).toContain('Owner decision about the roadmap');
+  });
+
+  // Regression: a semantic returned by BOTH the scope channel and the vector
+  // channel must keep its (meaningful) cosine relevance. byScope adds it first;
+  // before the fix the `seen` dedup let that default-relevance copy shadow the
+  // vector score, flattening ranking. This stayed hidden while no semantic had an
+  // embedding (byVector always empty).
+  it('keeps the vector relevance for a semantic also returned by byScope (no scope-channel shadowing)', async () => {
+    const low = makeSemanticNode({ id: 'low', content: 'L'.repeat(40) });
+    const high = makeSemanticNode({ id: 'high', content: 'H'.repeat(40) });
+
+    const redis = makeRedis();
+    const neo4j = makeNeo4j({
+      query: {
+        // Scope channel returns BOTH first (equal confidence/recency → a tie
+        // without vector relevance, which would preserve this input order).
+        byScope: vi.fn().mockResolvedValue([low, high]),
+        byVector: vi.fn().mockResolvedValue([
+          { ...low, score: 0.10 },
+          { ...high, score: 0.95 },
+        ]),
+      },
+    });
+    const service = new AMPService(redis, neo4j, makeEmbedding(), makeConfig());
+
+    const result = await service.load({ task: 'rank by vector', max_tokens: 2000 });
+
+    // The high-cosine node must outrank the low one — proof the vector score
+    // survived the merge instead of being pinned to the scope channel's default.
+    expect(result.sources.indexOf('high')).toBeGreaterThanOrEqual(0);
+    expect(result.sources.indexOf('high')).toBeLessThan(result.sources.indexOf('low'));
+  });
+
   it('respects max_tokens budget', async () => {
     // Each node content is 200 chars → ~50 tokens
     const nodes: SemanticNode[] = Array.from({ length: 10 }, (_, i) =>

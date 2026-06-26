@@ -196,7 +196,10 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   }
 
   // Services the MCP server needs beyond the core load/store kit.
-  const semantic = new SemanticStore(driver);
+  // Pass the shared embedding provider so consolidation-promoted and superseded
+  // semantics get a content embedding at write time and land in the
+  // semantic_embedding vector index (without it they were write-only).
+  const semantic = new SemanticStore(driver, embedding);
   const lock = new DistributedLock(redis);
   const proposals = new ProposalStore(redis);
   const provenanceTraversal = new ProvenanceTraversal(driver);
@@ -219,8 +222,9 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     config,
   );
 
-  // Build bootstrap service
-  const bootstrapGraphService = new BootstrapGraphService(driver);
+  // Build bootstrap service (embedding provider so seeded semantics are
+  // vector-recallable, matching the consolidation/supersede write paths).
+  const bootstrapGraphService = new BootstrapGraphService(driver, embedding);
 
   // Background "dream" pass (generative gap-filling + abductive hypotheses).
   const dreamEngine = buildDreamEngine(core);

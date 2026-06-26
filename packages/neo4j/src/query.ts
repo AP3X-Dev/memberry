@@ -1,7 +1,7 @@
 // packages/neo4j/src/query.ts
 import neo4j, { type Driver } from 'neo4j-driver';
 import type { SemanticNode, FactNode, EpisodicNode, TemporalOptions } from '@memberry/core';
-import { readEnv } from '@memberry/core';
+import { readEnv, DEFAULT_TENANT } from '@memberry/core';
 import { activeRelationshipFilter } from './temporal-edges.js';
 import { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from './tenant.js';
 
@@ -228,7 +228,7 @@ export class ScopedQuery {
         params.tags = tags;
         cypher = `
           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
-          WHERE e.name IN $entities AND ANY(t IN $tags WHERE t IN s.tags)
+          WHERE e.name IN $entities AND ANY(t IN $tags WHERE toLower(t) IN [x IN s.tags | toLower(x)])
             AND ${relFilter} AND ${tFilter}${pFilter}
           RETURN DISTINCT s { .*, embedding: null } AS s
           ORDER BY s.confidence DESC, s.updated_at DESC
@@ -246,7 +246,7 @@ export class ScopedQuery {
         params.tags = tags;
         cypher = `
           MATCH (s:Semantic)
-          WHERE ANY(t IN $tags WHERE t IN s.tags) AND ${tFilter}${pFilter}
+          WHERE ANY(t IN $tags WHERE toLower(t) IN [x IN s.tags | toLower(x)]) AND ${tFilter}${pFilter}
           RETURN DISTINCT s { .*, embedding: null } AS s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
@@ -304,6 +304,61 @@ export class ScopedQuery {
         ...mapSemanticNode(nodeProps(r.get('node'))),
         score: r.get('score') as number,
       }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Vector similarity over EPISODIC memories — the raw captured episodes.
+   *
+   * The episodic_embedding index is populated at store() time but was queried by
+   * nothing, so freshly captured knowledge stayed unrecallable until (if ever)
+   * consolidated into a Semantic. This channel surfaces episodes directly, so a
+   * berry_load/context/ask recalls what was just stored. Mirrors byVector's
+   * tenant + project-scope enforcement: similarity alone must never cross a
+   * tenant or project boundary. Returns scope/tags/tenant so the caller's
+   * inProjectScope guard can re-check.
+   */
+  async byVectorEpisodic(
+    embedding: number[],
+    limit: number,
+    tenantId?: string,
+    projectScope?: string,
+  ): Promise<Array<EpisodicNode & { score: number }>> {
+    const session = this.driver.session();
+    try {
+      const tenant = resolveTenant(tenantId);
+      // Over-fetch then post-filter when a scope/tenant predicate applies, so the
+      // project isn't starved by another project's nearer neighbours (see byVector).
+      const filtered = !isDefaultTenant(tenant) || !!projectScope;
+      const fetch = filtered ? Math.min(limit * 5, 200) : limit;
+      const params: Record<string, unknown> = {
+        fetch: neo4j.int(fetch), limit: neo4j.int(limit), embedding, [TENANT_PARAM]: tenant,
+      };
+      let pFilter = '';
+      if (projectScope) {
+        params.projectScope = projectScope.toLowerCase();
+        pFilter = ` AND ${projectScopeWhere('node')}`;
+      }
+      const result = await session.run(
+        `CALL db.index.vector.queryNodes('episodic_embedding', $fetch, $embedding)
+         YIELD node, score
+         WHERE ${tenantWhere('node', tenant)}${pFilter}
+         RETURN node { .*, embedding: null } AS node, score
+         LIMIT $limit`,
+        params,
+      );
+      return result.records.map((r) => {
+        const props = nodeProps(r.get('node'));
+        return {
+          ...mapEpisodicNode(props),
+          ...(props.scope != null && { scope: props.scope as string }),
+          tags: Array.isArray(props.tags) ? (props.tags as string[]) : [],
+          tenant_id: (props.tenant_id as string | undefined) ?? DEFAULT_TENANT,
+          score: r.get('score') as number,
+        };
+      });
     } finally {
       await session.close();
     }

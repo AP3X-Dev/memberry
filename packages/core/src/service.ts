@@ -101,6 +101,10 @@ export interface Neo4jLayer {
   query: {
     byScope(scope: { entities?: string[]; tags?: string[]; limit: number; asOf?: string; tenantId?: string; projectScope?: string }): Promise<SemanticNode[]>;
     byVector(embedding: number[], limit: number, tenantId?: string, projectScope?: string): Promise<Array<SemanticNode & { score: number }>>;
+    /** Vector similarity over raw EPISODIC memories (optional). Surfaces captured
+     *  episodes directly so freshly stored knowledge is recallable before (or
+     *  without) consolidation into a Semantic. */
+    byVectorEpisodic?(embedding: number[], limit: number, tenantId?: string, projectScope?: string): Promise<Array<EpisodicNode & { score: number }>>;
     /** Graph-structural retrieval: expand from seed entities via ABOUT and SAME_EPISODE edges (optional) */
     expandByGraph?(entityNames: string[], depth?: number, maxPerHop?: number, asOf?: string, tenantId?: string): Promise<SemanticNode[]>;
   };
@@ -131,7 +135,7 @@ export function requestedProjectScope(tags?: string[]): string | undefined {
  * project-scoped loads — a wrong memory is worse than no memory.
  */
 export function inProjectScope(
-  node: Pick<SemanticNode, 'tags'> & { scope?: string },
+  node: { tags?: string[]; scope?: string },
   projectScope: string | undefined,
 ): boolean {
   if (!projectScope) return true;
@@ -310,6 +314,14 @@ export class AMPService {
       this._vectorSearch(scope.task, 20, scope.tenantId, projectScope, scope.queryVector),
     ]);
 
+    // Episodic recall channel: vector similarity over the raw captured episodes.
+    // Semantics are the consolidated layer, but episodes hold the actual session
+    // decisions and are recallable immediately at store() time — without this
+    // channel, captured knowledge stays write-only until (if ever) consolidated.
+    const episodicVectorPromise = this._vectorSearchEpisodic(
+      scope.task, 20, scope.tenantId, projectScope, scope.queryVector,
+    );
+
     // OPT-41: one batched fact fetch (UNWIND ids) instead of one getActive per
     // entity. getActiveBatch returns per-entity arrays in input order, each
     // identical to getActive — so the dedup+rank below is byte-identical. Falls
@@ -321,9 +333,10 @@ export class AMPService {
           : Promise.all(scope.entities.map((e) => this.neo4j.fact!.getActive(e, scope.temporal, scope.tenantId)))
         : Promise.resolve([]);
 
-    const [[coreRaw, workingRaw], [byScope, byVector], factResults] = await Promise.all([
+    const [[coreRaw, workingRaw], [byScope, byVector], byVectorEpisodic, factResults] = await Promise.all([
       blocksPromise,
       semanticsPromise,
+      episodicVectorPromise,
       factsPromise,
     ]);
 
@@ -365,18 +378,51 @@ export class AMPService {
     // Merge and de-duplicate semantics by id. Every channel passes through the
     // project-scope guard — the Cypher already filters, but the guard makes the
     // invariant hold even for channels (or mocks) that don't.
+    // Index the vector channel's cosine scores by id. A semantic matched by BOTH
+    // the scope channel (tag/entity) and the vector channel must keep its vector
+    // relevance — the real similarity signal — not the scope channel's default.
+    // Without this, a project-scoped load (where byScope returns every project
+    // semantic) would let the scope hit, added first, shadow the vector score via
+    // the `seen` dedup, flattening all semantics to the default relevance. This
+    // stayed invisible while no semantic carried an embedding (byVector empty).
+    const vectorScoreById = new Map<string, number>();
+    for (const node of byVector) vectorScoreById.set(node.id, node.score);
+
     const seen = new Set<string>();
     const merged: Array<SemanticNode & { relevanceScore?: number }> = [];
     for (const node of byScope) {
       if (!seen.has(node.id) && inProjectScope(node, projectScope)) {
         seen.add(node.id);
-        merged.push(node);
+        const vs = vectorScoreById.get(node.id);
+        merged.push(vs !== undefined ? { ...node, relevanceScore: vs } : node);
       }
     }
     for (const node of byVector) {
       if (!seen.has(node.id) && inProjectScope(node, projectScope)) {
         seen.add(node.id);
         merged.push({ ...node, relevanceScore: node.score });
+      }
+    }
+    // Episodic vector hits join the same ranked candidate pool as pseudo-semantic
+    // nodes: a raw capture is ground truth (confidence 1.0), its recency is its
+    // creation time, and its relevance is the cosine score. rankMemories then
+    // orders episodes and semantics together; the token budget trims the tail.
+    for (const ep of byVectorEpisodic) {
+      if (!seen.has(ep.id) && inProjectScope(ep, projectScope)) {
+        seen.add(ep.id);
+        merged.push({
+          id: ep.id,
+          content: ep.task ? `${ep.task}\n\n${ep.content}` : ep.content,
+          confidence: 1.0,
+          signal_count: 0,
+          created_at: ep.created_at,
+          updated_at: ep.created_at,
+          decay_class: 'stable',
+          tags: ep.tags ?? [],
+          ...(ep.scope != null && { scope: ep.scope }),
+          tenant_id: ep.tenant_id,
+          relevanceScore: ep.score,
+        });
       }
     }
 
@@ -876,6 +922,31 @@ export class AMPService {
       return await this.neo4j.query.byVector(emb, limit, tenantId, projectScope);
     } catch (err: unknown) {
       console.error("[service] Suppressed error:", err);
+      return [];
+    }
+  }
+
+  /**
+   * Vector search over raw EPISODIC memories. Mirrors _vectorSearch but targets
+   * the episodic_embedding index so captured episodes are recallable directly.
+   * Reuses the same query embedding (CachingEmbeddingProvider dedupes the OpenAI
+   * call by content, so embedding the task here is a cache hit). No-ops when the
+   * provider is degraded or the layer doesn't implement the channel (mocks).
+   */
+  private async _vectorSearchEpisodic(
+    text: string,
+    limit: number,
+    tenantId?: string,
+    projectScope?: string,
+    queryVector?: number[],
+  ): Promise<Array<EpisodicNode & { score: number }>> {
+    if (this.embedding.available === false) return [];
+    if (!this.neo4j.query.byVectorEpisodic) return [];
+    try {
+      const emb = queryVector ?? await this._getEmbedding(text);
+      return await this.neo4j.query.byVectorEpisodic(emb, limit, tenantId, projectScope);
+    } catch (err: unknown) {
+      console.error("[service] Suppressed error (episodic vector):", err);
       return [];
     }
   }
