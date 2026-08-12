@@ -109,6 +109,12 @@ export interface Neo4jLayer {
     expandByGraph?(entityNames: string[], depth?: number, maxPerHop?: number, asOf?: string, tenantId?: string): Promise<SemanticNode[]>;
   };
   fact?: FactLayer;
+  /** Semantic-node existence check, used to validate signal targets at the
+   *  store boundary. Optional — without it, signal targets are unvalidated
+   *  (previous behavior). */
+  semantic?: {
+    existingIds(ids: string[]): Promise<string[]>;
+  };
   /** Minimal entity ops used by project-tag enforcement (Bucket B). Optional for backwards compat. */
   entity?: {
     listProjectNames(): Promise<string[]>;
@@ -506,6 +512,32 @@ export class AMPService {
 
   // ─── STORE ─────────────────────────────────────────────────────────────────
 
+  /**
+   * Reject a store whose signals target anything but an existing Semantic node.
+   *
+   * No-op when no signals are given, or when the layer exposes no semantic
+   * accessor (older wiring keeps the previous unvalidated behavior). The error
+   * names the offending ids so the caller can correct them rather than
+   * discovering months later that none of its signals ever landed.
+   */
+  private async assertSignalTargetsAreSemantic(signals?: Signal[]): Promise<void> {
+    if (!signals || signals.length === 0) return;
+    const accessor = this.neo4j.semantic;
+    if (!accessor) return;
+
+    const targets = [...new Set(signals.map((s) => s.target_id))];
+    const found = new Set(await accessor.existingIds(targets));
+    const missing = targets.filter((id) => !found.has(id));
+    if (missing.length === 0) return;
+
+    throw new Error(
+      `Invalid signal target_id(s): ${missing.join(', ')}. ` +
+        'A signal must target an existing Semantic node (consolidated knowledge), ' +
+        'not an episodic memory or an invented id. Use the semantic ids returned by ' +
+        'berry_load — signals against anything else are discarded by consolidation.',
+    );
+  }
+
   async store(input: EpisodeInput): Promise<{ id: string; duplicate: boolean }> {
     // 0a. Read-only guard — reject writes when the deployment is read-only.
     if (this.config.readonly) {
@@ -522,6 +554,15 @@ export class AMPService {
         ...(input.task ? { task: redactSecrets(input.task) } : {}),
       };
     }
+
+    // 0c. Validate signal targets BEFORE anything is persisted or the dedup key
+    // is marked. A signal must point at a SEMANTIC node: linkSignal matches
+    // `(s:Semantic {id: $targetId})` and the consolidation engine resolves
+    // targets through semantic.getByIds. A non-semantic target (in practice an
+    // EPISODIC id, which is what berry_load surfaces) silently created no edge
+    // and was dropped from every consolidation run — signals that looked
+    // accepted but did nothing. Fail loudly instead.
+    await this.assertSignalTargetsAreSemantic(input.signals);
 
     // Resolve the tenant once — used for dedup namespacing and the node stamp.
     const tenantId = (input.tenantId && input.tenantId.trim()) || DEFAULT_TENANT;

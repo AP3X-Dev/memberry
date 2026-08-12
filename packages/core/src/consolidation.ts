@@ -11,6 +11,7 @@ import type {
 import { SIGNAL_WEIGHTS, DEFAULT_TENANT } from './types.js';
 import { extractFacts } from './extract.js';
 import { readEnv } from './config/settings.js';
+import type { LlmClient } from './llm.js';
 
 // ─── Runtime validators ──────────────────────────────────────────────────────
 
@@ -196,6 +197,16 @@ export interface ConsolidationNeo4jLayer {
    */
   episodic?: {
     getById(id: string): Promise<EpisodicNode | null>;
+    /**
+     * Episodes eligible for promotion: in-scope, embedded, and not already the
+     * source of a PROMOTED_FROM edge. Optional — without it the engine emits no
+     * promote proposals and behaves exactly as the signal-only engine did.
+     */
+    findPromotable?(
+      scope: string | undefined,
+      limit: number,
+      tenantId?: string,
+    ): Promise<EpisodicNode[]>;
     /** OPT-45: batched tenant_id projection for many episodes in ONE query
      *  (optional — _deriveTenantFromEpisodes falls back to per-id getById when
      *  absent). One entry per FOUND episode (its tenant_id, null when unset);
@@ -220,10 +231,17 @@ export interface RunResult {
 export class ConsolidationEngine {
   private readonly lockHolder: string;
 
+  /**
+   * @param llm Optional chat client used to synthesize a clustered set of
+   *   episodes into one durable Semantic claim. Without it (or with a
+   *   NullLlmClient), the promote path is inert and the engine falls back to
+   *   signal-driven proposals only.
+   */
   constructor(
     private redis: ConsolidationRedisLayer,
     private neo4j: ConsolidationNeo4jLayer,
     private config: AMPConfig,
+    private llm?: LlmClient,
   ) {
     this.lockHolder = `consolidation-engine-${nanoid(8)}`;
   }
@@ -253,8 +271,12 @@ export class ConsolidationEngine {
         queueEntries.push(entry);
       }
 
-      // 4. Generate proposals from signal clusters
+      // 4. Generate proposals from signal clusters, then from unpromoted
+      // episodes. The two are independent: signals adjust EXISTING semantics,
+      // promotion mints new ones. Only the signal path existed before, so a
+      // graph with no semantics to signal against could never grow any.
       const proposals = await this._generateProposals(scope, signals, queueEntries);
+      proposals.push(...(await this._generatePromoteProposals(scope)));
 
       // 5. Apply or store for review
       const applied: string[] = [];
@@ -405,6 +427,141 @@ export class ConsolidationEngine {
     }
 
     return proposals;
+  }
+
+  // ─── Private: generate promote proposals ──────────────────────────────────
+
+  /**
+   * Mint `promote` proposals from episodes that have never been consolidated.
+   *
+   * Pipeline: fetch unpromoted in-scope episodes -> cluster by embedding
+   * similarity -> keep clusters at/above minClusterSize -> synthesize each into
+   * one durable claim via the LLM -> propose.
+   *
+   * Returns [] (never throws) when the promote path can't run: no episodic
+   * accessor, no findPromotable, no LLM, too few candidates, or a synthesis
+   * failure. Consolidation's other proposals must not be lost to a promote-side
+   * error.
+   */
+  private async _generatePromoteProposals(scope: string): Promise<ConsolidationProposal[]> {
+    const accessor = this.neo4j.episodic;
+    if (!accessor?.findPromotable) return [];
+    if (!this.llm?.available) return [];
+
+    const cfg = promoteConfig(this.config);
+    if (cfg.maxPerRun <= 0) return [];
+
+    // 'global' is the adapter's stand-in for "no scope given" — don't filter on it.
+    const scopeFilter = scope && scope !== 'global' ? scope : undefined;
+
+    let candidates: EpisodicNode[];
+    try {
+      candidates = await accessor.findPromotable(scopeFilter, cfg.maxCandidates);
+    } catch (err: unknown) {
+      console.error(
+        '[consolidation] findPromotable failed; skipping promote pass:',
+        err instanceof Error ? err.message : err,
+      );
+      return [];
+    }
+    if (candidates.length < cfg.minClusterSize) return [];
+
+    // A cluster whose members span projects must not become one semantic — its
+    // tags/scope would merge two projects' knowledge. Only reachable on an
+    // unscoped ("global") run, where candidates aren't pre-filtered.
+    const clusters = clusterByEmbedding(candidates, cfg.similarityThreshold, cfg.minClusterSize)
+      .filter((c) => {
+        const scopes = new Set(c.map((e) => e.scope ?? ''));
+        if (scopes.size === 1) return true;
+        console.error(
+          `[consolidation] promote: dropped a ${c.length}-episode cluster spanning ${scopes.size} project scopes`,
+        );
+        return false;
+      });
+    if (clusters.length === 0) return [];
+
+    // Largest clusters first — the most-corroborated knowledge is promoted while
+    // the per-run budget lasts. A skipped cluster is reconsidered next run (its
+    // episodes stay unpromoted), so the budget defers work, never drops it.
+    const ranked = [...clusters].sort((a, b) => b.length - a.length);
+    const selected = ranked.slice(0, cfg.maxPerRun);
+    if (ranked.length > selected.length) {
+      console.error(
+        `[consolidation] promote: ${ranked.length} clusters qualified, promoting ${selected.length} this run ` +
+          `(maxPerRun=${cfg.maxPerRun}); the rest remain unpromoted and are reconsidered next run.`,
+      );
+    }
+
+    const proposals: ConsolidationProposal[] = [];
+    for (const cluster of selected) {
+      const synthesized = await this._synthesizeCluster(cluster);
+      if (!synthesized) continue;
+      proposals.push(buildPromoteProposal(scope, cluster, synthesized, clusterTags(cluster)));
+    }
+    return proposals;
+  }
+
+  /**
+   * Condense one cluster of episodes into a single durable claim. Returns null
+   * when the model declines (empty content), the response doesn't parse, or the
+   * call fails — a bad synthesis must not become a proposal.
+   */
+  private async _synthesizeCluster(
+    cluster: EpisodicNode[],
+  ): Promise<{ content: string; confidence: number; decay_class: SemanticNode['decay_class'] } | null> {
+    const llm = this.llm;
+    if (!llm) return null;
+
+    // Cap per-episode text so one long episode can't crowd the others out of
+    // the prompt — every member must be represented for a claim to generalize.
+    const rendered = cluster
+      .map((e, i) => `[${i + 1}] task: ${e.task}\n${e.content.slice(0, 1200)}`)
+      .join('\n\n');
+
+    let raw: string;
+    try {
+      raw = await llm.chat(
+        [
+          { role: 'system', content: PROMOTE_SYNTHESIS_PROMPT },
+          { role: 'user', content: rendered.slice(0, 12000) },
+        ],
+        { model: llm.modelFor('synthesis'), jsonMode: true, maxTokens: 600 },
+      );
+    } catch (err: unknown) {
+      console.error(
+        '[consolidation] promote synthesis failed:',
+        err instanceof Error ? err.message : err,
+      );
+      return null;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      console.error('[consolidation] promote synthesis returned non-JSON; skipping cluster');
+      return null;
+    }
+
+    const obj = parsed as Record<string, unknown>;
+    const content = typeof obj.content === 'string' ? obj.content.trim() : '';
+    if (content === '') return null;
+
+    const rawConfidence = typeof obj.confidence === 'number' && Number.isFinite(obj.confidence)
+      ? obj.confidence
+      : 0.5;
+    const decayClass =
+      typeof obj.decay_class === 'string' && VALID_DECAY_CLASSES.has(obj.decay_class)
+        ? (obj.decay_class as SemanticNode['decay_class'])
+        : 'stable';
+
+    return {
+      content,
+      // Clamp: a model-supplied confidence is untrusted input, and a >1 value
+      // would make the new semantic un-decayable.
+      confidence: Math.min(1, Math.max(0, rawConfidence)),
+      decay_class: decayClass,
+    };
   }
 
   // ─── Private: apply proposal ──────────────────────────────────────────────
@@ -704,7 +861,161 @@ export class ConsolidationEngine {
   }
 }
 
+// ─── Promote: configuration ───────────────────────────────────────────────────
+
+/**
+ * Promote-pass knobs, with env overrides. Defaults are deliberately
+ * conservative: 3 episodes must agree before their shared knowledge is durable
+ * enough to propose, and at most 3 promotions are proposed per run so a first
+ * pass over a large backlog can be reviewed rather than dumped.
+ */
+const PROMOTE_DEFAULTS = {
+  minClusterSize: 3,
+  similarityThreshold: 0.82,
+  maxPerRun: 3,
+  maxCandidates: 200,
+} as const;
+
+function numFromEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = readEnv(name);
+  if (raw === undefined) return fallback;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function promoteConfig(config: AMPConfig): {
+  minClusterSize: number;
+  similarityThreshold: number;
+  maxPerRun: number;
+  maxCandidates: number;
+} {
+  const c = config.consolidation.promote;
+  return {
+    minClusterSize: Math.round(
+      c?.minClusterSize ?? numFromEnv('MEMBERRY_PROMOTE_MIN_CLUSTER', PROMOTE_DEFAULTS.minClusterSize, 2, 50),
+    ),
+    similarityThreshold:
+      c?.similarityThreshold ??
+      numFromEnv('MEMBERRY_PROMOTE_SIMILARITY', PROMOTE_DEFAULTS.similarityThreshold, 0, 1),
+    maxPerRun: Math.round(
+      c?.maxPerRun ?? numFromEnv('MEMBERRY_PROMOTE_MAX_PER_RUN', PROMOTE_DEFAULTS.maxPerRun, 0, 50),
+    ),
+    maxCandidates: Math.round(
+      c?.maxCandidates ?? numFromEnv('MEMBERRY_PROMOTE_MAX_CANDIDATES', PROMOTE_DEFAULTS.maxCandidates, 10, 2000),
+    ),
+  };
+}
+
+/** Union of the cluster's tags (deduped, project tags lowercased) — the source
+ *  episodes' tags are what make the promoted semantic retrievable by scope. */
+function clusterTags(cluster: EpisodicNode[]): string[] {
+  const tags = new Set<string>();
+  for (const ep of cluster) {
+    for (const t of ep.tags ?? []) {
+      tags.add(/^project:/i.test(t) ? t.toLowerCase() : t);
+    }
+  }
+  return [...tags];
+}
+
+// ─── Promote: clustering helpers ──────────────────────────────────────────────
+
+/** Cosine similarity of two equal-length vectors. Returns 0 for degenerate input. */
+function cosine(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i] as number;
+    const y = b[i] as number;
+    dot += x * y;
+    normA += x * x;
+    normB += y * y;
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+/**
+ * Greedy single-pass clustering: each episode joins the first cluster whose
+ * SEED it is at least `threshold` similar to, else it seeds a new cluster.
+ * Deterministic given a fixed input order (episodes arrive newest-first), which
+ * keeps a re-run over the same graph state reproducible.
+ *
+ * Greedy (not k-means / HDBSCAN) on purpose: the candidate set is capped in the
+ * hundreds and only clusters at/above `minSize` survive, so the cost of a
+ * slightly suboptimal partition is a missed promotion this cycle, not a wrong
+ * one — and the next run reconsiders every still-unpromoted episode.
+ */
+export function clusterByEmbedding(
+  episodes: EpisodicNode[],
+  threshold: number,
+  minSize: number,
+): EpisodicNode[][] {
+  const clusters: Array<{ seed: number[]; members: EpisodicNode[] }> = [];
+
+  for (const ep of episodes) {
+    const vec = ep.embedding;
+    if (!vec || vec.length === 0) continue;
+    const hit = clusters.find((c) => cosine(c.seed, vec) >= threshold);
+    if (hit) hit.members.push(ep);
+    else clusters.push({ seed: vec, members: [ep] });
+  }
+
+  return clusters.filter((c) => c.members.length >= minSize).map((c) => c.members);
+}
+
+// ─── Promote: synthesis prompt ────────────────────────────────────────────────
+
+const PROMOTE_SYNTHESIS_PROMPT = `You are a memory consolidation system. You are given several related episodic memories from one project — raw session snapshots of what happened.
+
+Write the single durable piece of knowledge they share: the principle, convention, decision, or architectural fact that stays true after these particular sessions are forgotten.
+
+Rules:
+- State it as a standalone claim. It must make sense to someone who never sees the source episodes.
+- Generalize across the episodes; do not summarize them one by one and do not narrate the sessions ("the agent did X").
+- Include the concrete specifics that make the knowledge usable (names, paths, versions, thresholds).
+- Omit anything only true of one session (timestamps, one-off errors, transient state).
+- If the episodes share no durable knowledge, return an empty string for "content".
+
+Respond with JSON only:
+{"content": "...", "confidence": 0.0-1.0, "decay_class": "volatile" | "stable" | "permanent"}
+
+confidence: how strongly the episodes support the claim. decay_class: "volatile" for knowledge that changes often (current task state), "stable" for conventions and architecture, "permanent" for immutable facts.`;
+
 // ─── Proposal builders ────────────────────────────────────────────────────────
+
+function buildPromoteProposal(
+  scope: string,
+  cluster: EpisodicNode[],
+  synthesized: { content: string; confidence: number; decay_class: SemanticNode['decay_class'] },
+  tags: string[],
+): ConsolidationProposal {
+  const now = new Date().toISOString();
+  return {
+    id: nanoid(),
+    type: 'promote',
+    scope,
+    // Source EPISODE ids — _applyPromoteProposal anchors PROMOTED_FROM on the
+    // first and derives the new semantic's tenant from all of them.
+    affected_ids: cluster.map((e) => e.id),
+    before: {},
+    after: {
+      id: nanoid(),
+      content: synthesized.content,
+      confidence: synthesized.confidence,
+      signal_count: cluster.length,
+      created_at: now,
+      updated_at: now,
+      decay_class: synthesized.decay_class,
+      tags,
+    } as Record<string, unknown>,
+    score: cluster.length,
+    created_at: now,
+  };
+}
 
 function buildSupersedePropsal(
   scope: string,

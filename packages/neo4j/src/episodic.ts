@@ -130,6 +130,61 @@ export class EpisodicStore {
     }
   }
 
+  /**
+   * Episodes eligible for consolidation into a Semantic node: in-scope, carrying
+   * an embedding (so they can be clustered), and not already the source of a
+   * promotion. Newest first, capped by `limit`.
+   *
+   * This is the input side of the promote path. Before it existed, the
+   * consolidation engine could only ever see Redis signals, so the entire
+   * episodic->semantic promotion was unreachable regardless of how many
+   * episodes were stored.
+   */
+  async findPromotable(
+    scope: string | undefined,
+    limit: number,
+    tenantId?: string,
+  ): Promise<EpisodicNode[]> {
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `MATCH (e:Episodic)
+         WHERE ($scope IS NULL OR e.scope = $scope)
+           AND ($tenantId IS NULL OR coalesce(e.tenant_id, $tenantId) = $tenantId)
+           AND e.embedding IS NOT NULL
+           AND NOT EXISTS { MATCH (:Semantic)-[:PROMOTED_FROM]->(e) }
+         RETURN e
+         ORDER BY e.created_at DESC
+         LIMIT toInteger($limit)`,
+        { scope: scope ?? null, tenantId: tenantId ?? null, limit },
+      );
+      return result.records.map((r) =>
+        this.mapEpisodic(r.get('e').properties as Record<string, unknown>),
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  /** Shared Episodic mapping so getById and findPromotable build the node
+   *  IDENTICALLY — single source of truth, no drift. */
+  private mapEpisodic(props: Record<string, unknown>): EpisodicNode {
+    return {
+      id: props.id as string,
+      session_id: props.session_id as string,
+      agent_id: props.agent_id as string,
+      task: props.task as string,
+      content: props.content as string,
+      outcome: (props.outcome as EpisodicNode['outcome']) ?? undefined,
+      created_at: props.created_at as string,
+      ttl: props.ttl != null ? (props.ttl as number) : undefined,
+      embedding: props.embedding != null ? (props.embedding as number[]) : undefined,
+      scope: props.scope != null ? (props.scope as string) : undefined,
+      tags: props.tags != null ? (props.tags as string[]) : undefined,
+      tenant_id: props.tenant_id != null ? (props.tenant_id as string) : undefined,
+    };
+  }
+
   async getById(id: string): Promise<EpisodicNode | null> {
     const session = this.driver.session();
     try {
@@ -142,20 +197,7 @@ export class EpisodicStore {
         return null;
       }
 
-      const props = result.records[0].get('e').properties as Record<string, unknown>;
-      return {
-        id: props.id as string,
-        session_id: props.session_id as string,
-        agent_id: props.agent_id as string,
-        task: props.task as string,
-        content: props.content as string,
-        outcome: props.outcome as EpisodicNode['outcome'] ?? undefined,
-        created_at: props.created_at as string,
-        ttl: props.ttl != null ? (props.ttl as number) : undefined,
-        embedding: props.embedding != null ? (props.embedding as number[]) : undefined,
-        scope: props.scope != null ? (props.scope as string) : undefined,
-        tags: props.tags != null ? (props.tags as string[]) : undefined,
-      };
+      return this.mapEpisodic(result.records[0].get('e').properties as Record<string, unknown>);
     } finally {
       await session.close();
     }

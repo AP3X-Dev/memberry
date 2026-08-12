@@ -154,6 +154,27 @@ export class SemanticStore {
     }
   }
 
+  /**
+   * Which of `ids` actually exist as Semantic nodes. Used to validate signal
+   * targets at the berry_store boundary: a signal whose target_id is not a
+   * Semantic (in practice, agents passing an EPISODIC id) matches nothing in
+   * linkSignal and is dropped by the consolidation engine's getByIds lookup —
+   * silently, with no edge and no error. Callers reject up front instead.
+   */
+  async existingIds(ids: string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        'MATCH (s:Semantic) WHERE s.id IN $ids RETURN s.id AS id',
+        { ids },
+      );
+      return result.records.map((r) => r.get('id') as string);
+    } finally {
+      await session.close();
+    }
+  }
+
   async updateConfidence(id: string, confidence: number): Promise<void> {
     const session = this.driver.session();
     try {

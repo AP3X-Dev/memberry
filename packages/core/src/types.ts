@@ -146,7 +146,25 @@ export interface AMPConfig {
   neo4j: { uri: string; user: string; password: string };
   embedding: { provider: 'openai'; apiKey: string };
   cache: { defaultTTL: number; contextTTL: number; embeddingTTL: number };
-  consolidation: { autoApply: boolean; signalThreshold: number };
+  consolidation: {
+    autoApply: boolean;
+    signalThreshold: number;
+    /**
+     * Episodic->Semantic promotion knobs. Omitted keys fall back to the
+     * MEMBERRY_PROMOTE_* env vars, then to built-in defaults
+     * (see PROMOTE_DEFAULTS in consolidation.ts).
+     */
+    promote?: {
+      /** Episodes that must agree before a claim is proposed. Default 3. */
+      minClusterSize?: number;
+      /** Cosine similarity for two episodes to share a cluster. Default 0.82. */
+      similarityThreshold?: number;
+      /** Max promote proposals per run; 0 disables promotion. Default 3. */
+      maxPerRun?: number;
+      /** Max unpromoted episodes examined per run. Default 200. */
+      maxCandidates?: number;
+    };
+  };
   exportPath: string;
   /** When true, all write paths (store, block mutations) are rejected. Set via MEMBERRY_READONLY. */
   readonly?: boolean;

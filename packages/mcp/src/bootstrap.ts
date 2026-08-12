@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import { DistributedLock, ProposalStore } from '@memberry/redis';
-import { runMigrations, checkVectorIndexDimensions, SemanticStore, ProvenanceTraversal } from '@memberry/neo4j';
+import { runMigrations, checkVectorIndexDimensions, ProvenanceTraversal } from '@memberry/neo4j';
 import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath } from '@memberry/core';
 import { setServiceInstances, setTenantContainer } from './tools.js';
 import {
@@ -155,6 +155,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     scopedQuery,
     episodic,
     factStore: factStoreInstance,
+    semantic,
     embedding,
     llm,
     config,
@@ -199,7 +200,9 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   // Pass the shared embedding provider so consolidation-promoted and superseded
   // semantics get a content embedding at write time and land in the
   // semantic_embedding vector index (without it they were write-only).
-  const semantic = new SemanticStore(driver, embedding);
+  // `semantic` comes from CoreServices (constructed there with the same shared
+  // embedding provider) so the store used by AMPService's signal-target
+  // validation and the one used by consolidation are the SAME instance.
   const lock = new DistributedLock(redis);
   const proposals = new ProposalStore(redis);
   const provenanceTraversal = new ProvenanceTraversal(driver);
@@ -220,6 +223,9 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     // getTenantsByIds (OPT-45) — matching the optional ConsolidationNeo4jLayer.episodic.
     { semantic, episodic, fact: factStoreInstance },
     config,
+    // The promote path synthesizes clustered episodes into one durable claim;
+    // without an LLM it stays inert and only signal-driven proposals are made.
+    llm,
   );
 
   // Build bootstrap service (embedding provider so seeded semantics are

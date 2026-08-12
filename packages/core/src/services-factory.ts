@@ -24,6 +24,7 @@ import {
 import {
   createNeo4jDriver,
   EpisodicStore,
+  SemanticStore,
   ScopedQuery,
   FactStore,
   AuditLogStore,
@@ -65,6 +66,9 @@ export interface CoreServices {
   /** Durable fact-extraction job queue (drained by the ExtractionConsumer). */
   extractionQueue: ExtractionQueue;
   episodic: EpisodicStore;
+  /** Semantic-node store. Shared so the MCP bootstrap and AMPService use ONE
+   *  instance (and one embedding provider) rather than constructing their own. */
+  semantic: SemanticStore;
   scopedQuery: ScopedQuery;
   factStore: FactStore;
   /** Append-only mutation audit trail. */
@@ -144,6 +148,11 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
     ? new CachingEmbeddingProvider(new OpenAIEmbedding(openaiKey), embeddings)
     : disabledEmbedding();
 
+  // Constructed after `embedding` so promoted/superseded semantics get a
+  // content embedding at write time (otherwise they are write-only — invisible
+  // to vector recall). Shared with the MCP bootstrap via CoreServices.
+  const semanticStore = new SemanticStore(driver, embedding);
+
   // Per-task model overrides from env (MEMBERRY_MODEL_*); omitted keys fall back to DEFAULT_MODELS.
   const models: NonNullable<AMPConfig['models']> = {};
   const mExtraction = readEnv('MEMBERRY_MODEL_EXTRACTION');
@@ -183,7 +192,7 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
 
   const ampService = new AMPService(
     { cache, embeddings, dedup, signals, queue, extraction: extractionQueue },
-    { episodic, query: scopedQuery, fact: factStore },
+    { episodic, query: scopedQuery, fact: factStore, semantic: semanticStore },
     embedding,
     config,
     memoryBlocks,
@@ -200,6 +209,7 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
     queue,
     extractionQueue,
     episodic,
+    semantic: semanticStore,
     scopedQuery,
     factStore,
     audit,
