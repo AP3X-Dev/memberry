@@ -244,6 +244,11 @@ export async function runMigrations(
   return { applied: newlyApplied, skipped, version: applied.length };
 }
 
+/** The node property holding an embedding-model vector. Vector indexes over any
+ *  OTHER property (lexical_vector, mini_vector) are not embedding indexes and are
+ *  exempt from the EMBEDDING_DIM drift check. */
+const EMBEDDING_PROPERTY = 'embedding';
+
 export interface VectorIndexDimension {
   name: string;
   actual: number;
@@ -251,20 +256,30 @@ export interface VectorIndexDimension {
 }
 
 /**
- * Best-effort drift check: compares each VECTOR index's configured dimension
- * against EMBEDDING_DIM. A mismatch means similarity queries will fail or return
- * garbage until the index is dropped and recreated. Returns the mismatches (empty
- * when all good, or when the server doesn't support the introspection query).
+ * Best-effort drift check: compares each EMBEDDING vector index's configured
+ * dimension against EMBEDDING_DIM. A mismatch means similarity queries will fail
+ * or return garbage until the index is dropped and recreated. Returns the
+ * mismatches (empty when all good, or when the server doesn't support the
+ * introspection query).
+ *
+ * Only indexes over the `embedding` property are checked. Not every vector index
+ * holds an embedding-model vector: `symbol_lexical` (4096-d hashed lexical) and
+ * `symbol_mini` (64-d reduced) are deliberately other dimensions, and comparing
+ * them against EMBEDDING_DIM reported two permanent "mismatches" that pinned the
+ * server in DEGRADED MODE — masking the real degradation the mode exists to show.
  */
 export async function checkVectorIndexDimensions(driver: Driver): Promise<VectorIndexDimension[]> {
   const session = driver.session();
   try {
     const res = await session.run(
-      "SHOW INDEXES YIELD name, type, options WHERE type = 'VECTOR' RETURN name, options",
+      "SHOW INDEXES YIELD name, type, properties, options WHERE type = 'VECTOR' RETURN name, properties, options",
     );
     const mismatches: VectorIndexDimension[] = [];
     for (const record of res.records) {
       const name = String(record.get('name'));
+      // Skip non-embedding vector indexes (lexical/mini vectors have their own dimensions).
+      const properties = (record.get('properties') as string[] | null) ?? [];
+      if (!properties.includes(EMBEDDING_PROPERTY)) continue;
       const options = record.get('options') as Record<string, unknown> | null;
       const indexConfig = (options?.['indexConfig'] ?? {}) as Record<string, unknown>;
       const rawDim = indexConfig['vector.dimensions'];
