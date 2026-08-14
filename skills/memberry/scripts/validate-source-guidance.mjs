@@ -47,6 +47,10 @@ for (const path of guidanceFiles) {
 const reference = await readFile(join(repoRoot, 'skills', 'memberry', 'reference', 'memberry-tool-reference.md'), 'utf8');
 const tools = [...new Set(reference.match(/\bberry_[a-z0-9_]+\b/g) ?? [])];
 if (tools.length !== 49) throw new Error(`Expected 49 documented tools, found ${tools.length}`);
+const mainSkill = await readFile(join(repoRoot, 'skills', 'memberry', 'SKILL.md'), 'utf8');
+const disclosedInMain = [...new Set(mainSkill.match(/\bberry_[a-z0-9_]+\b/g) ?? [])];
+if (disclosedInMain.length > 12) throw new Error(`Main skill discloses ${disclosedInMain.length} tool names; keep the detailed catalog in the reference (max 12)`);
+if (mainSkill.includes('| Domain | Tools |')) throw new Error('Main skill must route domains instead of inlining the complete tool catalog');
 for (const domain of ['memory', 'temporal', 'admin', 'research', 'code', 'arch', 'wiki', 'retrieval', 'graph']) {
   if (!reference.includes(`\`${domain}\``)) throw new Error(`Missing domain in tool reference: ${domain}`);
 }

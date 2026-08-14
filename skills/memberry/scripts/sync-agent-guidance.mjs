@@ -17,6 +17,7 @@ const valueAfter = (flag, fallback) => {
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(valueAfter('--repo-root', join(scriptDir, '..', '..', '..')));
 const userHome = resolve(valueAfter('--home', homedir()));
+const backupRoot = join(userHome, '.memberry-backups');
 const contract = (await readFile(join(repoRoot, 'skills', 'memberry', 'reference', 'agent-contract.md'), 'utf8')).trim();
 const rendered = `${START}\n${contract}\n${END}`;
 
@@ -25,13 +26,41 @@ function assertUnder(parent, target) {
   if (rel.startsWith('..') || rel === '..' || rel.split(sep).includes('..')) throw new Error(`Refusing path outside ${parent}: ${target}`);
 }
 
-async function backupOnce(path) {
+async function uniqueBackupPath(directory, label) {
+  const timestamp = new Date().toISOString().replace(/[-:.]/g, '');
+  const base = join(directory, `${label}-${timestamp}`);
+  let candidate = base;
+  for (let suffix = 2; existsSync(candidate); suffix += 1) candidate = `${base}-${suffix}`;
+  return candidate;
+}
+
+async function backupOnce(path, category, label) {
   if (!existsSync(path)) return;
-  const day = new Date().toISOString().slice(0, 10).replaceAll('-', '');
-  const base = `${path}.memberry-backup-${day}`;
-  let backup = base;
-  for (let suffix = 2; existsSync(backup); suffix += 1) backup = `${base}-${suffix}`;
+  const directory = join(backupRoot, category);
+  assertUnder(backupRoot, directory);
+  await mkdir(directory, { recursive: true });
+  const backup = await uniqueBackupPath(directory, label);
+  assertUnder(backupRoot, backup);
   await cp(path, backup, { recursive: true });
+}
+
+async function migrateDiscoverableBackups(platform, skillsRoot) {
+  if (!existsSync(skillsRoot)) return 0;
+  const entries = await readdir(skillsRoot, { withFileTypes: true });
+  const legacy = entries.filter((entry) => entry.isDirectory() && /^memberry(?:-[a-z0-9-]+)?\.memberry-backup-/i.test(entry.name));
+  if (legacy.length === 0) return 0;
+  if (!apply) throw new Error(`${platform} has ${legacy.length} discoverable MemBerry backup skill(s); run with --apply to migrate them`);
+  const archive = join(backupRoot, 'legacy-discoverable', platform);
+  assertUnder(backupRoot, archive);
+  await mkdir(archive, { recursive: true });
+  for (const entry of legacy) {
+    const source = join(skillsRoot, entry.name);
+    const target = await uniqueBackupPath(archive, entry.name);
+    assertUnder(skillsRoot, source);
+    assertUnder(backupRoot, target);
+    await rename(source, target);
+  }
+  return legacy.length;
 }
 
 function replaceMarked(text) {
@@ -58,11 +87,11 @@ function renderClaude(existing) {
   return `# Claude Global Instructions\n\n${rendered}${tail ? `\n\n---\n\n${tail}` : ''}\n`;
 }
 
-async function writeOrCheck(path, expected, label) {
+async function writeOrCheck(path, expected, label, backupLabel) {
   const actual = existsSync(path) ? await readFile(path, 'utf8') : '';
   if (actual === expected) return;
   if (!apply) throw new Error(`${label} is out of sync: ${path}`);
-  await backupOnce(path);
+  await backupOnce(path, 'guidance', backupLabel);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, expected, 'utf8');
 }
@@ -71,8 +100,8 @@ const agentsPath = join(userHome, 'AGENTS.md');
 const claudePath = join(userHome, '.claude', 'CLAUDE.md');
 const agentsExisting = existsSync(agentsPath) ? await readFile(agentsPath, 'utf8') : '# Codex Global Instructions\n';
 const claudeExisting = existsSync(claudePath) ? await readFile(claudePath, 'utf8') : '# Claude Global Instructions\n';
-await writeOrCheck(agentsPath, renderAgents(agentsExisting), 'Global AGENTS contract');
-await writeOrCheck(claudePath, renderClaude(claudeExisting), 'Global Claude contract');
+await writeOrCheck(agentsPath, renderAgents(agentsExisting), 'Global AGENTS contract', 'AGENTS.md');
+await writeOrCheck(claudePath, renderClaude(claudeExisting), 'Global Claude contract', 'CLAUDE.md');
 
 async function sameTree(source, target) {
   if (!existsSync(source) || !existsSync(target)) return false;
@@ -87,6 +116,11 @@ async function sameTree(source, target) {
   return true;
 }
 
+let migratedBackups = 0;
+for (const platform of ['.codex', '.claude']) {
+  migratedBackups += await migrateDiscoverableBackups(platform.slice(1), join(userHome, platform, 'skills'));
+}
+
 for (const skill of SKILLS) {
   const source = join(repoRoot, 'skills', skill);
   if (!existsSync(join(source, 'SKILL.md'))) throw new Error(`Missing canonical skill: ${source}`);
@@ -96,7 +130,7 @@ for (const skill of SKILLS) {
     assertUnder(root, target);
     if (await sameTree(source, target)) continue;
     if (!apply) throw new Error(`${platform} skill is out of sync: ${skill}`);
-    await backupOnce(target);
+    await backupOnce(target, join('skills', platform.slice(1)), skill);
     await mkdir(root, { recursive: true });
     const staging = join(root, `.${skill}.memberry-staging-${process.pid}`);
     const previous = join(root, `.${skill}.memberry-previous-${process.pid}`);
@@ -116,4 +150,4 @@ for (const skill of SKILLS) {
   }
 }
 
-console.log(`MemBerry guidance ${apply ? 'synchronized' : 'is synchronized'} (${SKILLS.length} skills, 2 platforms).`);
+console.log(`MemBerry guidance ${apply ? 'synchronized' : 'is synchronized'} (${SKILLS.length} skills, 2 platforms, ${migratedBackups} discoverable backups migrated).`);
