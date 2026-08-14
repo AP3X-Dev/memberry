@@ -34,6 +34,8 @@ describe('SemanticStore promotion ambiguous-commit replay contract', () => {
     expect(cypher).toContain('OPTIONAL MATCH (existing:Semantic {id: $id})');
     expect(cypher).toContain('size(existingSourceIds) = size($episodicIds)');
     expect(cypher).toContain('other.id <> $id');
+    expect(cypher).toContain('MERGE (s:Semantic {id: $id})');
+    expect(cypher).not.toMatch(/CALL\s*\{\s*WITH\s+existing\s*WHERE/);
     expect(cypher).toContain('MERGE (s)-[:PROMOTED_FROM]->(ep)');
   });
 });

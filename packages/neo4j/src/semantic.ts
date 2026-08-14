@@ -304,43 +304,35 @@ export class SemanticStore {
         FOREACH (ep IN episodes | REMOVE ep.__promotion_lock)
         WITH episodes
         OPTIONAL MATCH (existing:Semantic {id: $id})
-        WHERE coalesce(existing.tenant_id, $default_tenant) = $tenant_id
         OPTIONAL MATCH (existing)-[:PROMOTED_FROM]->(existingSource:Episodic)
         WITH episodes, existing, collect(DISTINCT existingSource.id) AS existingSourceIds
         // A lost commit response is safe to replay only when the deterministic
         // Semantic id already owns this exact provenance set. Any different or
         // overlapping promotion still fails closed.
         WHERE (existing IS NULL OR (
-          size(existingSourceIds) = size($episodicIds)
+          coalesce(existing.tenant_id, $default_tenant) = $tenant_id
+          AND size(existingSourceIds) = size($episodicIds)
           AND all(sourceId IN $episodicIds WHERE sourceId IN existingSourceIds)
         ))
         AND none(ep IN episodes WHERE EXISTS {
           MATCH (ep)<-[:PROMOTED_FROM]-(other:Semantic)
           WHERE other.id <> $id
         })
-        CALL {
-          WITH existing
-          WHERE existing IS NOT NULL
-          RETURN existing AS s
-          UNION
-          WITH existing
-          WHERE existing IS NULL
-          CREATE (created:Semantic {
-            id: $id,
-            content: $content,
-            confidence: $confidence,
-            signal_count: $signal_count,
-            created_at: $created_at,
-            updated_at: $updated_at,
-            decay_class: $decay_class,
-            memory_type: $memory_type,
-            tags: $tags,
-            scope: $scope,
-            tenant_id: $tenant_id
-          })
-          ${embedding ? 'SET created.embedding = $embedding' : ''}
-          RETURN created AS s
-        }
+        // MERGE makes an exact-provenance replay a successful no-op without a
+        // conditional subquery. Neo4j 5 rejects an importing WITH followed by
+        // WHERE inside a CALL subquery, even though the shape parses in mocks.
+        MERGE (s:Semantic {id: $id})
+        ON CREATE SET s.content = $content,
+                      s.confidence = $confidence,
+                      s.signal_count = $signal_count,
+                      s.created_at = $created_at,
+                      s.updated_at = $updated_at,
+                      s.decay_class = $decay_class,
+                      s.memory_type = $memory_type,
+                      s.tags = $tags,
+                      s.scope = $scope,
+                      s.tenant_id = $tenant_id
+                      ${embedding ? ', s.embedding = $embedding' : ''}
         WITH s, episodes
         UNWIND episodes AS ep
         MERGE (s)-[:PROMOTED_FROM]->(ep)
