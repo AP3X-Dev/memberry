@@ -4,7 +4,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { watch, type FSWatcher } from 'node:fs';
+import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Marked } from 'marked';
@@ -1775,7 +1775,13 @@ export async function __rebuildCacheForTest(wikiDir: string, maxWaitMs = CACHE_C
 function startWatching(wikiDir: string): void {
   stopWatching();
   try {
-    cacheWatcher = watch(wikiDir, { recursive: true }, (_eventType, filename) => {
+    // Once atomic generation publication is active, all meaningful changes are
+    // top-level pointer/sentinel replacements. Watching the entire generations
+    // tree makes Node attach watchers to short-lived `.building-*` directories;
+    // their atomic rename/removal can emit a spurious ENOENT and kill the watcher.
+    // Legacy in-place wikis retain recursive watching for direct nested edits.
+    const generationPublicationActive = existsSync(join(wikiDir, ACTIVE_GENERATION_FILENAME));
+    cacheWatcher = watch(wikiDir, { recursive: !generationPublicationActive }, (_eventType, filename) => {
       if (!filename) return;
       // Rebuild for markdown changes (direct edits) OR when the compiler's
       // top-level .compiled sentinel changes. OPT-10: recursive fs.watch is

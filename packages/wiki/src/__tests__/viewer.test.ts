@@ -3,7 +3,7 @@
 // These functions are not exported, so we test them indirectly or re-implement
 // the logic for unit testing. Since they are private, we test via the public API.
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { startWikiViewer, confineToDir, resetViewerCache, __rebuildCacheForTest } from '../viewer.js';
 import { writeFile, mkdir, rm, rename } from 'node:fs/promises';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs';
@@ -820,6 +820,22 @@ describe('WikiViewer atomic generation publication', () => {
     const afterHtml = await after.text();
     expect(afterHtml).toContain('new-tree-token');
     expect(afterHtml).not.toContain('old-tree-token');
+  });
+
+  it('does not recursively watch short-lived private generation builds', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const buildingDir = join(publicationRoot, '.generations', 'global', '.building-watcher-race');
+    try {
+      await mkdir(buildingDir, { recursive: true });
+      await writeFile(join(buildingDir, '_index.md'), '# Private Partial Generation\n', 'utf-8');
+      await rm(buildingDir, { recursive: true, force: true });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(
+        errorSpy.mock.calls.some((call) => String(call[0]).includes('File watcher error')),
+      ).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 
