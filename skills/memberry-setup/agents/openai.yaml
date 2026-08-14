@@ -1,0 +1,4 @@
+interface:
+  display_name: "MemBerry Setup"
+  short_description: "Bootstrap and verify MemBerry projects"
+  default_prompt: "Use $memberry-setup to configure, ingest, and verify this project's persistent memory."

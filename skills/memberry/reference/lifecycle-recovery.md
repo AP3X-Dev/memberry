@@ -9,7 +9,7 @@ When updates appear frozen, locate the first failed stage.
 5. Manual approval is only expected for intentionally review-only correction, contradiction, supersede, or decay proposals.
 6. Query the resulting Semantic and its `PROMOTED_FROM` provenance.
 7. For decisions, verify `memory_type: "decision"` and confidence `>= 0.7`; unclassified high-confidence rows are legacy fallback only.
-8. For patterns, verify `memory_type` is `pattern`/`convention` and the same stable non-project tag spans semantics in at least two distinct real projects.
+8. For patterns, verify `memory_type` is `pattern`/`convention` and stable non-project tags survived recurrent evidence. Project-local classified patterns render immediately after promotion; only the legacy cross-project theme rollup requires the tag in two distinct real projects.
 9. Compile with `project_tag: "all"`, lint, refresh the viewer cache, and inspect served contents.
 
 The autonomous coordinator is the normal path: successful stores schedule consolidation and publication, startup/periodic catch-up recovers missed work, and bounded retries self-heal transient failures. Use manual compile/refresh only after automation reports stale, exhausted, or degraded publication.

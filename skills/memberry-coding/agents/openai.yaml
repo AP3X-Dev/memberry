@@ -1,0 +1,4 @@
+interface:
+  display_name: "MemBerry Coding"
+  short_description: "Ground coding work in durable project context"
+  default_prompt: "Use $memberry-coding to load code, architecture, and memory context before changing this project."

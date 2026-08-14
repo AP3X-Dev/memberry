@@ -1,62 +1,66 @@
-# MemBerry persistent memory
+# MemBerry project guidance
 
-Use MemBerry autonomously for non-trivial work. Scope every operation to the project's `## MemBerry Memory` config and verify each lifecycle transition.
+Use the global MemBerry contract and the `$memberry` skill for non-trivial work. Repository/runtime evidence outranks recalled memory. Consolidation and full wiki publication are automatic; manual operations are verification or recovery only.
 
-## Session start
+## MemBerry Memory
 
-1. Read the nearest memory config, preferring `AGENTS.md`, then `CLAUDE.md`, `GEMINI.md`, and `.cursorrules`.
-2. Generate one `session-{YYYYMMDD}-{HHMMSS}` ID and reuse it.
-3. Call `berry_context` or `berry_load` with the task and project tag. Core blocks arrive automatically.
-4. If config is absent, enable `admin` and prefer `berry_ingest_codebase` to bootstrap, index, and seed the project.
-5. Never fabricate tool calls when MemBerry is unavailable.
+Project: memberry
+Description: Persistent graph, retrieval, consolidation, code-intelligence, and wiki memory engine for coding and general-purpose agents.
+Domain: agent memory and context infrastructure
+Project Tag: project:memberry
+Workload Profile: coding
 
-## Current tool surface
+Entities:
+- memberry
+- mcp-server
+- memory-core
+- consolidation-engine
+- retrieval-engine
+- neo4j-store
+- redis-signal-queue
+- wiki-compiler
+- wiki-viewer
+- code-intelligence
+- architecture-intelligence
+- graph-analytics
 
-Always visible: `berry_load`, `berry_store`, `berry_memory_read`, `berry_memory_insert`, `berry_grep`, `berry_context`, `berry_ask`, `berry_tools`.
+Canonical Entity IDs:
+- memberry-project: Y-GCkJYdEeWm38j_HI1XX
 
-Enable one of nine domains with `berry_tools(action: "enable", domain: "<domain>")`:
+Stable Tags:
+- backend
+- database
+- infrastructure
+- retrieval
+- consolidation
+- wiki
+- coding-agents
+- observability
+- security
 
-- `memory`: `berry_memory_replace`, `berry_memory_rewrite`, `berry_memory_promote`, `berry_memory_archive`
-- `temporal`: `berry_timeline`, `berry_fact_diff`
-- `admin`: `berry_query`, `berry_consolidate`, `berry_bootstrap`, `berry_resolve`, `berry_ingest_codebase`, `berry_provenance`
-- `research`: `berry_research_init`, `berry_research_log`, `berry_research_context`, `berry_research_tree`, `berry_research_contradictions`, `berry_research_consolidate`
-- `code`: `berry_code_index`, `berry_code_search`, `berry_code_ast_grep`, `berry_code_symbols`, `berry_code_deps`, `berry_code_context`, `berry_code_watch`
-- `arch`: `berry_arch_register`, `berry_arch_relate`, `berry_arch_aspect`, `berry_impact`, `berry_arch_drift`, `berry_arch_context`
-- `wiki`: `berry_compile`, `berry_ingest`, `berry_lint`, `berry_braindump`, `berry_wiki_sync`
-- `retrieval`: `berry_feedback`
-- `graph`: `berry_graph_report`, `berry_graph_export`, `berry_pr_impact`, `berry_pr_conflicts`
+Recall Priorities:
+- Active approved decisions and supersession history.
+- Current architecture boundaries, interfaces, and blast radius.
+- Known lifecycle failure modes and failed recovery attempts.
+- Tenant/project isolation and provenance constraints.
+- Readiness, publication, and indexing health relevant to the task.
 
-## Recall and store
+Store Policy:
+- Classify durable knowledge and verify every returned episode.
+- Final decisions use `memory_type: decision` and `outcome: approved`.
+- Pattern/convention stores are independently sourced evidence, not invented approval.
+- Resolve canonical Entity IDs and reuse the stable tag vocabulary.
+- Search for an existing Semantic before emitting reinforcement, correction, or contradiction.
 
-Recall continuously before deciding, changing unfamiliar code, assuming a preference, or re-asking the user. Use the smallest scoped tool: grep/block read for precise facts, load for task memory, context for blended context, ask for cited synthesis, temporal tools for change history, and code/arch tools for implementation context.
+Data Exclusions:
+- Secrets, credentials, tokens, raw customer data, routine diffs, and code derivable from git.
 
-Store durable decisions, user corrections, preferences, bug root causes, conventions, architecture choices, and completed-task summaries. Do not store routine edits, raw code, secrets, or git-derivable facts.
+Agent Coordination:
+- Share one conversation session ID; use distinct runtime/connection `agent_id` identities for parent and child agents. Do not invent unsupported tool fields.
+- Subagents load only task-relevant context and return durable findings to the parent.
+- The parent stores one integrated decision or handoff instead of duplicate worker summaries.
 
-Before `berry_store`:
-
-1. Resolve each configured entity with `berry_grep(node_types: ["entity"])` or an exact graph query.
-2. Pass canonical `Entity.id` values in `entities`; human-readable names do not create `REFERENCES` edges.
-3. Pass both `scope: "project:<tag>"` and tags containing `project:<tag>` plus stable non-project domain tags.
-4. Verify the returned episode ID. `duplicate:true` means no new episode.
-
-Signals must target existing Semantic IDs, never episode or entity IDs.
-
-## Semantic and wiki lifecycle
-
-`berry_store` creates an episode. The autonomous coordinator schedules scoped consolidation and full wiki publication, retries failures, and reconciles missed graph changes on startup/periodic catch-up.
-
-1. Normal operation is automatic. A finalized `memory_type: "decision"` with `outcome: "approved"` promotes deterministically without an LLM/embedding; classified patterns/conventions require independently sourced recurrence.
-2. Use manual consolidate/status/review only for diagnosis, recovery, or advisor-gated correction/contradiction proposals.
-3. Use full compile/lint/cache refresh only for verification or recovery. Check `/readyz` publication versions/errors and verify Semantic provenance plus served-page content.
-
-Decisions prefer classified semantics with a high-confidence legacy fallback. Classified patterns/conventions appear on their project after promotion; the cross-project legacy theme rollup requires the same non-project tag in two real projects.
-
-## Retrieval feedback
-
-Enable `retrieval` and call `berry_feedback` with required `result_id`, `was_useful`, and `session_id`; optional `query` and `source_type`. `source_type` is `semantic`, `episodic`, `symbol`, `arch_entity`, or `aspect`. Do not use stale `useful` or `reason` fields.
-
-## Session end
-
-Store and verify the durable handoff first. Promote and verify blocks that belong in core second. Archive obsolete working blocks last. `berry_memory_archive` deletes the source and reports only `archived_length`.
-
-Use `berry_consolidate(action: "dream", scope: "project:<tag>")` only for optional abductive gap-filling. Treat dream output as hypotheses, not decisions.
+Priors:
+- The repository is a TypeScript monorepo whose runtime graph and source indexes can drift independently.
+- Historical unclassified semantics may still appear through conservative wiki fallbacks.
+- Live integration behavior can differ from mocked Redis and Neo4j tests.

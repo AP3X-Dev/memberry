@@ -15,6 +15,10 @@ Use MemBerry as a scoped, verified memory pipeline. Read the nearest project mem
 4. If config is missing, enable `admin` and prefer `berry_ingest_codebase` to bootstrap, index, and seed the project.
 5. If tools are unavailable, use repo truth and local memory; never invent calls.
 
+## Resolve evidence conflicts
+
+Use this precedence: current user instruction, current runtime/repository evidence, active approved Semantic memory, recent Episodic memory, then priors or dream hypotheses. Memory is evidence, not authority. If live evidence invalidates an active Semantic, verify the discrepancy and target that Semantic ID with a correction or contradiction signal.
+
 ## Current tool surface
 
 Eight tools are always visible: `berry_load`, `berry_store`, `berry_memory_read`, `berry_memory_insert`, `berry_grep`, `berry_context`, `berry_ask`, and `berry_tools`.
@@ -62,10 +66,20 @@ Read [reference/lifecycle-recovery.md](reference/lifecycle-recovery.md) before d
 
 Use the smallest scoped tool that fits: `berry_grep` for a fact or ID, `berry_memory_read` for one block, `berry_load` for task memory, `berry_context` for blended context, and `berry_ask` for cited synthesis. Enable `retrieval` and record useful or misleading results with the exact `berry_feedback` schema.
 
-Use code and architecture domains before unfamiliar-module changes. Use graph tools for deterministic audits, exports, and PR impact/conflict analysis.
+Use `$memberry-coding` before unfamiliar-module changes. Use graph tools for deterministic audits, exports, and PR impact/conflict analysis.
+
+## Coordinate multiple agents
+
+Parent and child agents share the conversation session ID but use distinct runtime/connection `agent_id` identities. Do not invent an `agent_id` tool argument when the live schema does not expose one. Subagents load only task-relevant context, prefix shared working-state notes with their agent/task name, and return durable findings to the parent. The parent stores the integrated decision or handoff once; do not create duplicate summaries from every worker.
 
 ## Safe end of session
 
 Store and verify a durable summary first. Promote and verify working blocks that belong in core second. Archive obsolete working blocks last. `berry_memory_archive` deletes the source block and reports only its archived length.
 
 Use `berry_consolidate(action: "dream", scope: "project:<tag>")` only for optional abductive gap-filling. Dream hypotheses are not verified decisions.
+
+## Validate fragile guidance
+
+- Run `scripts/validate-project-config.mjs` after creating or changing a project memory config.
+- Run `scripts/validate-store-payload.mjs` when debugging or automating store payloads.
+- Run `scripts/sync-agent-guidance.mjs` to synchronize the canonical contract and skill family across Codex and Claude; check mode detects drift without changing files.

@@ -52,4 +52,4 @@ Wiki tools:
 - `berry_ingest`: required `source_path`, `source_type`, `project_tag`.
 - `berry_lint`: required `project_tag`.
 - `berry_braindump`: required `scope` plus `content` or `source_path`.
-- `berry_wiki_sync`: required `path`; optional `project_tag`.
+- `berry_wiki_sync`: required `path`; optional `project_tag`. Integrated deployments schedule publication automatically after graph changes.

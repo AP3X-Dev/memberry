@@ -1,0 +1,4 @@
+interface:
+  display_name: "MemBerry Wiki"
+  short_description: "Publish and verify MemBerry knowledge wikis"
+  default_prompt: "Use $memberry-wiki to verify graph knowledge and its automatically published wiki."

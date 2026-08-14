@@ -1,0 +1,4 @@
+interface:
+  display_name: "MemBerry"
+  short_description: "Operate verified MemBerry memory workflows"
+  default_prompt: "Use $memberry to recall, store, and verify durable project memory."

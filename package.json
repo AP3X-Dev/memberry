@@ -24,7 +24,8 @@
     "stack:up": "docker compose --profile app up -d --build",
     "stack:down": "docker compose --profile app down",
     "stack:logs": "docker compose --profile app logs -f mcp",
-    "bench:quality": "tsx bench/quality/eval.ts"
+    "bench:quality": "tsx bench/quality/eval.ts",
+    "validate:memberry-guidance": "node skills/memberry/scripts/validate-source-guidance.mjs && node skills/memberry/scripts/validate-project-config.mjs .cursorrules"
   },
   "engines": {
     "node": ">=20.0.0"
