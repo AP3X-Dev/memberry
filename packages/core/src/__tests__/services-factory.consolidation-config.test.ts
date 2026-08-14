@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createCoreServices } from '../services-factory.js';
 
+const managedEnv = ['MEMBERRY_CONSOLIDATION_AUTO_APPLY', 'NEO4J_URI', 'NEO4J_USER', 'REDIS_URL'] as const;
+const originalEnv = Object.fromEntries(managedEnv.map((name) => [name, process.env[name]]));
+
 afterEach(() => {
-  delete process.env['MEMBERRY_CONSOLIDATION_AUTO_APPLY'];
+  for (const name of managedEnv) {
+    const original = originalEnv[name];
+    if (original === undefined) delete process.env[name];
+    else process.env[name] = original;
+  }
 });
 describe('createCoreServices consolidation policy config', () => {
   it('keeps the library-safe review-first default', async () => {
@@ -19,6 +26,31 @@ describe('createCoreServices consolidation policy config', () => {
     const core = createCoreServices();
     try {
       expect(core.config.consolidation.autoApply).toBe(true);
+    } finally {
+      await core.close();
+    }
+  });
+
+  it.each(['', '   '])('treats blank connection environment values as unset (%j)', async (value) => {
+    process.env['NEO4J_URI'] = value;
+    process.env['NEO4J_USER'] = value;
+    process.env['REDIS_URL'] = value;
+    const core = createCoreServices();
+    try {
+      expect(core.config.neo4j.uri).toBe('bolt://localhost:7687');
+      expect(core.config.neo4j.user).toBe('neo4j');
+      expect(core.config.redis.url).toBe('redis://localhost:6379');
+    } finally {
+      await core.close();
+    }
+  });
+
+  it('treats blank explicit connection overrides as unset', async () => {
+    const core = createCoreServices({ neo4jUri: ' ', neo4jUser: '\t', redisUrl: '\n' });
+    try {
+      expect(core.config.neo4j.uri).toBe('bolt://localhost:7687');
+      expect(core.config.neo4j.user).toBe('neo4j');
+      expect(core.config.redis.url).toBe('redis://localhost:6379');
     } finally {
       await core.close();
     }

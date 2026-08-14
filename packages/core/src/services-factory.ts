@@ -85,14 +85,19 @@ export interface CoreServices {
   close(): Promise<void>;
 }
 
+function nonBlank(value: string | undefined, fallback: string): string {
+  const normalized = value?.trim();
+  return normalized ? normalized : fallback;
+}
+
 function resolveEnv(env: CoreServicesEnv = {}): Required<CoreServicesEnv> {
   return {
-    neo4jUri: env.neo4jUri ?? process.env['NEO4J_URI'] ?? 'bolt://localhost:7687',
-    neo4jUser: env.neo4jUser ?? process.env['NEO4J_USER'] ?? 'neo4j',
+    neo4jUri: nonBlank(env.neo4jUri ?? process.env['NEO4J_URI'], 'bolt://localhost:7687'),
+    neo4jUser: nonBlank(env.neo4jUser ?? process.env['NEO4J_USER'], 'neo4j'),
     neo4jPassword: env.neo4jPassword ?? process.env['NEO4J_PASSWORD'] ?? '',
-    redisUrl: env.redisUrl ?? process.env['REDIS_URL'] ?? 'redis://localhost:6379',
-    openaiKey: env.openaiKey ?? process.env['OPENAI_API_KEY'] ?? '',
-    exportPath: env.exportPath ?? readEnv('MEMBERRY_EXPORT_PATH') ?? defaultExportPath(),
+    redisUrl: nonBlank(env.redisUrl ?? process.env['REDIS_URL'], 'redis://localhost:6379'),
+    openaiKey: (env.openaiKey ?? process.env['OPENAI_API_KEY'] ?? '').trim(),
+    exportPath: nonBlank(env.exportPath ?? readEnv('MEMBERRY_EXPORT_PATH'), defaultExportPath()),
   };
 }
 

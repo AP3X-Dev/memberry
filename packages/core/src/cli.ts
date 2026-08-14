@@ -59,10 +59,10 @@ function loadEnv(): {
   neo4jPassword: string;
   redisUrl: string;
 } {
-  const neo4jUri = process.env['NEO4J_URI'] ?? 'bolt://localhost:7687';
-  const neo4jUser = process.env['NEO4J_USER'] ?? 'neo4j';
+  const neo4jUri = process.env['NEO4J_URI']?.trim() || 'bolt://localhost:7687';
+  const neo4jUser = process.env['NEO4J_USER']?.trim() || 'neo4j';
   const neo4jPassword = process.env['NEO4J_PASSWORD'] ?? '';
-  const redisUrl = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
+  const redisUrl = process.env['REDIS_URL']?.trim() || 'redis://localhost:6379';
   return { neo4jUri, neo4jUser, neo4jPassword, redisUrl };
 }
 

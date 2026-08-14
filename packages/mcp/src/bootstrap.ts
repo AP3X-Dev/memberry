@@ -165,11 +165,11 @@ export function parseTenantDatastores(
 }
 
 export async function bootstrap(): Promise<BootstrapHandles> {
-  const neo4jUri = process.env['NEO4J_URI'] ?? 'bolt://localhost:7687';
-  const neo4jUser = process.env['NEO4J_USER'] ?? 'neo4j';
+  const neo4jUri = process.env['NEO4J_URI']?.trim() || 'bolt://localhost:7687';
+  const neo4jUser = process.env['NEO4J_USER']?.trim() || 'neo4j';
   const neo4jPassword = process.env['NEO4J_PASSWORD'] ?? '';
-  const redisUrl = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
-  const openaiKey = process.env['OPENAI_API_KEY'] ?? '';
+  const redisUrl = process.env['REDIS_URL']?.trim() || 'redis://localhost:6379';
+  const openaiKey = process.env['OPENAI_API_KEY']?.trim() ?? '';
   const exportPath = readEnv('MEMBERRY_EXPORT_PATH') ?? defaultExportPath();
 
   // Build the shared core load/store kit through the single construction path

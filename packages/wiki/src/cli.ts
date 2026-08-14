@@ -41,8 +41,8 @@ function parseArgs(argv: string[]): {
 
 // ─── Environment ──────────────────────────────────────────────────────────────
 
-const neo4jUri = process.env['NEO4J_URI'] ?? 'bolt://localhost:7687';
-const neo4jUser = process.env['NEO4J_USER'] ?? 'neo4j';
+const neo4jUri = process.env['NEO4J_URI']?.trim() || 'bolt://localhost:7687';
+const neo4jUser = process.env['NEO4J_USER']?.trim() || 'neo4j';
 const neo4jPassword = process.env['NEO4J_PASSWORD'] ?? '';
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
