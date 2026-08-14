@@ -3,7 +3,9 @@
 // subdirectory layout, episodic history, library, topics, and portal homepage.
 
 import type { Driver } from 'neo4j-driver';
-import { writeFile, mkdir, rm, readdir, open, readFile, unlink } from 'node:fs/promises';
+import { writeFile, mkdir, rm, readdir, open, readFile, unlink, stat, lstat, rename } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type {
   CompileV2Result,
@@ -52,8 +54,8 @@ import {
   renderRecentChanges,
   renderProjectGraph,
   renderDisambiguationStub,
-  crossProjectPatternTags,
-  DECISION_CONFIDENCE_THRESHOLD,
+  patternKnowledgeCount,
+  isDecisionSemantic,
 } from './renderers.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -148,31 +150,239 @@ function escapeRegExp(s: string): string {
  */
 export const COMPILED_MARKER_FILENAME = '.compiled';
 
-const COMPILE_LOCK_FILENAME = '.compile.lock';
-/** A lock older than this (no longer being held by a live compile) is stale → broken. */
-const COMPILE_LOCK_STALE_MS = 60_000;
-/** Give up acquiring after this long and proceed anyway (don't deadlock a compile). */
-const COMPILE_LOCK_TIMEOUT_MS = 120_000;
+/**
+ * The compiler never mutates the directory currently served by the viewer.
+ * Complete trees live below this private directory and a tiny pointer selects
+ * the active global tree. Keeping both names stable also makes the layout
+ * portable across the MCP/wiki containers sharing a named volume.
+ */
+export const WIKI_GENERATIONS_DIRNAME = '.generations';
+export const ACTIVE_GENERATION_FILENAME = '.active-generation';
+const GLOBAL_GENERATIONS_DIRNAME = 'global';
+const SCOPED_GENERATIONS_DIRNAME = 'scoped';
+const GENERATIONS_TO_RETAIN = 3;
+
+interface ActiveGenerationPointer {
+  version: 1;
+  path: string;
+  published_at: string;
+}
+
+function parseActiveGenerationPointer(body: string): string | null {
+  const trimmed = body.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as Partial<ActiveGenerationPointer>;
+    return typeof parsed.path === 'string' ? parsed.path : null;
+  } catch {
+    // Early development builds used a plain relative path. Accepting it keeps
+    // those volumes readable while all new publications use versioned JSON.
+    return trimmed;
+  }
+}
+
+function isGlobalGenerationPath(value: string): boolean {
+  const normalized = value.replace(/\\/g, '/');
+  return /^\.generations\/global\/gen-[a-zA-Z0-9-]+$/.test(normalized);
+}
+
+/**
+ * Resolve the immutable tree selected by the atomic pointer. A volume created
+ * before generation publication has no pointer and therefore continues to
+ * serve its legacy root tree unchanged.
+ */
+export async function resolvePublishedWikiDir(outputDir: string): Promise<string> {
+  let relativePath: string | null = null;
+  try {
+    relativePath = parseActiveGenerationPointer(
+      await readFile(join(outputDir, ACTIVE_GENERATION_FILENAME), 'utf-8'),
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+
+  if (relativePath && isGlobalGenerationPath(relativePath)) {
+    const generationDir = join(outputDir, ...relativePath.replace(/\\/g, '/').split('/'));
+    try {
+      const [generationStat, markerStat] = await Promise.all([
+        lstat(generationDir),
+        stat(join(generationDir, COMPILED_MARKER_FILENAME)),
+      ]);
+      if (generationStat.isDirectory() && !generationStat.isSymbolicLink() && markerStat.isFile()) return generationDir;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+
+  // A pointer can be lost/corrupted by an interrupted volume migration or refer
+  // to a manually removed tree. Recover by selecting the newest completed
+  // generation; `.building-*` directories and trees without the final marker
+  // are never eligible. If none exist, retain pre-generation root compatibility.
+  const globalDir = join(outputDir, WIKI_GENERATIONS_DIRNAME, GLOBAL_GENERATIONS_DIRNAME);
+  let entries: import('node:fs').Dirent[] = [];
+  try {
+    entries = await readdir(globalDir, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  for (const entry of entries
+    .filter((candidate) => candidate.isDirectory() && candidate.name.startsWith('gen-'))
+    .sort((left, right) => right.name.localeCompare(left.name))) {
+    const candidate = join(globalDir, entry.name);
+    try {
+      if ((await stat(join(candidate, COMPILED_MARKER_FILENAME))).isFile()) return candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+  return outputDir;
+}
+
+async function publishGenerationPointer(outputDir: string, generationName: string): Promise<void> {
+  const relativePath = `${WIKI_GENERATIONS_DIRNAME}/${GLOBAL_GENERATIONS_DIRNAME}/${generationName}`;
+  const pointer: ActiveGenerationPointer = {
+    version: 1,
+    path: relativePath,
+    published_at: new Date().toISOString(),
+  };
+  const pointerPath = join(outputDir, ACTIVE_GENERATION_FILENAME);
+  const tempPath = join(outputDir, `${ACTIVE_GENERATION_FILENAME}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(tempPath, JSON.stringify(pointer), 'utf-8');
+    // Same-directory rename is the portable atomic publication primitive for
+    // the shared Docker volume. If replacement is unsupported, fail closed and
+    // leave the previous pointer/tree active rather than unlinking it first.
+    await rename(tempPath, pointerPath);
+  } finally {
+    await rm(tempPath, { force: true }).catch(() => {});
+  }
+}
+
+async function cleanupOldGenerations(parentDir: string, activeName: string): Promise<void> {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await readdir(parentDir, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+
+  const completed = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('gen-'))
+    .map((entry) => entry.name)
+    .sort()
+    .reverse();
+
+  // The compile lock proves no other writer is using a `.building-*` tree.
+  // Removing crash residue here prevents incomplete generations accumulating
+  // forever while keeping all completed rollback candidates untouched.
+  for (const entry of entries.filter((candidate) => candidate.isDirectory() && candidate.name.startsWith('.building-'))) {
+    await rm(join(parentDir, entry.name), { recursive: true, force: true }).catch((err) => {
+      console.error('[wiki-compile] Failed to clean incomplete generation:', entry.name, err instanceof Error ? err.message : err);
+    });
+  }
+  const keep = new Set([activeName, ...completed.slice(0, GENERATIONS_TO_RETAIN)]);
+  for (const name of completed) {
+    if (keep.has(name)) continue;
+    try {
+      await rm(join(parentDir, name), { recursive: true, force: true });
+    } catch (err) {
+      // Publication already succeeded. Cleanup is bounded best-effort and must
+      // never roll back a healthy active tree.
+      console.error('[wiki-compile] Failed to clean stale generation:', name, err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+export const COMPILE_LOCK_FILENAME = '.compile.lock';
+/** Cold graph compiles can take many minutes; a one-minute lease was unsafe. */
+const COMPILE_LOCK_STALE_MS = 30 * 60_000;
+/** Renew often enough that a healthy slow compile never approaches expiry. */
+const COMPILE_LOCK_HEARTBEAT_MS = 60_000;
+/** Allow one contender to observe and recover a full stale lease. */
+const COMPILE_LOCK_TIMEOUT_MS = 35 * 60_000;
 /** Poll interval while waiting for the holder to release. */
 const COMPILE_LOCK_RETRY_MS = 250;
+
+export interface WikiCompilerOptions {
+  /** @internal Primarily exposed for deterministic lease-contention tests. */
+  compileLockStaleMs?: number;
+  /** @internal Primarily exposed for deterministic lease-contention tests. */
+  compileLockHeartbeatMs?: number;
+  /** @internal Primarily exposed for deterministic lease-contention tests. */
+  compileLockTimeoutMs?: number;
+  /** @internal Primarily exposed for deterministic lease-contention tests. */
+  compileLockRetryMs?: number;
+}
+
+interface CompileLockTimings {
+  staleMs: number;
+  heartbeatMs: number;
+  timeoutMs: number;
+  retryMs: number;
+}
+
+function compileLockTimings(options: WikiCompilerOptions): CompileLockTimings {
+  const timings = {
+    staleMs: options.compileLockStaleMs ?? COMPILE_LOCK_STALE_MS,
+    heartbeatMs: options.compileLockHeartbeatMs ?? COMPILE_LOCK_HEARTBEAT_MS,
+    timeoutMs: options.compileLockTimeoutMs ?? COMPILE_LOCK_TIMEOUT_MS,
+    retryMs: options.compileLockRetryMs ?? COMPILE_LOCK_RETRY_MS,
+  };
+  if (Object.values(timings).some((value) => !Number.isFinite(value) || value <= 0)) {
+    throw new Error('Wiki compile lock timings must be positive finite numbers');
+  }
+  if (timings.heartbeatMs >= timings.staleMs) {
+    throw new Error('Wiki compile lock heartbeat must be shorter than its stale lease');
+  }
+  return timings;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Lockfile payload: pid + ISO timestamp, so a stale lock can be detected/broken. */
-function lockPayload(): string {
-  return JSON.stringify({ pid: process.pid, at: new Date().toISOString() });
+interface CompileLockPayload {
+  pid: number;
+  at: string;
+  token: string;
 }
 
-/** Parse a lockfile body; returns null if unreadable/corrupt (treated as stale). */
-function parseLockAgeMs(body: string): number | null {
+interface CompileLockLease {
+  token: string;
+  handle: FileHandle;
+}
+
+/** Lockfile payload includes a unique owner token for owner-safe release. */
+function lockPayload(token: string): string {
+  return JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token });
+}
+
+function parseLockPayload(body: string): CompileLockPayload | null {
   try {
-    const parsed = JSON.parse(body) as { at?: unknown };
-    if (typeof parsed.at !== 'string') return null;
-    const ts = Date.parse(parsed.at);
-    if (Number.isNaN(ts)) return null;
-    return Date.now() - ts;
+    const parsed = JSON.parse(body) as Partial<CompileLockPayload>;
+    if (typeof parsed.pid !== 'number' || typeof parsed.at !== 'string' || typeof parsed.token !== 'string') return null;
+    if (Number.isNaN(Date.parse(parsed.at)) || parsed.token.length === 0) return null;
+    return parsed as CompileLockPayload;
+  } catch {
+    return null;
+  }
+}
+
+async function lockAgeMs(lockPath: string, body: string): Promise<number | null> {
+  const parsed = parseLockPayload(body);
+  if (parsed) return Date.now() - Date.parse(parsed.at);
+  try {
+    const legacy = JSON.parse(body) as { at?: unknown };
+    if (typeof legacy.at === 'string' && !Number.isNaN(Date.parse(legacy.at))) {
+      return Date.now() - Date.parse(legacy.at);
+    }
+  } catch { /* fall through to filesystem age */ }
+  // A contender can observe the file in the tiny window between O_EXCL create
+  // and payload write. Use mtime for malformed/legacy files instead of declaring
+  // them stale immediately and deleting a live owner's lock.
+  try {
+    return Date.now() - (await stat(lockPath)).mtimeMs;
   } catch {
     return null;
   }
@@ -182,51 +392,124 @@ function parseLockAgeMs(body: string): number | null {
  * Acquire the cross-process compile lock for `outputDir`. Resolves once held.
  * Uses `open(path, 'wx')` (O_EXCL) as the atomic create-or-fail primitive. On
  * contention it waits and retries; if the existing lock is older than the stale
- * threshold (or its timestamp is unreadable), it breaks the lock and retries. After
- * the overall timeout it proceeds without the lock rather than deadlocking — a
- * degraded-but-live recompile beats a hung one. The dir is created first so the
- * lockfile has somewhere to live; this is mount-safe (no rmdir/rename of the mount).
+ * threshold, it breaks the lock and retries. After the overall timeout it fails
+ * closed instead of running a second clear-and-rebuild concurrently. The dir is
+ * created first so the lockfile has somewhere to live; this is mount-safe.
  */
-async function acquireCompileLock(outputDir: string): Promise<void> {
+async function acquireCompileLock(outputDir: string, timings: CompileLockTimings): Promise<CompileLockLease> {
   await mkdir(outputDir, { recursive: true });
   const lockPath = join(outputDir, COMPILE_LOCK_FILENAME);
-  const deadline = Date.now() + COMPILE_LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + timings.timeoutMs;
+  const token = randomUUID();
 
   for (;;) {
     try {
       const handle = await open(lockPath, 'wx');
       try {
-        await handle.writeFile(lockPayload(), 'utf-8');
-      } finally {
-        await handle.close();
+        await handle.writeFile(lockPayload(token), 'utf-8');
+        // Keep this handle open for owner-safe heartbeat writes. If a stale-lock
+        // contender ever unlinks the path, writes through this handle stay on
+        // the old inode and cannot overwrite a successor's lock.
+        return { token, handle };
+      } catch (err) {
+        await handle.close().catch(() => {});
+        throw err;
       }
-      return; // lock held
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') {
+        // Windows can report EPERM rather than EEXIST when another process
+        // keeps the lock FileHandle open. Treat it as contention only when the
+        // exact lock path still exists; unrelated permission failures surface.
+        if (code !== 'EPERM') throw err;
+        try {
+          await lstat(lockPath);
+        } catch {
+          throw err;
+        }
+      }
 
       // Contention: inspect the holder. Break it if it looks stale.
-      let ageMs: number | null = null;
+      let body: string | null = null;
       try {
-        ageMs = parseLockAgeMs(await readFile(lockPath, 'utf-8'));
-      } catch {
-        ageMs = null; // unreadable (e.g. removed mid-read) → retry below
+        body = await readFile(lockPath, 'utf-8');
+      } catch (readErr) {
+        if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
       }
-      if (ageMs === null || ageMs > COMPILE_LOCK_STALE_MS) {
-        // Stale or corrupt lock — remove and retry immediately. force:true so a
-        // concurrent breaker that already removed it doesn't make us throw.
+      const ageMs = body === null ? null : await lockAgeMs(lockPath, body);
+      if (ageMs !== null && ageMs > timings.staleMs) {
+        // Re-read before breaking so we do not remove a successor lock that
+        // replaced the stale file while it was being inspected.
+        let current: string | null = null;
+        try { current = await readFile(lockPath, 'utf-8'); } catch { /* retry */ }
+        if (current !== body || current === null) continue;
+        const currentAgeMs = await lockAgeMs(lockPath, current);
+        if (currentAgeMs === null || currentAgeMs <= timings.staleMs) continue;
         await rm(lockPath, { force: true });
         continue;
       }
-      if (Date.now() >= deadline) return; // give up waiting; proceed lock-less
-      await sleep(COMPILE_LOCK_RETRY_MS);
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for wiki compile lock after ${timings.timeoutMs}ms`);
+      }
+      await sleep(timings.retryMs);
     }
   }
 }
 
+/** Renew a held lease until stopped, but never write through another owner's path. */
+function startCompileLockHeartbeat(
+  outputDir: string,
+  lease: CompileLockLease,
+  heartbeatMs: number,
+): () => Promise<void> {
+  const lockPath = join(outputDir, COMPILE_LOCK_FILENAME);
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let inFlight: Promise<void> = Promise.resolve();
+
+  const schedule = () => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      inFlight = (async () => {
+        try {
+          const current = parseLockPayload(await readFile(lockPath, 'utf-8'));
+          if (!current || current.token !== lease.token) {
+            stopped = true;
+            return;
+          }
+          const payload = Buffer.from(lockPayload(lease.token), 'utf-8');
+          await lease.handle.truncate(0);
+          await lease.handle.write(payload, 0, payload.length, 0);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            stopped = true;
+            return;
+          }
+          console.error('[wiki-compile] Compile lock heartbeat failed:', err instanceof Error ? err.message : err);
+        } finally {
+          schedule();
+        }
+      })();
+    }, heartbeatMs);
+    timer.unref?.();
+  };
+  schedule();
+
+  return async () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    await inFlight;
+    await lease.handle.close().catch(() => {});
+  };
+}
+
 /** Release the compile lock. Best-effort; a missing lockfile is not an error. */
-async function releaseCompileLock(outputDir: string): Promise<void> {
+async function releaseCompileLock(outputDir: string, token: string): Promise<void> {
+  const lockPath = join(outputDir, COMPILE_LOCK_FILENAME);
   try {
-    await unlink(join(outputDir, COMPILE_LOCK_FILENAME));
+    const current = parseLockPayload(await readFile(lockPath, 'utf-8'));
+    if (!current || current.token !== token) return;
+    await unlink(lockPath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       console.error('[wiki-compile] Failed to release compile lock:', err instanceof Error ? err.message : err);
@@ -382,9 +665,22 @@ function sameProjectScope(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase() || slugify(left) === slugify(right);
 }
 
-function semanticMatchesScope(sem: { tags: string[] }, projectScope: string | null): boolean {
+function semanticProjectScopes(sem: { tags: string[]; scope?: string }): string[] {
+  const scopes: string[] = [];
+  if (sem.scope && /^project:/i.test(sem.scope)) scopes.push(sem.scope.replace(/^project:/i, ''));
+  for (const tag of sem.tags) {
+    if (/^project:/i.test(tag)) scopes.push(tag.replace(/^project:/i, ''));
+  }
+  return [...new Set(scopes.filter(Boolean))];
+}
+
+function semanticPrimaryProjectScope(sem: { tags: string[]; scope?: string }): string | null {
+  return semanticProjectScopes(sem)[0] ?? null;
+}
+
+function semanticMatchesScope(sem: { tags: string[]; scope?: string }, projectScope: string | null): boolean {
   if (!projectScope) return true;
-  return sem.tags.some((tag) => tag.startsWith('project:') && sameProjectScope(tag.replace(/^project:/, ''), projectScope));
+  return semanticProjectScopes(sem).some((scope) => sameProjectScope(scope, projectScope));
 }
 
 function entityMatchesScope(entity: EntityInfo, projectScope: string | null): boolean {
@@ -412,7 +708,7 @@ function sourceMatchesScope(source: SourceInfo, projectScope: string | null): bo
 // ─── Main compiler ──────────────────────────────────────────────────────────
 
 export class WikiCompiler {
-  constructor(private driver: Driver) {}
+  constructor(private driver: Driver, private options: WikiCompilerOptions = {}) {}
 
   async compile(outputDir: string, projectTag = 'all'): Promise<CompileV2Result> {
     const projectScope = normalizeCompileScope(projectTag);
@@ -426,15 +722,51 @@ export class WikiCompiler {
       output_dir: outputDir,
     };
 
-    // OPT-9: serialize the clear-then-rebuild against any other writer (the MCP
-    // autorefresh vs the wiki-service startup build both call compile() on the
-    // shared mount). Acquired before the clear, released in the finally below, so
-    // an overlapping compile waits its turn instead of deleting files mid-write.
-    await acquireCompileLock(outputDir);
+    // Serialize generation creation and publication across the MCP autorefresh
+    // writer and the wiki-service startup writer. Readers never wait on this
+    // lock: they keep resolving the previous immutable active generation until
+    // the final pointer rename below.
+    const lockTimings = compileLockTimings(this.options);
+    const lockLease = await acquireCompileLock(outputDir, lockTimings);
+    const stopLockHeartbeat = startCompileLockHeartbeat(outputDir, lockLease, lockTimings.heartbeatMs);
+    const generationName = `gen-${Date.now().toString().padStart(13, '0')}-${randomUUID()}`;
+    const generationParent = projectScope
+      ? join(outputDir, WIKI_GENERATIONS_DIRNAME, SCOPED_GENERATIONS_DIRNAME, slugify(projectScope) || 'project')
+      : join(outputDir, WIKI_GENERATIONS_DIRNAME, GLOBAL_GENERATIONS_DIRNAME);
+    const buildingDir = join(generationParent, `.building-${generationName}`);
+    const generationDir = join(generationParent, generationName);
     try {
-      return await this.compileLocked(outputDir, projectScope, result);
+      await mkdir(generationParent, { recursive: true });
+      await this.compileLocked(buildingDir, projectScope, result);
+      await rename(buildingDir, generationDir);
+
+      if (projectScope) {
+        // Scoped compiles are intentionally unpublished artifacts. Publishing
+        // one would replace the complete served portal with a partial project
+        // tree. Return its concrete location so CLI/MCP callers can inspect or
+        // export it without affecting the global viewer.
+        result.output_dir = generationDir;
+      } else {
+        await publishGenerationPointer(outputDir, generationName);
+        // Top-level notification only; the selected tree has its own .compiled
+        // marker. Watchers that miss the pointer rename still observe this file.
+        await writeFile(join(outputDir, COMPILED_MARKER_FILENAME), generationName, 'utf-8').catch((err) => {
+          console.error('[wiki-compile] Published generation but failed to update watcher marker:', err instanceof Error ? err.message : err);
+        });
+      }
+      await cleanupOldGenerations(generationParent, generationName).catch((err) => {
+        console.error('[wiki-compile] Published generation but cleanup failed:', err instanceof Error ? err.message : err);
+      });
+      return result;
+    } catch (err) {
+      // An incomplete directory is never reachable from the active pointer.
+      // Remove it eagerly; if the process crashes, its `.building-*` name keeps
+      // it distinguishable and a later maintenance pass can remove it safely.
+      await rm(buildingDir, { recursive: true, force: true }).catch(() => {});
+      throw err;
     } finally {
-      await releaseCompileLock(outputDir);
+      await stopLockHeartbeat();
+      await releaseCompileLock(outputDir, lockLease.token);
     }
   }
 
@@ -443,17 +775,9 @@ export class WikiCompiler {
     projectScope: string | null,
     result: CompileV2Result,
   ): Promise<CompileV2Result> {
-    // Clean the output directory's CONTENTS without removing the directory
-    // itself. `outputDir` may be a Docker volume MOUNT POINT (the gap-15 shared
-    // wiki_output volume); rm-ing a mount point fails with EBUSY. Clearing the
-    // children is mount-point-safe and equivalent to starting from a fresh dir.
-    // Skip the lockfile itself — it's how we hold this run's exclusivity, and
-    // deleting it mid-compile would let an overlapping writer barge in.
+    // Every compile targets a new private generation directory. No served tree
+    // is cleared or mutated while requests are reading it.
     await mkdir(outputDir, { recursive: true });
-    for (const entry of await readdir(outputDir)) {
-      if (entry === COMPILE_LOCK_FILENAME) continue;
-      await rm(join(outputDir, entry), { recursive: true, force: true });
-    }
 
     // ── Phase 0: Pre-fetch shared data ─────────────────────────────
 
@@ -499,12 +823,12 @@ export class WikiCompiler {
     let allProjectData: ProjectData[] = [];
 
     // OPT-58: accumulate every entity's episodics fetched in Phase 1 (the OPT-22
-    // batched fetchEpisodicsForEntities scan) into a global name→episodics map, so
+    // batched fetchEpisodicsForEntities scan) into a global ID→episodics map, so
     // Phase 2 can REUSE it instead of re-running fetchEpisodicsForEntity per entity
     // (the per-entity result is identical — same predicate/ORDER/LIMIT, proven in
-    // queries.test.ts). Keyed by entity NAME, which is project-independent, so it
-    // stays correct across canonicalizeHumanProjects' project merges.
-    const entityEpisodicsByName = new Map<string, EpisodicEntry[]>();
+    // queries.test.ts). Stable IDs prevent same-named entities in different
+    // projects from sharing history.
+    const entityEpisodicsById = new Map<string, EpisodicEntry[]>();
 
     // Entity-based projects
     for (const projectEntity of projectEntities) {
@@ -544,15 +868,16 @@ export class WikiCompiler {
       // scan (vs one full-label scan per entity). Same per-entity ORDER/LIMIT.
       const entityEpisodicMap = await fetchEpisodicsForEntities(
         this.driver,
-        [...new Set(entities.map((e) => e.name))],
+        entities.map((entity) => ({ id: entity.id, name: entity.name })),
+        projectScope,
       );
       // OPT-58: feed the global map so Phase 2 reuses these results.
-      for (const [name, eps] of entityEpisodicMap) entityEpisodicsByName.set(name, eps);
+      for (const [entityId, eps] of entityEpisodicMap) entityEpisodicsById.set(entityId, eps);
 
       for (const entity of entities) {
         const key = entity.name.toLowerCase();
         const semCount = (semanticsByEntity.get(key) ?? []).length;
-        const entityEpisodics = entityEpisodicMap.get(entity.name) ?? [];
+        const entityEpisodics = entityEpisodicMap.get(entity.id) ?? [];
         const semMentions = semanticsMentioningEntity.get(key) ?? [];
         if (semCount > 0 || entityEpisodics.length > 0 || semMentions.length > 0) {
           substantive.push(entity);
@@ -561,21 +886,19 @@ export class WikiCompiler {
         }
       }
 
-      // Build semantics for project-level data from pre-fetched index
-      const semantics: ProjectData['semantics'] = [];
-      const seenSemanticIds = new Set<string>();
+      // Project-level data includes every explicitly project-scoped semantic,
+      // including claims with no ABOUT edge. Unscoped claims ABOUT a contained
+      // entity remain useful, but explicitly other-project claims never leak in.
+      const semantics: ProjectData['semantics'] = allSemantics
+        .filter((sem) => semanticMatchesScope(sem, projectScope));
+      const seenSemanticIds = new Set(semantics.map((sem) => sem.id));
       for (const entity of entities) {
         const sems = semanticsByEntity.get(entity.name.toLowerCase()) ?? [];
         for (const sem of sems) {
+          if (semanticProjectScopes(sem).length > 0) continue;
           if (seenSemanticIds.has(sem.id)) continue;
           seenSemanticIds.add(sem.id);
-          semantics.push({
-            id: sem.id,
-            content: sem.content,
-            confidence: sem.confidence,
-            tags: sem.tags,
-            entities: sem.entities.filter((e) => e !== entity.name),
-          });
+          semantics.push(sem);
         }
       }
 
@@ -589,17 +912,19 @@ export class WikiCompiler {
       });
     }
 
-    // Episodic-only projects (virtual)
+    // Memory-only projects (virtual): episodics, semantics, or both can establish
+    // a project before an Entity node has been bootstrapped.
     for (const scope of episodicOnlyScopes) {
       const episodics = await fetchEpisodicsForProject(this.driver, scope);
-      if (episodics.length === 0) continue;
+      const semantics = allSemantics.filter((sem) => semanticMatchesScope(sem, scope));
+      if (episodics.length === 0 && semantics.length === 0) continue;
 
       const virtualEntity: EntityInfo = {
         id: `virtual-${scope}`,
         name: scope,
         type: 'project',
         slug: slugify(scope),
-        description: `Project discovered from episodic entries (no Entity node).`,
+        description: `Project discovered from scoped memory (no Entity node).`,
         created_at: episodics[episodics.length - 1]?.created_at ?? new Date().toISOString(),
       };
 
@@ -609,7 +934,7 @@ export class WikiCompiler {
         substantive_entities: [],
         sparse_entities: [],
         episodics,
-        semantics: [],
+        semantics,
       });
     }
 
@@ -635,7 +960,7 @@ export class WikiCompiler {
       for (const entity of project.substantive_entities) {
         // OPT-58: reuse the Phase-1 batched episodics (identical per-entity result)
         // instead of re-fetching per entity — one fewer DB round-trip per article.
-        const entityEpisodics = entityEpisodicsByName.get(entity.name) ?? [];
+        const entityEpisodics = entityEpisodicsById.get(entity.id) ?? [];
         const [entitySemantics, hierarchy, backlinks, seeAlso, sources, inboundCount] =
           await Promise.all([
             fetchSemanticsForEntity(this.driver, entity.name),
@@ -645,7 +970,10 @@ export class WikiCompiler {
             fetchSourcesForEntity(this.driver, entity.name),
             fetchInboundLinkCount(this.driver, entity.name),
           ]);
-        const semantics = entitySemantics.filter((sem) => semanticMatchesScope(sem, projectScope));
+        const semantics = entitySemantics.filter((sem) => {
+          const scopes = semanticProjectScopes(sem);
+          return scopes.length === 0 || semanticMatchesScope(sem, project.entity.name);
+        });
 
         // Group semantics by domain tag into sections
         const sectionMap = new Map<string, ResolvedClaim[]>();
@@ -658,6 +986,7 @@ export class WikiCompiler {
             content: resolveInlineLinks(sem.content, otherRefs, projectSlug),
             confidence: sem.confidence,
             memberry_id: sem.id,
+            memory_type: sem.memory_type,
             source_refs: [],
             entity_refs: otherRefs,
           };
@@ -811,8 +1140,7 @@ export class WikiCompiler {
     // Build tag→projects map from pre-fetched allSemantics (no extra query)
     const tagProjectMap = new Map<string, Set<string>>();
     for (const sem of allSemantics) {
-      const projectTag = sem.tags.find((t) => t.startsWith('project:'));
-      const proj = projectTag ? projectTag.replace('project:', '') : null;
+      const proj = semanticPrimaryProjectScope(sem);
       for (const tag of sem.tags) {
         if (tag.startsWith('project:')) continue;
         const projects = tagProjectMap.get(tag) ?? new Set();
@@ -860,8 +1188,7 @@ export class WikiCompiler {
         for (const sem of tagSems) {
           for (const e of sem.entities) entities.add(e);
           // Project is already available from the full semantic data (no .find() needed)
-          const projectTag = sem.tags.find((t) => t.startsWith('project:'));
-          const proj = projectTag ? projectTag.replace('project:', '') : 'unscoped';
+          const proj = semanticPrimaryProjectScope(sem) ?? 'unscoped';
           projects.add(proj);
 
           semanticsWithProject.push({
@@ -943,10 +1270,10 @@ export class WikiCompiler {
 
     // Derived counts, computed from the same in-scope data the pages render — so the
     // portal tiles always match the pages and auto-update on every recompile.
-    const totalPatterns = crossProjectPatternTags(allSemantics).length;
+    const totalPatterns = patternKnowledgeCount(allSemantics);
     const totalDecisions = allSemantics.filter((sem) => {
-      if (sem.confidence < DECISION_CONFIDENCE_THRESHOLD) return false;
-      const project = (sem.tags.find((t) => t.startsWith('project:')) ?? 'project:unscoped').replace('project:', '');
+      if (!isDecisionSemantic(sem)) return false;
+      const project = semanticPrimaryProjectScope(sem) ?? 'unscoped';
       return !isInternalProjectName(project);
     }).length;
     const totalTopics = result.topic_pages;
@@ -966,9 +1293,9 @@ export class WikiCompiler {
       })),
       recent_changes: humanRecentEpisodics.slice(0, 10),
       top_decisions: allSemantics
-        .filter((s) => s.confidence >= 0.7)
+        .filter((s) => isDecisionSemantic(s))
         .filter((s) => {
-          const project = (s.tags.find((t) => t.startsWith('project:')) ?? 'project:unscoped').replace('project:', '');
+          const project = semanticPrimaryProjectScope(s) ?? 'unscoped';
           return !isInternalProjectName(project);
         })
         .sort((a, b) => b.confidence - a.confidence)
@@ -976,7 +1303,7 @@ export class WikiCompiler {
         .map((s) => ({
           content: s.content,
           confidence: s.confidence,
-          project: (s.tags.find((t) => t.startsWith('project:')) ?? 'project:unscoped').replace('project:', ''),
+          project: semanticPrimaryProjectScope(s) ?? 'unscoped',
           entities: s.entities,
         })),
       stats: {

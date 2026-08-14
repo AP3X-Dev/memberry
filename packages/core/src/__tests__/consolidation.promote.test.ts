@@ -106,7 +106,11 @@ describe('clusterByEmbedding', () => {
 // ─── promote proposals ───────────────────────────────────────────────────────
 
 describe('ConsolidationEngine promote path', () => {
-  const promotable = [ep('e1', vecAt(0)), ep('e2', vecAt(3)), ep('e3', vecAt(6))];
+  const promotable = [
+    ep('e1', vecAt(0), { session_id: 'sess-1' }),
+    ep('e2', vecAt(3), { session_id: 'sess-2' }),
+    ep('e3', vecAt(6), { session_id: 'sess-3' }),
+  ];
 
   function neo4jWith(findPromotable: unknown) {
     return {
@@ -131,8 +135,8 @@ describe('ConsolidationEngine promote path', () => {
     expect(result.proposals).toHaveLength(1);
     const p = result.proposals[0]!;
     expect(p.type).toBe('promote');
-    // affected_ids must be the SOURCE EPISODE ids — _applyPromoteProposal anchors
-    // PROMOTED_FROM on the first and derives the tenant from all of them.
+    // affected_ids must be every SOURCE EPISODE id — promotion preserves a
+    // PROMOTED_FROM edge for the complete cluster and derives one tenant.
     expect(p.affected_ids.sort()).toEqual(['e1', 'e2', 'e3']);
     expect(p.after.content).toBe('The engine owns validation.');
     expect(p.after.confidence).toBe(0.8);
@@ -171,12 +175,120 @@ describe('ConsolidationEngine promote path', () => {
     expect(llm.chat).not.toHaveBeenCalled();
   });
 
-  it('is inert without an LLM (no synthesis possible)', async () => {
+  it('does not auto-generalize repeated evidence from one agent session', async () => {
+    const sameSession = [
+      ep('same-1', vecAt(0)),
+      ep('same-2', vecAt(3)),
+      ep('same-3', vecAt(6)),
+    ];
+    const neo4j = neo4jWith(vi.fn().mockResolvedValue(sameSession));
+    const llm = llmReturning({ content: 'Uncorroborated.', confidence: 0.95, decay_class: 'stable' });
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+
+    const result = await engine.run('project:test');
+
+    expect(result.proposals).toEqual([]);
+    expect(llm.chat).not.toHaveBeenCalled();
+  });
+
+  it('requires independent sessions or agents before proposing promotion', async () => {
+    const repeatedObservation = [ep('r1', vecAt(0)), ep('r2', vecAt(2)), ep('r3', vecAt(4))];
+    const neo4j = neo4jWith(vi.fn().mockResolvedValue(repeatedObservation));
+    const llm = llmReturning({ content: 'Should not promote.', confidence: 0.9, decay_class: 'stable' });
+
+    const result = await new ConsolidationEngine(
+      emptyRedis() as never,
+      neo4j as never,
+      CONFIG,
+      llm as never,
+    ).run('project:test');
+
+    expect(result.proposals).toHaveLength(0);
+    expect(llm.chat).not.toHaveBeenCalled();
+  });
+
+  it('gates a low-confidence promote instead of auto-applying it', async () => {
+    const redis = emptyRedis();
+    const neo4j = neo4jWith(vi.fn().mockResolvedValue(promotable));
+    const llm = llmReturning({ content: 'Uncertain claim.', confidence: 0.69, decay_class: 'stable' });
+    const config = { ...CONFIG, consolidation: { ...CONFIG.consolidation, autoApply: true } };
+
+    const result = await new ConsolidationEngine(
+      redis as never,
+      neo4j as never,
+      config,
+      llm as never,
+    ).run('project:test');
+
+    expect(result.applied).toHaveLength(0);
+    expect(redis.proposals.save).toHaveBeenCalledOnce();
+    expect(neo4j.semantic.promoteFromEpisodic).not.toHaveBeenCalled();
+  });
+
+  it('still scans without an LLM but leaves ordinary recurrence candidates inert', async () => {
     const findPromotable = vi.fn().mockResolvedValue(promotable);
     const engine = new ConsolidationEngine(emptyRedis() as never, neo4jWith(findPromotable) as never, CONFIG);
 
     expect((await engine.run('project:test')).proposals).toHaveLength(0);
-    expect(findPromotable).not.toHaveBeenCalled();
+    expect(findPromotable).toHaveBeenCalledOnce();
+  });
+
+  it('automatically applies one explicit approved decision without an LLM or broad autoApply', async () => {
+    const decision = ep('decision-1', [], {
+      content: 'Use owner-token locks for wiki publication.',
+      outcome: 'approved',
+      memory_type: 'decision',
+      tags: ['project:test', 'wiki-publication'],
+    });
+    const neo4j = neo4jWith(vi.fn().mockResolvedValue([decision]));
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG);
+
+    const result = await engine.run('project:test');
+
+    expect(result.applied).toHaveLength(1);
+    expect(result.proposals[0]?.after).toMatchObject({
+      content: decision.content,
+      confidence: 0.9,
+      memory_type: 'decision',
+      tags: ['project:test', 'wiki-publication'],
+    });
+    expect(neo4j.semantic.promoteFromEpisodic).toHaveBeenCalledWith(
+      ['decision-1'],
+      expect.objectContaining({ memory_type: 'decision', confidence: 0.9 }),
+      'default',
+    );
+  });
+
+  it.each(['revised', 'rejected', 'abandoned', undefined] as const)(
+    'does not direct-promote a %s decision',
+    async (outcome) => {
+      const candidate = ep(`decision-${outcome ?? 'implicit'}`, vecAt(0), {
+        outcome,
+        memory_type: 'decision',
+      });
+      const neo4j = neo4jWith(vi.fn().mockResolvedValue([candidate]));
+      const result = await new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG).run('project:test');
+
+      expect(result.proposals).toEqual([]);
+      expect(neo4j.semantic.promoteFromEpisodic).not.toHaveBeenCalled();
+    },
+  );
+
+  it('recurring patterns retain classification and only recurring non-project tags', async () => {
+    const patterns = [
+      ep('p1', vecAt(0), { session_id: 's1', memory_type: 'pattern', tags: ['project:test', 'validation', 'one-off'] }),
+      ep('p2', vecAt(2), { session_id: 's2', memory_type: 'pattern', tags: ['project:test', 'validation'] }),
+      ep('p3', vecAt(4), { session_id: 's3', memory_type: 'pattern', tags: ['project:test', 'validation'] }),
+    ];
+    const neo4j = neo4jWith(vi.fn().mockResolvedValue(patterns));
+    const llm = llmReturning({ content: 'Validate external inputs.', confidence: 0.85, decay_class: 'stable' });
+
+    const result = await new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never).run('project:test');
+
+    expect(result.proposals[0]?.after).toMatchObject({
+      memory_type: 'pattern',
+      tags: ['project:test', 'validation'],
+    });
   });
 
   it('is inert on a layer without findPromotable (backward compatibility)', async () => {
@@ -200,10 +312,16 @@ describe('ConsolidationEngine promote path', () => {
   it('does not filter by scope on an unscoped ("global") run', async () => {
     const findPromotable = vi.fn().mockResolvedValue(promotable);
     const llm = llmReturning({ content: 'A claim.', confidence: 0.7, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4jWith(findPromotable) as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(
+      emptyRedis() as never,
+      neo4jWith(findPromotable) as never,
+      CONFIG,
+      llm as never,
+      'tenant-a',
+    );
 
     await engine.run('global');
 
-    expect(findPromotable).toHaveBeenCalledWith(undefined, 200);
+    expect(findPromotable).toHaveBeenCalledWith(undefined, 200, 'tenant-a');
   });
 });

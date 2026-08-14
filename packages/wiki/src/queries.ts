@@ -45,32 +45,40 @@ export async function fetchAllProjects(driver: Driver): Promise<EntityInfo[]> {
   }
 }
 
-/** Discover projects that exist only in episodics but have no Entity node.
- * gap-13: scopes come from the structured `ep.scope` and `ep.tags` (the canonical
- * project association set by berry_store, stripped of the `project:` prefix) AS
- * WELL AS the legacy `[project:…]` task prefix (FALLBACK). The "only those with no
- * Entity{type:'project'} yet" filter is preserved; distinct scope slugs returned. */
+/** Discover project scopes carried by memory but missing a project Entity.
+ * The historical name is retained for API compatibility, but both Episodic and
+ * Semantic nodes participate so a semantic-only scope can get a virtual wiki. */
 export async function fetchEpisodicProjectScopes(driver: Driver): Promise<string[]> {
   const session = driver.session();
   try {
     const result = await session.run(
-      `MATCH (ep:Episodic)
-       // structured: ep.scope (e.g. 'project:agent-assist-cr') + any 'project:*' tag,
-       // plus the legacy task-prefix split — all reduced to the bare project name.
-       WITH ep,
-            CASE WHEN ep.scope IS NOT NULL AND ep.scope STARTS WITH 'project:'
-                 THEN [substring(ep.scope, 8)] ELSE [] END AS scopeNames,
-            [t IN coalesce(ep.tags, []) WHERE t STARTS WITH 'project:' | substring(t, 8)] AS tagNames,
-            CASE WHEN ep.task STARTS WITH '[project:'
-                 THEN [split(split(ep.task, ']')[0], ':')[1]] ELSE [] END AS taskNames
-       UNWIND (scopeNames + tagNames + taskNames) AS proj
+      `CALL {
+         MATCH (ep:Episodic)
+         WITH ep,
+              CASE WHEN ep.scope IS NOT NULL AND ep.scope STARTS WITH 'project:'
+                   THEN [substring(ep.scope, 8)] ELSE [] END AS scopeNames,
+              [t IN coalesce(ep.tags, []) WHERE t STARTS WITH 'project:' | substring(t, 8)] AS tagNames,
+              CASE WHEN ep.task STARTS WITH '[project:'
+                   THEN [split(split(ep.task, ']')[0], ':')[1]] ELSE [] END AS taskNames
+         UNWIND (scopeNames + tagNames + taskNames) AS proj
+         RETURN proj
+         UNION
+         MATCH (s:Semantic)
+         WHERE NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }
+         WITH s,
+              CASE WHEN s.scope IS NOT NULL AND s.scope STARTS WITH 'project:'
+                   THEN [substring(s.scope, 8)] ELSE [] END AS scopeNames,
+              [t IN coalesce(s.tags, []) WHERE t STARTS WITH 'project:' | substring(t, 8)] AS tagNames
+         UNWIND (scopeNames + tagNames) AS proj
+         RETURN proj
+       }
        WITH DISTINCT proj WHERE proj IS NOT NULL AND proj <> ''
        OPTIONAL MATCH (e:Entity {type: 'project'})
        WHERE toLower(e.name) = toLower(proj)
        WITH proj WHERE e IS NULL
        RETURN proj ORDER BY proj`,
     );
-    return result.records.map((r) => r.get('proj') as string);
+    return result.records.map((r) => r.get('proj') as string).filter(Boolean);
   } finally {
     await session.close();
   }
@@ -143,16 +151,19 @@ export async function fetchEntitiesModifiedByProject(driver: Driver, projectScop
 // ─── Semantic queries ───────────────────────────────────────────────────────
 
 export async function fetchSemanticsForEntity(driver: Driver, entityName: string): Promise<Array<{
-  id: string; content: string; confidence: number; tags: string[]; updated_at: string; entity_refs: string[];
+  id: string; content: string; confidence: number; memory_type?: string; tags: string[]; scope?: string; updated_at: string; entity_refs: string[];
 }>> {
   const session = driver.session();
   try {
     const result = await session.run(
-      `MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: $name})
-       OPTIONAL MATCH (s)-[:ABOUT]->(other:Entity)
-       WHERE other.name <> $name
+      `MATCH (s:Semantic)-[about:ABOUT]->(e:Entity {name: $name})
+       WHERE about.invalid_at IS NULL
+         AND NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }
+       OPTIONAL MATCH (s)-[otherAbout:ABOUT]->(other:Entity)
+       WHERE other.name <> $name AND otherAbout.invalid_at IS NULL
        RETURN s.id AS id, s.content AS content, s.confidence AS confidence,
-              s.tags AS tags, s.updated_at AS updated_at,
+              s.memory_type AS memory_type,
+              s.tags AS tags, s.scope AS scope, s.updated_at AS updated_at,
               collect(DISTINCT other.name) AS entity_refs
        ORDER BY s.confidence DESC, s.updated_at DESC`,
       { name: entityName },
@@ -161,7 +172,9 @@ export async function fetchSemanticsForEntity(driver: Driver, entityName: string
       id: r.get('id') as string,
       content: r.get('content') as string,
       confidence: r.get('confidence') as number,
+      memory_type: (r.get('memory_type') as string | null) ?? undefined,
       tags: (r.get('tags') as string[]) ?? [],
+      scope: (r.get('scope') as string | null) ?? undefined,
       updated_at: r.get('updated_at') as string,
       entity_refs: (r.get('entity_refs') as string[]) ?? [],
     }));
@@ -174,7 +187,9 @@ export async function fetchSemanticCountForEntity(driver: Driver, entityName: st
   const session = driver.session();
   try {
     const result = await session.run(
-      `MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: $name})
+      `MATCH (s:Semantic)-[about:ABOUT]->(e:Entity {name: $name})
+       WHERE about.invalid_at IS NULL
+         AND NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }
        RETURN count(s) AS cnt`,
       { name: entityName },
     );
@@ -185,22 +200,27 @@ export async function fetchSemanticCountForEntity(driver: Driver, entityName: st
 }
 
 export async function fetchAllSemantics(driver: Driver): Promise<Array<{
-  id: string; content: string; confidence: number; tags: string[]; entities: string[];
+  id: string; content: string; confidence: number; memory_type?: string; tags: string[]; scope?: string; entities: string[];
 }>> {
   const session = driver.session();
   try {
     const result = await session.run(
       `MATCH (s:Semantic)
-       OPTIONAL MATCH (s)-[:ABOUT]->(e:Entity)
+       WHERE NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }
+       OPTIONAL MATCH (s)-[about:ABOUT]->(e:Entity)
+       WHERE about.invalid_at IS NULL
        RETURN s.id AS id, s.content AS content, s.confidence AS confidence,
-              s.tags AS tags, collect(DISTINCT e.name) AS entities
+              s.memory_type AS memory_type,
+              s.tags AS tags, s.scope AS scope, collect(DISTINCT e.name) AS entities
        ORDER BY s.confidence DESC`,
     );
     return result.records.map((r) => ({
       id: r.get('id') as string,
       content: r.get('content') as string,
       confidence: r.get('confidence') as number,
+      memory_type: (r.get('memory_type') as string | null) ?? undefined,
       tags: (r.get('tags') as string[]) ?? [],
+      scope: (r.get('scope') as string | null) ?? undefined,
       entities: (r.get('entities') as string[]).filter(Boolean),
     }));
   } finally {
@@ -249,18 +269,27 @@ export async function fetchEpisodicsForProject(driver: Driver, projectScope: str
   }
 }
 
-export async function fetchEpisodicsForEntity(driver: Driver, entityName: string): Promise<EpisodicEntry[]> {
+export async function fetchEpisodicsForEntity(
+  driver: Driver,
+  entityName: string,
+  projectScope: string,
+  entityId?: string,
+): Promise<EpisodicEntry[]> {
   const session = driver.session();
   try {
+    const canonTag = `project:${projectScope.replace(/^project:/i, '').toLowerCase()}`;
+    const taskTag = `[project:${projectScope.replace(/^project:/i, '')}]`;
     const result = await session.run(
       `MATCH (ep:Episodic)
-       WHERE (ep.task CONTAINS $name OR ep.content CONTAINS $name)
-          OR EXISTS { MATCH (ep)-[:MODIFIED]->(e:Entity {name: $name}) }
+       WHERE (ep.scope = $canonTag OR $canonTag IN coalesce(ep.tags, []) OR ep.task CONTAINS $taskTag)
+         AND ((ep.task CONTAINS $name OR ep.content CONTAINS $name)
+              OR ($entityId IS NOT NULL AND EXISTS { MATCH (ep)-[:MODIFIED]->(e:Entity {id: $entityId}) }))
        RETURN DISTINCT ep.id AS id, ep.task AS task, ep.content AS content,
-              ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at
+              ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at,
+              ep.scope AS scope, ep.tags AS tags
        ORDER BY ep.created_at DESC
        LIMIT 20`,
-      { name: entityName },
+      { name: entityName, entityId: entityId ?? null, canonTag, taskTag },
     );
     return result.records.map((r) => ({
       id: r.get('id') as string,
@@ -270,6 +299,8 @@ export async function fetchEpisodicsForEntity(driver: Driver, entityName: string
       session_id: r.get('session_id') as string,
       created_at: r.get('created_at') as string,
       project_scope: extractProjectScope(r.get('task') as string),
+      scope: (r.get('scope') as string | null) ?? undefined,
+      tags: (r.get('tags') as string[] | null) ?? undefined,
     }));
   } finally {
     await session.close();
@@ -278,47 +309,50 @@ export async function fetchEpisodicsForEntity(driver: Driver, entityName: string
 
 /**
  * Batched form of {@link fetchEpisodicsForEntity}. Scans `:Episodic` ONCE for an
- * array of entity names instead of once per name, then regroups rows per name in
- * JS. Result identity is preserved exactly:
- *   - same matching predicate (CONTAINS on task/content OR the :MODIFIED edge),
- *   - the per-name `ORDER BY ep.created_at DESC LIMIT 20` is kept inside a per-name
- *     `CALL {}` subquery (the OPT-16 pattern), so each name still gets its own
+ * array of project entities instead of once per entity, then regroups rows per ID
+ * in JS. Text mentions are admitted only from the requested project scope; an
+ * exact `:MODIFIED` edge uses entity ID so same-named entities in another project
+ * cannot leak history. The per-entity `ORDER BY ... LIMIT 20` remains inside a
+ * `CALL {}` subquery (the OPT-16 pattern), so each entity still gets its own
  *     top-20, identical to calling fetchEpisodicsForEntity(name) individually.
  *
- * Returns a Map keyed by the input entity name. Names with no matches are absent
+ * Returns a Map keyed by the input entity ID. Entities with no matches are absent
  * from the map (callers should treat a miss as an empty list).
  */
 export async function fetchEpisodicsForEntities(
   driver: Driver,
-  entityNames: string[],
+  entities: Array<Pick<EntityInfo, 'id' | 'name'>>,
+  projectScope: string,
 ): Promise<Map<string, EpisodicEntry[]>> {
   const grouped = new Map<string, EpisodicEntry[]>();
-  if (entityNames.length === 0) return grouped;
-  // Callers may pass the same name once per same-named entity node (e.g. 65
-  // distinct '__init__.py' file entities under one project). Deduplicate before
-  // UNWIND: otherwise the per-name subquery runs once per duplicate and the
-  // regroup below appends the same episodic many times, producing duplicated
-  // wiki "History" rows.
-  const uniqueNames = [...new Set(entityNames)];
+  if (entities.length === 0) return grouped;
+  // Deduplicate stable IDs before UNWIND: otherwise the per-entity subquery runs
+  // more than once and appends duplicate wiki "History" rows.
+  const uniqueEntities = [...new Map(entities.map((entity) => [entity.id, entity])).values()];
+  const canonTag = `project:${projectScope.replace(/^project:/i, '').toLowerCase()}`;
+  const taskTag = `[project:${projectScope.replace(/^project:/i, '')}]`;
   const session = driver.session();
   try {
     const result = await session.run(
-      `UNWIND $names AS name
+      `UNWIND $entities AS entity
        CALL {
-         WITH name
+         WITH entity
          MATCH (ep:Episodic)
-         WHERE (ep.task CONTAINS name OR ep.content CONTAINS name)
-            OR EXISTS { MATCH (ep)-[:MODIFIED]->(e:Entity {name: name}) }
+         WHERE (ep.scope = $canonTag OR $canonTag IN coalesce(ep.tags, []) OR ep.task CONTAINS $taskTag)
+           AND ((ep.task CONTAINS entity.name OR ep.content CONTAINS entity.name)
+                OR EXISTS { MATCH (ep)-[:MODIFIED]->(e:Entity) WHERE e.id = entity.id })
          RETURN DISTINCT ep.id AS id, ep.task AS task, ep.content AS content,
-                ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at
+                ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at,
+                ep.scope AS scope, ep.tags AS tags
          ORDER BY ep.created_at DESC
          LIMIT 20
        }
-       RETURN name AS name, id, task, content, outcome, session_id, created_at`,
-      { names: uniqueNames },
+       RETURN entity.id AS entity_id, entity.name AS name,
+              id, task, content, outcome, session_id, created_at, scope, tags`,
+      { entities: uniqueEntities, canonTag, taskTag },
     );
     for (const r of result.records) {
-      const name = r.get('name') as string;
+      const entityId = r.get('entity_id') as string;
       const entry: EpisodicEntry = {
         id: r.get('id') as string,
         task: r.get('task') as string,
@@ -327,13 +361,15 @@ export async function fetchEpisodicsForEntities(
         session_id: r.get('session_id') as string,
         created_at: r.get('created_at') as string,
         project_scope: extractProjectScope(r.get('task') as string),
+        scope: (r.get('scope') as string | null) ?? undefined,
+        tags: (r.get('tags') as string[] | null) ?? undefined,
       };
-      const existing = grouped.get(name);
+      const existing = grouped.get(entityId);
       if (existing) {
         // Defense-in-depth: never store the same episodic twice for one name.
         if (!existing.some((e) => e.id === entry.id)) existing.push(entry);
       } else {
-        grouped.set(name, [entry]);
+        grouped.set(entityId, [entry]);
       }
     }
     return grouped;
@@ -348,7 +384,8 @@ export async function fetchRecentEpisodics(driver: Driver, limit: number): Promi
     const result = await session.run(
       `MATCH (ep:Episodic)
        RETURN ep.id AS id, ep.task AS task, ep.content AS content,
-              ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at
+              ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at,
+              ep.scope AS scope, ep.tags AS tags
        ORDER BY ep.created_at DESC
        LIMIT $limit`,
       { limit: neo4j.int(limit) },
@@ -361,6 +398,8 @@ export async function fetchRecentEpisodics(driver: Driver, limit: number): Promi
       session_id: r.get('session_id') as string,
       created_at: r.get('created_at') as string,
       project_scope: extractProjectScope(r.get('task') as string),
+      scope: (r.get('scope') as string | null) ?? undefined,
+      tags: (r.get('tags') as string[] | null) ?? undefined,
     }));
   } finally {
     await session.close();

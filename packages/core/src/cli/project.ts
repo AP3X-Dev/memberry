@@ -79,10 +79,16 @@ export function wikiBaseUrl(mcpUrl: string): string {
   }
 }
 
+/** Upper bound for the optional viewer refresh; setup already treats failure as non-fatal. */
+export const WIKI_REFRESH_TIMEOUT_MS = 10_000;
+
 /** Best-effort POST to the wiki viewer's `/api/refresh`. Never throws. */
 async function refreshWikiViewer(baseUrl: string): Promise<boolean> {
   try {
-    const res = await fetch(`${baseUrl}/api/refresh`, { method: 'POST' });
+    const res = await fetch(`${baseUrl}/api/refresh`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(WIKI_REFRESH_TIMEOUT_MS),
+    });
     return res.ok;
   } catch {
     return false;

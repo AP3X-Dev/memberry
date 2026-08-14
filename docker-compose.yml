@@ -91,6 +91,18 @@ services:
       MEMBERRY_MODEL_EXTRACTION: ${MEMBERRY_MODEL_EXTRACTION:-}
       MEMBERRY_MODEL_SYNTHESIS: ${MEMBERRY_MODEL_SYNTHESIS:-}
       MEMBERRY_MODEL_DREAM: ${MEMBERRY_MODEL_DREAM:-}
+      # Autonomous Episodic -> Semantic lifecycle. The MCP coordinator runs a
+      # debounced pass after stores plus startup/periodic catch-up. Core policy
+      # auto-applies only safe promote/reinforce proposals; corrections and
+      # contradictions remain reviewable.
+      MEMBERRY_CONSOLIDATION_ENABLED: ${MEMBERRY_CONSOLIDATION_ENABLED:-true}
+      MEMBERRY_CONSOLIDATION_AUTO_APPLY: ${MEMBERRY_CONSOLIDATION_AUTO_APPLY:-true}
+      MEMBERRY_CONSOLIDATION_DEBOUNCE_MS: ${MEMBERRY_CONSOLIDATION_DEBOUNCE_MS:-5000}
+      MEMBERRY_CONSOLIDATION_INTERVAL_MS: ${MEMBERRY_CONSOLIDATION_INTERVAL_MS:-900000}
+      MEMBERRY_CONSOLIDATION_STARTUP_DELAY_MS: ${MEMBERRY_CONSOLIDATION_STARTUP_DELAY_MS:-2000}
+      MEMBERRY_CONSOLIDATION_RETRY_BASE_MS: ${MEMBERRY_CONSOLIDATION_RETRY_BASE_MS:-1000}
+      MEMBERRY_CONSOLIDATION_RETRY_MAX_MS: ${MEMBERRY_CONSOLIDATION_RETRY_MAX_MS:-60000}
+      MEMBERRY_CONSOLIDATION_MAX_RETRIES: ${MEMBERRY_CONSOLIDATION_MAX_RETRIES:-5}
       # Multi-tenant isolation (opt-in). Empty = current single-tenant behavior.
       MEMBERRY_TENANT_TOKENS: ${MEMBERRY_TENANT_TOKENS:-}
       MEMBERRY_TENANT_DATASTORES: ${MEMBERRY_TENANT_DATASTORES:-}
@@ -103,12 +115,13 @@ services:
       # Defaults to /workspace so code indexing / ingest / compile have a real
       # host-backed root out of the box.
       MEMBERRY_INGEST_ALLOW_DIR: ${MEMBERRY_INGEST_ALLOW_DIR:-/workspace}
-      # gap-15 (T10): OPT-IN wiki autorefresh. When truthy, the MCP server
+      # Served wiki autorefresh. Enabled by default for the integrated stack so
+      # memory mutations are published without an operator compile step.
       # recompiles the served wiki (gap-3, port 3200) after store/bootstrap/ingest
-      # into the shared wiki_output volume mounted at /app/wiki below. Empty
-      # (default) = OFF = no recompile, behavior unchanged. The wiki viewer's
+      # and safe consolidation mutations into the shared wiki_output volume.
+      # The wiki viewer's
       # fs.watch on /app/wiki then picks up the regenerated markdown.
-      MEMBERRY_WIKI_AUTOREFRESH: ${MEMBERRY_WIKI_AUTOREFRESH:-}
+      MEMBERRY_WIKI_AUTOREFRESH: ${MEMBERRY_WIKI_AUTOREFRESH:-true}
       # Output dir MCP compiles into; must match the wiki viewer's served dir.
       MEMBERRY_WIKI_OUTPUT_DIR: ${MEMBERRY_WIKI_OUTPUT_DIR:-/app/wiki}
     volumes:
@@ -126,6 +139,14 @@ services:
       # 0.0.0.0 = LAN/server. The container itself binds all interfaces (see
       # MEMBERRY_HOST above); this line is the actual access gate.
       - "${MEMBERRY_PUBLISH_HOST:-127.0.0.1}:${MCP_PORT:-3101}:3101"
+    healthcheck:
+      # Prefer authenticated lifecycle-aware readiness when setup supplied a
+      # token; fall back to process liveness only for generated-token dev runs.
+      test: ["CMD-SHELL", "if [ -n \"$$MEMBERRY_API_TOKEN\" ]; then wget -qO- --header=\"Authorization: Bearer $$MEMBERRY_API_TOKEN\" http://127.0.0.1:3101/readyz >/dev/null; else wget -qO- http://127.0.0.1:3101/healthz >/dev/null; fi"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
     restart: unless-stopped
 
   # The MemBerry wiki viewer. Opt-in via the "wiki" profile so it ships only when
@@ -149,6 +170,9 @@ services:
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-memberry-local-dev}
       REDIS_URL: redis://:${REDIS_PASSWORD:-memberry-local-dev}@redis:6379
+      # Fail-closed guard: the wiki CLI refuses to compile/serve a shared
+      # logical multi-tenant graph until generation queries are tenant-qualified.
+      MEMBERRY_TENANT_TOKENS: ${MEMBERRY_TENANT_TOKENS:-}
       # Optional public-URL label for the wiki (e.g. host:3200). Empty by default.
       MEMBERRY_WIKI_PUBLIC_LABEL: ${MEMBERRY_WIKI_PUBLIC_LABEL:-}
     # The wiki service ALWAYS self-builds (`build` = compile + serve + fs.watch)

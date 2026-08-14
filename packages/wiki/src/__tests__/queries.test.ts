@@ -181,9 +181,86 @@ describe('fetchEpisodicProjectScopes', () => {
     expect(cypher).toContain("[t IN coalesce(ep.tags, []) WHERE t STARTS WITH 'project:' | substring(t, 8)]");
     // FALLBACK: legacy task-prefix split is retained
     expect(cypher).toContain("ep.task STARTS WITH '[project:'");
+    // Semantic-only projects must also become virtual wiki projects. Both the
+    // canonical s.scope property and project:* tags are valid scope sources.
+    expect(cypher).toContain('MATCH (s:Semantic)');
+    expect(cypher).toContain("s.scope IS NOT NULL AND s.scope STARTS WITH 'project:'");
+    expect(cypher).toContain("[t IN coalesce(s.tags, []) WHERE t STARTS WITH 'project:' | substring(t, 8)]");
     // existing "no project Entity yet" filter preserved
     expect(cypher).toContain("OPTIONAL MATCH (e:Entity {type: 'project'})");
     expect(cypher).toContain('WITH proj WHERE e IS NULL');
+  });
+});
+
+describe('semantic scope attribution', () => {
+  it('surfaces s.scope from all-semantic queries', async () => {
+    const { fetchAllSemantics } = await import('../queries.js');
+    const mockSession = {
+      run: vi.fn(async () => mockResult([mockRecord({
+        id: 'sem-scoped',
+        content: 'Scoped independently of tags',
+        confidence: 0.8,
+        tags: ['architecture'],
+        scope: 'project:memberry',
+        entities: [],
+      })])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+
+    const semantics = await fetchAllSemantics({ session: vi.fn(() => mockSession) } as unknown as Driver);
+
+    expect(semantics[0].scope).toBe('project:memberry');
+    const cypher = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(cypher).toContain('s.scope AS scope');
+    expect(cypher).toContain('NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }');
+    expect(cypher).toContain('[about:ABOUT]');
+    expect(cypher).toContain('about.invalid_at IS NULL');
+  });
+
+  it('surfaces s.scope from entity-semantic queries', async () => {
+    const { fetchSemanticsForEntity } = await import('../queries.js');
+    const mockSession = {
+      run: vi.fn(async () => mockResult([mockRecord({
+        id: 'sem-entity-scoped',
+        content: 'Entity claim',
+        confidence: 0.8,
+        tags: [],
+        scope: 'project:memberry',
+        updated_at: '2026-08-14T00:00:00Z',
+        entity_refs: [],
+      })])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+
+    const semantics = await fetchSemanticsForEntity(
+      { session: vi.fn(() => mockSession) } as unknown as Driver,
+      'memberry',
+    );
+
+    expect(semantics[0].scope).toBe('project:memberry');
+    const cypher = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(cypher).toContain('s.scope AS scope');
+    expect(cypher).toContain('NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }');
+    expect(cypher).toContain('about.invalid_at IS NULL');
+    expect(cypher).toContain('otherAbout.invalid_at IS NULL');
+  });
+
+  it('counts only active semantics linked by active ABOUT edges', async () => {
+    const { fetchSemanticCountForEntity } = await import('../queries.js');
+    const mockSession = {
+      run: vi.fn(async () => mockResult([mockRecord({ cnt: 2 })])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+
+    expect(await fetchSemanticCountForEntity(
+      { session: vi.fn(() => mockSession) } as unknown as Driver,
+      'memberry',
+    )).toBe(2);
+
+    const cypher = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(cypher).toContain('NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }');
+    expect(cypher).toContain('[about:ABOUT]');
+    expect(cypher).toContain('about.invalid_at IS NULL');
   });
 });
 
@@ -293,10 +370,11 @@ describe('fetchEpisodicsForEntities (batched single-scan)', () => {
   it('scans :Episodic once for many entities and groups rows per entity', async () => {
     const { fetchEpisodicsForEntities } = await import('../queries.js');
 
-    // One UNWIND scan returns rows for two entities, each tagged with `name`.
+    // One UNWIND scan returns rows for two entities, each tagged with stable ID.
     const mockSession = {
       run: vi.fn(async () => mockResult([
         mockRecord({
+          entity_id: 'ent-auth',
           name: 'auth-module',
           id: 'ep-1',
           task: '[project:amp] Harden auth-module',
@@ -306,6 +384,7 @@ describe('fetchEpisodicsForEntities (batched single-scan)', () => {
           created_at: '2026-04-09T12:00:00Z',
         }),
         mockRecord({
+          entity_id: 'ent-auth',
           name: 'auth-module',
           id: 'ep-2',
           task: 'General auth-module review',
@@ -315,6 +394,7 @@ describe('fetchEpisodicsForEntities (batched single-scan)', () => {
           created_at: '2026-04-08T12:00:00Z',
         }),
         mockRecord({
+          entity_id: 'ent-wiki',
           name: 'wiki',
           id: 'ep-3',
           task: '[project:amp] wiki compile perf',
@@ -329,18 +409,21 @@ describe('fetchEpisodicsForEntities (batched single-scan)', () => {
 
     const driver = { session: vi.fn(() => mockSession) } as unknown as Driver;
 
-    const grouped = await fetchEpisodicsForEntities(driver, ['auth-module', 'wiki']);
+    const grouped = await fetchEpisodicsForEntities(driver, [
+      { id: 'ent-auth', name: 'auth-module' },
+      { id: 'ent-wiki', name: 'wiki' },
+    ], 'amp');
 
     // ONE label scan for the whole batch, not one per entity.
     expect((mockSession.run as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
 
     // Same per-entity episodics + same project_scope extraction as the
     // per-entity fetchEpisodicsForEntity would have returned.
-    expect(grouped.get('auth-module')?.map((e) => e.id)).toEqual(['ep-1', 'ep-2']);
-    expect(grouped.get('auth-module')?.[0].project_scope).toBe('amp');
-    expect(grouped.get('auth-module')?.[1].project_scope).toBeNull();
-    expect(grouped.get('wiki')?.map((e) => e.id)).toEqual(['ep-3']);
-    expect(grouped.get('wiki')?.[0].project_scope).toBe('amp');
+    expect(grouped.get('ent-auth')?.map((e) => e.id)).toEqual(['ep-1', 'ep-2']);
+    expect(grouped.get('ent-auth')?.[0].project_scope).toBe('amp');
+    expect(grouped.get('ent-auth')?.[1].project_scope).toBeNull();
+    expect(grouped.get('ent-wiki')?.map((e) => e.id)).toEqual(['ep-3']);
+    expect(grouped.get('ent-wiki')?.[0].project_scope).toBe('amp');
   });
 
   it('preserves the per-entity ORDER/LIMIT contract in the Cypher (CALL{} subquery)', async () => {
@@ -352,17 +435,21 @@ describe('fetchEpisodicsForEntities (batched single-scan)', () => {
     } as unknown as Session;
     const driver = { session: vi.fn(() => mockSession) } as unknown as Driver;
 
-    await fetchEpisodicsForEntities(driver, ['x']);
+    await fetchEpisodicsForEntities(driver, [{ id: 'ent-x', name: 'x' }], 'alpha');
 
     const cypher = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    const params = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0][1] as Record<string, unknown>;
     // Single scan via UNWIND, per-name top-20 preserved inside a CALL{} subquery.
-    expect(cypher).toContain('UNWIND $names AS name');
+    expect(cypher).toContain('UNWIND $entities AS entity');
     expect(cypher).toContain('CALL {');
     expect(cypher).toContain('ORDER BY ep.created_at DESC');
     expect(cypher).toContain('LIMIT 20');
-    // Same matching predicate as the per-entity query (CONTAINS + :MODIFIED edge).
-    expect(cypher).toContain('ep.task CONTAINS name OR ep.content CONTAINS name');
-    expect(cypher).toContain('[:MODIFIED]->(e:Entity {name: name})');
+    expect(cypher).toContain('ep.scope = $canonTag');
+    expect(cypher).toContain('$canonTag IN coalesce(ep.tags, [])');
+    expect(cypher).toContain('ep.task CONTAINS entity.name OR ep.content CONTAINS entity.name');
+    expect(cypher).toContain('[:MODIFIED]->(e:Entity) WHERE e.id = entity.id');
+    expect(params.canonTag).toBe('project:alpha');
+    expect(params.entities).toEqual([{ id: 'ent-x', name: 'x' }]);
   });
 
   it('returns an empty map without touching the DB for an empty name list', async () => {
@@ -371,15 +458,40 @@ describe('fetchEpisodicsForEntities (batched single-scan)', () => {
     const sessionFactory = vi.fn();
     const driver = { session: sessionFactory } as unknown as Driver;
 
-    const grouped = await fetchEpisodicsForEntities(driver, []);
+    const grouped = await fetchEpisodicsForEntities(driver, [], 'alpha');
 
     expect(grouped.size).toBe(0);
     expect(sessionFactory).not.toHaveBeenCalled();
   });
+
+  it('binds alpha entity history to alpha scope and ID, excluding beta identity', async () => {
+    const { fetchEpisodicsForEntities } = await import('../queries.js');
+    const mockSession = {
+      run: vi.fn(async () => mockResult([])),
+      close: vi.fn(async () => {}),
+    } as unknown as Session;
+    const driver = { session: vi.fn(() => mockSession) } as unknown as Driver;
+
+    await fetchEpisodicsForEntities(
+      driver,
+      [{ id: 'alpha-shared-name-id', name: 'SharedEngine' }],
+      'alpha',
+    );
+
+    const [cypher, params] = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0] as [string, Record<string, unknown>];
+    expect(params).toMatchObject({
+      canonTag: 'project:alpha',
+      taskTag: '[project:alpha]',
+      entities: [{ id: 'alpha-shared-name-id', name: 'SharedEngine' }],
+    });
+    expect(JSON.stringify(params)).not.toContain('beta-shared-name-id');
+    expect(cypher).toContain('[:MODIFIED]->(e:Entity) WHERE e.id = entity.id');
+    expect(cypher).toContain('ep.scope = $canonTag');
+  });
 });
 
 describe('fetchRecentEpisodics', () => {
-  it('returns episodic entries with project scope extracted', async () => {
+  it('returns episodic entries with structured scope and tags preserved', async () => {
     const { fetchRecentEpisodics } = await import('../queries.js');
 
     const mockSession = {
@@ -391,6 +503,8 @@ describe('fetchRecentEpisodics', () => {
           outcome: 'approved',
           session_id: 'sess-1',
           created_at: '2026-04-09T12:00:00Z',
+          scope: 'project:amp',
+          tags: ['project:amp', 'wiki'],
         }),
         mockRecord({
           id: 'ep-2',
@@ -410,6 +524,11 @@ describe('fetchRecentEpisodics', () => {
 
     expect(episodes).toHaveLength(2);
     expect(episodes[0].project_scope).toBe('amp');
+    expect(episodes[0].scope).toBe('project:amp');
+    expect(episodes[0].tags).toEqual(['project:amp', 'wiki']);
     expect(episodes[1].project_scope).toBeNull();
+
+    const cypher = (mockSession.run as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(cypher).toContain('ep.scope AS scope, ep.tags AS tags');
   });
 });

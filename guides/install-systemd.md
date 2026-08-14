@@ -48,6 +48,10 @@ OPENAI_API_KEY=<optional>
 MEMBERRY_MODEL_EXTRACTION=
 MEMBERRY_MODEL_SYNTHESIS=
 MEMBERRY_MODEL_DREAM=
+MEMBERRY_CONSOLIDATION_ENABLED=true
+MEMBERRY_CONSOLIDATION_AUTO_APPLY=true
+MEMBERRY_WIKI_AUTOREFRESH=true
+MEMBERRY_WIKI_OUTPUT_DIR=<INSTALL_DIR>/wiki
 ```
 
 Lock it down — it holds secrets:
@@ -70,6 +74,7 @@ After=network.target docker.service
 Type=simple
 User=<USER>
 WorkingDirectory=<INSTALL_DIR>
+ExecStartPre=/usr/bin/mkdir -p <INSTALL_DIR>/wiki
 ExecStart=/usr/bin/npx tsx packages/mcp/src/server.ts
 Restart=always
 RestartSec=5
@@ -78,6 +83,10 @@ Environment=NODE_ENV=production
 Environment=MEMBERRY_EXPORT_PATH=<INSTALL_DIR>/.memberry
 Environment=MCP_PORT=3101
 Environment=HOST=0.0.0.0
+Environment=MEMBERRY_CONSOLIDATION_ENABLED=true
+Environment=MEMBERRY_CONSOLIDATION_AUTO_APPLY=true
+Environment=MEMBERRY_WIKI_AUTOREFRESH=true
+Environment=MEMBERRY_WIKI_OUTPUT_DIR=<INSTALL_DIR>/wiki
 
 [Install]
 WantedBy=multi-user.target
@@ -99,6 +108,17 @@ Environment=MEMBERRY_READYZ_INTERVAL_MS=500
 ```
 
 Install it under `systemd/system/memberry-mcp.service.d/` to enable.
+
+The MCP process now owns the normal memory lifecycle: it debounces successful
+stores by `project:*` scope, performs an immediate startup catch-up, repeats the
+catch-up every 15 minutes, retries transient failures with bounded exponential
+backoff, and republishes the wiki after safe applied mutations. `/readyz`
+includes the coordinator's last success/error and pending retry state. No timer
+unit or manual `berry_consolidate` call is needed for healthy operation.
+
+`MEMBERRY_CONSOLIDATION_AUTO_APPLY=true` does not authorize silent corrections:
+core policy auto-applies only corroborated promotion and positive reinforcement.
+Correction, contradiction, supersede, and decay proposals remain review-only.
 
 ## 4. The wiki viewer unit (optional)
 
@@ -166,10 +186,11 @@ commits it (the snapshot path is force-added since `.memberry/` is gitignored);
 ExecStart=/usr/bin/npx tsx packages/core/src/cli.ts snapshot --path ./.memberry --commit
 ```
 
-### Wiki recompile — every 6 hours
+### Wiki recompile — every 6 hours (optional safety net)
 
 `memberry-wiki-compile.service` recompiles the wiki; `memberry-wiki-compile.timer`
-fires every 6 hours:
+fires every 6 hours. Live MCP publication already keeps the wiki current; retain
+this persistent timer only as a belt-and-suspenders recovery check:
 
 ```ini
 # memberry-wiki-compile.service (ExecStart)

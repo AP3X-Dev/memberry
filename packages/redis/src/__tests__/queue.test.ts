@@ -81,6 +81,15 @@ describe('ConsolidationQueue', () => {
     expect(entries.find((e) => e.member === 'scope-X')).toBeUndefined();
   });
 
+  it('should remove a named member without disturbing lower-scored work', async () => {
+    if (!redisAvailable) return;
+    await queue.incrementScore('handled', 5);
+    await queue.incrementScore('pending', 1);
+
+    expect(await queue.remove('handled')).toBe(1);
+    expect(await queue.peek()).toEqual([{ member: 'pending', score: 1 }]);
+  });
+
   it('should peek without removing', async () => {
     if (!redisAvailable) return;
     await queue.incrementScore('scope-1', 10);

@@ -5,6 +5,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ImportResolver } from '../resolver.js';
 import type { ImportInfo } from '../types.js';
+import path from 'node:path';
 
 describe('ImportResolver.resolveImportsBatch', () => {
   it('resolves imports in-memory and issues exactly ONE UNWIND round-trip', async () => {
@@ -21,13 +22,17 @@ describe('ImportResolver.resolveImportsBatch', () => {
 
     // Target files exist only in the indexed set (NOT on disk) — so a created edge
     // proves resolution happened in memory, not via fs.stat.
-    const indexed = new Set(['/proj/b.ts', '/proj/c.ts']);
+    const projectRoot = path.resolve('proj');
+    const sourcePath = path.join(projectRoot, 'a.ts');
+    const bPath = path.join(projectRoot, 'b.ts');
+    const cPath = path.join(projectRoot, 'c.ts');
+    const indexed = new Set([bPath, cPath]);
     const imports: ImportInfo[] = [
-      { file_path: '/proj/a.ts', source: './b', specifiers: ['foo'] } as ImportInfo,
-      { file_path: '/proj/a.ts', source: './c', specifiers: [] } as ImportInfo,
+      { file_path: sourcePath, source: './b', specifiers: ['foo'] } as ImportInfo,
+      { file_path: sourcePath, source: './c', specifiers: [] } as ImportInfo,
     ];
 
-    const n = await resolver.resolveImportsBatch(imports, '/proj', indexed);
+    const n = await resolver.resolveImportsBatch(imports, projectRoot, indexed);
 
     const importCalls = calls.filter((c) => c.q.includes('MERGE (from)-[:SYMBOL_IMPORTS]->(to)'));
     expect(importCalls).toHaveLength(1); // one round-trip for both imports
@@ -35,8 +40,8 @@ describe('ImportResolver.resolveImportsBatch', () => {
 
     const rows = importCalls[0]!.p.rows as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ fromPath: '/proj/a.ts', toPath: '/proj/b.ts', specifiers: ['foo'], noSpecifiers: false });
-    expect(rows[1]).toMatchObject({ fromPath: '/proj/a.ts', toPath: '/proj/c.ts', noSpecifiers: true });
+    expect(rows[0]).toMatchObject({ fromPath: sourcePath, toPath: bPath, specifiers: ['foo'], noSpecifiers: false });
+    expect(rows[1]).toMatchObject({ fromPath: sourcePath, toPath: cPath, noSpecifiers: true });
     expect(n).toBe(2);
   });
 

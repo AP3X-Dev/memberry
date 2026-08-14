@@ -8,6 +8,7 @@ After=network.target docker.service
 Type=simple
 User=<USER>
 WorkingDirectory=<INSTALL_DIR>
+ExecStartPre=/usr/bin/mkdir -p <INSTALL_DIR>/wiki
 ExecStart=/usr/bin/npx tsx packages/mcp/src/server.ts
 Restart=always
 RestartSec=5
@@ -16,6 +17,10 @@ Environment=NODE_ENV=production
 Environment=MEMBERRY_EXPORT_PATH=<INSTALL_DIR>/.memberry
 Environment=MCP_PORT=3101
 Environment=HOST=0.0.0.0
+Environment=MEMBERRY_CONSOLIDATION_ENABLED=true
+Environment=MEMBERRY_CONSOLIDATION_AUTO_APPLY=true
+Environment=MEMBERRY_WIKI_AUTOREFRESH=true
+Environment=MEMBERRY_WIKI_OUTPUT_DIR=<INSTALL_DIR>/wiki
 
 [Install]
 WantedBy=multi-user.target

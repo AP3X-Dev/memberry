@@ -14,6 +14,7 @@ export type {
   SourceCitation,
   EntityInfo,
   EpisodicEntry,
+  SemanticEntry,
   ProjectData,
   SourceInfo,
   LibraryPage,
@@ -30,7 +31,14 @@ export type {
 } from './types.js';
 
 // Services
-export { WikiCompiler, slugify } from './compile.js';
+export {
+  WikiCompiler,
+  slugify,
+  resolvePublishedWikiDir,
+  ACTIVE_GENERATION_FILENAME,
+  WIKI_GENERATIONS_DIRNAME,
+} from './compile.js';
+export type { WikiCompilerOptions } from './compile.js';
 export { IngestionService, initWikiSchema } from './ingest.js';
 export {
   DefaultDocumentConverter,

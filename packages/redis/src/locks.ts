@@ -15,6 +15,22 @@ export class DistributedLock {
     return result === 'OK';
   }
 
+  /** Extend a lease only when it is still owned by this holder. */
+  async renew(scope: string, holder: string, ttlSeconds: number = DEFAULT_TTL): Promise<boolean> {
+    const result = await this.redis.eval(
+      `if redis.call("GET", KEYS[1]) == ARGV[1] then
+         return redis.call("EXPIRE", KEYS[1], ARGV[2])
+       else
+         return 0
+       end`,
+      1,
+      lockKey(scope),
+      holder,
+      ttlSeconds,
+    );
+    return result === 1;
+  }
+
   async release(scope: string, holder: string): Promise<boolean> {
     const key = lockKey(scope);
     // Atomic compare-and-delete via Lua to prevent TOCTOU race

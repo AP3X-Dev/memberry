@@ -16,6 +16,7 @@ import { registerRetrievalTools, retrievalContainerForTenant, RETRIEVAL_TOOL_NAM
 import { registerWikiTools, WIKI_TOOL_NAMES } from '@memberry/wiki';
 import { registerGraphTools, GRAPH_TOOL_NAMES } from '@memberry/graph';
 import { readEnv, resolvePort } from '@memberry/core';
+import { getConsolidationAutomationHealth } from './consolidation-coordinator.js';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -38,6 +39,11 @@ export interface SSEHandle {
    * tenant's session.
    */
   sessionIdentity: Map<string, { tenant: string; actor: string }>;
+}
+
+/** Pure status selector kept separate so degraded readiness policy is testable. */
+export function readinessStatusCode(automation: { unhealthy?: boolean }): 200 | 503 {
+  return automation.unhealthy === true ? 503 : 200;
 }
 
 export interface AMPMCPServer {
@@ -519,6 +525,7 @@ export function createAMPServer(): AMPMCPServer {
         registered_sessions: servers.size + streamableServers.size,
         auth_required: effectiveToken !== null,
         uptime_ms: Date.now() - startedAt,
+        consolidation_automation: getConsolidationAutomationHealth(),
       };
     }
 
@@ -630,7 +637,13 @@ export function createAMPServer(): AMPMCPServer {
 
           // ── Authenticated readiness check ────────────────────────────────
           if (req.method === 'GET' && pathname === '/readyz') {
-            sendJson(res, 200, statusPayload('ready'));
+            const body = statusPayload('ready');
+            const automation = body['consolidation_automation'] as { unhealthy?: boolean };
+            // During startup grace and while bounded retries are pending the
+            // service remains ready. Only stale/exhausted enabled automation is
+            // genuinely unhealthy; disabled/read-only modes are explicit but
+            // do not create a false outage.
+            sendJson(res, readinessStatusCode(automation), body);
             return;
           }
 

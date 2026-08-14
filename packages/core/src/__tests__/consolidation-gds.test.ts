@@ -515,9 +515,7 @@ describe('PageRank-based importance scoring', () => {
     }
   });
 
-  it('pageRank scores influence which nodes get decay proposals via queue', async () => {
-    // High-scoring nodes in the queue (above threshold) should generate
-    // decay proposals during consolidation
+  it('does not reinterpret untyped pageRank queue scores as decay instructions', async () => {
     const highScoreNode = makeSemanticNode('sem-high-pr', {
       confidence: 0.95,
       signal_count: 10,
@@ -556,13 +554,11 @@ describe('PageRank-based importance scoring', () => {
     const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
     const result = await engine.run('pagerank-scope');
 
-    // Only the high-score entry (score=10 >= threshold=3) generates a proposal
-    expect(result.proposals).toHaveLength(1);
-    expect(result.proposals[0]!.affected_ids).toContain('sem-high-pr');
-    expect(result.proposals[0]!.type).toBe('decay');
+    expect(result.proposals).toHaveLength(0);
+    expect(redis.queue.popHighest).not.toHaveBeenCalled();
   });
 
-  it('queue score boosts signal weight for combined entries', async () => {
+  it('does not double-count an untyped queue score alongside typed signals', async () => {
     const node = makeSemanticNode('sem-boosted', { confidence: 0.8 });
 
     // 1 reinforcement = weight 1.0 (below threshold 3)
@@ -594,11 +590,8 @@ describe('PageRank-based importance scoring', () => {
     const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
     const result = await engine.run('boost-scope');
 
-    // Signal alone (1.0) would not meet threshold, but queue boost (5) pushes it to 6.0
-    expect(result.proposals).toHaveLength(1);
-    // A reinforcement signal (no corrections/contradictions) raises confidence.
-    expect(result.proposals[0]!.type).toBe('reinforce');
-    expect(result.proposals[0]!.affected_ids).toContain('sem-boosted');
+    expect(result.proposals).toHaveLength(0);
+    expect(redis.queue.popHighest).not.toHaveBeenCalled();
   });
 
   it('pageRank returns empty for entity with no semantic nodes', async () => {
@@ -638,7 +631,7 @@ describe('PageRank-based importance scoring', () => {
     expect(orphans[0]!.id).toBe('sem-orphan');
   });
 
-  it('decay proposal confidence is 95% of original', async () => {
+  it('never creates queue-only decay, regardless of queue score', async () => {
     const node = makeSemanticNode('sem-decay-check', { confidence: 0.8 });
 
     let queueCallCount = 0;
@@ -663,11 +656,7 @@ describe('PageRank-based importance scoring', () => {
     const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
     const result = await engine.run('decay-check-scope');
 
-    const proposal = result.proposals[0]!;
-    expect(proposal.type).toBe('decay');
-    const afterConfidence = (proposal.after as { confidence: number }).confidence;
-    // Decay is 0.95 * original, clamped to >= 0
-    expect(afterConfidence).toBeCloseTo(0.8 * 0.95, 5);
-    expect(afterConfidence).toBeCloseTo(0.76, 5);
+    expect(result.proposals).toHaveLength(0);
+    expect(redis.queue.popHighest).not.toHaveBeenCalled();
   });
 });

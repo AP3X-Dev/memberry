@@ -1,5 +1,6 @@
 // packages/redis/src/__tests__/locks.test.ts
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
+import type { Redis } from 'ioredis';
 import { createRedisClient } from '../client.js';
 import { DistributedLock } from '../locks.js';
 
@@ -98,5 +99,26 @@ describe('DistributedLock', () => {
     await lock.release('test-scope-6', 'worker-A');
     const reacquired = await lock.acquire('test-scope-6', 'worker-C', 30);
     expect(reacquired).toBe(true);
+  });
+});
+
+describe('DistributedLock.renew (mocked redis)', () => {
+  it('uses one owner-checked Lua operation to extend the lease', async () => {
+    const evalCommand = vi.fn().mockResolvedValue(1);
+    const lock = new DistributedLock({ eval: evalCommand } as unknown as Redis);
+
+    await expect(lock.renew('scope-a', 'holder-a', 45)).resolves.toBe(true);
+    expect(evalCommand).toHaveBeenCalledWith(
+      expect.stringContaining('EXPIRE'),
+      1,
+      'amp:lock:consolidate:scope-a',
+      'holder-a',
+      45,
+    );
+  });
+
+  it('cannot renew a lease owned by another holder', async () => {
+    const lock = new DistributedLock({ eval: vi.fn().mockResolvedValue(0) } as unknown as Redis);
+    await expect(lock.renew('scope-a', 'wrong-holder', 30)).resolves.toBe(false);
   });
 });

@@ -41,6 +41,14 @@ function makeStreamSignal(targetId: string, type: StreamSignal['type'] = 'reinfo
   };
 }
 
+function makeDeliveredSignal(
+  streamId: string,
+  targetId: string,
+  type: StreamSignal['type'] = 'reinforcement',
+): StreamSignal & { stream_id: string } {
+  return { ...makeStreamSignal(targetId, type), stream_id: streamId };
+}
+
 // ─── Mock factories ────────────────────────────────────────────────────────────
 
 function makeRedis(overrides: Partial<ConsolidationRedisLayer> = {}): ConsolidationRedisLayer {
@@ -114,6 +122,34 @@ describe('ConsolidationEngine.run', () => {
 
     await expect(engine.run('test-scope')).rejects.toThrow('stream error');
     expect(redis.lock.release).toHaveBeenCalledOnce();
+  });
+
+  it('renews the distributed lease during a long consolidation run', async () => {
+    vi.useFakeTimers();
+    try {
+      const renew = vi.fn().mockResolvedValue(true);
+      const redis = makeRedis({
+        lock: {
+          acquire: vi.fn().mockResolvedValue(true),
+          renew,
+          release: vi.fn().mockResolvedValue(true),
+        },
+        signals: {
+          consume: vi.fn().mockImplementation(
+            () => new Promise((resolve) => setTimeout(() => resolve([]), 10_001)),
+          ),
+        },
+      });
+      const run = new ConsolidationEngine(redis, makeNeo4j(), makeConfig()).run('slow-scope');
+
+      await vi.advanceTimersByTimeAsync(10_001);
+      await run;
+
+      expect(renew).toHaveBeenCalledWith('slow-scope', expect.any(String), 30);
+      expect(redis.lock.release).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('generates proposals from signals when threshold is met', async () => {
@@ -248,7 +284,7 @@ describe('ConsolidationEngine.run', () => {
     expect(result.proposals.some((p) => p.affected_ids.includes('sem-fallback'))).toBe(true);
   });
 
-  it('auto-applies proposals when autoApply is true', async () => {
+  it('keeps correction-derived supersedes review-gated when autoApply is true', async () => {
     const node = makeSemanticNode('sem-auto');
 
     const signals: StreamSignal[] = [
@@ -275,9 +311,301 @@ describe('ConsolidationEngine.run', () => {
 
     expect(result.skipped).toBe(false);
     expect(result.proposals.length).toBeGreaterThan(0);
-    expect(result.applied.length).toBeGreaterThan(0);
-    // save should NOT be called when auto-applying
+    expect(result.applied).toHaveLength(0);
+    expect(redis.proposals.save).toHaveBeenCalledOnce();
+    expect(neo4j.semantic.supersede).not.toHaveBeenCalled();
+  });
+
+  it('auto-applies corroborated reinforcement when autoApply is true', async () => {
+    const node = makeSemanticNode('sem-auto-reinforce');
+    const signals = [
+      makeStreamSignal(node.id),
+      makeStreamSignal(node.id),
+      makeStreamSignal(node.id),
+    ];
+    const redis = makeRedis({ signals: { consume: vi.fn().mockResolvedValue(signals) } });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(node),
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('unused'),
+      },
+    });
+
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(true)).run('auto-scope');
+
+    expect(result.proposals[0]?.type).toBe('reinforce');
+    expect(result.applied).toEqual([result.proposals[0]?.id]);
+    expect(neo4j.semantic.updateConfidence).toHaveBeenCalledOnce();
     expect(redis.proposals.save).not.toHaveBeenCalled();
+  });
+
+  it('uses a stable Neo4j application key when reinforcement is redelivered after ACK failure', async () => {
+    const node = makeSemanticNode('sem-idempotent');
+    const signals = [
+      makeDeliveredSignal('stable-1', node.id),
+      makeDeliveredSignal('stable-2', node.id),
+      makeDeliveredSignal('stable-3', node.id),
+    ];
+    const ack = vi.fn()
+      .mockRejectedValueOnce(new Error('redis unavailable after graph commit'))
+      .mockResolvedValueOnce(3);
+    const redis = makeRedis({ signals: { consume: vi.fn().mockResolvedValue(signals), ack } });
+    const updateConfidence = vi.fn().mockResolvedValue(undefined);
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(node),
+        updateConfidence,
+        supersede: vi.fn().mockResolvedValue('unused'),
+      },
+    });
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(true));
+
+    await expect(engine.run('idempotent-scope')).rejects.toThrow('redis unavailable');
+    await expect(engine.run('idempotent-scope')).resolves.toMatchObject({ skipped: false });
+
+    expect(updateConfidence).toHaveBeenCalledTimes(2);
+    const firstKey = updateConfidence.mock.calls[0]?.[2];
+    const secondKey = updateConfidence.mock.calls[1]?.[2];
+    expect(firstKey).toMatch(/^signal-/);
+    expect(secondKey).toBe(firstKey);
+  });
+
+  it('treats cache invalidation as best-effort after durable reinforcement', async () => {
+    const node = makeSemanticNode('sem-cache-failure');
+    const signals = [
+      makeDeliveredSignal('cache-1', node.id),
+      makeDeliveredSignal('cache-2', node.id),
+      makeDeliveredSignal('cache-3', node.id),
+    ];
+    const ack = vi.fn().mockResolvedValue(3);
+    const redis = makeRedis({
+      signals: { consume: vi.fn().mockResolvedValue(signals), ack },
+      cache: { invalidateByNodeId: vi.fn().mockRejectedValue(new Error('cache down')) },
+    });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(node),
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('unused'),
+      },
+    });
+
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(true)).run('cache-scope');
+
+    expect(result.applied).toHaveLength(1);
+    expect(ack).toHaveBeenCalledOnce();
+  });
+
+  it('accumulates 1+1+1 typed reinforcement deliveries across runs before ACK', async () => {
+    const node = makeSemanticNode('sem-accumulate');
+    let run = 0;
+    const all = [
+      makeDeliveredSignal('1-0', node.id),
+      makeDeliveredSignal('2-0', node.id),
+      makeDeliveredSignal('3-0', node.id),
+    ];
+    const ack = vi.fn().mockResolvedValue(3);
+    const remove = vi.fn().mockResolvedValue(1);
+    const redis = makeRedis({
+      signals: {
+        consume: vi.fn().mockImplementation(() => Promise.resolve(all.slice(0, ++run))),
+        ack,
+      },
+      queue: { remove },
+    });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(node),
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('unused'),
+      },
+    });
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+
+    expect((await engine.run('scope')).proposals).toHaveLength(0);
+    expect((await engine.run('scope')).proposals).toHaveLength(0);
+    expect(ack).not.toHaveBeenCalled();
+
+    const third = await engine.run('scope');
+    expect(third.proposals).toHaveLength(1);
+    expect(third.proposals[0]?.type).toBe('reinforce');
+    expect(ack).toHaveBeenCalledWith('consolidation', ['1-0', '2-0', '3-0']);
+    expect(remove).toHaveBeenCalledWith(node.id);
+  });
+
+  it('redelivers after a crash/failure before proposal save instead of ACKing', async () => {
+    const node = makeSemanticNode('sem-redeliver');
+    const signals = [makeDeliveredSignal('crash-1', node.id, 'correction')];
+    const save = vi.fn()
+      .mockRejectedValueOnce(new Error('proposal store unavailable'))
+      .mockResolvedValueOnce(undefined);
+    const ack = vi.fn().mockResolvedValue(1);
+    const redis = makeRedis({
+      signals: { consume: vi.fn().mockResolvedValue(signals), ack },
+      proposals: {
+        save,
+        get: vi.fn().mockResolvedValue(null),
+        listPending: vi.fn().mockResolvedValue([]),
+        remove: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(node),
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('unused'),
+      },
+    });
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+
+    await expect(engine.run('scope')).rejects.toThrow('proposal store unavailable');
+    expect(ack).not.toHaveBeenCalled();
+
+    const retried = await engine.run('scope');
+    expect(retried.proposals).toHaveLength(1);
+    expect(ack).toHaveBeenCalledWith('consolidation', ['crash-1']);
+  });
+
+  it('leaves another project pending and ACKs only the current project signal', async () => {
+    const nodeA = {
+      ...makeSemanticNode('sem-project-a'),
+      scope: 'project:a',
+      tags: ['project:a'],
+    };
+    const nodeB = {
+      ...makeSemanticNode('sem-project-b'),
+      scope: 'project:b',
+      tags: ['project:b'],
+    };
+    const signalA = {
+      ...makeDeliveredSignal('a-1', nodeA.id, 'correction'),
+      scope: 'project:a',
+      tenant_id: 'default',
+    };
+    const signalB = {
+      ...makeDeliveredSignal('b-1', nodeB.id, 'correction'),
+      scope: 'project:b',
+      tenant_id: 'default',
+    };
+    const ack = vi.fn().mockResolvedValue(1);
+    const getByIds = vi.fn().mockResolvedValue([nodeA]);
+    const redis = makeRedis({
+      signals: { consume: vi.fn().mockResolvedValue([signalA, signalB]), ack },
+    });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(null),
+        getByIds,
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('unused'),
+      },
+    });
+
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false)).run('project:a');
+
+    expect(result.proposals).toHaveLength(1);
+    expect(result.proposals[0]?.affected_ids).toEqual([nodeA.id]);
+    expect(getByIds).toHaveBeenCalledWith([nodeA.id]);
+    expect(ack).toHaveBeenCalledWith('consolidation', ['a-1']);
+  });
+
+  it('resolves legacy unscoped entries against target scope and leaves foreign targets pending', async () => {
+    const nodeA = {
+      ...makeSemanticNode('sem-legacy-a'),
+      scope: 'project:a',
+      tags: ['project:a'],
+    };
+    const nodeB = {
+      ...makeSemanticNode('sem-legacy-b'),
+      scope: 'project:b',
+      tags: ['project:b'],
+    };
+    const signalA = makeDeliveredSignal('legacy-a', nodeA.id, 'correction');
+    const signalB = makeDeliveredSignal('legacy-b', nodeB.id, 'correction');
+    const ack = vi.fn().mockResolvedValue(1);
+    const redis = makeRedis({
+      signals: { consume: vi.fn().mockResolvedValue([signalA, signalB]), ack },
+    });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(null),
+        getByIds: vi.fn().mockResolvedValue([nodeA, nodeB]),
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('unused'),
+      },
+    });
+
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false)).run('project:a');
+
+    expect(result.proposals).toHaveLength(1);
+    expect(result.proposals[0]?.affected_ids).toEqual([nodeA.id]);
+    expect(ack).toHaveBeenCalledWith('consolidation', ['legacy-a']);
+  });
+
+  it('leaves a cross-tenant signal pending even when its project scope matches', async () => {
+    const target = {
+      ...makeSemanticNode('sem-tenant-b'),
+      scope: 'project:a',
+      tags: ['project:a'],
+      tenant_id: 'tenant-b',
+    };
+    const signal = {
+      ...makeDeliveredSignal('tenant-a-signal', target.id, 'correction'),
+      scope: 'project:a',
+      tenant_id: 'tenant-a',
+    };
+    const ack = vi.fn().mockResolvedValue(1);
+    const redis = makeRedis({
+      signals: { consume: vi.fn().mockResolvedValue([signal]), ack },
+    });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(target),
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('unused'),
+      },
+    });
+
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false)).run('project:a');
+
+    expect(result.proposals).toHaveLength(0);
+    expect(ack).not.toHaveBeenCalled();
+  });
+
+  it('a global maintenance run preserves target project scope and rejects mismatched emitters', async () => {
+    const target = {
+      ...makeSemanticNode('sem-global-target'),
+      scope: 'project:b',
+      tags: ['project:b'],
+    };
+    const valid = {
+      ...makeDeliveredSignal('global-valid', target.id, 'correction'),
+      scope: 'project:b',
+      tenant_id: 'default',
+    };
+    const foreign = {
+      ...makeDeliveredSignal('global-foreign', target.id, 'correction'),
+      scope: 'project:a',
+      tenant_id: 'default',
+    };
+    const ack = vi.fn().mockResolvedValue(1);
+    const redis = makeRedis({
+      signals: { consume: vi.fn().mockResolvedValue([valid, foreign]), ack },
+    });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(target),
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('unused'),
+      },
+    });
+
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false)).run('global');
+
+    expect(result.proposals).toHaveLength(1);
+    expect(result.proposals[0]?.scope).toBe('project:b');
+    expect(ack).toHaveBeenCalledWith('consolidation', ['global-valid']);
   });
 
   it('skips signals below the threshold', async () => {
@@ -299,7 +627,7 @@ describe('ConsolidationEngine.run', () => {
     expect(result.proposals).toHaveLength(0);
   });
 
-  it('generates decay proposals from queue entries above threshold', async () => {
+  it('does not turn an untyped queue score into a decay proposal', async () => {
     const node = makeSemanticNode('sem-queued');
 
     let callCount = 0;
@@ -323,10 +651,9 @@ describe('ConsolidationEngine.run', () => {
     const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
     const result = await engine.run('queue-scope');
 
-    expect(result.proposals.length).toBeGreaterThan(0);
-    const decayProposal = result.proposals.find((p) => p.type === 'decay');
-    expect(decayProposal).toBeDefined();
-    expect(decayProposal?.affected_ids).toContain('sem-queued');
+    expect(result.proposals).toHaveLength(0);
+    expect(redis.queue.popHighest).not.toHaveBeenCalled();
+    expect(neo4j.semantic.getById).not.toHaveBeenCalled();
   });
 });
 
@@ -405,7 +732,7 @@ describe('ConsolidationEngine.reviewProposal', () => {
     const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
     await engine.reviewProposal('prop-decay', 'approve');
 
-    expect(neo4j.semantic.updateConfidence).toHaveBeenCalledWith('sem-decay', 0.76);
+    expect(neo4j.semantic.updateConfidence).toHaveBeenCalledWith('sem-decay', 0.76, 'prop-decay');
     expect(redis.cache.invalidateByNodeId).toHaveBeenCalledWith('sem-decay');
     expect(redis.proposals.remove).toHaveBeenCalledWith('prop-decay');
   });
@@ -534,13 +861,13 @@ describe('ConsolidationEngine tenant propagation', () => {
     await engine.reviewProposal('prop-promote', 'approve');
 
     expect(promoteFromEpisodic).toHaveBeenCalledWith(
-      'ep-1',
+      ['ep-1', 'ep-2'],
       expect.objectContaining({ tenant_id: 'acme', content: 'Distilled knowledge' }),
       'acme',
     );
   });
 
-  it('falls back to DEFAULT_TENANT for a promote when source episodes mix tenants', async () => {
+  it('rejects a promote when source episodes mix tenants', async () => {
     const proposal: ConsolidationProposal = {
       id: 'prop-promote-mixed',
       type: 'promote',
@@ -586,13 +913,10 @@ describe('ConsolidationEngine tenant propagation', () => {
     });
 
     const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
-    await engine.reviewProposal('prop-promote-mixed', 'approve');
-
-    expect(promoteFromEpisodic).toHaveBeenCalledWith(
-      'ep-1',
-      expect.objectContaining({ tenant_id: 'default' }),
-      'default',
+    await expect(engine.reviewProposal('prop-promote-mixed', 'approve')).rejects.toThrow(
+      'Failed to apply proposal prop-promote-mixed',
     );
+    expect(promoteFromEpisodic).not.toHaveBeenCalled();
   });
 
   it('OPT-45: derives tenant via the batched getTenantsByIds projection (not per-id getById)', async () => {
@@ -635,7 +959,7 @@ describe('ConsolidationEngine tenant propagation', () => {
     expect(getTenantsByIds).toHaveBeenCalledWith(['ep-1', 'ep-2']);
     expect(getById).not.toHaveBeenCalled(); // batched path preferred over per-id
     expect(promoteFromEpisodic).toHaveBeenCalledWith(
-      'ep-1',
+      ['ep-1', 'ep-2'],
       expect.objectContaining({ tenant_id: 'acme' }),
       'acme',
     );

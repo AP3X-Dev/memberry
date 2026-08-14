@@ -24,8 +24,8 @@ async function isRedisReachable(url: string): Promise<boolean> {
   }
 }
 
-describe('SignalStream.publish — XADD bounding (mocked redis)', () => {
-  it('should XADD with an approximate MAXLEN cap while preserving the payload', async () => {
+describe('SignalStream.publish — durable XADD (mocked redis)', () => {
+  it('does not MAXLEN-trim potentially unacked signals and preserves the payload', async () => {
     const xadd = vi.fn().mockResolvedValue('1-0');
     const fakeRedis = { xadd } as unknown as Redis;
     const stream = new SignalStream(fakeRedis);
@@ -44,17 +44,11 @@ describe('SignalStream.publish — XADD bounding (mocked redis)', () => {
     expect(xadd).toHaveBeenCalledTimes(1);
 
     const args = xadd.mock.calls[0];
-    // Bound the stream: MAXLEN ~ <cap> must appear before the '*' auto-id,
-    // and the cap must be applied approximately (the '~' modifier).
     expect(args[0]).toBe('amp:signals');
-    expect(args[1]).toBe('MAXLEN');
-    expect(args[2]).toBe('~');
-    expect(args[3]).toBe(10_000);
+    expect(args).not.toContain('MAXLEN');
 
-    // The '*' auto-id and the original field/value payload must still follow
-    // the MAXLEN clause, unchanged and in order.
     const starIdx = args.indexOf('*');
-    expect(starIdx).toBe(4);
+    expect(starIdx).toBe(1);
     expect(args.slice(starIdx)).toEqual([
       '*',
       'type', 'reinforcement',
@@ -63,7 +57,83 @@ describe('SignalStream.publish — XADD bounding (mocked redis)', () => {
       'source_session', 'session-abc',
       'agent_id', 'agent-1',
       'timestamp', '2026-06-14T00:00:00.000Z',
+      'scope', '',
+      'tenant_id', '',
     ]);
+  });
+});
+
+describe('SignalStream.consume — durable delivery (mocked redis)', () => {
+  const fields = [
+    'type', 'reinforcement',
+    'target_id', 'node-backlog',
+    'detail', 'still valid',
+    'source_session', 'session-1',
+    'agent_id', 'agent-1',
+    'timestamp', '2026-08-14T00:00:00.000Z',
+  ];
+
+  it('creates a first consumer group at 0-0 and does not ACK during read', async () => {
+    const xgroup = vi.fn().mockResolvedValue('OK');
+    const xreadgroup = vi.fn()
+      .mockResolvedValueOnce(null) // this consumer's pending entries
+      .mockResolvedValueOnce([['amp:signals', [['1-0', fields]]]]); // backlog/new delivery
+    const xautoclaim = vi.fn().mockResolvedValue(['0-0', []]);
+    const xack = vi.fn().mockResolvedValue(1);
+    const stream = new SignalStream({ xgroup, xreadgroup, xautoclaim, xack } as unknown as Redis);
+
+    const delivered = await stream.consume('durable-group', 'consumer-1', 10);
+
+    expect(xgroup).toHaveBeenCalledWith(
+      'CREATE', 'amp:signals', 'durable-group', '0-0', 'MKSTREAM',
+    );
+    expect(delivered).toEqual([
+      expect.objectContaining({ stream_id: '1-0', target_id: 'node-backlog' }),
+    ]);
+    expect(xack).not.toHaveBeenCalled();
+  });
+
+  it('reclaims a crashed consumer delivery and ACKs only when explicitly asked', async () => {
+    const xgroup = vi.fn().mockResolvedValue('OK');
+    const xreadgroup = vi.fn().mockResolvedValue(null);
+    const xautoclaim = vi.fn().mockResolvedValue(['0-0', [['2-0', fields]]]);
+    const xack = vi.fn().mockReturnThis();
+    const xdel = vi.fn().mockReturnThis();
+    const exec = vi.fn().mockResolvedValue([[null, 1], [null, 1]]);
+    const multi = vi.fn(() => ({ xack, xdel, exec }));
+    const stream = new SignalStream({ xgroup, xreadgroup, xautoclaim, multi } as unknown as Redis);
+
+    const delivered = await stream.consume('durable-group', 'consumer-after-crash', 10, '>', 0);
+    expect(delivered[0]?.stream_id).toBe('2-0');
+    expect(xack).not.toHaveBeenCalled();
+
+    await stream.ack('durable-group', ['2-0']);
+    expect(xack).toHaveBeenCalledWith('amp:signals', 'durable-group', '2-0');
+    expect(xdel).toHaveBeenCalledWith('amp:signals', '2-0');
+    expect(exec).toHaveBeenCalledOnce();
+  });
+
+  it('reserves capacity for new work when the pending prefix is full of poison', async () => {
+    const poison = (id: string): [string, string[]] => [
+      id,
+      [...fields.slice(0, 2), 'target_id', `missing-${id}`, ...fields.slice(4)],
+    ];
+    const validFields = [...fields];
+    validFields[3] = 'valid-later';
+    const xgroup = vi.fn().mockResolvedValue('OK');
+    const xreadgroup = vi.fn()
+      .mockResolvedValueOnce([['amp:signals', [poison('1-0'), poison('2-0')]]])
+      .mockResolvedValueOnce([['amp:signals', [['200-0', validFields]]]]);
+    const xautoclaim = vi.fn().mockResolvedValue(['0-0', []]);
+    const stream = new SignalStream({ xgroup, xreadgroup, xautoclaim } as unknown as Redis);
+
+    const delivered = await stream.consume('fair-group', 'consumer-1', 4);
+
+    expect(delivered.some((signal) => signal.stream_id === '200-0')).toBe(true);
+    expect(xreadgroup).toHaveBeenLastCalledWith(
+      'GROUP', 'fair-group', 'consumer-1', 'COUNT', 2,
+      'STREAMS', 'amp:signals', '>',
+    );
   });
 });
 
@@ -111,9 +181,6 @@ describe('SignalStream', () => {
   it('should consume a published signal', async () => {
     if (!redisAvailable) return;
 
-    // First consume call creates the group at '$'. After that, publish and consume with '>'.
-    await stream.consume('test-consume-group', 'consumer-1', 1);
-
     const signal: StreamSignal = {
       type: 'correction',
       target_id: 'node-002',
@@ -125,7 +192,7 @@ describe('SignalStream', () => {
 
     const msgId = await stream.publish(signal);
 
-    // Consume with '>' to read new messages delivered after group creation
+    // The group is created after publish; starting at 0-0 must preserve backlog.
     const consumed = await stream.consume('test-consume-group', 'consumer-1', 10);
 
     expect(consumed.length).toBeGreaterThanOrEqual(1);
@@ -135,14 +202,13 @@ describe('SignalStream', () => {
     expect(found!.detail).toBe('Needs revision');
     expect(found!.source_session).toBe('session-xyz');
     expect(found!.agent_id).toBe('agent-2');
+    expect(found!.stream_id).toBe(msgId);
     expect(msgId).toMatch(/^\d+-\d+$/);
+    await stream.ack('test-consume-group', consumed.map((s) => s.stream_id));
   });
 
   it('should not return already-consumed messages on subsequent consume calls', async () => {
     if (!redisAvailable) return;
-
-    // Create the group first
-    await stream.consume('dedup-group', 'consumer-1', 1);
 
     const signal: StreamSignal = {
       type: 'contradiction',
@@ -158,8 +224,9 @@ describe('SignalStream', () => {
     // First consume reads new messages
     const first = await stream.consume('dedup-group', 'consumer-1', 10);
     expect(first.length).toBe(1);
+    await stream.ack('dedup-group', first.map((s) => s.stream_id));
 
-    // Second consume with '>' should return nothing (already ACKed)
+    // Second consume should return nothing after explicit durable ACK.
     const second = await stream.consume('dedup-group', 'consumer-1', 10);
     expect(second.length).toBe(0);
   });

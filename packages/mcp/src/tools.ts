@@ -306,6 +306,10 @@ export const AmpStoreSchema = {
     .enum(['approved', 'revised', 'rejected', 'abandoned'])
     .optional()
     .describe('Outcome of the episode'),
+  memory_type: z
+    .enum(['decision', 'pattern', 'convention', 'architecture', 'preference', 'fact', 'general'])
+    .optional()
+    .describe('Durable memory classification. Use decision with outcome=approved for autonomous one-source promotion; patterns and conventions still require recurrence.'),
   signals: z
     .array(
       z.object({
@@ -476,6 +480,7 @@ export type ToolHandlers = {
     task: string;
     content: string;
     outcome?: 'approved' | 'revised' | 'rejected' | 'abandoned';
+    memory_type?: 'decision' | 'pattern' | 'convention' | 'architecture' | 'preference' | 'fact' | 'general';
     signals?: Array<{ type: 'reinforcement' | 'correction' | 'contradiction'; target_id: string; detail: string }>;
     entities?: string[];
     model_id?: string;
@@ -535,6 +540,18 @@ function textContent(text: string): { content: Array<{ type: 'text'; text: strin
   return { content: [{ type: 'text' as const, text }] };
 }
 
+/** True when a backward-compatible result shape reports at least one mutation. */
+function reportsMutation(result: unknown, fields: string[]): boolean {
+  if (typeof result !== 'object' || result === null) return false;
+  const record = result as Record<string, unknown>;
+  return fields.some((field) => {
+    const value = record[field];
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'number') return Number.isFinite(value) && value > 0;
+    return value === true;
+  });
+}
+
 function normalizeBoundedPositiveInt(value: number | undefined, defaultValue: number, maxValue: number): number {
   if (value == null) return defaultValue;
   const floored = Math.floor(value);
@@ -581,6 +598,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         task: args.task,
         content: args.content,
         outcome: args.outcome,
+        memory_type: args.memory_type,
         signals: args.signals,
         entities: args.entities,
         model_id: args.model_id,
@@ -957,6 +975,9 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         case 'run': {
           const effectiveScope = args.scope ?? 'global';
           const result = await consolidationEngine.run(effectiveScope);
+          if (reportsMutation(result, ['applied'])) {
+            await recompileWikiNow();
+          }
           return textContent(JSON.stringify(result, null, 2));
         }
         case 'status': {
@@ -970,6 +991,9 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
           if (args.decision) {
             // Apply the decision
             const applied = await consolidationEngine.apply(args.proposal_id, args.decision);
+            if (args.decision === 'approve' && applied.applied) {
+              await recompileWikiNow();
+            }
             return textContent(JSON.stringify(applied, null, 2));
           }
           // Just review / fetch the proposal
@@ -982,6 +1006,9 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
           }
           const effectiveScope = args.scope ?? 'global';
           const result = await consolidationEngine.dream(effectiveScope);
+          if (reportsMutation(result, ['hypotheses_created', 'cards_refreshed'])) {
+            await recompileWikiNow();
+          }
           return textContent(JSON.stringify(result, null, 2));
         }
         default: {
@@ -1473,7 +1500,7 @@ export function registerTools(
 
   tier1.push(server.tool(
     'berry_store',
-    'Store an episodic memory. Returns the new episode ID.',
+    'Store an episodic memory. Classify durable knowledge with memory_type. An explicit decision with outcome=approved is promoted automatically by the coordinator; patterns and conventions require recurring independent evidence. Returns the new episode ID.',
     AmpStoreSchema,
     ANN_WRITE,
     handlers.berry_store,

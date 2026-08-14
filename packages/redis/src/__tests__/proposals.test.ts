@@ -1,5 +1,6 @@
 // packages/redis/src/__tests__/proposals.test.ts
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import type { Redis } from 'ioredis';
 import type { ConsolidationProposal } from '@memberry/core';
 import { createRedisClient } from '../client.js';
 import { ProposalStore } from '../proposals.js';
@@ -150,5 +151,39 @@ describe('ProposalStore', () => {
     await store.save(proposal);
     const result = await store.get(proposal.id);
     expect(result).toEqual(proposal);
+  });
+});
+
+describe('ProposalStore durable save (mocked redis)', () => {
+  function fakeRedis(execResult: unknown) {
+    const pipeline: Record<string, ReturnType<typeof vi.fn>> = {};
+    pipeline.set = vi.fn(() => pipeline);
+    pipeline.setex = vi.fn(() => pipeline);
+    pipeline.sadd = vi.fn(() => pipeline);
+    pipeline.exec = vi.fn().mockResolvedValue(execResult);
+    return {
+      redis: { pipeline: () => pipeline } as unknown as Redis,
+      pipeline,
+    };
+  }
+
+  it('stores review-gated proposals without expiry by default', async () => {
+    const prior = process.env.MEMBERRY_PROPOSAL_TTL_SECONDS;
+    delete process.env.MEMBERRY_PROPOSAL_TTL_SECONDS;
+    try {
+      const { redis, pipeline } = fakeRedis([[null, 'OK'], [null, 1]]);
+      await new ProposalStore(redis).save(makeProposal());
+      expect(pipeline.set).toHaveBeenCalledOnce();
+      expect(pipeline.setex).not.toHaveBeenCalled();
+    } finally {
+      if (prior === undefined) delete process.env.MEMBERRY_PROPOSAL_TTL_SECONDS;
+      else process.env.MEMBERRY_PROPOSAL_TTL_SECONDS = prior;
+    }
+  });
+
+  it('rejects a partial pipeline failure so consolidation cannot ACK the signal', async () => {
+    const failure = new Error('SADD failed');
+    const { redis } = fakeRedis([[null, 'OK'], [failure, null]]);
+    await expect(new ProposalStore(redis).save(makeProposal())).rejects.toThrow('SADD failed');
   });
 });

@@ -16,6 +16,7 @@ import {
   renderTopicIndex,
   renderTopicPage,
   renderPortalHomepage,
+  patternKnowledgeCount,
 } from '../renderers.js';
 import type { ProjectData, PortalData, TopicData, LibraryPage, SourceInfo, EpisodicEntry } from '../types.js';
 
@@ -291,7 +292,7 @@ describe('renderDecisionsPage', () => {
       {
         id: 'sem-u',
         content: 'General principle about testing',
-        confidence: 0.6,
+        confidence: 0.7,
         tags: ['testing'],
         entities: [],
       },
@@ -300,6 +301,44 @@ describe('renderDecisionsPage', () => {
     const result = renderDecisionsPage(semantics);
     expect(result).toContain('Unscoped');
     expect(result).toContain('testing');
+  });
+
+  it('excludes claims below the decision confidence threshold', () => {
+    const result = renderDecisionsPage([
+      {
+        id: 'sem-low',
+        content: 'Tentative idea that is not yet a decision',
+        confidence: 0.69,
+        tags: ['project:api'],
+        entities: [],
+      },
+      {
+        id: 'sem-boundary',
+        content: 'Approved boundary decision',
+        confidence: 0.7,
+        tags: ['project:api'],
+        entities: [],
+      },
+    ]);
+
+    expect(result).not.toContain('Tentative idea');
+    expect(result).toContain('Approved boundary decision');
+  });
+
+  it('uses explicit classification and does not mislabel a high-confidence fact', () => {
+    const result = renderDecisionsPage([
+      {
+        id: 'sem-fact', content: 'The service listens on port 3101', confidence: 0.99,
+        memory_type: 'fact', tags: ['project:memberry'], entities: [],
+      },
+      {
+        id: 'sem-decision', content: 'Use owner-token compile locks', confidence: 0.9,
+        memory_type: 'decision', tags: ['project:memberry'], entities: [],
+      },
+    ]);
+
+    expect(result).not.toContain('listens on port 3101');
+    expect(result).toContain('Use owner-token compile locks');
   });
 });
 
@@ -325,7 +364,7 @@ describe('renderPatternsPage', () => {
     ];
 
     const result = renderPatternsPage(semantics);
-    expect(result).toContain('# Cross-Project Patterns');
+    expect(result).toContain('# Patterns and Conventions');
     expect(result).toContain('validation');
     expect(result).toContain('2 projects');
   });
@@ -343,6 +382,37 @@ describe('renderPatternsPage', () => {
 
     const result = renderPatternsPage(semantics);
     expect(result).toContain('No cross-project patterns detected yet');
+  });
+
+  it('shows a classified recurring pattern even when it belongs to one project', () => {
+    const semantics = [{
+      id: 'p-local',
+      content: 'Use owner-token locks for long-running jobs',
+      confidence: 0.91,
+      memory_type: 'pattern',
+      tags: ['project:memberry', 'concurrency'],
+      entities: [],
+    }];
+
+    const result = renderPatternsPage(semantics);
+    expect(result).toContain('Classified Project Knowledge');
+    expect(result).toContain('Pattern · memberry');
+    expect(result).toContain('Use owner-token locks');
+    expect(patternKnowledgeCount(semantics)).toBe(1);
+  });
+
+  it('requires classified pattern-like knowledge in two real projects', () => {
+    const result = renderPatternsPage([
+      { id: 'p1', content: 'Validate at boundaries', confidence: 0.9, memory_type: 'pattern', tags: ['project:a', 'validation'], entities: [] },
+      { id: 'p2', content: 'Validate external input', confidence: 0.9, memory_type: 'pattern', tags: ['project:b', 'validation'], entities: [] },
+      { id: 'a1', content: 'Architecture note', confidence: 0.99, memory_type: 'architecture', tags: ['project:c', 'validation'], entities: [] },
+      { id: 'u1', content: 'Unscoped note', confidence: 0.9, memory_type: 'pattern', tags: ['unscoped-only'], entities: [] },
+    ]);
+
+    expect(result).toContain('validation');
+    expect(result).toContain('2 projects');
+    expect(result).not.toContain('Architecture note');
+    expect(result).not.toContain('unscoped-only');
   });
 });
 

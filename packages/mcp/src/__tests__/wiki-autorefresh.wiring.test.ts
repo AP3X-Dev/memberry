@@ -25,21 +25,28 @@ describe('wiki autorefresh wiring (gap-15)', () => {
     expect(cfg![1]).toContain('rawWikiCompiler.compile');
   });
 
-  it('the store monkey-patch schedules a DEBOUNCED recompile after each store', () => {
-    // scheduleWikiRecompile() must be called inside the ampService.store override
-    // (the same post-process block that queues code re-index).
-    expect(BOOTSTRAP_SOURCE).toContain('scheduleWikiRecompile()');
+  it('the store monkey-patch durably schedules publication after each store', () => {
+    // The coordinator persists dirty intent before its debounced, retrying full
+    // publication. This replaced the older in-memory scheduleWikiRecompile hook.
+    expect(BOOTSTRAP_SOURCE).toContain('await consolidationCoordinator.schedulePublication()');
     const storeOverride = BOOTSTRAP_SOURCE.match(
       /ampService\.store\s*=\s*async[\s\S]*?return result;\s*\};/,
     );
     expect(storeOverride).not.toBeNull();
-    expect(storeOverride![0]).toContain('scheduleWikiRecompile()');
+    expect(storeOverride![0]).toContain('await consolidationCoordinator.schedulePublication()');
+    expect(storeOverride![0]).toContain('consolidationCoordinator.schedule(resolveEpisodeScope(input))');
   });
 
-  it('berry_bootstrap and berry_ingest_codebase trigger an immediate recompile', () => {
+  it('setup and successful consolidation mutation paths trigger an immediate recompile', () => {
     expect(TOOLS_SOURCE).toContain("import { recompileWikiNow } from './wiki-autorefresh.js'");
-    // Exactly the two setup handlers call recompileWikiNow() (await, non-fatal).
+    // Two setup paths plus run/apply/dream consolidation mutation paths.
     const calls = TOOLS_SOURCE.match(/await recompileWikiNow\(\);/g) ?? [];
-    expect(calls.length).toBe(2);
+    expect(calls.length).toBe(5);
+
+    const consolidateHandler = TOOLS_SOURCE.match(
+      /async berry_consolidate\(args\)[\s\S]*?async berry_resolve\(args\)/,
+    );
+    expect(consolidateHandler).not.toBeNull();
+    expect(consolidateHandler![0].match(/await recompileWikiNow\(\);/g)).toHaveLength(3);
   });
 });

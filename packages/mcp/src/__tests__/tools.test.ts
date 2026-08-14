@@ -1,5 +1,9 @@
 // packages/mcp/src/__tests__/tools.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const recompileWikiNow = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../wiki-autorefresh.js', () => ({ recompileWikiNow }));
+
 import {
   buildToolHandlers,
   setServiceInstances,
@@ -26,6 +30,7 @@ const mockConsolidationEngine: IConsolidationEngine = {
   status: vi.fn().mockResolvedValue({ pending: 5, lastRun: '2026-01-01T00:00:00.000Z' }),
   review: vi.fn().mockResolvedValue({ id: 'prop-1', type: 'promote', score: 0.9 }),
   apply: vi.fn().mockResolvedValue({ applied: true }),
+  dream: vi.fn().mockResolvedValue({ hypotheses_created: 0, cards_refreshed: 0 }),
 };
 
 const mockScopedQuery: IScopedQuery = {
@@ -143,6 +148,7 @@ describe('berry_store handler', () => {
       task: 'Write copy',
       content: 'Some content here',
       outcome: 'approved',
+      memory_type: 'decision',
     });
 
     expect(mockAmpService.store).toHaveBeenCalledWith(
@@ -151,6 +157,7 @@ describe('berry_store handler', () => {
         task: 'Write copy',
         content: 'Some content here',
         outcome: 'approved',
+        memory_type: 'decision',
         agent_id: 'mcp',
       }),
     );
@@ -409,6 +416,32 @@ describe('berry_consolidate handler', () => {
     expect(mockConsolidationEngine.run).toHaveBeenCalledWith('global');
   });
 
+  it('recompiles the wiki after a run applies graph mutations', async () => {
+    vi.mocked(mockConsolidationEngine.run).mockResolvedValueOnce({
+      skipped: false,
+      proposals: [],
+      applied: ['prop-1'],
+    });
+    const handlers = buildToolHandlers();
+
+    await handlers.berry_consolidate({ action: 'run', scope: 'project:test' });
+
+    expect(recompileWikiNow).toHaveBeenCalledOnce();
+  });
+
+  it('does not request a wiki recompile after a run applies nothing', async () => {
+    vi.mocked(mockConsolidationEngine.run).mockResolvedValueOnce({
+      skipped: false,
+      proposals: [],
+      applied: [],
+    });
+    const handlers = buildToolHandlers();
+
+    await handlers.berry_consolidate({ action: 'run', scope: 'project:test' });
+
+    expect(recompileWikiNow).not.toHaveBeenCalled();
+  });
+
   it('calls status action correctly', async () => {
     const handlers = buildToolHandlers();
     const result = await handlers.berry_consolidate({ action: 'status' });
@@ -441,6 +474,32 @@ describe('berry_consolidate handler', () => {
     expect(mockConsolidationEngine.apply).toHaveBeenCalledWith('prop-1', 'approve');
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.applied).toBe(true);
+    expect(recompileWikiNow).toHaveBeenCalledOnce();
+  });
+
+  it('does not request a wiki recompile when review rejects a proposal', async () => {
+    vi.mocked(mockConsolidationEngine.apply).mockResolvedValueOnce({ applied: false });
+    const handlers = buildToolHandlers();
+
+    await handlers.berry_consolidate({
+      action: 'review',
+      proposal_id: 'prop-1',
+      decision: 'reject',
+    });
+
+    expect(recompileWikiNow).not.toHaveBeenCalled();
+  });
+
+  it('recompiles the wiki after dream creates hypotheses', async () => {
+    vi.mocked(mockConsolidationEngine.dream!).mockResolvedValueOnce({
+      hypotheses_created: 2,
+      cards_refreshed: 0,
+    });
+    const handlers = buildToolHandlers();
+
+    await handlers.berry_consolidate({ action: 'dream', scope: 'project:test' });
+
+    expect(recompileWikiNow).toHaveBeenCalledOnce();
   });
 
   it('throws when review action is missing proposal_id', async () => {

@@ -301,8 +301,11 @@ export function buildWikiToolHandlers(container: WikiServiceContainer = defaultC
       let compiled: string | undefined;
       if (args.compile && wikiCompiler) {
         try {
-          await wikiCompiler.compile({ project_tag: scope, output_dir: path.resolve(process.cwd(), 'wiki'), format: 'obsidian', emit_graph: true });
-          compiled = scope;
+          // Scoped compiles are unpublished exports. A user asking for compile
+          // expects this mutation to become visible in the served portal, which
+          // requires a complete global generation publication.
+          await wikiCompiler.compile({ project_tag: 'all', output_dir: path.resolve(process.cwd(), 'wiki'), format: 'obsidian', emit_graph: true });
+          compiled = 'all';
         } catch (err) {
           compiled = `compile failed: ${err instanceof Error ? err.message : 'unknown'}`;
         }
@@ -320,6 +323,14 @@ export function buildWikiToolHandlers(container: WikiServiceContainer = defaultC
         ?? fm.tags.find((t) => t.startsWith('project:'))
         ?? 'project:unscoped';
       const result = await editReconciler.reconcile({ project_tag: projectTag, edited_md: editedMd });
+      if (wikiCompiler) {
+        await wikiCompiler.compile({
+          project_tag: 'all',
+          output_dir: path.resolve(process.cwd(), 'wiki'),
+          format: 'obsidian',
+          emit_graph: true,
+        });
+      }
       return textContent(JSON.stringify(result, null, 2));
     },
 

@@ -440,6 +440,9 @@ describe('AMPService.store', () => {
       agent_id: 'agent-1',
       task: 'test task',
       content: 'Content with signals',
+      scope: 'project:signals',
+      tags: ['project:signals'],
+      tenantId: 'tenant-signals',
       signals: [
         { type: 'reinforcement', target_id: 'sem-99', detail: 'Confirms prior knowledge' },
         { type: 'correction', target_id: 'sem-100', detail: 'Corrects prior belief' },
@@ -450,8 +453,13 @@ describe('AMPService.store', () => {
 
     expect(result.duplicate).toBe(false);
     expect(redis.signals.publish).toHaveBeenCalledTimes(2);
-    expect(redis.cache.invalidateByNodeId).toHaveBeenCalledWith('sem-99', 'default');
-    expect(redis.cache.invalidateByNodeId).toHaveBeenCalledWith('sem-100', 'default');
+    expect(redis.signals.publish).toHaveBeenCalledWith(expect.objectContaining({
+      target_id: 'sem-99',
+      scope: 'project:signals',
+      tenant_id: 'tenant-signals',
+    }));
+    expect(redis.cache.invalidateByNodeId).toHaveBeenCalledWith('sem-99', 'tenant-signals');
+    expect(redis.cache.invalidateByNodeId).toHaveBeenCalledWith('sem-100', 'tenant-signals');
     expect(neo4j.episodic.linkSignal).toHaveBeenCalledTimes(2);
     expect(redis.queue.incrementScore).toHaveBeenCalledTimes(2);
   });

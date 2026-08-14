@@ -11,6 +11,7 @@ import { initWikiSchema } from './ingest.js';
 import { WikiLinter, formatLintReport } from './lint.js';
 import { startWikiViewer } from './viewer.js';
 import { WikiEditReconciler, parseFrontmatter } from './reconcile.js';
+import { assertWikiTenantSafe } from './tenant-safety.js';
 
 // ─── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ const neo4jPassword = process.env['NEO4J_PASSWORD'] ?? '';
 
 async function main(): Promise<void> {
   const { command, flags } = parseArgs(process.argv);
+  assertWikiTenantSafe(command);
 
   if (!command || command === 'help') {
     console.log(`Usage: wiki-cli <command> [options]

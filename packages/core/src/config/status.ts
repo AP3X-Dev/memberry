@@ -41,7 +41,12 @@ export function getConfigStatus(): ConfigStatus {
       editable: false,
       // Bootstrap defaults (packages/mcp/src/bootstrap.ts) — applied on server restart.
       cacheTTLSeconds: { default: 300, context: 300, embedding: 86400 },
-      consolidation: { autoApply: false, signalThreshold: 3 },
+      consolidation: {
+        autoApply: ['1', 'true', 'yes', 'on'].includes(
+          (readEnv('MEMBERRY_CONSOLIDATION_AUTO_APPLY') ?? '').trim().toLowerCase(),
+        ),
+        signalThreshold: 3,
+      },
       decayHalfLivesDays: { volatile: 14, stable: 90, permanent: 365 },
       // Live, env-derived (the wiki service shares the MCP server's env file).
       requireProjectTag: readEnv('MEMBERRY_REQUIRE_PROJECT_TAG') !== 'false',

@@ -149,10 +149,10 @@ describe('selectRenderNodes (render cap)', () => {
 // ─── Path safety ─────────────────────────────────────────────────────────────
 
 describe('resolveSafeOutputPath', () => {
-  const base = '/tmp/memberry-graph-out';
+  const base = path.resolve('tmp', 'memberry-graph-out');
   it('resolves a relative path inside the base', () => {
-    expect(resolveSafeOutputPath('graph.html', base)).toBe('/tmp/memberry-graph-out/graph.html');
-    expect(resolveSafeOutputPath('sub/graph.json', base)).toBe('/tmp/memberry-graph-out/sub/graph.json');
+    expect(resolveSafeOutputPath('graph.html', base)).toBe(path.join(base, 'graph.html'));
+    expect(resolveSafeOutputPath('sub/graph.json', base)).toBe(path.join(base, 'sub', 'graph.json'));
   });
   it('rejects absolute paths and traversal', () => {
     expect(() => resolveSafeOutputPath('/etc/passwd', base)).toThrow();

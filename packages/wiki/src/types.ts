@@ -73,6 +73,8 @@ export interface ResolvedClaim {
   content: string;
   confidence: number;
   memberry_id: string;
+  /** Durable memory classification; absent on legacy semantics. */
+  memory_type?: string;
   source_refs: string[];
   /** Entity names referenced inline (for link resolution) */
   entity_refs: string[];
@@ -256,6 +258,19 @@ export interface EpisodicEntry {
   tags?: string[];
 }
 
+/** Semantic row used by compilation and cross-project rendering. */
+export interface SemanticEntry {
+  id: string;
+  content: string;
+  confidence: number;
+  /** Durable memory classification; absent on legacy semantics. */
+  memory_type?: string;
+  tags: string[];
+  /** Canonical project scope persisted independently of tags. */
+  scope?: string;
+  entities: string[];
+}
+
 // ─── Project-scoped compilation ──────────────────────────────────────────────
 
 export interface ProjectData {
@@ -268,7 +283,7 @@ export interface ProjectData {
   /** All episodic entries scoped to this project */
   episodics: EpisodicEntry[];
   /** Semantic nodes scoped to this project */
-  semantics: Array<{ id: string; content: string; confidence: number; tags: string[]; entities: string[] }>;
+  semantics: SemanticEntry[];
 }
 
 // ─── Library ─────────────────────────────────────────────────────────────────

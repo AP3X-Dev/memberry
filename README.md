@@ -41,7 +41,8 @@ Session 5: Agent stores "migrated auth to OAuth2 + PKCE" → old JWT fact auto-i
                     ↓
 Session 8: Three agents independently confirm the Zod validation pattern works
                     ↓
-           Consolidation promotes "use Zod for validation" to high-confidence principle
+           Background consolidation automatically promotes "use Zod for validation"
+           to a high-confidence principle and republishes the wiki
                     ↓
 Session 15: New agent loads context → knows about OAuth2, Zod convention, and WHY
 ```
@@ -294,7 +295,9 @@ The wiki round-trips: edit a compiled article in the viewer (Edit button) or syn
 | `OPENAI_API_KEY` | — | For embedding-based semantic search (optional — works without) |
 | `MCP_PORT` | `3101` | MCP server port |
 | `MEMBERRY_API_TOKEN` | — | Optional Bearer token gating MCP access (the `/mcp` HTTP transport) |
-| `MEMBERRY_WIKI_AUTOREFRESH` | off | Opt-in: recompile the served wiki (all projects) after each store/bootstrap/ingest |
+| `MEMBERRY_CONSOLIDATION_ENABLED` | on | Store-triggered plus startup/15-minute catch-up consolidation coordinator |
+| `MEMBERRY_CONSOLIDATION_AUTO_APPLY` | off (library), on (Compose/systemd) | Auto-apply corroborated promote/reinforce only; risky corrections stay review-only |
+| `MEMBERRY_WIKI_AUTOREFRESH` | off (direct), on (Compose/systemd) | Recompile the served wiki after graph mutations |
 | `MEMBERRY_WIKI_OUTPUT_DIR` | `/app/wiki` | Directory the MCP server compiles the wiki into for autorefresh (must match the wiki viewer's dir) |
 
 ## MCP Health Checks
@@ -307,7 +310,18 @@ curl -H "Authorization: Bearer $MEMBERRY_API_TOKEN" http://localhost:3101/readyz
 ```
 
 - `GET /healthz` is unauthenticated liveness. It returns process status only and never includes token material.
-- `GET /readyz` is authenticated readiness. It verifies the same Bearer token gate as the streamable-HTTP `/mcp` endpoint without opening a stream. (The legacy `/sse` transport is still served for older clients — see the [AMP migration guide](guides/migration-from-amp.md).)
+- `GET /readyz` is authenticated readiness. It verifies the same Bearer token gate as the streamable-HTTP `/mcp` endpoint and includes a secret-free `consolidation_automation` snapshot (running scope, queue, last success/error, and pending retries) without opening a stream. (The legacy `/sse` transport is still served for older clients — see the [AMP migration guide](guides/migration-from-amp.md).)
+
+In healthy operation, no consolidation or wiki command is required from the
+user. Successful stores are debounced per concrete scope, missed work is rediscovered
+after restart and periodically, failed passes retry with bounded exponential
+backoff, and timers stop cleanly with the server. Wiki publication uses durable
+Redis generation counters, so a restart cannot forget a queued graph update.
+After a two-minute startup grace, `/readyz` returns 503 for exhausted or stale
+enabled automation while bounded recovery retries remain ready-but-degraded.
+Deliberately unsafe knowledge
+changes—corrections, contradictions, supersedes, and decay—stay in the review
+queue rather than silently rewriting durable memory.
 
 ## Development
 

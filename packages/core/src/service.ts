@@ -96,7 +96,7 @@ export interface Neo4jLayer {
     linkToAgent(episodicId: string, agentId: string): Promise<void>;
     linkToEntity(episodicId: string, entityId: string): Promise<void>;
     linkToModel(episodicId: string, modelId: string): Promise<void>;
-    linkSignal(episodicId: string, signal: Signal): Promise<void>;
+    linkSignal(episodicId: string, signal: Signal, tenantId?: string): Promise<void>;
   };
   query: {
     byScope(scope: { entities?: string[]; tags?: string[]; limit: number; asOf?: string; tenantId?: string; projectScope?: string }): Promise<SemanticNode[]>;
@@ -113,7 +113,7 @@ export interface Neo4jLayer {
    *  store boundary. Optional — without it, signal targets are unvalidated
    *  (previous behavior). */
   semantic?: {
-    existingIds(ids: string[]): Promise<string[]>;
+    existingIds(ids: string[], tenantId?: string): Promise<string[]>;
   };
   /** Minimal entity ops used by project-tag enforcement (Bucket B). Optional for backwards compat. */
   entity?: {
@@ -520,13 +520,13 @@ export class AMPService {
    * names the offending ids so the caller can correct them rather than
    * discovering months later that none of its signals ever landed.
    */
-  private async assertSignalTargetsAreSemantic(signals?: Signal[]): Promise<void> {
+  private async assertSignalTargetsAreSemantic(signals: Signal[] | undefined, tenantId: string): Promise<void> {
     if (!signals || signals.length === 0) return;
     const accessor = this.neo4j.semantic;
     if (!accessor) return;
 
     const targets = [...new Set(signals.map((s) => s.target_id))];
-    const found = new Set(await accessor.existingIds(targets));
+    const found = new Set(await accessor.existingIds(targets, tenantId));
     const missing = targets.filter((id) => !found.has(id));
     if (missing.length === 0) return;
 
@@ -555,6 +555,10 @@ export class AMPService {
       };
     }
 
+    // Resolve the tenant before target validation so existence checks and graph
+    // links cannot cross a logical tenant boundary.
+    const tenantId = (input.tenantId && input.tenantId.trim()) || DEFAULT_TENANT;
+
     // 0c. Validate signal targets BEFORE anything is persisted or the dedup key
     // is marked. A signal must point at a SEMANTIC node: linkSignal matches
     // `(s:Semantic {id: $targetId})` and the consolidation engine resolves
@@ -562,10 +566,7 @@ export class AMPService {
     // EPISODIC id, which is what berry_load surfaces) silently created no edge
     // and was dropped from every consolidation run — signals that looked
     // accepted but did nothing. Fail loudly instead.
-    await this.assertSignalTargetsAreSemantic(input.signals);
-
-    // Resolve the tenant once — used for dedup namespacing and the node stamp.
-    const tenantId = (input.tenantId && input.tenantId.trim()) || DEFAULT_TENANT;
+    await this.assertSignalTargetsAreSemantic(input.signals, tenantId);
 
     // 1. Atomic dedup check-and-mark (prevents TOCTOU race between isDuplicate/markSeen).
     // Namespaced by tenant so identical content in two tenants isn't cross-deduped.
@@ -607,6 +608,7 @@ export class AMPService {
       task: input.task,
       content: input.content,
       outcome: input.outcome,
+      memory_type: input.memory_type,
       signals: input.signals,
       embedding,
       created_at: new Date().toISOString(),
@@ -657,9 +659,11 @@ export class AMPService {
             source_session: input.session_id,
             agent_id: input.agent_id,
             timestamp: new Date().toISOString(),
+            ...(scope ? { scope } : {}),
+            tenant_id: tenantId,
           };
           return Promise.all([
-            this.neo4j.episodic.linkSignal(id, signal),
+            this.neo4j.episodic.linkSignal(id, signal, tenantId),
             this.redis.signals.publish(streamSignal),
             this.redis.cache.invalidateByNodeId(signal.target_id, tenantId),
             this.redis.queue.incrementScore(signal.target_id, 1),

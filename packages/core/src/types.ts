@@ -1,5 +1,18 @@
 // === Node Types ===
 
+/**
+ * Durable memory classification supplied at capture time and preserved through
+ * consolidation. Optional for backward compatibility with existing graph rows.
+ */
+export type MemoryType =
+  | 'decision'
+  | 'pattern'
+  | 'convention'
+  | 'architecture'
+  | 'preference'
+  | 'fact'
+  | 'general';
+
 export interface EpisodicNode {
   id: string;
   session_id: string;
@@ -8,6 +21,7 @@ export interface EpisodicNode {
   content: string;
   embedding?: number[];
   outcome?: 'approved' | 'revised' | 'rejected' | 'abandoned';
+  memory_type?: MemoryType;
   signals?: Signal[];
   created_at: string;
   ttl?: number;
@@ -26,6 +40,7 @@ export interface SemanticNode {
   created_at: string;
   updated_at: string;
   decay_class: 'volatile' | 'stable' | 'permanent';
+  memory_type?: MemoryType;
   tags: string[];
   /** Canonical project scope (e.g. "project:amp"). Structural tenancy — enforced in read paths, not advisory. */
   scope?: string;
@@ -68,6 +83,10 @@ export interface StreamSignal extends Signal {
   source_session: string;
   agent_id: string;
   timestamp: string;
+  /** Project scope that emitted the signal. Optional for legacy stream entries. */
+  scope?: string;
+  /** Tenant that emitted the signal. Missing legacy entries belong to DEFAULT_TENANT. */
+  tenant_id?: string;
 }
 
 // === LOAD ===
@@ -105,6 +124,7 @@ export interface EpisodeInput {
   task: string;
   content: string;
   outcome?: 'approved' | 'revised' | 'rejected' | 'abandoned';
+  memory_type?: MemoryType;
   signals?: Signal[];
   entities?: string[];
   model_id?: string;

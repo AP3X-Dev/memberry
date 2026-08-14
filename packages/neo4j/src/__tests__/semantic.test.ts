@@ -177,6 +177,18 @@ describe('SemanticStore', () => {
     expect(fetched!.confidence).toBe(0.95);
   });
 
+  it('applies the same confidence application key at most once', async () => {
+    if (!neo4jAvailable) return;
+    const node = makeSemanticNode('idempotent-confidence');
+    const id = await store.create(node);
+    createdIds.push(id);
+
+    await store.updateConfidence(id, 0.9, 'proposal-stable-key');
+    await store.updateConfidence(id, 0.99, 'proposal-stable-key');
+
+    expect((await store.getById(id))?.confidence).toBe(0.9);
+  });
+
   it('should supersede an old node with a new one and create SUPERSEDES relationship', async () => {
     if (!neo4jAvailable) return;
     const oldNode = makeSemanticNode('supersede-old');
@@ -205,45 +217,150 @@ describe('SemanticStore', () => {
     }
   });
 
-  it('should promote from episodic and create PROMOTED_FROM relationship', async () => {
+  it('atomically promotes every source episode and inherits active entity links', async () => {
     if (!neo4jAvailable) return;
 
-    // Create a test Episodic node first
-    const episodicId = `${TEST_PREFIX}-episodic`;
+    const episodicIds = [`${TEST_PREFIX}-episodic-a`, `${TEST_PREFIX}-episodic-b`];
+    const entityIds = [
+      `${TEST_PREFIX}-promote-reference`,
+      `${TEST_PREFIX}-promote-modified`,
+      `${TEST_PREFIX}-promote-invalid`,
+    ];
     const session = driver.session();
     try {
       await session.run(
-        `CREATE (:Episodic {
-          id: $id,
+        `CREATE (a:Episodic {
+          id: $episodicA,
           session_id: 'test-session',
           agent_id: 'test-agent',
           task: 'test-task',
-          content: 'test episodic content',
+          content: 'test episodic content a',
+          scope: 'project:test',
           created_at: $now
-        })`,
-        { id: episodicId, now: new Date().toISOString() }
+        })
+        CREATE (b:Episodic {
+          id: $episodicB,
+          session_id: 'test-session',
+          agent_id: 'test-agent',
+          task: 'test-task',
+          content: 'test episodic content b',
+          scope: 'project:test',
+          created_at: $now
+        })
+        CREATE (referenced:Entity {id: $referenced, name: $referenced, type: 'project'})
+        CREATE (modified:Entity {id: $modified, name: $modified, type: 'test'})
+        CREATE (invalid:Entity {id: $invalid, name: $invalid, type: 'test'})
+        CREATE (a)-[:REFERENCES {valid_at: $now}]->(referenced)
+        CREATE (b)-[:MODIFIED {valid_at: $now}]->(modified)
+        CREATE (b)-[:REFERENCES {valid_at: $now, invalid_at: $now}]->(invalid)`,
+        {
+          episodicA: episodicIds[0],
+          episodicB: episodicIds[1],
+          referenced: entityIds[0],
+          modified: entityIds[1],
+          invalid: entityIds[2],
+          now: new Date().toISOString(),
+        },
       );
     } finally {
       await session.close();
     }
 
     const newNode = makeSemanticNode('promoted');
-    const newId = await store.promoteFromEpisodic(episodicId, newNode);
+    const newId = await store.promoteFromEpisodic(episodicIds, newNode);
     createdIds.push(newId);
 
     expect(newId).toBe(newNode.id);
+    // Ambiguous commit replay: the same deterministic id and exact provenance
+    // is a successful no-op so callers can retrigger derived publication.
+    await expect(
+      store.promoteFromEpisodic(episodicIds, newNode),
+    ).resolves.toBe(newNode.id);
+    await expect(
+      store.promoteFromEpisodic(episodicIds, makeSemanticNode('overlapping-promote')),
+    ).rejects.toThrow('already promoted');
 
-    // Verify the PROMOTED_FROM relationship exists
     const verifySession = driver.session();
     try {
       const result = await verifySession.run(
-        `MATCH (s:Semantic {id: $newId})-[:PROMOTED_FROM]->(ep:Episodic {id: $episodicId})
-         RETURN count(*) AS cnt`,
-        { newId, episodicId }
+        `MATCH (s:Semantic {id: $newId})
+         OPTIONAL MATCH (s)-[:PROMOTED_FROM]->(ep:Episodic)
+         WITH s, collect(ep.id) AS sources
+         OPTIONAL MATCH (s)-[about:ABOUT]->(entity:Entity)
+         RETURN sources, collect(entity.id) AS entities,
+                count(CASE WHEN about.invalid_at IS NULL THEN 1 END) AS activeAbout`,
+        { newId },
       );
-      const cnt = result.records[0].get('cnt') as { toNumber: () => number } | number;
-      const count = typeof cnt === 'object' ? cnt.toNumber() : cnt;
-      expect(count).toBe(1);
+      expect((result.records[0].get('sources') as string[]).sort()).toEqual([...episodicIds].sort());
+      expect((result.records[0].get('entities') as string[]).sort()).toEqual(entityIds.slice(0, 2).sort());
+    } finally {
+      await verifySession.close();
+    }
+  });
+
+  it('preserves active ABOUT links on a superseding semantic and invalidates old links', async () => {
+    if (!neo4jAvailable) return;
+    const oldNode = makeSemanticNode('supersede-about-old');
+    const oldId = await store.create(oldNode);
+    createdIds.push(oldId);
+    const entityId = `${TEST_PREFIX}-supersede-about-entity`;
+    const session = driver.session();
+    try {
+      await session.run(
+        `CREATE (:Entity {id: $id, name: $id, type: 'test'})`,
+        { id: entityId },
+      );
+    } finally {
+      await session.close();
+    }
+    await store.linkToEntity(oldId, entityId);
+
+    const newNode = makeSemanticNode('supersede-about-new');
+    const newId = await store.supersede(oldId, newNode);
+    createdIds.push(newId);
+
+    const verifySession = driver.session();
+    try {
+      const result = await verifySession.run(
+        `MATCH (new:Semantic {id: $newId})-[newR:ABOUT]->(e:Entity {id: $entityId})
+         MATCH (old:Semantic {id: $oldId})-[oldR:ABOUT]->(e)
+         RETURN newR.invalid_at AS newInvalidAt, oldR.invalid_at AS oldInvalidAt`,
+        { newId, oldId, entityId },
+      );
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].get('newInvalidAt')).toBeNull();
+      expect(result.records[0].get('oldInvalidAt')).toBeTruthy();
+    } finally {
+      await verifySession.close();
+    }
+  });
+
+  it('does not create a semantic when any promotion source is outside the tenant', async () => {
+    if (!neo4jAvailable) return;
+    const episodicId = `${TEST_PREFIX}-tenant-isolated-episodic`;
+    const session = driver.session();
+    try {
+      await session.run(
+        `CREATE (:Episodic {id: $id, tenant_id: 'acme', created_at: $now})`,
+        { id: episodicId, now: new Date().toISOString() },
+      );
+    } finally {
+      await session.close();
+    }
+    const newNode = { ...makeSemanticNode('tenant-isolated-promote'), tenant_id: 'globex' };
+
+    await expect(store.promoteFromEpisodic([episodicId], newNode, 'globex')).rejects.toThrow(
+      'outside tenant globex',
+    );
+
+    const verifySession = driver.session();
+    try {
+      const result = await verifySession.run(
+        `MATCH (s:Semantic {id: $id}) RETURN count(s) AS count`,
+        { id: newNode.id },
+      );
+      const count = result.records[0].get('count') as { toNumber: () => number };
+      expect(count.toNumber()).toBe(0);
     } finally {
       await verifySession.close();
     }

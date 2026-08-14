@@ -71,6 +71,7 @@ export class SemanticStore {
           created_at: $created_at,
           updated_at: $updated_at,
           decay_class: $decay_class,
+          memory_type: $memory_type,
           tags: $tags,
           scope: $scope,
           tenant_id: $tenant_id
@@ -86,6 +87,7 @@ export class SemanticStore {
         created_at: node.created_at,
         updated_at: node.updated_at,
         decay_class: node.decay_class,
+        memory_type: node.memory_type ?? null,
         tags: canonicalTags(node.tags),
         scope: semanticScope(node),
         tenant_id: node.tenant_id ?? DEFAULT_TENANT,
@@ -111,6 +113,7 @@ export class SemanticStore {
       created_at: props.created_at as string,
       updated_at: props.updated_at as string,
       decay_class: props.decay_class as SemanticNode['decay_class'],
+      memory_type: (props.memory_type as SemanticNode['memory_type']) ?? undefined,
       tags: props.tags as string[],
       ...(props.scope != null && { scope: props.scope as string }),
       tenant_id: (props.tenant_id as string | undefined) ?? DEFAULT_TENANT,
@@ -161,13 +164,16 @@ export class SemanticStore {
    * linkSignal and is dropped by the consolidation engine's getByIds lookup —
    * silently, with no edge and no error. Callers reject up front instead.
    */
-  async existingIds(ids: string[]): Promise<string[]> {
+  async existingIds(ids: string[], tenantId?: string): Promise<string[]> {
     if (ids.length === 0) return [];
     const session = this.driver.session();
     try {
       const result = await session.run(
-        'MATCH (s:Semantic) WHERE s.id IN $ids RETURN s.id AS id',
-        { ids },
+        `MATCH (s:Semantic)
+         WHERE s.id IN $ids
+           AND ($tenantId IS NULL OR coalesce(s.tenant_id, $defaultTenant) = $tenantId)
+         RETURN s.id AS id`,
+        { ids, tenantId: tenantId ?? null, defaultTenant: DEFAULT_TENANT },
       );
       return result.records.map((r) => r.get('id') as string);
     } finally {
@@ -175,14 +181,27 @@ export class SemanticStore {
     }
   }
 
-  async updateConfidence(id: string, confidence: number): Promise<void> {
+  async updateConfidence(id: string, confidence: number, applicationKey?: string): Promise<void> {
     const session = this.driver.session();
     try {
       const now = new Date().toISOString();
-      await session.run(
-        'MATCH (s:Semantic {id: $id}) SET s.confidence = $confidence, s.updated_at = $now',
-        { id, confidence, now }
-      );
+      await session.executeWrite((tx) => tx.run(
+        `MATCH (s:Semantic {id: $id})
+         // Force a write lock before checking the idempotency ledger so two
+         // concurrent retries on the same Semantic serialize safely.
+         SET s.__confidence_application_lock = true
+         REMOVE s.__confidence_application_lock
+         WITH s, coalesce(s.applied_consolidation_keys, []) AS applied
+         WHERE $application_key IS NULL OR NOT $application_key IN applied
+         SET s.confidence = $confidence,
+             s.updated_at = $now,
+             s.applied_consolidation_keys = CASE
+               WHEN $application_key IS NULL THEN applied
+               ELSE applied + $application_key
+             END
+         RETURN s.id AS id`,
+        { id, confidence, now, application_key: applicationKey ?? null },
+      ));
     } finally {
       await session.close();
     }
@@ -194,30 +213,42 @@ export class SemanticStore {
       const now = new Date().toISOString();
       const embedding = await this.resolveEmbedding(newNode);
       const query = `
-        CREATE (new:Semantic {
-          id: $id,
-          content: $content,
-          confidence: $confidence,
-          signal_count: $signal_count,
-          created_at: $created_at,
-          updated_at: $updated_at,
-          decay_class: $decay_class,
-          tags: $tags,
-          scope: $scope,
-          tenant_id: $tenant_id
-        })
-        ${embedding ? 'SET new.embedding = $embedding' : ''}
-        WITH new
         MATCH (old:Semantic {id: $oldId})
-        CREATE (new)-[:SUPERSEDES]->(old)
+        WHERE coalesce(old.tenant_id, $default_tenant) = $tenant_id
+        MERGE (new:Semantic {id: $id})
+        ON CREATE SET
+          new.content = $content,
+          new.confidence = $confidence,
+          new.signal_count = $signal_count,
+          new.created_at = $created_at,
+          new.updated_at = $updated_at,
+          new.decay_class = $decay_class,
+          new.memory_type = $memory_type,
+          new.tags = $tags,
+          new.scope = $scope,
+          new.tenant_id = $tenant_id
+        ${embedding ? 'SET new.embedding = $embedding' : ''}
+        MERGE (new)-[:SUPERSEDES]->(old)
         WITH new, old
         // The successor inherits the project scope when the caller didn't set one
-        SET new.scope = coalesce(new.scope, old.scope)
+        SET new.scope = coalesce(new.scope, old.scope),
+            new.memory_type = coalesce(new.memory_type, old.memory_type)
         WITH new, old
-        // Invalidate the old node's ABOUT relationships
+        // Copy active entity associations to the successor before invalidating
+        // the predecessor's relationships. Both operations share this write.
         OPTIONAL MATCH (old)-[oldR:ABOUT]->(e:Entity)
         WHERE oldR.invalid_at IS NULL
-        SET oldR.invalid_at = $now
+        WITH new, old,
+             collect(oldR) AS oldRelationships,
+             [entity IN collect(DISTINCT e) WHERE entity IS NOT NULL] AS entities
+        FOREACH (entity IN entities |
+          MERGE (new)-[newR:ABOUT]->(entity)
+          SET newR.valid_at = coalesce(newR.valid_at, $now),
+              newR.invalid_at = null
+        )
+        FOREACH (oldR IN oldRelationships |
+          SET oldR.invalid_at = $now
+        )
         RETURN new.id AS id
       `;
       const params: Record<string, unknown> = {
@@ -228,14 +259,19 @@ export class SemanticStore {
         created_at: newNode.created_at,
         updated_at: newNode.updated_at,
         decay_class: newNode.decay_class,
+        memory_type: newNode.memory_type ?? null,
         tags: canonicalTags(newNode.tags),
         scope: semanticScope(newNode),
         tenant_id: newNode.tenant_id ?? DEFAULT_TENANT,
+        default_tenant: DEFAULT_TENANT,
         oldId,
         now,
       };
       if (embedding) params.embedding = embedding;
-      const result = await session.run(query, params);
+      const result = await session.executeWrite((tx) => tx.run(query, params));
+      if (result.records.length === 0) {
+        throw new Error(`Semantic ${oldId} not found in tenant ${params.tenant_id as string}`);
+      }
       return result.records[0].get('id') as string;
     } finally {
       await session.close();
@@ -243,33 +279,88 @@ export class SemanticStore {
   }
 
   async promoteFromEpisodic(
-    episodicId: string,
+    episodicIds: string[],
     newNode: SemanticNode,
     tenantId?: string,
   ): Promise<string> {
+    const uniqueEpisodeIds = [...new Set(episodicIds)];
+    if (uniqueEpisodeIds.length === 0) {
+      throw new Error('Cannot promote a Semantic without source episodes');
+    }
     const session = this.driver.session();
     try {
       const embedding = await this.resolveEmbedding(newNode);
       const query = `
-        CREATE (s:Semantic {
-          id: $id,
-          content: $content,
-          confidence: $confidence,
-          signal_count: $signal_count,
-          created_at: $created_at,
-          updated_at: $updated_at,
-          decay_class: $decay_class,
-          tags: $tags,
-          scope: $scope,
-          tenant_id: $tenant_id
+        MATCH (ep:Episodic)
+        WHERE ep.id IN $episodicIds
+          AND coalesce(ep.tenant_id, $default_tenant) = $tenant_id
+        WITH collect(DISTINCT ep) AS episodes
+        // Validate the complete tenant-scoped source set before any mutation.
+        WHERE size(episodes) = size($episodicIds)
+        // Acquire write locks on every source before checking provenance. The
+        // temporary property is removed in the same transaction but its locks
+        // remain held through commit, serializing overlapping promotions.
+        FOREACH (ep IN episodes | SET ep.__promotion_lock = true)
+        FOREACH (ep IN episodes | REMOVE ep.__promotion_lock)
+        WITH episodes
+        OPTIONAL MATCH (existing:Semantic {id: $id})
+        WHERE coalesce(existing.tenant_id, $default_tenant) = $tenant_id
+        OPTIONAL MATCH (existing)-[:PROMOTED_FROM]->(existingSource:Episodic)
+        WITH episodes, existing, collect(DISTINCT existingSource.id) AS existingSourceIds
+        // A lost commit response is safe to replay only when the deterministic
+        // Semantic id already owns this exact provenance set. Any different or
+        // overlapping promotion still fails closed.
+        WHERE (existing IS NULL OR (
+          size(existingSourceIds) = size($episodicIds)
+          AND all(sourceId IN $episodicIds WHERE sourceId IN existingSourceIds)
+        ))
+        AND none(ep IN episodes WHERE EXISTS {
+          MATCH (ep)<-[:PROMOTED_FROM]-(other:Semantic)
+          WHERE other.id <> $id
         })
-        ${embedding ? 'SET s.embedding = $embedding' : ''}
-        WITH s
-        MATCH (ep:Episodic {id: $episodicId})
-        CREATE (s)-[:PROMOTED_FROM]->(ep)
-        WITH s, ep
-        // Promotions inherit the source episode's project scope when unset
-        SET s.scope = coalesce(s.scope, ep.scope)
+        CALL {
+          WITH existing
+          WHERE existing IS NOT NULL
+          RETURN existing AS s
+          UNION
+          WITH existing
+          WHERE existing IS NULL
+          CREATE (created:Semantic {
+            id: $id,
+            content: $content,
+            confidence: $confidence,
+            signal_count: $signal_count,
+            created_at: $created_at,
+            updated_at: $updated_at,
+            decay_class: $decay_class,
+            memory_type: $memory_type,
+            tags: $tags,
+            scope: $scope,
+            tenant_id: $tenant_id
+          })
+          ${embedding ? 'SET created.embedding = $embedding' : ''}
+          RETURN created AS s
+        }
+        WITH s, episodes
+        UNWIND episodes AS ep
+        MERGE (s)-[:PROMOTED_FROM]->(ep)
+        WITH DISTINCT s, episodes
+        UNWIND episodes AS ep
+        OPTIONAL MATCH (ep)-[sourceR:REFERENCES|MODIFIED]->(entity:Entity)
+        WHERE sourceR.invalid_at IS NULL
+        WITH s, episodes,
+             [linked IN collect(DISTINCT entity) WHERE linked IS NOT NULL] AS entities
+        // Inherit the complete active entity association set as ABOUT edges.
+        FOREACH (entity IN entities |
+          MERGE (s)-[about:ABOUT]->(entity)
+          SET about.valid_at = coalesce(about.valid_at, $now),
+              about.invalid_at = null
+        )
+        WITH DISTINCT s, episodes
+        SET s.scope = coalesce(
+          s.scope,
+          head([ep IN episodes WHERE ep.scope IS NOT NULL | ep.scope])
+        )
         RETURN s.id AS id
       `;
       const params: Record<string, unknown> = {
@@ -280,13 +371,21 @@ export class SemanticStore {
         created_at: newNode.created_at,
         updated_at: newNode.updated_at,
         decay_class: newNode.decay_class,
+        memory_type: newNode.memory_type ?? null,
         tags: canonicalTags(newNode.tags),
         scope: semanticScope(newNode),
         tenant_id: tenantId ?? newNode.tenant_id ?? DEFAULT_TENANT,
-        episodicId,
+        default_tenant: DEFAULT_TENANT,
+        episodicIds: uniqueEpisodeIds,
+        now: new Date().toISOString(),
       };
       if (embedding) params.embedding = embedding;
-      const result = await session.run(query, params);
+      const result = await session.executeWrite((tx) => tx.run(query, params));
+      if (result.records.length === 0) {
+        throw new Error(
+          `Promotion sources were missing, already promoted, or outside tenant ${params.tenant_id as string}`,
+        );
+      }
       return result.records[0].get('id') as string;
     } finally {
       await session.close();

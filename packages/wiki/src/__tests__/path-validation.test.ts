@@ -13,42 +13,43 @@ import type { IngestResult, CompileResult, LintResult } from '../types.js';
 // ─── validatePath unit tests ─────────────────────────────────────────────────
 
 describe('validatePath', () => {
-  const baseDir = '/home/cerebro/projects/amp';
+  // Resolve the Linux-shaped fixture through the host path implementation so
+  // confinement is exercised identically on Windows and POSIX runners.
+  const baseDir = path.resolve('/home/cerebro/projects/amp');
 
   it('accepts a path within the base directory', () => {
-    const result = validatePath('/home/cerebro/projects/amp/docs/test.md', baseDir);
-    expect(result).toBe('/home/cerebro/projects/amp/docs/test.md');
+    const candidate = path.join(baseDir, 'docs', 'test.md');
+    expect(validatePath(candidate, baseDir)).toBe(candidate);
   });
 
   it('accepts the base directory itself', () => {
-    const result = validatePath('/home/cerebro/projects/amp', baseDir);
-    expect(result).toBe('/home/cerebro/projects/amp');
+    expect(validatePath(baseDir, baseDir)).toBe(baseDir);
   });
 
   it('accepts a deeply nested path', () => {
-    const result = validatePath('/home/cerebro/projects/amp/packages/wiki/src/tools.ts', baseDir);
-    expect(result).toBe('/home/cerebro/projects/amp/packages/wiki/src/tools.ts');
+    const candidate = path.join(baseDir, 'packages', 'wiki', 'src', 'tools.ts');
+    expect(validatePath(candidate, baseDir)).toBe(candidate);
   });
 
   it('rejects path outside via parent traversal', () => {
-    expect(() => validatePath('/home/cerebro/projects/amp/../../../etc/passwd', baseDir))
+    expect(() => validatePath(path.join(baseDir, '..', '..', '..', 'etc', 'passwd'), baseDir))
       .toThrow('Path must be within allowed directory');
   });
 
   it('rejects an absolute path outside the base directory', () => {
-    expect(() => validatePath('/etc/passwd', baseDir))
+    expect(() => validatePath(path.resolve('/etc/passwd'), baseDir))
       .toThrow('Path must be within allowed directory');
   });
 
   it('rejects a sibling directory path', () => {
-    expect(() => validatePath('/home/cerebro/projects/other-project/file.md', baseDir))
+    expect(() => validatePath(path.join(baseDir, '..', 'other-project', 'file.md'), baseDir))
       .toThrow('Path must be within allowed directory');
   });
 
   it('rejects path that is a prefix but not a child (amp-evil vs amp)', () => {
     // /home/cerebro/projects/amp-evil starts with /home/cerebro/projects/amp
     // but is NOT inside it. The path.sep check catches this.
-    expect(() => validatePath('/home/cerebro/projects/amp-evil/file.md', baseDir))
+    expect(() => validatePath(`${baseDir}-evil${path.sep}file.md`, baseDir))
       .toThrow('Path must be within allowed directory');
   });
 
@@ -58,17 +59,17 @@ describe('validatePath', () => {
   });
 
   it('normalizes path with redundant separators', () => {
-    const result = validatePath('/home/cerebro/projects/amp///docs//test.md', baseDir);
-    expect(result).toBe('/home/cerebro/projects/amp/docs/test.md');
+    const result = validatePath(`${baseDir}${path.sep}${path.sep}docs${path.sep}${path.sep}test.md`, baseDir);
+    expect(result).toBe(path.join(baseDir, 'docs', 'test.md'));
   });
 
   it('normalizes path with dot segments', () => {
-    const result = validatePath('/home/cerebro/projects/amp/./docs/./test.md', baseDir);
-    expect(result).toBe('/home/cerebro/projects/amp/docs/test.md');
+    const result = validatePath(path.join(baseDir, '.', 'docs', '.', 'test.md'), baseDir);
+    expect(result).toBe(path.join(baseDir, 'docs', 'test.md'));
   });
 
   it('rejects path with mixed traversal after resolution', () => {
-    expect(() => validatePath('/home/cerebro/projects/amp/docs/../../etc/passwd', baseDir))
+    expect(() => validatePath(path.join(baseDir, 'docs', '..', '..', 'etc', 'passwd'), baseDir))
       .toThrow('Path must be within allowed directory');
   });
 
@@ -77,7 +78,8 @@ describe('validatePath', () => {
   });
 
   it('includes the offending path in the error message', () => {
-    expect(() => validatePath('/etc/passwd', baseDir)).toThrow('/etc/passwd');
+    const outside = path.resolve('/etc/passwd');
+    expect(() => validatePath(outside, baseDir)).toThrow(outside);
   });
 });
 
@@ -174,7 +176,7 @@ describe('getAllowedBaseDir', () => {
 
   it('returns AMP_INGEST_ALLOW_DIR when set', () => {
     process.env['AMP_INGEST_ALLOW_DIR'] = '/opt/amp-data';
-    expect(getAllowedBaseDir()).toBe('/opt/amp-data');
+    expect(getAllowedBaseDir()).toBe(path.resolve('/opt/amp-data'));
   });
 
   it('falls back to cwd when AMP_INGEST_ALLOW_DIR is not set', () => {
@@ -289,6 +291,20 @@ describe('buildWikiToolHandlers path validation', () => {
         output_dir: validDir,
       });
       expect(mockCompiler.compile).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('served mutation publication', () => {
+    it('braindump compile requests publish a complete global generation', async () => {
+      const handlers = buildWikiToolHandlers();
+      const response = await handlers.berry_braindump({
+        content: 'A durable architecture decision.',
+        scope: 'project:test',
+        compile: true,
+      });
+
+      expect(mockCompiler.compile).toHaveBeenCalledWith(expect.objectContaining({ project_tag: 'all' }));
+      expect(JSON.parse(response.content[0].text).compiled).toBe('all');
     });
   });
 });

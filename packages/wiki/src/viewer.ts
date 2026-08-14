@@ -13,7 +13,14 @@ import type { Driver } from 'neo4j-driver';
 import type { ViewerConfig } from './types.js';
 import { renderSettingsBody, applyHooksTuning, runHooksInstall, getSettingsData, type InstallRequest, type TuningPatch } from './settings.js';
 import { WikiEditReconciler } from './reconcile.js';
-import { WikiCompiler, COMPILED_MARKER_FILENAME } from './compile.js';
+import {
+  WikiCompiler,
+  COMPILED_MARKER_FILENAME,
+  COMPILE_LOCK_FILENAME,
+  ACTIVE_GENERATION_FILENAME,
+  WIKI_GENERATIONS_DIRNAME,
+  resolvePublishedWikiDir,
+} from './compile.js';
 
 // ─── Markdown rendering with [[wikilink]] support ───────────────────────────
 
@@ -1507,6 +1514,10 @@ async function discoverMarkdownFiles(rootDir: string): Promise<FileEntry[]> {
       return;
     }
     for (const item of items) {
+      // When a pre-generation viewer opens a volume after an interrupted first
+      // migration (there is no active pointer yet), private build trees must not
+      // leak into its legacy-root sidebar/search index.
+      if (dir === rootDir && item === WIKI_GENERATIONS_DIRNAME) continue;
       const fullPath = join(dir, item);
       try {
         const s = await stat(fullPath);
@@ -1562,6 +1573,9 @@ const DEBOUNCE_MS = 500;
 // rebuild self-heals that. Cheap relative to its interval (a sidebar + search-index
 // scan of a few hundred files), and unref'd so it never keeps the process alive.
 const CACHE_BACKSTOP_MS = 45_000;
+/** Viewer waits briefly for a compile, then keeps serving its last complete snapshot. */
+const CACHE_COMPILE_WAIT_MS = 15_000;
+const CACHE_COMPILE_RETRY_MS = 100;
 
 function extractProjectSlug(wikiPath: string): string | null {
   return wikiPath.match(/^projects\/([^/]+)\//)?.[1] ?? null;
@@ -1590,8 +1604,8 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Build (or rebuild) sidebar HTML and search index from disk. */
-async function buildCache(wikiDir: string): Promise<WikiCache> {
+/** Scan a known-stable wiki directory into a candidate cache. */
+async function scanCache(wikiDir: string): Promise<WikiCache> {
   const files = await discoverMarkdownFiles(wikiDir);
 
   // Build sidebar HTML (pure computation, no I/O)
@@ -1623,6 +1637,69 @@ async function buildCache(wikiDir: string): Promise<WikiCache> {
   return { sidebarHtml, searchIndex, wikiDir };
 }
 
+async function compileLockHeld(wikiDir: string): Promise<boolean> {
+  try {
+    await stat(join(wikiDir, COMPILE_LOCK_FILENAME));
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+async function readCompileGeneration(wikiDir: string): Promise<string | null> {
+  try {
+    return await readFile(join(wikiDir, COMPILED_MARKER_FILENAME), 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
+ * Build only from a stable compiler generation. Never starts a directory scan
+ * while the cross-process compile lock is present. If contention outlives the
+ * bounded wait, callers with an existing cache keep that complete snapshot.
+ */
+async function buildCache(
+  wikiDir: string,
+  previous: WikiCache | null = wikiCache,
+  maxWaitMs: number = CACHE_COMPILE_WAIT_MS,
+): Promise<WikiCache> {
+  const publishedDir = await resolvePublishedWikiDir(wikiDir);
+  const reusable = previous?.wikiDir === publishedDir ? previous : null;
+
+  // Generation trees are immutable after publication. Resolving the pointer
+  // once gives this rebuild a consistent snapshot without waiting for an active
+  // compiler; the old generation remains readable until bounded cleanup.
+  if (publishedDir !== wikiDir) return scanCache(publishedDir);
+
+  // Legacy installations have no pointer and still compile in-place. Retain
+  // the lock/marker stability loop until their first generated publication.
+  const deadline = Date.now() + Math.max(0, maxWaitMs);
+
+  for (;;) {
+    if (await compileLockHeld(wikiDir)) {
+      if (Date.now() >= deadline) {
+        if (reusable) return reusable;
+        throw new Error('Wiki compile is still in progress; no complete cache is available yet');
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(CACHE_COMPILE_RETRY_MS, Math.max(1, deadline - Date.now()))));
+      continue;
+    }
+
+    const generationBefore = await readCompileGeneration(wikiDir);
+    const candidate = await scanCache(wikiDir);
+    const generationAfter = await readCompileGeneration(wikiDir);
+    if (!(await compileLockHeld(wikiDir)) && generationBefore === generationAfter) return candidate;
+
+    if (Date.now() >= deadline) {
+      if (reusable) return reusable;
+      throw new Error('Wiki changed during cache construction; no complete cache is available yet');
+    }
+  }
+}
+
 /**
  * Rebuild the sidebar/search cache from disk now and drop stale rendered HTML.
  * The single rebuild path shared by the debounced watcher, the periodic backstop,
@@ -1630,7 +1707,10 @@ async function buildCache(wikiDir: string): Promise<WikiCache> {
  * handle (the watcher/backstop log-and-continue; /api/refresh surfaces a 500).
  */
 async function rebuildCacheNow(wikiDir: string): Promise<WikiCache> {
-  wikiCache = await buildCache(wikiDir);
+  const next = await buildCache(wikiDir, wikiCache);
+  const previous = wikiCache;
+  if (next === previous) return next;
+  wikiCache = next;
   renderCache.clear(); // OPT-57: drop rendered HTML for now-edited/removed pages
   return wikiCache;
 }
@@ -1681,8 +1761,13 @@ function stopCacheBackstop(): void {
  * assert "a missed fs event self-heals via a rebuild" without spinning a server or
  * waiting on a real interval.
  */
-export async function __rebuildCacheForTest(wikiDir: string): Promise<number> {
-  const cache = await rebuildCacheNow(wikiDir);
+export async function __rebuildCacheForTest(wikiDir: string, maxWaitMs = CACHE_COMPILE_WAIT_MS): Promise<number> {
+  const previous = wikiCache;
+  const cache = await buildCache(wikiDir, previous, maxWaitMs);
+  if (cache !== previous) {
+    wikiCache = cache;
+    renderCache.clear();
+  }
   return cache.searchIndex.size;
 }
 
@@ -1699,7 +1784,7 @@ function startWatching(wikiDir: string): void {
       // LAST on every compile, is the one path fs.watch reports reliably. Catching
       // it guarantees a full cache rebuild after every recompile.
       const base = filename.split(/[\\/]/).pop() ?? filename;
-      if (filename.endsWith('.md') || base === COMPILED_MARKER_FILENAME) {
+      if (filename.endsWith('.md') || base === COMPILED_MARKER_FILENAME || base === ACTIVE_GENERATION_FILENAME) {
         scheduleCacheRebuild(wikiDir);
       }
     });
@@ -1729,8 +1814,9 @@ function stopWatching(): void {
 
 /** Get the current cache, building it on first call or when wikiDir changes. */
 async function getCache(wikiDir: string): Promise<WikiCache> {
-  if (wikiCache && wikiCache.wikiDir === wikiDir) return wikiCache;
-  wikiCache = await buildCache(wikiDir);
+  const publishedDir = await resolvePublishedWikiDir(wikiDir);
+  if (wikiCache && wikiCache.wikiDir === publishedDir) return wikiCache;
+  wikiCache = await buildCache(wikiDir, null);
   return wikiCache;
 }
 
@@ -2092,7 +2178,8 @@ function buildEditor(slugPath: string, rawContent: string): string {
 }
 
 async function handleEdit(
-  wikiDir: string,
+  servedWikiDir: string,
+  publicationRoot: string,
   body: { slug?: string; edited_md?: string },
   res: ServerResponse,
 ): Promise<void> {
@@ -2112,7 +2199,7 @@ async function handleEdit(
     return;
   }
 
-  const filePath = await resolveFile(wikiDir, slug);
+  const filePath = await resolveFile(servedWikiDir, slug);
   if (!filePath) {
     respond(404, { ok: false, error: `page not found: ${slug}` });
     return;
@@ -2131,16 +2218,17 @@ async function handleEdit(
       driver: editDriver,
     });
 
-    // Regenerate this project's files from the (now updated) graph so the wiki and
-    // its anchors stay consistent with the source of truth — no fragile in-place edits.
+    // Publish a complete global generation from the updated graph. A scoped
+    // compile is an intentionally unpublished export and must never replace the
+    // served portal, so post-edit visibility always follows the full path.
     if (projectSlug) {
       try {
-        await new WikiCompiler(editDriver).compile(wikiDir, projectTag);
+        await new WikiCompiler(editDriver).compile(publicationRoot, 'all');
       } catch (err) {
         console.error('[wiki-viewer] Post-edit recompile failed (non-fatal):', err instanceof Error ? err.message : err);
       }
     }
-    wikiCache = await buildCache(wikiDir);
+    wikiCache = await buildCache(publicationRoot);
 
     respond(200, { ok: true, ...result });
   } catch (err) {
@@ -2304,6 +2392,10 @@ export function startWikiViewer(config: ViewerConfig): Promise<ReturnType<typeof
     try {
       const url = new URL(req.url ?? '/', `http://localhost:${port}`);
       const path = url.pathname;
+      // Resolve once per request. If a compile publishes while this request is
+      // in flight, every file read below stays on the same immutable generation;
+      // the next request automatically observes the new pointer.
+      const servedWikiDir = await resolvePublishedWikiDir(wiki_dir);
 
       if (path === '/' || path === '') {
         // Redirect root to portal
@@ -2350,7 +2442,7 @@ export function startWikiViewer(config: ViewerConfig): Promise<ReturnType<typeof
         }
       } else if (path === '/api/edit' && req.method === 'POST') {
         const body = (await readJsonBody(req)) as { slug?: string; edited_md?: string };
-        await handleEdit(wiki_dir, body, res);
+        await handleEdit(servedWikiDir, wiki_dir, body, res);
       } else if (path === '/settings') {
         const body = renderSettingsBody(process.cwd());
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -2381,14 +2473,14 @@ export function startWikiViewer(config: ViewerConfig): Promise<ReturnType<typeof
           res.end();
           return;
         }
-        await handleWikiPage(wiki_dir, slugPath, res);
+        await handleWikiPage(servedWikiDir, slugPath, res);
       } else if (path === '/search') {
         const query = url.searchParams.get('q') ?? '';
         const projectFilter = url.searchParams.get('project');
-        await handleSearch(wiki_dir, query, projectFilter, res);
+        await handleSearch(servedWikiDir, query, projectFilter, res);
       } else if (path.startsWith('/api/graph/')) {
         const jsonPath = decodeURIComponent(path.slice('/api/graph/'.length));
-        const filePath = confineToDir(wiki_dir, jsonPath);
+        const filePath = confineToDir(servedWikiDir, jsonPath);
         if (!filePath) {
           res.writeHead(403);
           res.end('Forbidden');

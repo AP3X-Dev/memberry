@@ -32,6 +32,6 @@ describe('arch tools.ts regression', () => {
   });
 
   it('berry_arch_relate scopes structural relation creation', () => {
-    expect(TOOLS_SOURCE).toContain('args.properties,\n        args.project_name');
+    expect(TOOLS_SOURCE).toMatch(/args\.properties,\s*args\.project_name/);
   });
 });

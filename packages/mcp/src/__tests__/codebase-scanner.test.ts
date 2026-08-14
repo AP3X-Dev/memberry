@@ -91,6 +91,7 @@ describe('scanCodebase', () => {
     expect(coreModule).toBeDefined();
     expect(coreModule!.type).toBe('module');
     expect(coreModule!.parent).toBe('test-project');
+    expect(coreModule!.relPath).toBe('packages/core');
   });
 
   it('discovers src subdirectories as components', async () => {
@@ -122,6 +123,52 @@ describe('scanCodebase', () => {
     const scan = await scanCodebase(tempDir, { excludePatterns: ['packages'] });
     // Should not find workspace package files
     expect(scan.sourceFiles.some((f) => f.includes('packages/'))).toBe(false);
+    expect(scan.modules.some((m) => m.relPath?.startsWith('packages/'))).toBe(false);
+  });
+});
+
+describe('scanCodebase with explicit workspaces', () => {
+  let explicitDir: string;
+
+  beforeAll(async () => {
+    explicitDir = await mkdtemp(join(tmpdir(), 'memberry-scan-explicit-'));
+    await writeFile(
+      join(explicitDir, 'package.json'),
+      JSON.stringify({
+        name: 'explicit-project',
+        workspaces: ['packages/core', 'packages/mcp'],
+      }),
+    );
+
+    for (const workspace of ['core', 'mcp']) {
+      const workspaceDir = join(explicitDir, 'packages', workspace);
+      await mkdir(join(workspaceDir, 'src'), { recursive: true });
+      await mkdir(join(workspaceDir, 'dist'), { recursive: true });
+      await mkdir(join(workspaceDir, 'node_modules', 'dependency'), { recursive: true });
+      await writeFile(
+        join(workspaceDir, 'package.json'),
+        JSON.stringify({ name: `@test/${workspace}`, description: `${workspace} package` }),
+      );
+      await writeFile(join(workspaceDir, 'src', 'index.ts'), `export const ${workspace} = true;\n`);
+    }
+  });
+
+  afterAll(async () => {
+    await rm(explicitDir, { recursive: true, force: true });
+  });
+
+  it('treats each explicit workspace directory as the module itself', async () => {
+    const scan = await scanCodebase(explicitDir);
+
+    expect(scan.modules.filter((m) => m.type === 'module')).toEqual([
+      expect.objectContaining({ name: 'core', relPath: 'packages/core' }),
+      expect.objectContaining({ name: 'mcp', relPath: 'packages/mcp' }),
+    ]);
+    expect(scan.modules.map((m) => m.name)).not.toEqual(expect.arrayContaining([
+      'dist',
+      'node_modules',
+      'src',
+    ]));
   });
 });
 

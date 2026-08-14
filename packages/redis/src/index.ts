@@ -3,6 +3,7 @@ export { createRedisClient, healthCheck } from './client.js';
 export type { HealthResult } from './client.js';
 export { ContextCache } from './cache.js';
 export { SignalStream, EpisodicBuffer } from './streams.js';
+export type { ConsumedSignal, ScopedStreamSignal } from './streams.js';
 export type { BufferEvent } from './streams.js';
 export { EmbeddingCache } from './embeddings.js';
 export { ProposalStore } from './proposals.js';

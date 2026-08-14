@@ -200,10 +200,10 @@ export function renderEntityArticle(
     lines.push('');
   }
 
-  // Key decisions (high-confidence claims)
+  // Key decisions: classification wins; confidence is a legacy fallback.
   const decisions = sections
     .flatMap((s) => s.claims)
-    .filter((c) => c.confidence >= 0.8)
+    .filter((c) => isDecisionSemantic(c, 0.8))
     .sort((a, b) => b.confidence - a.confidence)
     .slice(0, 5);
 
@@ -309,7 +309,7 @@ export function renderProjectIndex(project: ProjectData): string {
   }
 
   const decisions = project.semantics
-    .filter((s) => s.confidence >= 0.7)
+    .filter((s) => isDecisionSemantic(s))
     .sort((a, b) => b.confidence - a.confidence)
     .slice(0, 5);
 
@@ -660,8 +660,26 @@ export function renderTopicPage(topic: TopicData): string {
 
 // ─── Decisions Page ──────────────────────────────────────────────────────────
 
+/** Minimum evidence level for explicit and legacy decision rendering. */
+export const DECISION_CONFIDENCE_THRESHOLD = 0.7;
+
+/** Classified non-decisions are never relabeled merely because confidence is high. */
+export function isDecisionSemantic(
+  sem: { confidence: number; memory_type?: string },
+  threshold = DECISION_CONFIDENCE_THRESHOLD,
+): boolean {
+  if (sem.confidence < threshold) return false;
+  return sem.memory_type === undefined || sem.memory_type === 'decision';
+}
+
+function semanticProjectName(sem: { tags: string[]; scope?: string }): string {
+  if (sem.scope && /^project:/i.test(sem.scope)) return sem.scope.replace(/^project:/i, '');
+  const projectTag = sem.tags.find((t) => /^project:/i.test(t));
+  return projectTag ? projectTag.replace(/^project:/i, '') : 'unscoped';
+}
+
 export function renderDecisionsPage(semantics: Array<{
-  id: string; content: string; confidence: number; tags: string[]; entities: string[];
+  id: string; content: string; confidence: number; memory_type?: string; tags: string[]; scope?: string; entities: string[];
 }>): string {
   const lines: string[] = [];
 
@@ -673,14 +691,13 @@ export function renderDecisionsPage(semantics: Array<{
 
   lines.push('# Decisions');
   lines.push('');
-  lines.push('High-confidence claims and decisions across all projects, sorted by confidence.');
+  lines.push('Explicit decisions across all projects, with a high-confidence fallback for legacy unclassified knowledge.');
   lines.push('');
 
   // Group by project tag
   const byProject = new Map<string, typeof semantics>();
-  for (const sem of semantics) {
-    const projectTag = sem.tags.find((t) => t.startsWith('project:'));
-    const proj = projectTag ? projectTag.replace('project:', '') : 'unscoped';
+  for (const sem of semantics.filter((item) => isDecisionSemantic(item))) {
+    const proj = semanticProjectName(sem);
     const list = byProject.get(proj) ?? [];
     list.push(sem);
     byProject.set(proj, list);
@@ -712,9 +729,6 @@ export function renderDecisionsPage(semantics: Array<{
 
 // ─── Patterns Page ───────────────────────────────────────────────────────────
 
-/** A semantic claim counts as a "decision" when its confidence clears this bar. */
-export const DECISION_CONFIDENCE_THRESHOLD = 0.7;
-
 /** A tag is a cross-project "pattern" when it appears in at least this many projects. */
 export const PATTERN_MIN_PROJECTS = 2;
 
@@ -724,14 +738,15 @@ export const PATTERN_MIN_PROJECTS = 2;
  * for both the patterns page and the portal patterns count.
  */
 export function crossProjectPatternTags(
-  semantics: Array<{ tags: string[] }>,
+  semantics: Array<{ tags: string[]; scope?: string; memory_type?: string }>,
 ): Array<[string, Set<string>]> {
   const tagProjects = new Map<string, Set<string>>();
   for (const sem of semantics) {
-    const projectTag = sem.tags.find((t) => t.startsWith('project:'));
-    const proj = projectTag ? projectTag.replace('project:', '') : 'unscoped';
+    if (sem.memory_type !== undefined && sem.memory_type !== 'pattern' && sem.memory_type !== 'convention') continue;
+    const proj = semanticProjectName(sem);
+    if (proj === 'unscoped') continue;
     for (const tag of sem.tags) {
-      if (tag.startsWith('project:')) continue;
+      if (/^project:/i.test(tag)) continue;
       const projects = tagProjects.get(tag) ?? new Set<string>();
       projects.add(proj);
       tagProjects.set(tag, projects);
@@ -742,30 +757,66 @@ export function crossProjectPatternTags(
     .sort(([, a], [, b]) => b.size - a.size);
 }
 
+/** Count visible pattern knowledge without double-counting classified rows. */
+export function patternKnowledgeCount(
+  semantics: Array<{ id: string; tags: string[]; scope?: string; memory_type?: string }>,
+): number {
+  const classified = semantics.filter(
+    (sem) => sem.memory_type === 'pattern' || sem.memory_type === 'convention',
+  ).length;
+  const legacyThemes = crossProjectPatternTags(
+    semantics.filter((sem) => sem.memory_type === undefined),
+  ).length;
+  return classified + legacyThemes;
+}
+
 export function renderPatternsPage(semantics: Array<{
-  id: string; content: string; confidence: number; tags: string[]; entities: string[];
+  id: string; content: string; confidence: number; memory_type?: string; tags: string[]; scope?: string; entities: string[];
 }>): string {
   const lines: string[] = [];
 
   lines.push(renderFrontmatter({
-    title: 'Cross-Project Patterns',
+    title: 'Patterns and Conventions',
     compiled: new Date().toISOString().split('T')[0],
   }));
   lines.push('');
 
-  lines.push('# Cross-Project Patterns');
+  lines.push('# Patterns and Conventions');
   lines.push('');
-  lines.push('Tags and patterns that appear across multiple projects.');
+  lines.push('Recurring knowledge learned from independent evidence. Classified project patterns are visible immediately after promotion; shared themes are also rolled up across projects.');
   lines.push('');
+
+  const classified = semantics
+    .filter((sem) => sem.memory_type === 'pattern' || sem.memory_type === 'convention')
+    .sort((a, b) => {
+      const projectOrder = semanticProjectName(a).localeCompare(semanticProjectName(b));
+      return projectOrder || b.confidence - a.confidence;
+    });
+
+  if (classified.length > 0) {
+    lines.push('## Classified Project Knowledge');
+    lines.push('');
+    for (const sem of classified) {
+      const proj = semanticProjectName(sem);
+      const label = sem.memory_type === 'convention' ? 'Convention' : 'Pattern';
+      lines.push(`- **${label} · ${proj}** — ${truncate(sem.content, 200)} *(${sem.confidence.toFixed(2)})*`);
+    }
+    lines.push('');
+  }
 
   // Tags that span multiple projects (shared helper — keeps the page and the
   // portal "PATTERNS" count in lockstep).
   const crossProjectTags = crossProjectPatternTags(semantics);
 
-  if (crossProjectTags.length === 0) {
+  if (crossProjectTags.length === 0 && classified.length === 0) {
     lines.push('*No cross-project patterns detected yet.*');
     lines.push('');
     return lines.join('\n');
+  }
+
+  if (crossProjectTags.length > 0) {
+    lines.push('## Cross-Project Themes');
+    lines.push('');
   }
 
   for (const [tag, projects] of crossProjectTags) {
@@ -775,12 +826,12 @@ export function renderPatternsPage(semantics: Array<{
 
     const tagSems = semantics
       .filter((s) => s.tags.includes(tag))
+      .filter((s) => s.memory_type === undefined || s.memory_type === 'pattern' || s.memory_type === 'convention')
       .sort((a, b) => b.confidence - a.confidence)
       .slice(0, 10);
 
     for (const sem of tagSems) {
-      const projectTag = sem.tags.find((t) => t.startsWith('project:'));
-      const proj = projectTag ? projectTag.replace('project:', '') : 'unscoped';
+      const proj = semanticProjectName(sem);
       lines.push(`- [${proj}] ${truncate(sem.content, 180)} *(${sem.confidence.toFixed(2)})*`);
     }
     lines.push('');

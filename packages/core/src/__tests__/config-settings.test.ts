@@ -90,4 +90,11 @@ describe('getConfigStatus source attribution', () => {
     if (prev === undefined) delete process.env.AMP_REQUIRE_PROJECT_TAG;
     else process.env.AMP_REQUIRE_PROJECT_TAG = prev;
   });
+  it('reports the effective consolidation auto-apply environment', () => {
+    const prev = process.env.MEMBERRY_CONSOLIDATION_AUTO_APPLY;
+    process.env.MEMBERRY_CONSOLIDATION_AUTO_APPLY = 'true';
+    expect(getConfigStatus().server.consolidation.autoApply).toBe(true);
+    if (prev === undefined) delete process.env.MEMBERRY_CONSOLIDATION_AUTO_APPLY;
+    else process.env.MEMBERRY_CONSOLIDATION_AUTO_APPLY = prev;
+  });
 });

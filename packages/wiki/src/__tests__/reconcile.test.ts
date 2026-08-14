@@ -53,13 +53,17 @@ function createDriver(graph: Map<string, GraphNode>): { driver: Driver; calls: (
         return { records: about.map((id) => ({ get: (k: string) => (k === 'id' ? id : undefined) })) };
       }
       // create/supersede/episodic-create all RETURN an id
-      if (q.includes('CREATE (new:Semantic') || q.includes('CREATE (s:Semantic') || q.includes('CREATE (e:Episodic')) {
+      if (q.includes('MERGE (new:Semantic') || q.includes('CREATE (s:Semantic') || q.includes('CREATE (e:Episodic')) {
         return { records: [{ get: () => (p.id as string) ?? 'new-id' }] };
       }
       return { records: [] };
     }),
     close: vi.fn(async () => {}),
   } as unknown as Session;
+  // SemanticStore writes are transactional; mirror neo4j-driver's transaction
+  // callback while keeping this lightweight graph fixture deterministic.
+  (session as unknown as { executeWrite: (work: (tx: { run: Session['run'] }) => Promise<unknown>) => Promise<unknown> }).executeWrite =
+    async (work) => work({ run: session.run.bind(session) });
   const driver = { session: vi.fn(() => session) } as unknown as Driver;
   return { driver, calls: () => queries };
 }

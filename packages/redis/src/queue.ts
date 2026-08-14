@@ -17,6 +17,11 @@ export class ConsolidationQueue {
     return { member: result[0], score: parseFloat(result[1]) };
   }
 
+  /** Remove bookkeeping for a target after its typed stream work is durable. */
+  async remove(member: string): Promise<number> {
+    return this.redis.zrem(QUEUE_KEY, member);
+  }
+
   async peek(count: number = 10): Promise<Array<{ member: string; score: number }>> {
     const result = await this.redis.zrevrange(QUEUE_KEY, 0, count - 1, 'WITHSCORES');
     const entries: Array<{ member: string; score: number }> = [];

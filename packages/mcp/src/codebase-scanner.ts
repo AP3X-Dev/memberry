@@ -37,8 +37,10 @@ export interface CodebaseScan {
   description: string;
   domain: string;
   languages: SupportedLanguage[];
+  /** Absolute source paths normalized to forward slashes. */
   sourceFiles: string[];
   modules: DiscoveredModule[];
+  /** Absolute entry-point paths normalized to forward slashes. */
   entryPoints: string[];
 }
 
@@ -132,7 +134,7 @@ export async function scanCodebase(
   });
 
   // 5. Discover modules
-  const modules = await discoverModules(absRoot, metadata, sourceFiles);
+  const modules = await discoverModules(absRoot, metadata, sourceFiles, userExcludes);
 
   // 6. Find entry points
   const entryPoints = sourceFiles.filter((f) => {
@@ -146,9 +148,9 @@ export async function scanCodebase(
     description: metadata.description,
     domain: metadata.domain,
     languages,
-    sourceFiles,
+    sourceFiles: sourceFiles.map(toPortablePath),
     modules,
-    entryPoints,
+    entryPoints: entryPoints.map(toPortablePath),
   };
 }
 
@@ -211,6 +213,7 @@ async function discoverModules(
   rootPath: string,
   metadata: ProjectMetadata,
   sourceFiles: string[],
+  userExcludes: Set<string>,
 ): Promise<DiscoveredModule[]> {
   const modules: DiscoveredModule[] = [];
   const seen = new Set<string>();
@@ -218,35 +221,62 @@ async function discoverModules(
   // Strategy 1: npm/pnpm workspaces
   if (metadata.workspaces && metadata.workspaces.length > 0) {
     for (const pattern of metadata.workspaces) {
-      // Resolve simple glob patterns like "packages/*"
-      const wsDir = pattern.replace(/\/?\*$/, '');
-      const wsPath = join(rootPath, wsDir);
-      try {
-        const entries = await readdir(wsPath, { withFileTypes: true });
-        for (const entry of entries) {
-          if (!entry.isDirectory()) continue;
-          const pkgJsonPath = join(wsPath, entry.name, 'package.json');
-          const pkgJson = await readJsonSafe(pkgJsonPath);
-          const name = pkgJson?.name as string ?? entry.name;
-          const desc = (pkgJson?.description as string) ?? `Workspace package: ${entry.name}`;
-          if (!seen.has(name)) {
-            seen.add(name);
-            modules.push({
-              name: entry.name,
-              type: 'module',
-              description: desc,
-              parent: metadata.name,
-              // Directory the module lives in (e.g. `packages/core`), so the
-              // code→wiki bridge maps files under it to THIS module, not the
-              // `packages` workspace root.
-              relPath: toRelPath(rootPath, join(wsPath, entry.name)),
-            });
+      const normalizedPattern = pattern.replace(/\\/g, '/').replace(/\/$/, '');
+      const isChildGlob = normalizedPattern.endsWith('/*')
+        && !normalizedPattern.slice(0, -2).includes('*');
+
+      if (isChildGlob) {
+        // Preserve the supported workspace glob behavior: each immediate child
+        // of `packages/*` (or equivalent) is a module.
+        const wsDir = normalizedPattern.slice(0, -2);
+        const wsPath = join(rootPath, wsDir);
+        if (isExcludedWorkspacePath(rootPath, wsPath, userExcludes)) continue;
+
+        try {
+          const entries = await readdir(wsPath, { withFileTypes: true });
+          for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+            const modulePath = join(wsPath, entry.name);
+            if (isExcludedWorkspacePath(rootPath, modulePath, userExcludes)) continue;
+            await addWorkspaceModule(modulePath);
           }
+        } catch {
+          // Workspace directory doesn't exist or isn't readable — skip.
         }
-      } catch (err: unknown) {
-        // Workspace directory doesn't exist — skip
+        continue;
+      }
+
+      // An explicit workspace such as `packages/core` names that directory as
+      // the module. Do not enumerate its children (`dist`, `src`, etc.).
+      if (!normalizedPattern.includes('*')) {
+        const modulePath = join(rootPath, normalizedPattern);
+        if (isExcludedWorkspacePath(rootPath, modulePath, userExcludes)) continue;
+        try {
+          const moduleStat = await stat(modulePath);
+          if (moduleStat.isDirectory()) await addWorkspaceModule(modulePath);
+        } catch {
+          // Explicit workspace doesn't exist or isn't readable — skip.
+        }
       }
     }
+  }
+
+  async function addWorkspaceModule(modulePath: string): Promise<void> {
+    const moduleName = basename(modulePath);
+    const pkgJson = await readJsonSafe(join(modulePath, 'package.json'));
+    const packageName = (pkgJson?.name as string | undefined) ?? moduleName;
+    const desc = (pkgJson?.description as string | undefined) ?? `Workspace package: ${moduleName}`;
+    if (seen.has(packageName) || seen.has(moduleName)) return;
+
+    seen.add(packageName);
+    seen.add(moduleName);
+    modules.push({
+      name: moduleName,
+      type: 'module',
+      description: desc,
+      parent: metadata.name,
+      relPath: toRelPath(rootPath, modulePath),
+    });
   }
 
   // Strategy 2: top-level source directories
@@ -283,7 +313,7 @@ async function discoverModules(
         if (!entry.isDirectory()) continue;
         if (entry.name.startsWith('.') || entry.name.startsWith('__')) continue;
         const dirPath = join(srcDir, entry.name);
-        const filesInDir = sourceFiles.filter((f) => f.startsWith(dirPath + '/'));
+        const filesInDir = sourceFiles.filter((f) => isWithinDirectory(f, dirPath));
         if (filesInDir.length >= 2 && !seen.has(entry.name)) {
           seen.add(entry.name);
           modules.push({
@@ -358,6 +388,28 @@ function toRelPath(rootPath: string, dirPath: string): string {
   return relative(rootPath, dirPath).split(/[\\/]/).filter(Boolean).join('/');
 }
 
+function toPortablePath(filePath: string): string {
+  return filePath.replace(/\\/g, '/');
+}
+
+function isWithinDirectory(filePath: string, dirPath: string): boolean {
+  const relPath = relative(dirPath, filePath);
+  return relPath.length > 0 && relPath !== '..' && !relPath.startsWith(`..\\`) && !relPath.startsWith('../');
+}
+
+function isExcludedWorkspacePath(
+  rootPath: string,
+  workspacePath: string,
+  userExcludes: Set<string>,
+): boolean {
+  const segments = relative(rootPath, workspacePath).split(/[\\/]/).filter(Boolean);
+  return segments.some((segment) => (
+    DEFAULT_EXCLUDE_DIRS.has(segment)
+    || userExcludes.has(segment)
+    || segment.startsWith('.')
+  ));
+}
+
 function detectLanguages(files: string[]): SupportedLanguage[] {
   const counts = new Map<SupportedLanguage, number>();
   for (const f of files) {
@@ -374,7 +426,8 @@ function detectLanguages(files: string[]): SupportedLanguage[] {
 }
 
 function isTestFile(filePath: string): boolean {
-  return TEST_PATTERNS.some((p) => p.test(filePath));
+  const portablePath = toPortablePath(filePath);
+  return TEST_PATTERNS.some((p) => p.test(portablePath));
 }
 
 function inferDomain(packageJson: Record<string, unknown>): string {
@@ -424,7 +477,7 @@ async function readJsonSafe(path: string): Promise<Record<string, unknown> | nul
     const content = await readFile(path, 'utf-8');
     return JSON.parse(content) as Record<string, unknown>;
   } catch (err: unknown) {
-    console.error("[codebase-scanner] Suppressed error:", err);
+    if (!isMissingFileError(err)) console.error('[codebase-scanner] Suppressed error:', err);
     return null;
   }
 }
@@ -433,7 +486,11 @@ async function readTextSafe(path: string): Promise<string | null> {
   try {
     return await readFile(path, 'utf-8');
   } catch (err: unknown) {
-    console.error("[codebase-scanner] Suppressed error:", err);
+    if (!isMissingFileError(err)) console.error('[codebase-scanner] Suppressed error:', err);
     return null;
   }
+}
+
+function isMissingFileError(err: unknown): boolean {
+  return err instanceof Error && 'code' in err && err.code === 'ENOENT';
 }

@@ -24,17 +24,20 @@ describe('compile.ts regression', () => {
     // The batched form is still used (Phase 1).
     expect(COMPILE_SRC).toContain('fetchEpisodicsForEntities(');
 
-    // The global reuse map is built and read by entity name in Phase 2.
-    expect(COMPILE_SRC).toContain('entityEpisodicsByName');
-    expect(COMPILE_SRC).toMatch(/entityEpisodicsByName\.get\(entity\.name\)/);
+    // The global reuse map is keyed by stable entity ID, preventing same-name
+    // entities in different projects from sharing history.
+    expect(COMPILE_SRC).toContain('entityEpisodicsById');
+    expect(COMPILE_SRC).toMatch(/entityEpisodicsById\.get\(entity\.id\)/);
   });
 
-  it('gap-15: clears the output dir CONTENTS (mount-point-safe), never rm-s the dir itself', () => {
+  it('gap-15: publishes private generations without removing or clearing the volume root', () => {
     // outputDir may be a Docker volume MOUNT POINT (the shared wiki_output
     // volume); rm-ing a mount point fails with EBUSY and crash-loops the wiki
-    // container. The compiler must clear the dir's children, not remove the dir.
+    // container. The compiler now writes a fresh tree and atomically selects it;
+    // neither the mount nor the currently served tree is cleared in place.
     expect(COMPILE_SRC).not.toMatch(/\brm\(outputDir\s*,/); // never rm the dir/mount itself
-    expect(COMPILE_SRC).toContain('readdir(outputDir)'); // enumerate children
-    expect(COMPILE_SRC).toMatch(/rm\(join\(outputDir, entry\)/); // remove each child
+    expect(COMPILE_SRC).toContain('WIKI_GENERATIONS_DIRNAME');
+    expect(COMPILE_SRC).toContain('publishGenerationPointer(outputDir, generationName)');
+    expect(COMPILE_SRC).toContain('await rename(buildingDir, generationDir)');
   });
 });

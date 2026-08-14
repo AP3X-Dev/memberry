@@ -1,6 +1,6 @@
 // packages/neo4j/src/episodic.ts
 import { type Driver } from 'neo4j-driver';
-import type { EpisodicNode, Signal } from '@memberry/core';
+import { DEFAULT_TENANT, type EpisodicNode, type Signal } from '@memberry/core';
 import { temporalSetClause } from './temporal-edges.js';
 
 export class EpisodicStore {
@@ -21,6 +21,7 @@ export class EpisodicStore {
         task: $task,
         content: $content,
         outcome: $outcome,
+        memory_type: $memory_type,
         created_at: $created_at,
         ttl: $ttl,
         scope: $scope,
@@ -36,6 +37,7 @@ export class EpisodicStore {
       task: node.task,
       content: node.content,
       outcome: node.outcome ?? null,
+      memory_type: node.memory_type ?? null,
       created_at: node.created_at,
       ttl: node.ttl ?? null,
       scope: node.scope ?? null,
@@ -132,8 +134,10 @@ export class EpisodicStore {
 
   /**
    * Episodes eligible for consolidation into a Semantic node: in-scope, carrying
-   * an embedding (so they can be clustered), and not already the source of a
-   * promotion. Newest first, capped by `limit`.
+   * an embedding (so they can be clustered), OR explicitly approved decisions
+   * (which need no synthesis vector), and not already the source of a promotion.
+   * Approved decisions sort first so a large legacy recurrence backlog cannot
+   * starve a newly authorized decision behind maxCandidates.
    *
    * This is the input side of the promote path. Before it existed, the
    * consolidation engine could only ever see Redis signals, so the entire
@@ -151,10 +155,17 @@ export class EpisodicStore {
         `MATCH (e:Episodic)
          WHERE ($scope IS NULL OR e.scope = $scope)
            AND ($tenantId IS NULL OR coalesce(e.tenant_id, $tenantId) = $tenantId)
-           AND e.embedding IS NOT NULL
+           AND (
+             (e.memory_type = 'decision' AND e.outcome = 'approved')
+             OR e.embedding IS NOT NULL
+           )
            AND NOT EXISTS { MATCH (:Semantic)-[:PROMOTED_FROM]->(e) }
          RETURN e
-         ORDER BY e.created_at DESC
+         ORDER BY CASE
+           WHEN e.memory_type = 'decision' AND e.outcome = 'approved' THEN 0
+           WHEN e.memory_type IN ['pattern', 'convention'] THEN 1
+           ELSE 2
+         END ASC, e.created_at ASC, e.id ASC
          LIMIT toInteger($limit)`,
         { scope: scope ?? null, tenantId: tenantId ?? null, limit },
       );
@@ -176,6 +187,7 @@ export class EpisodicStore {
       task: props.task as string,
       content: props.content as string,
       outcome: (props.outcome as EpisodicNode['outcome']) ?? undefined,
+      memory_type: (props.memory_type as EpisodicNode['memory_type']) ?? undefined,
       created_at: props.created_at as string,
       ttl: props.ttl != null ? (props.ttl as number) : undefined,
       embedding: props.embedding != null ? (props.embedding as number[]) : undefined,
@@ -243,7 +255,7 @@ export class EpisodicStore {
     }
   }
 
-  async linkSignal(episodicId: string, signal: Signal): Promise<void> {
+  async linkSignal(episodicId: string, signal: Signal, tenantId: string = DEFAULT_TENANT): Promise<void> {
     const relTypeMap: Record<Signal['type'], string> = {
       reinforcement: 'REINFORCES',
       correction: 'CORRECTS',
@@ -259,10 +271,19 @@ export class EpisodicStore {
       // Relationship types cannot be parameterized in Cypher, so build dynamically
       await session.run(
         `MATCH (e:Episodic {id: $episodicId}), (s:Semantic {id: $targetId})
+         WHERE coalesce(e.tenant_id, $defaultTenant) = $tenantId
+           AND coalesce(s.tenant_id, $defaultTenant) = $tenantId
          MERGE (e)-[r:${relType}]->(s)
          SET r.detail = $detail
          ${temporalSetClause('r')}`,
-        { episodicId, targetId: signal.target_id, detail: signal.detail, now: new Date().toISOString() },
+        {
+          episodicId,
+          targetId: signal.target_id,
+          detail: signal.detail,
+          tenantId,
+          defaultTenant: DEFAULT_TENANT,
+          now: new Date().toISOString(),
+        },
       );
     } finally {
       await session.close();

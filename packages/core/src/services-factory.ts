@@ -164,13 +164,20 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
 
   const readonlyMode = readEnv('MEMBERRY_READONLY') === 'true';
   const redactOnIngest = readEnv('MEMBERRY_REDACT_ON_INGEST') === 'true';
+  // Keep the library-safe default review-first. Integrated deployments opt in
+  // through compose/systemd; the ConsolidationEngine itself only auto-applies
+  // corroborated promotions and positive reinforcement. Corrections,
+  // contradictions, supersedes, and decay remain in the review queue.
+  const autoApplyConsolidation = ['1', 'true', 'yes', 'on'].includes(
+    (readEnv('MEMBERRY_CONSOLIDATION_AUTO_APPLY') ?? '').trim().toLowerCase(),
+  );
 
   const config: AMPConfig = {
     redis: { url: redisUrl },
     neo4j: { uri: neo4jUri, user: neo4jUser, password: neo4jPassword },
     embedding: { provider: 'openai', apiKey: openaiKey },
     cache: { defaultTTL: 300, contextTTL: 300, embeddingTTL: 86400 },
-    consolidation: { autoApply: false, signalThreshold: 3 },
+    consolidation: { autoApply: autoApplyConsolidation, signalThreshold: 3 },
     exportPath,
     readonly: readonlyMode,
     redactOnIngest,

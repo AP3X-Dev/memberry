@@ -1,5 +1,6 @@
 // packages/core/src/consolidation.ts
 import { nanoid } from 'nanoid';
+import { createHash } from 'node:crypto';
 import type {
   ConsolidationProposal,
   StreamSignal,
@@ -16,6 +17,72 @@ import type { LlmClient } from './llm.js';
 // ─── Runtime validators ──────────────────────────────────────────────────────
 
 const VALID_DECAY_CLASSES = new Set(['volatile', 'stable', 'permanent']);
+const VALID_MEMORY_TYPES = new Set([
+  'decision',
+  'pattern',
+  'convention',
+  'architecture',
+  'preference',
+  'fact',
+  'general',
+]);
+/** Explicitly approved decisions are already authorized by the writer. */
+const APPROVED_DECISION_CONFIDENCE = 0.9;
+const CONSOLIDATION_LOCK_TTL_SECONDS = 30;
+const CONSOLIDATION_LOCK_HEARTBEAT_MS = 10_000;
+
+function stableId(prefix: string, parts: string[]): string {
+  const digest = createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 24);
+  return `${prefix}-${digest}`;
+}
+
+function normalizedScope(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+/**
+ * Fail closed at the global-stream/project boundary. New deliveries carry
+ * source scope + tenant; legacy deliveries are treated as DEFAULT_TENANT and
+ * are accepted for a project run only when the target has structural scope.
+ */
+function signalMatchesTarget(
+  signal: StreamSignal,
+  target: SemanticNode,
+  runScope: string,
+): boolean {
+  const requested = normalizedScope(runScope);
+  const isGlobal = requested === '' || requested === 'global';
+  const signalScope = signal.scope ? normalizedScope(signal.scope) : undefined;
+  const targetScope = target.scope ? normalizedScope(target.scope) : undefined;
+  const targetProjectTags = (target.tags ?? [])
+    .filter((tag) => /^project:/i.test(tag))
+    .map(normalizedScope);
+
+  // Even an unscoped/global maintenance run may not use a source-project
+  // signal to mutate a target structurally owned by another project.
+  if (signalScope && targetScope && signalScope !== targetScope) return false;
+  if (
+    signalScope?.startsWith('project:') &&
+    targetProjectTags.length > 0 &&
+    !targetProjectTags.includes(signalScope)
+  ) {
+    return false;
+  }
+
+  if (!isGlobal) {
+    if (signalScope && signalScope !== requested) return false;
+    if (targetScope && targetScope !== requested) return false;
+    if (requested.startsWith('project:')) {
+      // A project run must be supported by the target itself, not merely by an
+      // emitter-supplied scope that could point at another project's node.
+      if (targetScope !== requested && !targetProjectTags.includes(requested)) return false;
+    }
+  }
+
+  const sourceTenant = signal.tenant_id?.trim() || DEFAULT_TENANT;
+  const targetTenant = target.tenant_id?.trim() || DEFAULT_TENANT;
+  return sourceTenant === targetTenant;
+}
 
 /**
  * OPT-31: an existing active fact whose confidence is at/above this threshold is
@@ -75,6 +142,9 @@ function parseSemanticNode(raw: Record<string, unknown>, label: string): Semanti
     updated_at: raw.updated_at,
     decay_class: raw.decay_class as SemanticNode['decay_class'],
     tags: raw.tags as string[],
+    ...(typeof raw.memory_type === 'string' && VALID_MEMORY_TYPES.has(raw.memory_type)
+      ? { memory_type: raw.memory_type as SemanticNode['memory_type'] }
+      : {}),
     ...(typeof raw.tenant_id === 'string' && raw.tenant_id !== '' ? { tenant_id: raw.tenant_id } : {}),
     ...(Array.isArray(raw.embedding) ? { embedding: raw.embedding as number[] } : {}),
   };
@@ -123,6 +193,11 @@ function parsePartialSemanticNode(raw: Record<string, unknown>, label: string): 
       throw new Error(`${label}: invalid "tags"`);
     result.tags = raw.tags as string[];
   }
+  if ('memory_type' in raw) {
+    if (typeof raw.memory_type !== 'string' || !VALID_MEMORY_TYPES.has(raw.memory_type))
+      throw new Error(`${label}: invalid "memory_type"`);
+    result.memory_type = raw.memory_type as SemanticNode['memory_type'];
+  }
   if ('tenant_id' in raw) {
     if (typeof raw.tenant_id !== 'string') throw new Error(`${label}: invalid "tenant_id"`);
     result.tenant_id = raw.tenant_id;
@@ -136,6 +211,7 @@ function parsePartialSemanticNode(raw: Record<string, unknown>, label: string): 
 export interface ConsolidationRedisLayer {
   lock: {
     acquire(scope: string, holder: string, ttlSeconds?: number): Promise<boolean>;
+    renew?(scope: string, holder: string, ttlSeconds?: number): Promise<boolean>;
     release(scope: string, holder: string): Promise<boolean>;
   };
   signals: {
@@ -144,10 +220,16 @@ export interface ConsolidationRedisLayer {
       consumer: string,
       count: number,
       startId?: string,
-    ): Promise<StreamSignal[]>;
+    ): Promise<Array<StreamSignal & { stream_id?: string }>>;
+    /** Optional for backward compatibility with non-Redis test adapters. */
+    ack?(group: string, messageIds: string[]): Promise<number>;
   };
   queue: {
-    popHighest(): Promise<{ member: string; score: number } | null>;
+    /** Legacy destructive API retained for adapter compatibility; consolidation
+     * no longer uses untyped queue scores to choose a semantic mutation. */
+    popHighest?(): Promise<{ member: string; score: number } | null>;
+    /** Remove bookkeeping for a target only after its typed signals are durable. */
+    remove?(member: string): Promise<number>;
   };
   proposals: {
     save(proposal: ConsolidationProposal): Promise<void>;
@@ -174,7 +256,7 @@ export interface ConsolidationNeo4jLayer {
      *  _generateProposals falls back to per-id getById when absent. Returns one
      *  entry per FOUND id (missing ids omitted). */
     getByIds?(ids: string[]): Promise<SemanticNode[]>;
-    updateConfidence(id: string, confidence: number): Promise<void>;
+    updateConfidence(id: string, confidence: number, applicationKey?: string): Promise<void>;
     supersede(oldId: string, newNode: SemanticNode): Promise<string>;
     /**
      * Promote an episodic memory into a new Semantic node.
@@ -184,7 +266,7 @@ export interface ConsolidationNeo4jLayer {
      * don't implement it simply have no promote path.
      */
     promoteFromEpisodic?(
-      episodicId: string,
+      episodicIds: string[],
       newNode: SemanticNode,
       tenantId?: string,
     ): Promise<string>;
@@ -242,6 +324,7 @@ export class ConsolidationEngine {
     private neo4j: ConsolidationNeo4jLayer,
     private config: AMPConfig,
     private llm?: LlmClient,
+    private tenantId?: string,
   ) {
     this.lockHolder = `consolidation-engine-${nanoid(8)}`;
   }
@@ -250,10 +333,39 @@ export class ConsolidationEngine {
 
   async run(scope: string): Promise<RunResult> {
     // 1. Acquire distributed lock
-    const acquired = await this.redis.lock.acquire(scope, this.lockHolder);
+    const acquired = await this.redis.lock.acquire(
+      scope,
+      this.lockHolder,
+      CONSOLIDATION_LOCK_TTL_SECONDS,
+    );
     if (!acquired) {
       return { skipped: true, reason: 'lock_held', proposals: [], applied: [] };
     }
+
+    let leaseFailure: Error | null = null;
+    let heartbeatWork: Promise<void> = Promise.resolve();
+    const renewLease = async (): Promise<void> => {
+      if (!this.redis.lock.renew || leaseFailure) return;
+      try {
+        const renewed = await this.redis.lock.renew(
+          scope,
+          this.lockHolder,
+          CONSOLIDATION_LOCK_TTL_SECONDS,
+        );
+        if (!renewed) leaseFailure = new Error(`Lost consolidation lock for scope ${scope}`);
+      } catch (err: unknown) {
+        leaseFailure = err instanceof Error ? err : new Error(String(err));
+      }
+    };
+    const heartbeat = this.redis.lock.renew
+      ? setInterval(() => {
+          heartbeatWork = heartbeatWork.then(renewLease);
+        }, CONSOLIDATION_LOCK_HEARTBEAT_MS)
+      : null;
+    heartbeat?.unref?.();
+    const assertLease = (): void => {
+      if (leaseFailure) throw leaseFailure;
+    };
 
     try {
       // 2. Consume signals from stream
@@ -263,37 +375,87 @@ export class ConsolidationEngine {
         100,
       );
 
-      // 3. Pop queue entries (up to 20)
-      const queueEntries: Array<{ member: string; score: number }> = [];
-      for (let i = 0; i < 20; i++) {
-        const entry = await this.redis.queue.popHighest();
-        if (!entry) break;
-        queueEntries.push(entry);
-      }
-
-      // 4. Generate proposals from signal clusters, then from unpromoted
+      // 3. Generate proposals from typed signal clusters, then from unpromoted
       // episodes. The two are independent: signals adjust EXISTING semantics,
       // promotion mints new ones. Only the signal path existed before, so a
       // graph with no semantics to signal against could never grow any.
-      const proposals = await this._generateProposals(scope, signals, queueEntries);
+      //
+      // The legacy sorted-set queue stores only target + numeric score. It does
+      // not retain whether the score came from reinforcement, correction, or
+      // contradiction, so consuming it as a queue-only decay instruction can
+      // invert reinforcement into decay. Typed stream deliveries are now the
+      // source of truth; their pending entries safely accumulate across runs.
+      const signalBatch = await this._generateProposals(scope, signals);
+      const signalProposals = signalBatch.proposals;
+      const proposals = [...signalProposals];
       proposals.push(...(await this._generatePromoteProposals(scope)));
+      assertLease();
 
-      // 5. Apply or store for review
+      // 4. Apply or store for review
       const applied: string[] = [];
-      if (this.config.consolidation.autoApply) {
-        for (const proposal of proposals) {
+      const durableSignalTargets = new Set<string>();
+      const durableSignalProposalIds = new Set<string>();
+      const signalProposalIds = new Set(signalProposals.map((proposal) => proposal.id));
+      for (const proposal of proposals) {
+        assertLease();
+        const after = proposal.after as { confidence?: number; memory_type?: string };
+        const promoteConfidence = after.confidence ?? 0;
+        // An explicitly classified, approved decision is generated only by the
+        // dedicated one-source path below. It is safe to apply even when broad
+        // autoApply is disabled: `outcome: approved` is the captured approval,
+        // while rejected/revised/implicit episodes never enter that path.
+        const approvedDecision =
+          proposal.type === 'promote' &&
+          after.memory_type === 'decision' &&
+          promoteConfidence >= 0.8 &&
+          proposal.affected_ids.length === 1;
+        // Corroborated promotion and positive reinforcement are safe to
+        // automate only when broad autoApply is enabled. Contradiction,
+        // correction, supersede, and decay remain reviewable.
+        const safeConfiguredAutoApply = this.config.consolidation.autoApply && (
+          proposal.type === 'reinforce' ||
+          (proposal.type === 'promote' && promoteConfidence >= 0.7)
+        );
+        if (approvedDecision || safeConfiguredAutoApply) {
           const ok = await this._applyProposal(proposal);
-          if (ok) applied.push(proposal.id);
-        }
-      } else {
-        // Store for manual review
-        for (const proposal of proposals) {
+          if (ok) {
+            applied.push(proposal.id);
+            if (signalProposalIds.has(proposal.id)) {
+              durableSignalProposalIds.add(proposal.id);
+              for (const id of proposal.affected_ids) durableSignalTargets.add(id);
+            }
+          }
+        } else {
           await this.redis.proposals.save(proposal);
+          if (signalProposalIds.has(proposal.id)) {
+            durableSignalProposalIds.add(proposal.id);
+            for (const id of proposal.affected_ids) durableSignalTargets.add(id);
+          }
+        }
+      }
+
+      // ACK only signal deliveries whose typed cluster produced durable work.
+      // Below-threshold deliveries remain pending and are re-read next run; a
+      // crash before proposal save/application likewise leaves them available
+      // for redelivery. Queue scores are advisory bookkeeping and are cleared
+      // only for the same durably handled targets.
+      if (this.redis.signals.ack && durableSignalTargets.size > 0) {
+        const messageIds = [...durableSignalProposalIds]
+          .flatMap((proposalId) => signalBatch.messageIdsByProposal.get(proposalId) ?? []);
+        if (messageIds.length > 0) {
+          await this.redis.signals.ack('consolidation', [...new Set(messageIds)]);
+          if (this.redis.queue.remove) {
+            for (const targetId of durableSignalTargets) {
+              await this.redis.queue.remove(targetId);
+            }
+          }
         }
       }
 
       return { skipped: false, proposals, applied };
     } finally {
+      if (heartbeat) clearInterval(heartbeat);
+      await heartbeatWork;
       await this.redis.lock.release(scope, this.lockHolder);
     }
   }
@@ -319,7 +481,7 @@ export class ConsolidationEngine {
 
     // approve: execute the proposal
     const ok = await this._applyProposal(proposal);
-    await this.redis.proposals.remove(proposalId);
+    if (ok) await this.redis.proposals.remove(proposalId);
     return { applied: ok };
   }
 
@@ -343,48 +505,43 @@ export class ConsolidationEngine {
 
   private async _generateProposals(
     scope: string,
-    signals: StreamSignal[],
-    queueEntries: Array<{ member: string; score: number }>,
-  ): Promise<ConsolidationProposal[]> {
+    signals: Array<StreamSignal & { stream_id?: string }>,
+  ): Promise<{
+    proposals: ConsolidationProposal[];
+    messageIdsByProposal: Map<string, string[]>;
+  }> {
     const proposals: ConsolidationProposal[] = [];
+    const messageIdsByProposal = new Map<string, string[]>();
 
     // Cluster signals by target_id
     const clusters = new Map<string, { signals: StreamSignal[]; totalWeight: number }>();
     for (const signal of signals) {
+      // Modern entries can be rejected before graph I/O. Legacy entries have no
+      // source scope and are validated against the target after it is fetched.
+      if (
+        signal.scope &&
+        normalizedScope(scope) !== 'global' &&
+        normalizedScope(signal.scope) !== normalizedScope(scope)
+      ) {
+        continue;
+      }
       const existing = clusters.get(signal.target_id) ?? { signals: [], totalWeight: 0 };
       existing.signals.push(signal);
       existing.totalWeight += SIGNAL_WEIGHTS[signal.type] ?? 1;
       clusters.set(signal.target_id, existing);
     }
 
-    // Also factor in queue entries (high score = needs consolidation): boost an
-    // existing cluster's weight, or remember a queue-only member (score above
-    // threshold) as a decay candidate. (No fetch yet — OPT-54 batches below.)
-    const queueOnlyCandidates: Array<{ member: string; score: number }> = [];
-    for (const entry of queueEntries) {
-      const existing = clusters.get(entry.member);
-      if (existing) {
-        // Already have signal data — boost score
-        existing.totalWeight += entry.score;
-      } else if (entry.score >= this.config.consolidation.signalThreshold) {
-        queueOnlyCandidates.push(entry);
-      }
-    }
-
-    // Signal clusters that meet threshold (evaluated AFTER queue-weight boosts).
+    // Signal clusters retain their type and remain pending across runs until
+    // this threshold is met.
     const clustersToProcess = [...clusters.entries()].filter(
       ([, cluster]) => cluster.totalWeight >= this.config.consolidation.signalThreshold,
     );
 
     // OPT-54: fetch every needed Semantic node in ONE round-trip instead of N
-    // sequential getById calls. Queue-only candidates and cluster targets are
-    // disjoint (queue-only = not in clusters). Missing ids are simply omitted —
-    // the proposal loops below skip them exactly as the original `if (!node)` did.
+    // sequential getById calls. Missing ids are simply omitted — the proposal
+    // loop below skips them exactly as the original `if (!node)` did.
     // Optional getByIds with a per-id getById fallback (mocks/layers without it).
-    const neededIds = [
-      ...queueOnlyCandidates.map((c) => c.member),
-      ...clustersToProcess.map(([id]) => id),
-    ];
+    const neededIds = clustersToProcess.map(([id]) => id);
     const nodeById = new Map<string, SemanticNode>();
     if (neededIds.length > 0) {
       const semantic = this.neo4j.semantic;
@@ -398,35 +555,52 @@ export class ConsolidationEngine {
       }
     }
 
-    // Queue-only decay proposals (preserve original order: before cluster proposals).
-    for (const { member, score } of queueOnlyCandidates) {
-      const node = nodeById.get(member);
-      if (node) proposals.push(buildDecayProposal(scope, node, score));
-    }
-
     // Generate proposals from signal clusters that meet threshold (clusters Map order).
     for (const [targetId, cluster] of clustersToProcess) {
       const node = nodeById.get(targetId);
       if (!node) continue;
 
-      const contradictions = cluster.signals.filter((s) => s.type === 'contradiction');
-      const corrections = cluster.signals.filter((s) => s.type === 'correction');
+      const validSignals = cluster.signals.filter((signal) => signalMatchesTarget(signal, node, scope));
+      const totalWeight = validSignals.reduce(
+        (total, signal) => total + (SIGNAL_WEIGHTS[signal.type] ?? 1),
+        0,
+      );
+      if (totalWeight < this.config.consolidation.signalThreshold) continue;
 
+      const contradictions = validSignals.filter((s) => s.type === 'contradiction');
+      const corrections = validSignals.filter((s) => s.type === 'correction');
+      const proposalScope = node.scope ?? validSignals.find((signal) => signal.scope)?.scope ?? scope;
+      const deliveryIds = validSignals
+        .map((signal) => (signal as StreamSignal & { stream_id?: string }).stream_id)
+        .filter((id): id is string => typeof id === 'string' && id !== '')
+        .sort();
+      const proposalId = deliveryIds.length === validSignals.length
+        ? stableId('signal', [proposalScope, targetId, ...deliveryIds])
+        : nanoid();
+
+      let proposal: ConsolidationProposal;
       if (contradictions.length > 0 || corrections.length > 0) {
         // Propose supersede with adjusted confidence
         const newConfidence = Math.max(0, node.confidence - 0.1 * (corrections.length + contradictions.length));
-        proposals.push(buildSupersedePropsal(scope, node, newConfidence, cluster.totalWeight));
+        proposal = buildSupersedePropsal(proposalId, proposalScope, node, newConfidence, totalWeight);
       } else {
         // Reinforce — the knowledge held true, so RAISE confidence (gently, with
         // diminishing returns toward 1.0). Previously this incorrectly called
         // buildDecayProposal, which DECAYED confidence by 5% — so repeatedly-confirmed
         // (i.e. most-validated) memories lost confidence every cycle, backwards for a
         // memory layer.
-        proposals.push(buildReinforceProposal(scope, node, cluster.totalWeight));
+        proposal = buildReinforceProposal(proposalId, proposalScope, node, totalWeight);
       }
+      proposals.push(proposal);
+      messageIdsByProposal.set(
+        proposal.id,
+        validSignals
+          .map((signal) => (signal as StreamSignal & { stream_id?: string }).stream_id)
+          .filter((id): id is string => typeof id === 'string' && id !== ''),
+      );
     }
 
-    return proposals;
+    return { proposals, messageIdsByProposal };
   }
 
   // ─── Private: generate promote proposals ──────────────────────────────────
@@ -434,19 +608,17 @@ export class ConsolidationEngine {
   /**
    * Mint `promote` proposals from episodes that have never been consolidated.
    *
-   * Pipeline: fetch unpromoted in-scope episodes -> cluster by embedding
-   * similarity -> keep clusters at/above minClusterSize -> synthesize each into
-   * one durable claim via the LLM -> propose.
+   * Pipeline: deterministically promote explicitly approved decisions, then
+   * cluster all other eligible classifications by embedding similarity, keep
+   * clusters at/above minClusterSize, and synthesize each into one durable
+   * claim via the LLM.
    *
-   * Returns [] (never throws) when the promote path can't run: no episodic
-   * accessor, no findPromotable, no LLM, too few candidates, or a synthesis
-   * failure. Consolidation's other proposals must not be lost to a promote-side
-   * error.
+   * Explicit decisions do not require an LLM. Recurrence-based promotion is
+   * skipped (never throws) when synthesis is unavailable or fails.
    */
   private async _generatePromoteProposals(scope: string): Promise<ConsolidationProposal[]> {
     const accessor = this.neo4j.episodic;
     if (!accessor?.findPromotable) return [];
-    if (!this.llm?.available) return [];
 
     const cfg = promoteConfig(this.config);
     if (cfg.maxPerRun <= 0) return [];
@@ -456,7 +628,7 @@ export class ConsolidationEngine {
 
     let candidates: EpisodicNode[];
     try {
-      candidates = await accessor.findPromotable(scopeFilter, cfg.maxCandidates);
+      candidates = await accessor.findPromotable(scopeFilter, cfg.maxCandidates, this.tenantId);
     } catch (err: unknown) {
       console.error(
         '[consolidation] findPromotable failed; skipping promote pass:',
@@ -464,12 +636,41 @@ export class ConsolidationEngine {
       );
       return [];
     }
-    if (candidates.length < cfg.minClusterSize) return [];
+    // Explicit approval is authorization, not inferred recurrence. Promote each
+    // approved, explicitly classified decision deterministically without LLM
+    // synthesis. This path intentionally excludes implicit, revised, rejected,
+    // and abandoned episodes.
+    const directDecisions = candidates
+      .filter((episode) => episode.memory_type === 'decision' && episode.outcome === 'approved')
+      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+      .slice(0, cfg.maxPerRun);
+    const proposals = directDecisions.map((episode) =>
+      buildApprovedDecisionProposal(episode.scope ?? scope, episode),
+    );
+
+    const remainingBudget = cfg.maxPerRun - proposals.length;
+    if (remainingBudget <= 0 || !this.llm?.available) return proposals;
+
+    // Decision semantics represent approved decisions only. Revised, rejected,
+    // abandoned, and implicit decision episodes stay episodic; they do not get
+    // a second chance to become decisions through recurrence synthesis.
+    const recurringCandidates = candidates.filter((episode) => episode.memory_type !== 'decision');
+    if (recurringCandidates.length < cfg.minClusterSize) return proposals;
 
     // A cluster whose members span projects must not become one semantic — its
     // tags/scope would merge two projects' knowledge. Only reachable on an
     // unscoped ("global") run, where candidates aren't pre-filtered.
-    const clusters = clusterByEmbedding(candidates, cfg.similarityThreshold, cfg.minClusterSize)
+    // Never blend unlike explicit classifications into one semantic. Legacy
+    // unclassified rows retain their previous behavior in one legacy bucket.
+    const byClassification = new Map<string, EpisodicNode[]>();
+    for (const episode of recurringCandidates) {
+      const key = episode.memory_type ?? '__legacy__';
+      const bucket = byClassification.get(key) ?? [];
+      bucket.push(episode);
+      byClassification.set(key, bucket);
+    }
+    const clusters = [...byClassification.values()]
+      .flatMap((bucket) => clusterByEmbedding(bucket, cfg.similarityThreshold, cfg.minClusterSize))
       .filter((c) => {
         const scopes = new Set(c.map((e) => e.scope ?? ''));
         if (scopes.size === 1) return true;
@@ -477,26 +678,38 @@ export class ConsolidationEngine {
           `[consolidation] promote: dropped a ${c.length}-episode cluster spanning ${scopes.size} project scopes`,
         );
         return false;
+      })
+      .filter((c) => {
+        const independentSources = new Set(
+          c.map((episode) => `${episode.agent_id}\u0000${episode.session_id}`),
+        ).size;
+        const distinctEvidence = new Set(
+          c.map((episode) => episode.content.trim().toLowerCase().replace(/\s+/g, ' ')),
+        ).size;
+        if (independentSources >= cfg.minClusterSize && distinctEvidence >= 2) return true;
+        console.error(
+          `[consolidation] promote: dropped a ${c.length}-episode cluster without independent corroboration`,
+        );
+        return false;
       });
-    if (clusters.length === 0) return [];
+    if (clusters.length === 0) return proposals;
 
     // Largest clusters first — the most-corroborated knowledge is promoted while
     // the per-run budget lasts. A skipped cluster is reconsidered next run (its
     // episodes stay unpromoted), so the budget defers work, never drops it.
     const ranked = [...clusters].sort((a, b) => b.length - a.length);
-    const selected = ranked.slice(0, cfg.maxPerRun);
+    const selected = ranked.slice(0, remainingBudget);
     if (ranked.length > selected.length) {
       console.error(
         `[consolidation] promote: ${ranked.length} clusters qualified, promoting ${selected.length} this run ` +
-          `(maxPerRun=${cfg.maxPerRun}); the rest remain unpromoted and are reconsidered next run.`,
+          `(remainingBudget=${remainingBudget}); the rest remain unpromoted and are reconsidered next run.`,
       );
     }
 
-    const proposals: ConsolidationProposal[] = [];
     for (const cluster of selected) {
       const synthesized = await this._synthesizeCluster(cluster);
       if (!synthesized) continue;
-      proposals.push(buildPromoteProposal(scope, cluster, synthesized, clusterTags(cluster)));
+      proposals.push(buildPromoteProposal(cluster[0]?.scope ?? scope, cluster, synthesized, clusterTags(cluster)));
     }
     return proposals;
   }
@@ -575,13 +788,14 @@ export class ConsolidationEngine {
         const after = parsePartialSemanticNode(proposal.after, 'proposal.after');
 
         const newNode: SemanticNode = {
-          id: nanoid(),
+          id: stableId('semantic-supersede', [proposal.id, before.id]),
           content: after.content ?? before.content,
           confidence: after.confidence ?? before.confidence,
           signal_count: (before.signal_count ?? 0) + 1,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           decay_class: after.decay_class ?? before.decay_class,
+          memory_type: after.memory_type ?? before.memory_type,
           tags: after.tags ?? before.tags ?? [],
           // Carry the tenant forward: the superseding node belongs to the same
           // tenant as the node it replaces (after-side wins if it specifies one).
@@ -589,8 +803,7 @@ export class ConsolidationEngine {
         };
 
         await this.neo4j.semantic.supersede(before.id, newNode);
-        await this.redis.cache.invalidateByNodeId(before.id);
-        await this.redis.cache.invalidateByNodeId(newNode.id);
+        await this._invalidateCacheBestEffort(before.id, newNode.id);
 
         // Fact extraction: optionally extract facts from superseded content
         await this._extractAndStoreFacts(newNode.content, newNode.id, proposal.affected_ids);
@@ -609,8 +822,8 @@ export class ConsolidationEngine {
         if (targetId) {
           const after = proposal.after as { confidence?: number };
           if (typeof after.confidence === 'number') {
-            await this.neo4j.semantic.updateConfidence(targetId, after.confidence);
-            await this.redis.cache.invalidateByNodeId(targetId);
+            await this.neo4j.semantic.updateConfidence(targetId, after.confidence, proposal.id);
+            await this._invalidateCacheBestEffort(targetId);
           }
         }
       }
@@ -644,7 +857,7 @@ export class ConsolidationEngine {
     }
 
     const after = parsePartialSemanticNode(proposal.after, 'proposal.after');
-    const sourceEpisodeIds = proposal.affected_ids;
+    const sourceEpisodeIds = [...new Set(proposal.affected_ids)];
     const tenantId = await this._deriveTenantFromEpisodes(sourceEpisodeIds, after.tenant_id);
 
     const now = new Date().toISOString();
@@ -656,21 +869,23 @@ export class ConsolidationEngine {
       created_at: after.created_at ?? now,
       updated_at: after.updated_at ?? now,
       decay_class: after.decay_class ?? 'stable',
+      memory_type: after.memory_type,
       tags: after.tags ?? [],
       tenant_id: tenantId,
     };
 
-    // Promote against the first source episode (PROMOTED_FROM provenance edge).
-    const anchorEpisodeId = sourceEpisodeIds[0];
-    if (!anchorEpisodeId) {
+    if (sourceEpisodeIds.length === 0) {
       console.error(
         `[consolidation] _applyPromoteProposal: proposal ${proposal.id} has no source episodes`,
       );
       return false;
     }
 
-    const newId = await this.neo4j.semantic.promoteFromEpisodic(anchorEpisodeId, newNode, tenantId);
-    await this.redis.cache.invalidateByNodeId(newId);
+    // The persistence layer creates the Semantic, every PROMOTED_FROM edge, and
+    // inherited ABOUT links in one transaction. Passing the complete cluster is
+    // essential: findPromotable excludes episodes by this provenance edge.
+    const newId = await this.neo4j.semantic.promoteFromEpisodic(sourceEpisodeIds, newNode, tenantId);
+    await this._invalidateCacheBestEffort(newId);
 
     // Extract facts from the promoted content for traceability.
     await this._extractAndStoreFacts(newNode.content, newId, sourceEpisodeIds);
@@ -678,23 +893,35 @@ export class ConsolidationEngine {
     return true;
   }
 
+  /** Cache is derived state; invalidation failure must not roll back durable graph work. */
+  private async _invalidateCacheBestEffort(...nodeIds: string[]): Promise<void> {
+    const results = await Promise.allSettled(
+      nodeIds.map((nodeId) => this.redis.cache.invalidateByNodeId(nodeId)),
+    );
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        console.error(
+          '[consolidation] cache invalidation failed after durable mutation (non-critical):',
+          result.reason instanceof Error ? result.reason.message : String(result.reason),
+        );
+      }
+    }
+  }
+
   /**
    * Determine the tenant for a set of source episodes.
    *
-   * Precedence: an explicit `preferred` tenant (e.g. from the proposal's after
-   * side) wins; otherwise the episodes' common tenant; otherwise DEFAULT_TENANT.
-   * A mix of distinct tenants (which shouldn't happen — consolidation is
-   * per-scope) also falls back to DEFAULT_TENANT rather than leaking across
-   * tenants.
+   * All discovered source episodes must belong to one tenant. An explicit
+   * `preferred` tenant must agree with that tenant. Mixed clusters are rejected
+   * rather than being written into DEFAULT_TENANT, which would cross an
+   * isolation boundary.
    */
   private async _deriveTenantFromEpisodes(
     episodeIds: string[],
     preferred?: string,
   ): Promise<string> {
-    if (typeof preferred === 'string' && preferred !== '') return preferred;
-
     const accessor = this.neo4j.episodic;
-    if (!accessor || episodeIds.length === 0) return DEFAULT_TENANT;
+    if (!accessor || episodeIds.length === 0) return preferred || DEFAULT_TENANT;
 
     const tenants = new Set<string>();
     if (accessor.getTenantsByIds) {
@@ -719,9 +946,15 @@ export class ConsolidationEngine {
       }
     }
 
-    if (tenants.size === 1) return [...tenants][0]!;
-    // No episodes resolved, or a mix of tenants — default rather than leak.
-    return DEFAULT_TENANT;
+    if (tenants.size > 1) {
+      throw new Error('Cannot promote episodes from multiple tenants');
+    }
+
+    const sourceTenant = tenants.size === 1 ? [...tenants][0]! : DEFAULT_TENANT;
+    if (preferred && preferred !== sourceTenant) {
+      throw new Error(`Promotion tenant ${preferred} does not match source tenant ${sourceTenant}`);
+    }
+    return preferred || sourceTenant;
   }
 
   // ─── Private: fact extraction ──────────────────────────────────────────────
@@ -910,13 +1143,29 @@ function promoteConfig(config: AMPConfig): {
 /** Union of the cluster's tags (deduped, project tags lowercased) — the source
  *  episodes' tags are what make the promoted semantic retrievable by scope. */
 function clusterTags(cluster: EpisodicNode[]): string[] {
-  const tags = new Set<string>();
+  const projectTags = new Set<string>();
+  const nonProjectCounts = new Map<string, number>();
   for (const ep of cluster) {
-    for (const t of ep.tags ?? []) {
-      tags.add(/^project:/i.test(t) ? t.toLowerCase() : t);
+    for (const raw of new Set(ep.tags ?? [])) {
+      const tag = /^project:/i.test(raw) ? raw.toLowerCase() : raw;
+      if (/^project:/i.test(tag)) {
+        projectTags.add(tag);
+      } else {
+        nonProjectCounts.set(tag, (nonProjectCounts.get(tag) ?? 0) + 1);
+      }
     }
   }
-  return [...tags];
+  const classification = cluster[0]?.memory_type;
+  // Pattern/convention tags must themselves recur: one episode's incidental
+  // label cannot manufacture a durable pattern/topic in the wiki. Other memory
+  // types retain the legacy union behavior for backward compatibility.
+  const stableNonProjectTags = [...nonProjectCounts]
+    .filter(([, count]) =>
+      classification === 'pattern' || classification === 'convention' ? count >= 2 : count >= 1,
+    )
+    .map(([tag]) => tag)
+    .sort();
+  return [...[...projectTags].sort(), ...stableNonProjectTags];
 }
 
 // ─── Promote: clustering helpers ──────────────────────────────────────────────
@@ -994,16 +1243,21 @@ function buildPromoteProposal(
   tags: string[],
 ): ConsolidationProposal {
   const now = new Date().toISOString();
+  const sourceIds = cluster.map((episode) => episode.id).sort();
+  const proposalId = stableId('promote', [scope, ...sourceIds]);
+  const memoryType = cluster.every((episode) => episode.memory_type === cluster[0]?.memory_type)
+    ? cluster[0]?.memory_type
+    : undefined;
   return {
-    id: nanoid(),
+    id: proposalId,
     type: 'promote',
     scope,
-    // Source EPISODE ids — _applyPromoteProposal anchors PROMOTED_FROM on the
-    // first and derives the new semantic's tenant from all of them.
+    // Source EPISODE ids — promotion persists provenance for the complete
+    // cluster and derives the new semantic's tenant from all of them.
     affected_ids: cluster.map((e) => e.id),
     before: {},
     after: {
-      id: nanoid(),
+      id: stableId('semantic', [scope, ...sourceIds]),
       content: synthesized.content,
       confidence: synthesized.confidence,
       signal_count: cluster.length,
@@ -1011,20 +1265,51 @@ function buildPromoteProposal(
       updated_at: now,
       decay_class: synthesized.decay_class,
       tags,
+      ...(memoryType ? { memory_type: memoryType } : {}),
     } as Record<string, unknown>,
     score: cluster.length,
     created_at: now,
   };
 }
 
+/** One approved decision is complete evidence; no generative rewrite is needed. */
+function buildApprovedDecisionProposal(
+  scope: string,
+  episode: EpisodicNode,
+): ConsolidationProposal {
+  const now = new Date().toISOString();
+  const proposalId = stableId('promote-decision', [scope, episode.id]);
+  return {
+    id: proposalId,
+    type: 'promote',
+    scope,
+    affected_ids: [episode.id],
+    before: {},
+    after: {
+      id: stableId('semantic-decision', [scope, episode.id]),
+      content: episode.content,
+      confidence: APPROVED_DECISION_CONFIDENCE,
+      signal_count: 1,
+      created_at: now,
+      updated_at: now,
+      decay_class: 'stable',
+      tags: clusterTags([episode]),
+      memory_type: 'decision',
+    },
+    score: 1,
+    created_at: now,
+  };
+}
+
 function buildSupersedePropsal(
+  proposalId: string,
   scope: string,
   node: SemanticNode,
   newConfidence: number,
   score: number,
 ): ConsolidationProposal {
   return {
-    id: nanoid(),
+    id: proposalId,
     type: 'supersede',
     scope,
     affected_ids: [node.id],
@@ -1039,38 +1324,19 @@ function buildSupersedePropsal(
   };
 }
 
-function buildDecayProposal(
-  scope: string,
-  node: SemanticNode,
-  score: number,
-): ConsolidationProposal {
-  const decayedConfidence = Math.max(0, node.confidence * 0.95);
-  return {
-    id: nanoid(),
-    type: 'decay',
-    scope,
-    affected_ids: [node.id],
-    before: { ...node } as Record<string, unknown>,
-    after: {
-      confidence: decayedConfidence,
-    } as Record<string, unknown>,
-    score,
-    created_at: new Date().toISOString(),
-  };
-}
-
 // Gentle confidence gain on reinforcement: move a small fraction toward 1.0, so
 // confidence rises with diminishing returns and is bounded at 1.0 (can never exceed it).
 const REINFORCE_FACTOR = 0.05;
 
 function buildReinforceProposal(
+  proposalId: string,
   scope: string,
   node: SemanticNode,
   score: number,
 ): ConsolidationProposal {
   const reinforcedConfidence = Math.min(1, node.confidence + (1 - node.confidence) * REINFORCE_FACTOR);
   return {
-    id: nanoid(),
+    id: proposalId,
     type: 'reinforce',
     scope,
     affected_ids: [node.id],

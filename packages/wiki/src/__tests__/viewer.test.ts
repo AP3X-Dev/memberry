@@ -5,9 +5,9 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { startWikiViewer, confineToDir, resetViewerCache, __rebuildCacheForTest } from '../viewer.js';
-import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { writeFile, mkdir, rm, rename } from 'node:fs/promises';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
 
@@ -748,21 +748,94 @@ describe('WikiViewer cache backstop (OPT-10)', () => {
     const after = await __rebuildCacheForTest(backstopDir);
     expect(after).toBe(3);
   });
+
+  it('does not scan partial compiler output and retains the previous cache while locked', async () => {
+    const baseline = await __rebuildCacheForTest(backstopDir);
+    const lockPath = join(backstopDir, '.compile.lock');
+    await writeFile(lockPath, JSON.stringify({ at: new Date().toISOString(), token: 'compiler' }), 'utf-8');
+    await writeFile(
+      join(backstopDir, 'projects', 'alpha', 'partial-during-compile.md'),
+      '# Partial During Compile\n',
+      'utf-8',
+    );
+
+    const started = Date.now();
+    const whileLocked = await __rebuildCacheForTest(backstopDir, 40);
+    expect(whileLocked).toBe(baseline);
+    expect(Date.now() - started).toBeLessThan(500);
+
+    await rm(lockPath, { force: true });
+    const afterUnlock = await __rebuildCacheForTest(backstopDir);
+    expect(afterUnlock).toBe(baseline + 1);
+  });
+});
+
+describe('WikiViewer atomic generation publication', () => {
+  const publicationRoot = join(tmpdir(), `amp-wiki-generation-viewer-${Date.now()}`);
+  const publicationPort = 39846;
+  let publicationServer: Server | null = null;
+
+  beforeAll(async () => {
+    resetViewerCache();
+    const oldDir = join(publicationRoot, '.generations', 'global', 'gen-0000000000001-old');
+    await mkdir(oldDir, { recursive: true });
+    await writeFile(join(oldDir, '_index.md'), '# Stable Old Generation\n\nold-tree-token\n', 'utf-8');
+    await writeFile(join(oldDir, '.compiled'), 'old', 'utf-8');
+    await writeFile(
+      join(publicationRoot, '.active-generation'),
+      JSON.stringify({ version: 1, path: '.generations/global/gen-0000000000001-old', published_at: new Date().toISOString() }),
+      'utf-8',
+    );
+    publicationServer = await startWikiViewer({ port: publicationPort, wiki_dir: publicationRoot });
+  });
+
+  afterAll(async () => {
+    if (publicationServer) await new Promise<void>((resolve) => publicationServer!.close(() => resolve()));
+    resetViewerCache();
+    await rm(publicationRoot, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('serves the old complete generation during a build, then observes publication without manual refresh', async () => {
+    const buildingDir = join(publicationRoot, '.generations', 'global', '.building-gen-0000000000002-new');
+    await mkdir(buildingDir, { recursive: true });
+    await writeFile(join(buildingDir, '_index.md'), '# Partial New Generation\n\nnew-tree-token\n', 'utf-8');
+    await writeFile(join(publicationRoot, '.compile.lock'), JSON.stringify({ token: 'builder', at: new Date().toISOString() }), 'utf-8');
+
+    const during = await fetch(`http://localhost:${publicationPort}/wiki/_index`);
+    const duringHtml = await during.text();
+    expect(duringHtml).toContain('old-tree-token');
+    expect(duringHtml).not.toContain('new-tree-token');
+
+    await writeFile(join(buildingDir, '.compiled'), 'new', 'utf-8');
+    const newDir = join(publicationRoot, '.generations', 'global', 'gen-0000000000002-new');
+    await rename(buildingDir, newDir);
+    await writeFile(
+      join(publicationRoot, '.active-generation'),
+      JSON.stringify({ version: 1, path: '.generations/global/gen-0000000000002-new', published_at: new Date().toISOString() }),
+      'utf-8',
+    );
+    await rm(join(publicationRoot, '.compile.lock'), { force: true });
+
+    const after = await fetch(`http://localhost:${publicationPort}/wiki/_index`);
+    const afterHtml = await after.text();
+    expect(afterHtml).toContain('new-tree-token');
+    expect(afterHtml).not.toContain('old-tree-token');
+  });
 });
 
 // ─── confineToDir unit tests ──────────────────────────────────────────────────
 
 describe('confineToDir', () => {
-  const baseDir = '/home/wiki/data';
+  const baseDir = resolve('/home/wiki/data');
 
   it('allows a safe relative path', () => {
     const result = confineToDir(baseDir, 'pages/test.md');
-    expect(result).toBe(`${baseDir}/pages/test.md`);
+    expect(result).toBe(join(baseDir, 'pages', 'test.md'));
   });
 
   it('allows the base directory itself', () => {
     const result = confineToDir(baseDir, '.');
-    expect(result).toBe('/home/wiki/data');
+    expect(result).toBe(baseDir);
   });
 
   it('rejects parent traversal with ../', () => {
@@ -789,12 +862,12 @@ describe('confineToDir', () => {
 
   it('allows deeply nested safe path', () => {
     const result = confineToDir(baseDir, 'a/b/c/d/e.md');
-    expect(result).toBe(`${baseDir}/a/b/c/d/e.md`);
+    expect(result).toBe(join(baseDir, 'a', 'b', 'c', 'd', 'e.md'));
   });
 
   it('allows path with dot segments that resolve safely', () => {
     const result = confineToDir(baseDir, 'a/./b/../b/c.md');
-    expect(result).toBe(`${baseDir}/a/b/c.md`);
+    expect(result).toBe(join(baseDir, 'a', 'b', 'c.md'));
   });
 
   it('rejects path that escapes after multiple levels', () => {

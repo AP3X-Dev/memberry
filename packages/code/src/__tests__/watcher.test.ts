@@ -6,6 +6,13 @@ import { join, resolve } from 'path';
 import { CodeWatcher, extractFilePaths, confineReindexPath } from '../watcher.js';
 import type { IFileIndexer, ISymbolDeleter } from '../watcher.js';
 
+async function waitUntil(predicate: () => boolean, timeoutMs = 1_500): Promise<void> {
+  const started = Date.now();
+  while (!predicate() && Date.now() - started < timeoutMs) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+}
+
 // ─── extractFilePaths ───────────────────────────────────────────────────────
 
 describe('extractFilePaths', () => {
@@ -286,10 +293,9 @@ describe('CodeWatcher', () => {
     watcher = new CodeWatcher(mockIndexer, mockDeleter, { debounceMs: 50 });
 
     // Create a real file so the stat check passes
-    const { writeFileSync, mkdirSync, rmSync } = await import('fs');
-    const tmpDir = '/tmp/amp-watcher-test-' + Date.now();
-    mkdirSync(tmpDir + '/src', { recursive: true });
-    const testFile = tmpDir + '/src/test.ts';
+    const tmpDir = mkdtempSync(join(tmpdir(), 'amp-watcher-test-'));
+    mkdirSync(join(tmpDir, 'src'), { recursive: true });
+    const testFile = join(tmpDir, 'src', 'test.ts');
     writeFileSync(testFile, 'export const x = 1;');
 
     try {
@@ -297,7 +303,7 @@ describe('CodeWatcher', () => {
       expect(watcher.getPendingCount()).toBe(1);
 
       // Wait for debounce to fire
-      await new Promise((r) => setTimeout(r, 100));
+      await waitUntil(() => (mockIndexer.indexFile as ReturnType<typeof vi.fn>).mock.calls.length > 0);
 
       expect(watcher.getPendingCount()).toBe(0);
       expect(mockIndexer.indexFile).toHaveBeenCalledWith(
@@ -313,13 +319,14 @@ describe('CodeWatcher', () => {
     watcher = new CodeWatcher(mockIndexer, mockDeleter, { debounceMs: 50 });
 
     // Queue a re-index for a file that does not exist
-    watcher.queueReindex('/tmp/nonexistent-file-abc123.ts');
+    const missing = join(tmpdir(), `nonexistent-file-${Date.now()}.ts`);
+    watcher.queueReindex(missing);
 
     // Wait for debounce to fire
-    await new Promise((r) => setTimeout(r, 100));
+    await waitUntil(() => (mockDeleter.deleteByFile as ReturnType<typeof vi.fn>).mock.calls.length > 0);
 
     expect(mockDeleter.deleteByFile).toHaveBeenCalledWith(
-      expect.stringContaining('nonexistent-file-abc123.ts'),
+      expect.stringContaining('nonexistent-file-'),
     );
     expect(mockIndexer.indexFile).not.toHaveBeenCalled();
   });

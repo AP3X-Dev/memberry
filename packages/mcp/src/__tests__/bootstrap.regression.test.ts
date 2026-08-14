@@ -47,7 +47,7 @@ describe('bootstrap.ts regression', () => {
 
     // The neo4j-layer (2nd) arg must include the episodic accessor alongside
     // semantic + fact so the engine can read source episodes' tenant_id.
-    expect(ctorArgs).toMatch(/\{\s*semantic,\s*episodic,\s*fact:/);
+    expect(ctorArgs).toMatch(/\{\s*semantic,\s*episodic:\s*\{[\s\S]*?fact:\s*factStoreInstance/);
 
     // And episodic must be destructured from the core service kit (between
     // scopedQuery and factStore) — not a stray identifier.

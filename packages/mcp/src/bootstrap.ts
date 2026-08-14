@@ -4,7 +4,7 @@
 import { z } from 'zod';
 import { DistributedLock, ProposalStore } from '@memberry/redis';
 import { runMigrations, checkVectorIndexDimensions, ProvenanceTraversal } from '@memberry/neo4j';
-import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath } from '@memberry/core';
+import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT } from '@memberry/core';
 import { setServiceInstances, setTenantContainer } from './tools.js';
 import {
   initResearchSchema,
@@ -54,9 +54,15 @@ import {
 import type { CompileInput, CompileV2Result } from '@memberry/wiki';
 import {
   configureWikiAutorefresh,
+  isWikiAutorefreshEnabled,
   resolveWikiOutputDir,
-  scheduleWikiRecompile,
 } from './wiki-autorefresh.js';
+import {
+  ConsolidationCoordinator,
+  recoverEpisodeScopes,
+  resolveConsolidationCoordinatorConfig,
+  resolveEpisodeScope,
+} from './consolidation-coordinator.js';
 import {
   initGraphSchema,
   GraphSnapshotService,
@@ -79,6 +85,31 @@ export interface TenantDatastoreConfig {
   neo4jPassword: string;
   redisUrl: string;
   openaiKey?: string;
+}
+
+async function discoverConcreteScopes(
+  driver: ReturnType<typeof createCoreServices>['driver'],
+  tenantId: string,
+): Promise<string[]> {
+  const session = driver.session();
+  try {
+    const result = await session.run(
+      `MATCH (e:Episodic)
+       WHERE coalesce(e.tenant_id, $defaultTenant) = $tenantId
+       RETURN e.scope AS scope, e.tags AS tags, e.task AS task, e.content AS content`,
+      { tenantId, defaultTenant: DEFAULT_TENANT },
+    );
+    return recoverEpisodeScopes(result.records.map((record) => ({
+      scope: record.get('scope') == null ? undefined : String(record.get('scope')),
+      tags: Array.isArray(record.get('tags'))
+        ? (record.get('tags') as unknown[]).map(String)
+        : undefined,
+      task: record.get('task') == null ? undefined : String(record.get('task')),
+      content: record.get('content') == null ? undefined : String(record.get('content')),
+    })));
+  } finally {
+    await session.close();
+  }
 }
 
 // OPT-37: shape-validate MEMBERRY_TENANT_DATASTORES. neo4jUri/neo4jPassword/redisUrl
@@ -221,7 +252,15 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     // after.tenant_id is unset would mis-attribute the consolidated semantic to
     // DEFAULT_TENANT in multi-tenant mode. EpisodicStore exposes getById +
     // getTenantsByIds (OPT-45) — matching the optional ConsolidationNeo4jLayer.episodic.
-    { semantic, episodic, fact: factStoreInstance },
+    {
+      semantic,
+      episodic: {
+        getById: (id) => episodic.getById(id),
+        getTenantsByIds: (ids) => episodic.getTenantsByIds(ids),
+        findPromotable: (scope, limit) => episodic.findPromotable(scope, limit, DEFAULT_TENANT),
+      },
+      fact: factStoreInstance,
+    },
     config,
     // The promote path synthesizes clustered episodes into one durable claim;
     // without an LLM it stays inert and only signal-driven proposals are made.
@@ -245,14 +284,86 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     },
     apply: async (proposalId: string, decision: 'approve' | 'reject') => {
       try {
-        await consolidationEngine.reviewProposal(proposalId, decision);
-        return { applied: true };
+        return await consolidationEngine.apply(proposalId, decision);
       } catch (err) {
         return { applied: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
     dream: (scope: string) => dreamEngine.run(scope),
   };
+
+  // A global consolidation run is unsafe for project isolation: it can inspect
+  // episodes from multiple scopes in one candidate set. The coordinator always
+  // discovers and schedules concrete scopes, and serializes them
+  // process-wide because the underlying signal consumer group is shared.
+  // Logical multi-tenant mode is deliberately fail-closed until the core run
+  // API accepts a tenant discriminator. Dedicated tenant datastores get their
+  // own isolated coordinator below.
+  // Configure the compiler before evaluating enablement so the guard checks the
+  // actual env-resolved output directory (not its /app/wiki initial default).
+  const rawWikiCompiler = new WikiCompiler(driver);
+  configureWikiAutorefresh({
+    recompile: (outputDir: string) => rawWikiCompiler.compile(outputDir),
+    outputDir: resolveWikiOutputDir(),
+  });
+  const logicalMultiTenant = Boolean(readEnv('MEMBERRY_TENANT_TOKENS'));
+  if (logicalMultiTenant) {
+    // The current full wiki compiler is graph-global. Publishing it in a shared
+    // logical multi-tenant datastore would leak tenant knowledge, so fail closed
+    // until generation queries carry a tenant boundary.
+    process.env['MEMBERRY_WIKI_AUTOREFRESH'] = 'false';
+  }
+  const wikiPublicationEnabled = !logicalMultiTenant && isWikiAutorefreshEnabled();
+  const automationLimitations = [
+    logicalMultiTenant
+      ? 'shared logical multi-tenant consolidation and wiki publication are disabled to prevent cross-tenant disclosure'
+      : null,
+    !openaiKey
+      ? 'recurring/synthesized semantic promotion is unavailable without an LLM/embedding provider; approved classified decisions still promote and episodic recall remains available'
+      : null,
+    !logicalMultiTenant && !wikiPublicationEnabled
+      ? 'automatic wiki publication is disabled; graph memory remains available but served wiki freshness is not managed'
+      : null,
+  ].filter((value): value is string => value !== null);
+  const defaultCoordinatorConfig = resolveConsolidationCoordinatorConfig(config.readonly === true);
+  const consolidationCoordinator = new ConsolidationCoordinator({
+    name: 'default',
+    config: {
+      ...defaultCoordinatorConfig,
+      enabled: defaultCoordinatorConfig.enabled && !logicalMultiTenant,
+    },
+    run: (scope) => consolidationEngine.run(scope),
+    discoverScopes: () => discoverConcreteScopes(driver, DEFAULT_TENANT),
+    // Auto-applied promotion/reinforcement changes must reach the served wiki;
+    // the existing publisher coalesces this into a safe full-generation build.
+    // Use the compiler promise directly so publication failure is observable;
+    // the coordinator retries publication separately and never re-applies a
+    // graph mutation merely because rendering failed.
+    onMutation: wikiPublicationEnabled
+      ? async () => { await rawWikiCompiler.compile(resolveWikiOutputDir()); }
+      : undefined,
+    publicationState: wikiPublicationEnabled ? {
+      markDirty: () => redis.incr('memberry:wiki:generation:dirty'),
+      versions: async () => {
+        const [dirty, published] = await redis.mget(
+          'memberry:wiki:generation:dirty',
+          'memberry:wiki:generation:published',
+        );
+        return { dirty: Number(dirty ?? 0), published: Number(published ?? 0) };
+      },
+      markPublished: async (version) => {
+        await redis.set('memberry:wiki:generation:published', String(version));
+      },
+    } : undefined,
+    limitation: automationLimitations.length > 0 ? automationLimitations.join('; ') : undefined,
+    forceUnhealthy: logicalMultiTenant,
+  });
+  if (logicalMultiTenant && defaultCoordinatorConfig.enabled) {
+    console.error(
+      '[memberry-mcp] consolidation automation disabled for the shared logical multi-tenant datastore; ' +
+      'tenant-qualified core consolidation is required to preserve isolation',
+    );
+  }
 
   // Inject into MCP tools (codeIndexer injected later after Code services init)
   setServiceInstances({
@@ -348,13 +459,11 @@ export async function bootstrap(): Promise<BootstrapHandles> {
         // Post-store hook failures are non-fatal
       }
 
-      // gap-15 (T10): OPT-IN wiki autorefresh. Schedule a DEBOUNCED full
-      // recompile of the served wiki into the shared /app/wiki volume so the
-      // gap-3 viewer (which fs.watches that dir) picks up the new graph state.
-      // scheduleWikiRecompile() is a STRICT no-op unless MEMBERRY_WIKI_AUTOREFRESH
-      // is truthy AND the output dir exists — so the DEFAULT path is unchanged
-      // from T9 (no compiler, no timer, zero overhead). Non-fatal by contract.
-      scheduleWikiRecompile();
+      // Publication is debounced, retried independently of consolidation, and
+      // surfaced in /readyz. A renderer failure can never fail the store or
+      // cause an already-applied graph mutation to execute twice.
+      await consolidationCoordinator.schedulePublication();
+      consolidationCoordinator.schedule(resolveEpisodeScope(input));
     }
     return result;
   };
@@ -421,7 +530,6 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   // ─── Wiki services ─────────────────────────────────────────────────────────
   // WikiCompiler.compile() accepts outputDir plus an optional project tag; the
   // IWikiCompiler interface used by MCP tools accepts a CompileInput object.
-  const rawWikiCompiler = new WikiCompiler(driver);
   const wikiCompilerAdapter = {
     compile: async (input: CompileInput): Promise<CompileV2Result> =>
       rawWikiCompiler.compile(input.output_dir, input.project_tag),
@@ -438,18 +546,6 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     ingestionService: ingestionServiceInstance,
     wikiLinter: wikiLinterInstance,
     editReconciler: editReconcilerInstance,
-  });
-
-  // gap-15 (T10): wire the OPT-IN wiki autorefresh trigger with a FULL recompile
-  // (all projects — project_tag omitted). The WikiCompiler is NOT in the MCP
-  // ServiceContainer; we reuse the same `rawWikiCompiler` (built on the main
-  // `driver` above) that backs the berry_compile tool. This only ARMS the
-  // capability — every trigger stays a strict no-op until MEMBERRY_WIKI_AUTOREFRESH
-  // is set (see wiki-autorefresh.ts). resolveWikiOutputDir() honours
-  // MEMBERRY_WIKI_OUTPUT_DIR (default /app/wiki, the shared docker volume).
-  configureWikiAutorefresh({
-    recompile: (outputDir: string) => rawWikiCompiler.compile(outputDir),
-    outputDir: resolveWikiOutputDir(),
   });
 
   console.error('[memberry-mcp] Wiki services initialized');
@@ -481,6 +577,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   // Tenants listed here get their OWN Neo4j/Redis (physical isolation); all other
   // tenants share this instance with a tenant_id filter (logical isolation).
   const dedicatedTenantCores: Array<{ close(): Promise<void> }> = [];
+  const dedicatedTenantCoordinators: ConsolidationCoordinator[] = [];
   const tenantDatastores = parseTenantDatastores(readEnv('MEMBERRY_TENANT_DATASTORES'));
   {
     for (const [tenant, ds] of Object.entries(tenantDatastores)) {
@@ -491,13 +588,62 @@ export async function bootstrap(): Promise<BootstrapHandles> {
       await tcore.redis.ping();
       await tcore.driver.getServerInfo();
       await runMigrations(tcore.driver);
+      const tenantProposals = new ProposalStore(tcore.redis);
+      const tenantConsolidation = new ConsolidationEngine(
+        {
+          lock: new DistributedLock(tcore.redis),
+          signals: tcore.signals,
+          queue: tcore.queue,
+          cache: tcore.cache,
+          proposals: tenantProposals,
+        },
+        {
+          semantic: tcore.semantic,
+          episodic: {
+            getById: (id) => tcore.episodic.getById(id),
+            getTenantsByIds: (ids) => tcore.episodic.getTenantsByIds(ids),
+            findPromotable: (scope, limit) => tcore.episodic.findPromotable(scope, limit, tenant),
+          },
+          fact: tcore.factStore,
+        },
+        tcore.config,
+        tcore.llm,
+      );
+      const tenantConsolidationAdapter = {
+        run: (scope?: string) => tenantConsolidation.run(scope ?? 'global'),
+        status: () => tenantConsolidation.status(),
+        review: async (proposalId: string) =>
+          (await tenantProposals.get(proposalId)) ?? { error: 'not found' },
+        apply: async (proposalId: string, decision: 'approve' | 'reject') => {
+          try {
+            return await tenantConsolidation.apply(proposalId, decision);
+          } catch (err) {
+            return { applied: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        },
+      };
+      const tenantCoordinator = new ConsolidationCoordinator({
+        name: `tenant:${tenant}`,
+        config: resolveConsolidationCoordinatorConfig(tcore.config.readonly === true),
+        run: (scope) => tenantConsolidation.run(scope),
+        discoverScopes: () => discoverConcreteScopes(tcore.driver, tenant),
+        limitation: 'the shared wiki publisher does not render this dedicated tenant datastore',
+      });
+      const tenantStore = tcore.ampService.store.bind(tcore.ampService);
+      tcore.ampService.store = async (input) => {
+        const result = await tenantStore(input);
+        if (!result.duplicate) tenantCoordinator.schedule(resolveEpisodeScope(input));
+        return result;
+      };
       setTenantContainer(tenant, {
         ampService: tcore.ampService,
+        consolidationEngine: tenantConsolidationAdapter,
         scopedQuery: tcore.scopedQuery,
         memoryBlockService: tcore.memoryBlocks,
         factStore: tcore.factStore,
       });
       dedicatedTenantCores.push(tcore);
+      dedicatedTenantCoordinators.push(tenantCoordinator);
       console.error(`[memberry-mcp] tenant "${tenant}" bound to a dedicated datastore`);
     }
   }
@@ -514,6 +660,12 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     console.error('[memberry-mcp] Extraction consumer started');
   }
 
+  // Start only after every graph/wiki service is ready. The immediate catch-up
+  // timer recovers stores missed while the process was down; periodic discovery
+  // repairs any missed hot-path trigger without a user call.
+  consolidationCoordinator.start();
+  for (const coordinator of dedicatedTenantCoordinators) coordinator.start();
+
   if (status.degraded.length > 0) {
     console.error(`[memberry-mcp] DEGRADED MODE — ${status.degraded.length} issue(s):`);
     for (const issue of status.degraded) {
@@ -525,6 +677,10 @@ export async function bootstrap(): Promise<BootstrapHandles> {
 
   return {
     async shutdown() {
+      try { await consolidationCoordinator.stop(); } catch { /* best-effort */ }
+      for (const coordinator of dedicatedTenantCoordinators) {
+        try { await coordinator.stop(); } catch { /* best-effort */ }
+      }
       try { await extractionConsumer.stop(); } catch { /* best-effort */ }
       for (const tc of dedicatedTenantCores) { try { await tc.close(); } catch { /* already closed */ } }
       try { codeWatcherService.stopAll(); } catch { /* best-effort */ }

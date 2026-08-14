@@ -16,7 +16,12 @@ import {
   mcpCall,
   McpClientError,
 } from '../cli/mcp-client.js';
-import { parseSummaryField, wikiBaseUrl, runProject } from '../cli/project.js';
+import {
+  parseSummaryField,
+  wikiBaseUrl,
+  runProject,
+  WIKI_REFRESH_TIMEOUT_MS,
+} from '../cli/project.js';
 
 // ─── Mock-fetch harness ───────────────────────────────────────────────────────
 
@@ -325,6 +330,8 @@ describe('runProject setup (mocked transport)', () => {
   it('with --with-wiki also enables wiki, compiles, refreshes, and prints the wiki URL', async () => {
     const { fn, calls } = makeFetchMock();
     globalThis.fetch = fn as any;
+    const refreshSignal = new AbortController().signal;
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(refreshSignal);
 
     await runProject(['setup', '/workspace/my-proj'], { 'project-name': 'my-proj', 'project-tag': 'project:my-proj', 'with-wiki': true });
 
@@ -343,6 +350,7 @@ describe('runProject setup (mocked transport)', () => {
 
     // Best-effort viewer refresh hit /api/refresh.
     expect(calls.some((c) => c.url.endsWith('/api/refresh'))).toBe(true);
+    expect(timeout).toHaveBeenCalledWith(WIKI_REFRESH_TIMEOUT_MS);
 
     const out = logs.join('\n');
     expect(out).toContain('http://localhost:3200/wiki/_index');
