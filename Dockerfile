@@ -54,15 +54,15 @@ WORKDIR /app
 
 # Copy the pruned production node_modules and the compiled workspace.
 # packages/ carries each package's manifest + dist (source .ts is harmless here).
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/packages ./packages
+COPY --chown=memberry:memberry --from=builder /app/node_modules ./node_modules
+COPY --chown=memberry:memberry --from=builder /app/package.json ./package.json
+COPY --chown=memberry:memberry --from=builder /app/packages ./packages
 
 # Create the wiki output dir so it exists in the image and is owned by the
 # non-root runtime user. A fresh named volume mounted at /app/wiki (the gap-15
 # shared wiki_output volume) inherits the image dir's ownership on first init,
 # so the wiki/mcp processes can write to it without an EACCES.
-RUN mkdir -p /app/wiki && chown -R memberry:memberry /app
+RUN mkdir -p /app/wiki && chown memberry:memberry /app/wiki
 USER memberry
 
 EXPOSE 3101
