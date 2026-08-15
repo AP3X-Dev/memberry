@@ -179,6 +179,20 @@ projects only the enumerated shadow fields and records the validated 503/class; 
 within the startup bound, while 401, 403, 404, 500, and other stable failures stop
 immediately with body-free numeric diagnostic codes.
 
+## Retrieval trace live conformance
+
+RET-001D is a separately registered composition-root proof for the opt-in
+`berry_context` trace. Against disposable loopback Redis and Neo4j, it exercises
+deterministic, ranked, actual auto, and named-tenant forced-ranked dispatch over
+Streamable HTTP. Omitted/false requests must retain the one-block ordinary path;
+true must add exactly one canonical, replayable, content-free trace after unchanged
+Markdown. JSON-RPC responses must correlate exactly, and every exact ordered
+Markdown result position is bound to the trace result order. The runner removes only exact
+run-owned fixtures, never concurrent Redis keys, and emits a clean-worktree,
+runtime/config-bound sanitized manifest with live service versions and inspected
+immutable container/image identities. See
+[retrieval-trace/README.md](retrieval-trace/README.md).
+
 ## Adding a scenario
 
 1. Put memories and query text in an `*-inputs.ts` or `input.jsonl` file.
@@ -219,6 +233,7 @@ bench/lab/
   datasets/     synthetic input/oracle splits and registry-driven acquisition
   fixtures/     committed protected and migrated behavioral scenarios
   registry/     datasets, systems, metrics, and default-off experiments
+  retrieval-trace/ opt-in MCP trace conformance and disposable live evidence
   ROADMAP.md    deferred dataset activation packets and acceptance gates
   __tests__/    golden metrics, hostile regressions, contract boundaries
 ```

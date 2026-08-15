@@ -243,6 +243,16 @@ export function validateSystemRegistry(value: unknown): string[] {
       if (system.requiredInCi !== false) errors.push(`${at} admission live composition evidence cannot be a required offline CI system`);
       if (system.adapter !== 'bench/lab/admission/live-composition.ts') errors.push(`${at} admission live composition adapter path is fixed`);
     }
+    if (system.contract === 'retrieval-trace-live-conformance-v1') {
+      if (system.mode !== 'live' || system.fidelity !== 'live') errors.push(`${at} retrieval trace conformance evidence must use live fidelity`);
+      if (system.fidelityDetail !== 'composition-root / live-disposable-persistence') {
+        errors.push(`${at}.fidelityDetail must name composition-root / live-disposable-persistence`);
+      }
+      if (system.requiredInCi !== false) errors.push(`${at} retrieval trace conformance evidence cannot be a required offline CI system`);
+      if (system.adapter !== 'bench/lab/retrieval-trace/live-conformance.ts') {
+        errors.push(`${at} retrieval trace conformance adapter path is fixed`);
+      }
+    }
   }
   return errors;
 }

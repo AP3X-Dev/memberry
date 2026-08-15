@@ -64,6 +64,9 @@ jobs:
     needs: unit
 
     services:
+      # These tags select compatible service lines; RET-001D never treats them as
+      # evidence identity. The inspection step below records the actual immutable
+      # container and image IDs plus versions observed from each live service.
       redis:
         image: redis:7-alpine
         ports:
@@ -222,5 +225,59 @@ jobs:
         with:
           name: memberry-admission-live-composition-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/memberry-admission-live-composition
+          if-no-files-found: error
+          retention-days: 14
+
+      # RET-001D exercises only the already opt-in retrieval trace. The runner
+      # owns exact synthetic fixtures, starts the real composition root in
+      # default and named-tenant modes, and removes its graph/Redis residue.
+      - name: Capture exact service container identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_container_id="${{ job.services.redis.id }}"
+          neo4j_container_id="${{ job.services.neo4j.id }}"
+          [[ "$redis_container_id" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$neo4j_container_id" =~ ^[0-9a-f]{64}$ ]]
+          redis_image_id="$(docker inspect --format='{{.Image}}' "$redis_container_id")"
+          neo4j_image_id="$(docker inspect --format='{{.Image}}' "$neo4j_container_id")"
+          [[ "$redis_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$neo4j_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          {
+            echo "MEMBERRY_TRACE_LIVE_REDIS_CONTAINER_ID=$redis_container_id"
+            echo "MEMBERRY_TRACE_LIVE_REDIS_IMAGE_ID=$redis_image_id"
+            echo "MEMBERRY_TRACE_LIVE_NEO4J_CONTAINER_ID=$neo4j_container_id"
+            echo "MEMBERRY_TRACE_LIVE_NEO4J_IMAGE_ID=$neo4j_image_id"
+          } >> "$GITHUB_ENV"
+
+      - name: Retrieval trace live conformance evidence
+        shell: bash
+        env:
+          MEMBERRY_TRACE_LIVE_DISPOSABLE: "true"
+          MEMBERRY_TRACE_LIVE_DEFAULT_TOKEN: trace-default-token
+          MEMBERRY_TRACE_LIVE_NAMED_TOKEN: trace-named-token
+          MEMBERRY_TRACE_LIVE_MCP_URL: http://127.0.0.1:3411
+          MEMBERRY_TRACE_LIVE_REDIS_URL: redis://127.0.0.1:6379
+          MEMBERRY_TRACE_LIVE_NEO4J_URI: bolt://127.0.0.1:7687
+          MEMBERRY_TRACE_LIVE_NEO4J_USER: neo4j
+          MEMBERRY_TRACE_LIVE_NEO4J_PASSWORD: testpassword
+          MEMBERRY_TRACE_LIVE_EVIDENCE_PATH: ${{ runner.temp }}/memberry-retrieval-trace-live-conformance/evidence.json
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/memberry-retrieval-trace-live-conformance"
+          mkdir -p "$evidence_dir"
+          npm run bench:lab:retrieval-trace:live 2>&1 | sed -E \
+            -e 's/(Bearer )[A-Za-z0-9._~+\/-]+/\1[REDACTED]/g' \
+            -e 's/trace-default-token/[REDACTED]/g' \
+            -e 's/trace-named-token/[REDACTED]/g' \
+            -e 's/testpassword/[REDACTED]/g' \
+            | tee "$evidence_dir/run.log"
+
+      - name: Upload retrieval trace live conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memberry-retrieval-trace-live-conformance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memberry-retrieval-trace-live-conformance
           if-no-files-found: error
           retention-days: 14

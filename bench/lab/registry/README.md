@@ -23,6 +23,12 @@ Rules:
 - MEM-001D2 uses the separate `admission-live-composition-v1` contract and exact
   `composition-root / live-disposable-persistence` fidelity. It cannot replace
   or relabel the production-core structural fixture evidence.
+- RET-001D uses the separate `retrieval-trace-live-conformance-v1` contract at
+  `composition-root / live-disposable-persistence` fidelity. Its offline tests
+  are required, while the registered live system itself runs only in the
+  disposable Redis/Neo4j integration job. Evidence records versions queried from
+  the live services and immutable container/image IDs inspected from that job;
+  workflow image tags are selectors, not verified identity claims.
 
 LongMemEval-S Cleaned and LoCoMo are intentionally registered as blocked. Their
 metadata makes future work visible without claiming reproducibility that has

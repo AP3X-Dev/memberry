@@ -78,6 +78,17 @@
       "requiredInCi": false,
       "adapter": "bench/lab/admission/live-composition.ts",
       "capabilities": ["streamable-http-mcp", "default-off", "shadow-observation", "duplicate-nonmutation", "invalid-store-nonmutation", "authenticated-readiness", "scorer-side-neo4j", "fixture-cleanup"]
+    },
+    {
+      "id": "memberry-retrieval-trace-live-conformance-v1",
+      "displayName": "MemBerry retrieval trace live conformance evidence",
+      "mode": "live",
+      "fidelity": "live",
+      "fidelityDetail": "composition-root / live-disposable-persistence",
+      "contract": "retrieval-trace-live-conformance-v1",
+      "requiredInCi": false,
+      "adapter": "bench/lab/retrieval-trace/live-conformance.ts",
+      "capabilities": ["streamable-http-mcp", "default-off-parity", "canonical-trace", "replay", "algorithm-identity", "tenant-isolation", "bounded-fail-closed", "fixture-cleanup"]
     }
   ]
 }
