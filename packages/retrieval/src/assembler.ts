@@ -331,8 +331,8 @@ export class UnifiedAssembler {
     options?: Partial<TenantRetrievalOptions>,
   ): Promise<TracedUnifiedContext> {
     const strategy = options?.strategy ?? 'ranked';
-    if (strategy !== 'ranked' && strategy !== 'deterministic') {
-      throw new Error('assembleTraced requires ranked or deterministic retrieval');
+    if (strategy !== 'auto' && strategy !== 'ranked' && strategy !== 'deterministic') {
+      throw new Error('assembleTraced requires auto, ranked, or deterministic retrieval');
     }
     const opts: TenantRetrievalOptions = {
       strategy,
@@ -346,7 +346,7 @@ export class UnifiedAssembler {
       as_of: options?.as_of,
       tenantId: resolveTenant(options?.tenantId),
     };
-    if (strategy === 'deterministic') {
+    const assembleDeterministicTraced = async (): Promise<TracedUnifiedContext> => {
       const result = await this.deterministic.assembleTraced(task, {
         entity_scope: opts.entity_scope,
         project_name: opts.project_name,
@@ -369,10 +369,24 @@ export class UnifiedAssembler {
         },
         trace: result.trace,
       };
-    }
+    };
+    if (strategy === 'deterministic') return assembleDeterministicTraced();
+
     const stageFailures: Array<{ stage: RetrievalTraceFailureStage; code: RetrievalTraceFailureCode }> = [];
     const getQueryVector = this.makeSharedQueryVector(task, (code) => stageFailures.push({ stage: 'embedding', code }));
-    const result = await this.assembleRankedInternal(task, opts, 'HYBRID', getQueryVector, true, stageFailures);
+    let intent: QueryIntent = 'HYBRID';
+    if (strategy === 'auto') {
+      try {
+        intent = (await classifyIntent(task, this.embedding, getQueryVector)).intent;
+      } catch {
+        // Trace-path diagnostics are fixed and value-free: backend exception
+        // strings can contain query text, identifiers, or credentials.
+        console.error('[memberry-retrieval] Intent classification failed [query-failed]');
+        stageFailures.push({ stage: 'intent', code: 'query-failed' });
+      }
+      if (intent === 'GRAPH') return assembleDeterministicTraced();
+    }
+    const result = await this.assembleRankedInternal(task, opts, intent, getQueryVector, true, stageFailures);
     return { context: result.context, trace: result.trace! };
   }
 

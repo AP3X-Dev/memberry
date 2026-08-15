@@ -1,6 +1,7 @@
 // packages/retrieval/src/__tests__/tools.test.ts
 // Tenant-isolation wiring for the retrieval tool layer: the container carries a
 // tenantId and registerRetrievalTools threads it into every assemble()/ask().
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi } from 'vitest';
 import {
   createRetrievalContainer,
@@ -8,7 +9,14 @@ import {
   type IUnifiedAssembler,
   type IFeedbackTracker,
 } from '../tools.js';
+import { canonicalTraceJson } from '../trace.js';
+import type { RetrievalTraceV1 } from '../trace.js';
 import type { UnifiedContext } from '../types.js';
+
+const approvedTrace = JSON.parse(readFileSync(
+  new URL('./fixtures/retrieval-trace-deterministic-v2.json', import.meta.url),
+  'utf8',
+)) as RetrievalTraceV1;
 
 function emptyCtx(): UnifiedContext {
   return { task: 'q', strategy: 'ranked', sections: [], token_count: 0, assembled_at: '2026-06-07T00:00:00.000Z' };
@@ -17,6 +25,7 @@ function emptyCtx(): UnifiedContext {
 function makeAssembler(): IUnifiedAssembler {
   return {
     assemble: vi.fn().mockResolvedValue(emptyCtx()),
+    assembleTraced: vi.fn().mockResolvedValue({ context: emptyCtx(), trace: approvedTrace }),
     renderMarkdown: vi.fn().mockReturnValue('# md'),
     ask: vi.fn().mockResolvedValue({ answer: 'a', cited_ids: [], evidence: [], level: 'medium' }),
   };
@@ -60,6 +69,73 @@ describe('registerRetrievalTools — tenant threading', () => {
       'find auth',
       expect.objectContaining({ tenantId: 'acme' }),
     );
+  });
+
+  it.each([undefined, false])('berry_context include_trace=%s preserves the ordinary single-call single-block path', async (includeTrace) => {
+    const assembler = makeAssembler();
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, createRetrievalContainer({ assembler }));
+
+    const args = { task: 'find auth', strategy: 'ranked', ...(includeTrace === undefined ? {} : { include_trace: includeTrace }) };
+    const result = await handlers.get('berry_context')!(args) as { content: Array<{ type: string; text: string }> };
+
+    expect(assembler.assemble).toHaveBeenCalledTimes(1);
+    expect(assembler.assembleTraced).not.toHaveBeenCalled();
+    expect(assembler.renderMarkdown).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ content: [{ type: 'text', text: '# md' }] });
+  });
+
+  it('berry_context include_trace=true returns unchanged markdown then canonical approved trace JSON', async () => {
+    const assembler = makeAssembler();
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, createRetrievalContainer({ assembler }));
+
+    const result = await handlers.get('berry_context')!({
+      task: 'find auth', strategy: 'deterministic', include_trace: true,
+    }) as { content: Array<{ type: string; text: string }> };
+
+    expect(assembler.assemble).not.toHaveBeenCalled();
+    expect(assembler.assembleTraced).toHaveBeenCalledWith(
+      'find auth',
+      expect.objectContaining({ strategy: 'deterministic', tenantId: 'default' }),
+    );
+    expect(result.content).toEqual([
+      { type: 'text', text: '# md' },
+      { type: 'text', text: canonicalTraceJson(approvedTrace) },
+    ]);
+  });
+
+  it('berry_context include_trace=true preserves forced-ranked isolation for named tenants', async () => {
+    const assembler = makeAssembler();
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, createRetrievalContainer({ assembler, tenantId: 'acme' }));
+
+    await handlers.get('berry_context')!({ task: 'what depends on auth', strategy: 'deterministic', include_trace: true });
+
+    expect(assembler.assembleTraced).toHaveBeenCalledWith(
+      'what depends on auth',
+      expect.objectContaining({ strategy: 'ranked', tenantId: 'acme' }),
+    );
+  });
+
+  it('fails trace exposure closed with a value-free error', async () => {
+    const assembler = makeAssembler();
+    const credential = 'sk_live_NEVER_ECHO_THIS';
+    vi.mocked(assembler.assembleTraced).mockResolvedValue({
+      context: emptyCtx(),
+      trace: { ...approvedTrace, credential } as unknown as RetrievalTraceV1,
+    });
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, createRetrievalContainer({ assembler }));
+
+    let message = '';
+    try {
+      await handlers.get('berry_context')!({ task: 'find auth', strategy: 'ranked', include_trace: true });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe('Retrieval trace validation failed');
+    expect(message).not.toContain(credential);
   });
 
   it('berry_ask passes the container tenantId into ask()', async () => {

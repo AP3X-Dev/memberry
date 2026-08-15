@@ -6,6 +6,12 @@ import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { DEFAULT_TENANT } from '@memberry/core';
 import type { UnifiedContext, RetrievalStrategy } from './types.js';
+import type { RetrievalTraceV1 } from './trace.js';
+import {
+  assertRetrievalTraceConformant,
+  canonicalTraceJson,
+  replayRetrievalTrace,
+} from './trace.js';
 
 // ─── Service interface (injected) ────────────────────────────────────────────
 
@@ -22,6 +28,18 @@ export interface IUnifiedAssembler {
     as_of?: string;
     tenantId?: string;
   }): Promise<UnifiedContext>;
+  assembleTraced(task: string, options?: {
+    strategy?: RetrievalStrategy;
+    include_code?: boolean;
+    include_arch?: boolean;
+    include_memory?: boolean;
+    max_tokens?: number;
+    entity_scope?: string[];
+    tag_scope?: string[];
+    project_name?: string;
+    as_of?: string;
+    tenantId?: string;
+  }): Promise<{ context: UnifiedContext; trace: RetrievalTraceV1 }>;
   renderMarkdown(ctx: UnifiedContext): string;
   ask(question: string, options?: {
     level?: 'minimal' | 'low' | 'medium' | 'high' | 'max';
@@ -100,6 +118,31 @@ function textContent(text: string): { content: Array<{ type: 'text'; text: strin
   return { content: [{ type: 'text' as const, text }] };
 }
 
+function tracedTextContent(markdown: string, traceJson: string): {
+  content: Array<{ type: 'text'; text: string }>;
+} {
+  return { content: [
+    { type: 'text' as const, text: markdown },
+    { type: 'text' as const, text: traceJson },
+  ] };
+}
+
+/** Validate both the in-memory value and the exact canonical bytes before they
+ * cross the MCP boundary. All rejection paths are deliberately value-free. */
+function serializeApprovedRetrievalTrace(trace: unknown): string {
+  try {
+    assertRetrievalTraceConformant(trace);
+    replayRetrievalTrace(trace);
+    const canonical = canonicalTraceJson(trace);
+    const exposed = JSON.parse(canonical) as unknown;
+    assertRetrievalTraceConformant(exposed);
+    replayRetrievalTrace(exposed);
+    return canonical;
+  } catch {
+    throw new Error('Retrieval trace validation failed');
+  }
+}
+
 // ─── Tool registration ────────────────────────────────────────────────────────
 
 export interface RetrievalRegisteredTools {
@@ -136,6 +179,8 @@ export function registerRetrievalTools(
       tag_scope: z.array(z.string()).optional().describe('Scope to specific tags'),
       project_name: z.string().max(2000).optional().describe('Project name for scoping'),
       as_of: z.string().optional().describe('ISO 8601 timestamp for point-in-time queries. When set, only knowledge valid at this time is included.'),
+      include_trace: z.boolean().optional().default(false)
+        .describe('Include a validated canonical retrieval trace as a second text block'),
     },
     { readOnlyHint: true, idempotentHint: true } satisfies ToolAnnotations,
     async (args) => {
@@ -145,7 +190,7 @@ export function registerRetrievalTools(
       // ranked path (memory is tenant-filtered; arch entities strict-match to
       // empty for a named tenant — no cross-tenant leak).
       const strategy = tenantId !== DEFAULT_TENANT ? 'ranked' : (args.strategy as RetrievalStrategy);
-      const ctx = await assembler.assemble(args.task, {
+      const options = {
         strategy,
         include_code: args.include_code,
         include_arch: args.include_arch,
@@ -156,9 +201,19 @@ export function registerRetrievalTools(
         project_name: args.project_name,
         as_of: args.as_of,
         tenantId,
-      });
-      const md = assembler.renderMarkdown(ctx);
-      return textContent(md);
+      };
+      // Keep the historical path byte/call/allocation-identical unless the
+      // caller explicitly opts in. In particular, omitted and false do not
+      // allocate trace collectors or invoke trace validation.
+      if (args.include_trace !== true) {
+        const ctx = await assembler.assemble(args.task, options);
+        const md = assembler.renderMarkdown(ctx);
+        return textContent(md);
+      }
+      const traced = await assembler.assembleTraced(args.task, options);
+      const md = assembler.renderMarkdown(traced.context);
+      const traceJson = serializeApprovedRetrievalTrace(traced.trace);
+      return tracedTextContent(md, traceJson);
     },
   ));
 

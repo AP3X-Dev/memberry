@@ -5,8 +5,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { UnifiedAssembler } from '../assembler.js';
 import { assertRetrievalTraceConformant, assertRetrievalTraceSecretSafe, replayRetrievalTrace } from '../trace.js';
+import type { RetrievalTraceV1 } from '../trace.js';
 
 const CANARY_ID = 'raw-private-sk_live_12345678901234567890';
+const DETERMINISTIC_TRACE = JSON.parse(readFileSync(
+  new URL('./fixtures/retrieval-trace-deterministic-v2.json', import.meta.url),
+  'utf8',
+)) as RetrievalTraceV1;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -108,10 +113,26 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
     expect(result.trace.incompleteReasons.length).toBeGreaterThan(0);
   });
 
-  it('still rejects auto routing because traced execution requires an explicit algorithm', async () => {
+  it('routes traced auto requests through the actual ranked algorithm', async () => {
     const { assembler } = makeAssembler(0, 0);
-    await expect(assembler.assembleTraced('graph', { strategy: 'auto' }))
-      .rejects.toThrow('ranked or deterministic');
+    const result = await assembler.assembleTraced('find alpha', { strategy: 'auto', include_arch: false });
+
+    expect(result.context.strategy).toBe('ranked');
+    expect(result.trace.algorithmVersion).toBe('ranked-v1');
+  });
+
+  it('routes traced auto graph requests through the actual deterministic algorithm', async () => {
+    const { assembler } = makeAssembler(0, 0);
+    const deterministic = {
+      assembleTraced: vi.fn().mockResolvedValue({ sections: [], trace: DETERMINISTIC_TRACE }),
+    };
+    (assembler as unknown as { deterministic: typeof deterministic }).deterministic = deterministic;
+
+    const result = await assembler.assembleTraced('what depends on auth', { strategy: 'auto' });
+
+    expect(deterministic.assembleTraced).toHaveBeenCalledTimes(1);
+    expect(result.context.strategy).toBe('deterministic');
+    expect(result.trace.algorithmVersion).toBe('deterministic-v2');
   });
 
   it('records a safe channel failure after settlement without changing surviving context', async () => {
