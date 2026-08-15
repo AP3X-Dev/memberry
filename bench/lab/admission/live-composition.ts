@@ -985,10 +985,33 @@ class ServerProcess {
   }
 }
 
-interface FixtureCounts {
+export interface FixtureCounts {
   readonly episodes: number;
   readonly observations: number;
   readonly projectEntities: number;
+}
+
+type FixtureCountStage = 'DEFAULT_OFF' | 'ENABLED_BEFORE_FAILURES' | 'ENABLED_AFTER_FAILURES' | 'CLEANUP';
+
+function boundedCountDiagnostic(value: number): string {
+  return Number.isSafeInteger(value) && value >= 0 ? String(value) : 'INVALID';
+}
+
+export function assertFixtureCounts(
+  stage: FixtureCountStage,
+  actual: FixtureCounts,
+  expected: FixtureCounts,
+): void {
+  if (actual.episodes === expected.episodes
+    && actual.observations === expected.observations
+    && actual.projectEntities === expected.projectEntities) return;
+  const actualCode = `E${boundedCountDiagnostic(actual.episodes)}`
+    + `_O${boundedCountDiagnostic(actual.observations)}`
+    + `_P${boundedCountDiagnostic(actual.projectEntities)}`;
+  const expectedCode = `E${boundedCountDiagnostic(expected.episodes)}`
+    + `_O${boundedCountDiagnostic(expected.observations)}`
+    + `_P${boundedCountDiagnostic(expected.projectEntities)}`;
+  throw new Error(`MEM001D2_${stage}_COUNTS_${actualCode}_EXPECTED_${expectedCode}`);
 }
 
 async function scopeCounts(
@@ -1133,9 +1156,9 @@ async function runAdmissionLiveCompositionEvidence(config: AdmissionLiveConfig):
       tags: [defaultScope, 'evaluation-lab', 'observability'],
     }));
     const defaultCounts = await scopeCounts(driver, tenantId, defaultScope, projectNames[0]!);
-    if (defaultCounts.episodes !== 1 || defaultCounts.observations !== 0 || defaultCounts.projectEntities !== 1) {
-      throw new Error('default-off store must create one Episodic, zero AdmissionObservations, and one auto project Entity');
-    }
+    assertFixtureCounts('DEFAULT_OFF', defaultCounts, {
+      episodes: 1, observations: 0, projectEntities: 0,
+    });
     await active.stop();
     active = undefined;
 
@@ -1181,11 +1204,9 @@ async function runAdmissionLiveCompositionEvidence(config: AdmissionLiveConfig):
     } catch { invalidRejected = true; }
     if (!invalidRejected) throw new Error('invalid signal target store must fail closed');
     const afterFailures = await scopeCounts(driver, tenantId, enabledScope, projectNames[1]!);
-    if (beforeDuplicate.episodes !== 1 || beforeDuplicate.observations !== 1
-      || beforeDuplicate.projectEntities !== 1
-      || afterFailures.episodes !== 1 || afterFailures.observations !== 1 || afterFailures.projectEntities !== 1) {
-      throw new Error('duplicate or invalid store added Episodic, AdmissionObservation, or project Entity state');
-    }
+    const enabledExpected = { episodes: 1, observations: 1, projectEntities: 0 } as const;
+    assertFixtureCounts('ENABLED_BEFORE_FAILURES', beforeDuplicate, enabledExpected);
+    assertFixtureCounts('ENABLED_AFTER_FAILURES', afterFailures, enabledExpected);
     const finalReady = assertReadinessContract(await readiness(config), true, config.timeoutMs, true);
     const counters = record(finalReady.counters, 'readiness.admission_shadow.counters');
     const storedWithinDeadline = counters.appended === 1 && counters.timed_out === 0 && counters.late_appended === 0;
@@ -1256,9 +1277,9 @@ async function runAdmissionLiveCompositionEvidence(config: AdmissionLiveConfig):
           }),
           { episodes: 0, observations: 0, projectEntities: 0 },
         );
-        if (cleanup.episodes !== 0 || cleanup.observations !== 0 || cleanup.projectEntities !== 0) {
-          throw new Error('MEM-001D2 cleanup left fixture Episodic, AdmissionObservation, or project Entity state');
-        }
+        assertFixtureCounts('CLEANUP', cleanup, {
+          episodes: 0, observations: 0, projectEntities: 0,
+        });
       },
     },
     { name: 'driver-close', run: () => driver.close() },

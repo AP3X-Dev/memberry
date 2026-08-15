@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   assertContentFreeObservation,
+  assertFixtureCounts,
   assertReadinessContract,
   acquireAdmissionLiveResources,
   childEnvironment,
@@ -655,6 +656,32 @@ describe('MEM-001D2 live composition evidence contract', () => {
     expect(source).toContain("p.description = 'Auto-created from berry_store on first reference'");
     expect(source).toContain("p.id STARTS WITH 'auto-proj-'");
     expect(source).toContain('count(DISTINCT p) AS projectEntities');
-    expect(source).toContain('cleanup.projectEntities !== 0');
+    expect(source).toContain("assertFixtureCounts('CLEANUP', cleanup");
+  });
+
+  it('uses exact composition-root project Entity truth and bounded numeric count diagnostics', async () => {
+    expect(() => assertFixtureCounts('DEFAULT_OFF', {
+      episodes: 1, observations: 0, projectEntities: 0,
+    }, {
+      episodes: 1, observations: 0, projectEntities: 1,
+    })).toThrow('MEM001D2_DEFAULT_OFF_COUNTS_E1_O0_P0_EXPECTED_E1_O0_P1');
+    expect(() => assertFixtureCounts('DEFAULT_OFF', {
+      episodes: Number.NaN, observations: -1, projectEntities: Number.MAX_SAFE_INTEGER + 1,
+    }, {
+      episodes: 1, observations: 0, projectEntities: 0,
+    })).toThrow('MEM001D2_DEFAULT_OFF_COUNTS_EINVALID_OINVALID_PINVALID_EXPECTED_E1_O0_P0');
+    expect(() => assertFixtureCounts('DEFAULT_OFF', {
+      episodes: 1, observations: 0, projectEntities: 0,
+    }, {
+      episodes: 1, observations: 0, projectEntities: 0,
+    })).not.toThrow();
+
+    const factorySource = await readFile(fileURLToPath(
+      new URL('../../../../packages/core/src/services-factory.ts', import.meta.url),
+    ), 'utf8');
+    expect(factorySource).not.toContain('EntityStore');
+    const constructorStart = factorySource.indexOf('const ampService = new AMPService(');
+    const constructorEnd = factorySource.indexOf('\n  );', constructorStart);
+    expect(factorySource.slice(constructorStart, constructorEnd)).not.toContain('entity');
   });
 });

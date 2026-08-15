@@ -162,6 +162,12 @@ are recorded. Non-auto or externally managed Entity nodes are never deleted. Red
 container teardown remain the caller's responsibility and are labeled as such
 in the evidence instead of being implied by graph cleanup.
 
+The production composition root does not wire AMPService's optional legacy
+project-Entity seam, so both stores require an exact project Entity count of zero.
+Cleanup still defensively deletes and residual-counts only an exact auto-created
+fixture Entity in case that production wiring changes; numeric-only count failure
+codes expose episode/observation/project-Entity drift without IDs or content.
+
 The tenant-token fixture intentionally activates logical multi-tenant mode. In
 that mode the production composition root marks shared consolidation/wiki
 automation unhealthy and returns HTTP 503 from `/readyz` to expose the unsupported
