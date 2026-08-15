@@ -16,6 +16,7 @@ export type {
   InternallyObserved,
 } from './retrieval-observer.js';
 export { InternalObservedRetrievalError } from './retrieval-observer.js';
+export * from './admission.js';
 export { normalizePredicate, getPredicateSynonyms } from './predicates.js';
 export { ConsolidationEngine } from './consolidation.js';
 export type { ConsolidationRedisLayer, ConsolidationNeo4jLayer, RunResult } from './consolidation.js';
