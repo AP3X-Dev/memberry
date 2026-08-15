@@ -149,7 +149,14 @@ percent encoding, query strings, and fragments; generates unique tenant/project/
 fixtures, and does not inherit arbitrary parent environment secrets into either server process. It proves one default-off
 Episodic with no sidecar; one enabled, correctly scoped, content-free linked
 sidecar; no duplicate/invalid-store mutation; and truthful authenticated
-readiness limitations. Exact unique fixture scopes are deleted in `finally` and
+readiness limitations. Before either store, it requires both authenticated
+`/readyz` and a read-only `berry_tools:list` transaction through Streamable HTTP
+`/mcp`. The production server's legacy "SSE server" startup label describes the
+shared HTTP listener, which serves `/mcp`, `/readyz`, and the legacy `/sse` route;
+it is not accepted as transport proof. Readiness and every Streamable HTTP
+response are time- and byte-bounded, remote bodies are never copied into failure
+diagnostics, and the transport probe must return the exact nonempty tenant-domain
+registry. Exact unique fixture scopes are deleted in `finally` and
 zero residual Episodic/AdmissionObservation/auto-created project Entity counts
 are recorded. Non-auto or externally managed Entity nodes are never deleted. Redis and
 container teardown remain the caller's responsibility and are labeled as such

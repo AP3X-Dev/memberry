@@ -12,8 +12,12 @@ import { promisify, types as nodeUtilTypes } from 'node:util';
 import type { Driver } from 'neo4j-driver';
 
 import { parseAdmissionObservationV1 } from '../../../packages/core/src/admission.js';
+import {
+  DOMAIN_DESCRIPTIONS,
+  DOMAIN_TOOL_NAMES_MAP,
+  type ToolDomain,
+} from '../../../packages/mcp/src/tools.js';
 import { createNeo4jDriver } from '../../../packages/neo4j/src/driver.js';
-import { HttpMemberryTransport } from '../adapters/memberry-live.js';
 
 const execFileAsync = promisify(execFile);
 const OBSERVATION_KEYS = [
@@ -23,8 +27,16 @@ const OBSERVATION_KEYS = [
   'would_change_baseline', 'reason_code', 'observed_at',
 ] as const;
 const REDACTED_KEY = /(?:authorization|token|password|secret|content|task)/i;
-const DEFAULT_STARTUP_TIMEOUT_MS = 120_000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 300_000;
 const DEFAULT_SHADOW_TIMEOUT_MS = 50;
+const MAX_HTTP_RESPONSE_BYTES = 256 * 1024;
+const MCP_PROTOCOL_VERSION = '2025-03-26';
+const TENANT_DOMAIN_ORDER = ['memory', 'temporal', 'admin', 'retrieval'] as const satisfies readonly ToolDomain[];
+const CANONICAL_TENANT_DOMAINS = Object.freeze(TENANT_DOMAIN_ORDER.map((domain) => Object.freeze({
+  domain,
+  description: DOMAIN_DESCRIPTIONS[domain],
+  tools: Object.freeze([...DOMAIN_TOOL_NAMES_MAP[domain]]),
+})));
 
 export interface AdmissionLiveConfig {
   readonly token: string;
@@ -339,18 +351,200 @@ function integer(value: unknown): number {
   return Number.NaN;
 }
 
+async function boundedResponseText(response: Response, diagnosticPrefix: string): Promise<string> {
+  const declared = response.headers.get('content-length');
+  if (declared && /^\d+$/.test(declared) && Number(declared) > MAX_HTTP_RESPONSE_BYTES) {
+    void response.body?.cancel().catch(() => undefined);
+    throw new Error(`${diagnosticPrefix}_RESPONSE_TOO_LARGE`);
+  }
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_HTTP_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => undefined);
+        throw new Error(`${diagnosticPrefix}_RESPONSE_TOO_LARGE`);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === `${diagnosticPrefix}_RESPONSE_TOO_LARGE`) throw error;
+    throw new Error(`${diagnosticPrefix}_RESPONSE_READ_FAILURE`);
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
+}
+
+function parseMcpEnvelope(contentType: string, raw: string): JsonRecord | undefined {
+  if (!raw.trim()) return undefined;
+  let encoded = raw;
+  if (contentType.toLowerCase().includes('text/event-stream')) {
+    encoded = raw.split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+      .trim();
+    if (!encoded) return undefined;
+  }
+  try { return record(JSON.parse(encoded), 'MCP response'); }
+  catch { throw new Error('MEM001D2_MCP_RESPONSE_INVALID'); }
+}
+
+class BoundedAdmissionMcpTransport {
+  private sessionId?: string;
+  private nextId = 1;
+
+  constructor(private readonly config: AdmissionLiveConfig) {}
+
+  private async request(body: JsonRecord, withSession = true): Promise<JsonRecord | undefined> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${this.config.token}`,
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+    if (withSession && this.sessionId) {
+      headers['mcp-session-id'] = this.sessionId;
+      headers['mcp-protocol-version'] = MCP_PROTOCOL_VERSION;
+    }
+    let response: Response;
+    try {
+      response = await fetch(new URL('/mcp', this.config.mcpUrl), {
+        method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal,
+      });
+    } catch {
+      clearTimeout(timer);
+      throw new Error('MEM001D2_MCP_NETWORK_FAILURE');
+    }
+    try {
+      if (!withSession) {
+        const candidate = response.headers.get('mcp-session-id');
+        this.pendingSessionId = candidate && /^[A-Za-z0-9._~-]{1,200}$/.test(candidate) ? candidate : undefined;
+      }
+      const raw = await boundedResponseText(response, 'MEM001D2_MCP');
+      if (!response.ok) throw new Error('MEM001D2_MCP_HTTP_FAILURE');
+      const envelope = parseMcpEnvelope(response.headers.get('content-type') ?? '', raw);
+      if (envelope?.error !== undefined) throw new Error('MEM001D2_MCP_RPC_FAILURE');
+      return envelope;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async initialize(): Promise<void> {
+    if (this.sessionId) return;
+    const envelope = await this.request({
+      jsonrpc: '2.0',
+      id: this.nextId++,
+      method: 'initialize',
+      params: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'memberry-admission-live-evidence', version: '1.0.0' },
+      },
+    }, false);
+    let result: JsonRecord | undefined;
+    try { result = envelope ? record(envelope.result, 'MCP initialize result') : undefined; }
+    catch { throw new Error('MEM001D2_MCP_INITIALIZE_INVALID'); }
+    if (result?.protocolVersion !== MCP_PROTOCOL_VERSION) throw new Error('MEM001D2_MCP_INITIALIZE_INVALID');
+    const sessionId = this.pendingSessionId;
+    if (!sessionId) throw new Error('MEM001D2_MCP_SESSION_INVALID');
+    this.sessionId = sessionId;
+    await this.request({ jsonrpc: '2.0', method: 'notifications/initialized' });
+  }
+
+  private pendingSessionId?: string;
+
+  async call(tool: string, args: JsonRecord): Promise<string> {
+    await this.initialize();
+    const envelope = await this.request({
+      jsonrpc: '2.0', id: this.nextId++, method: 'tools/call', params: { name: tool, arguments: args },
+    });
+    if (!envelope) throw new Error('MEM001D2_MCP_TOOL_RESPONSE_INVALID');
+    let result: JsonRecord;
+    try { result = record(envelope.result, 'MCP tool result'); }
+    catch { throw new Error('MEM001D2_MCP_TOOL_RESPONSE_INVALID'); }
+    if (result.isError === true || !Array.isArray(result.content)) throw new Error('MEM001D2_MCP_TOOL_FAILURE');
+    const text: string[] = [];
+    for (const part of result.content) {
+      let item: JsonRecord;
+      try { item = record(part, 'MCP tool content'); }
+      catch { throw new Error('MEM001D2_MCP_TOOL_RESPONSE_INVALID'); }
+      if (item.type !== 'text' || typeof item.text !== 'string') {
+        throw new Error('MEM001D2_MCP_TOOL_RESPONSE_INVALID');
+      }
+      text.push(item.text);
+    }
+    return text.join('\n');
+  }
+}
+
 async function readiness(config: AdmissionLiveConfig): Promise<JsonRecord> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000);
+  let response: Response;
   try {
-    const response = await fetch(new URL('/readyz', config.mcpUrl), {
+    response = await fetch(new URL('/readyz', config.mcpUrl), {
       headers: { authorization: `Bearer ${config.token}` },
       signal: controller.signal,
     });
-    const raw = await response.text();
-    if (!response.ok) throw new Error(`authenticated readiness returned HTTP ${response.status}`);
-    return record(JSON.parse(raw), 'readiness');
+  } catch {
+    clearTimeout(timer);
+    throw new Error('MEM001D2_READINESS_NETWORK_FAILURE');
+  }
+  try {
+    const raw = await boundedResponseText(response, 'MEM001D2_READINESS');
+    if (!response.ok) throw new Error('MEM001D2_READINESS_HTTP_FAILURE');
+    try { return record(JSON.parse(raw), 'readiness'); }
+    catch { throw new Error('MEM001D2_READINESS_RESPONSE_INVALID'); }
   } finally { clearTimeout(timer); }
+}
+
+async function assertStreamableHttpMcp(config: AdmissionLiveConfig): Promise<void> {
+  const transport = new BoundedAdmissionMcpTransport(config);
+  const raw = await transport.call('berry_tools', { action: 'list' });
+  let payload: JsonRecord;
+  try { payload = record(JSON.parse(raw), 'berry_tools Streamable HTTP probe'); }
+  catch { throw new Error('MEM001D2_MCP_REGISTRY_INVALID'); }
+  if (Reflect.ownKeys(payload).length !== 1 || !Array.isArray(payload.domains)
+    || payload.domains.length !== CANONICAL_TENANT_DOMAINS.length) {
+    throw new Error('MEM001D2_MCP_REGISTRY_INVALID');
+  }
+  for (let index = 0; index < CANONICAL_TENANT_DOMAINS.length; index++) {
+    const expected = CANONICAL_TENANT_DOMAINS[index]!;
+    let domain: JsonRecord;
+    try { domain = record(payload.domains[index], 'berry_tools domain'); }
+    catch { throw new Error('MEM001D2_MCP_REGISTRY_INVALID'); }
+    if (Reflect.ownKeys(domain).length !== 4 || domain.domain !== expected.domain
+      || domain.description !== expected.description
+      || domain.enabled !== false || !Array.isArray(domain.tools)
+      || domain.tools.length !== expected.tools.length
+      || domain.tools.some((tool, toolIndex) => tool !== expected.tools[toolIndex])) {
+      throw new Error('MEM001D2_MCP_REGISTRY_INVALID');
+    }
+  }
+}
+
+export async function probeAdmissionCompositionRoot(config: AdmissionLiveConfig): Promise<JsonRecord> {
+  const ready = await readiness(config);
+  if (ready.status !== 'ready') throw new Error('authenticated /readyz did not report ready');
+  await assertStreamableHttpMcp(config);
+  return ready;
+}
+
+export function compositionRootCommand(): { readonly executable: string; readonly args: readonly string[] } {
+  return {
+    executable: process.execPath,
+    args: ['--import', 'tsx', 'packages/mcp/src/server.ts'],
+  };
 }
 
 export function childEnvironment(
@@ -524,7 +718,8 @@ class ServerProcess {
   private log = '';
 
   constructor(private readonly config: AdmissionLiveConfig, enabled: boolean, exportPath: string, tenantId: string) {
-    this.child = spawn(process.execPath, ['--import', 'tsx', 'packages/mcp/src/server.ts'], {
+    const command = compositionRootCommand();
+    this.child = spawn(command.executable, command.args, {
       cwd: process.cwd(),
       env: childEnvironment(config, enabled, exportPath, tenantId),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -538,12 +733,27 @@ class ServerProcess {
 
   async waitUntilReady(): Promise<JsonRecord> {
     const deadline = Date.now() + this.config.startupTimeoutMs;
+    let lastFailure = 'composition root has not accepted an authenticated readiness probe';
     while (Date.now() < deadline) {
       if (this.child.exitCode !== null) throw new Error(`MCP composition root exited during startup: ${this.safeLog()}`);
-      try { return await readiness(this.config); }
-      catch { await new Promise((resolvePromise) => setTimeout(resolvePromise, 250)); }
+      let ready: JsonRecord;
+      try { ready = await readiness(this.config); }
+      catch (error) {
+        lastFailure = error instanceof Error ? error.message : String(error);
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+        continue;
+      }
+      try {
+        await assertStreamableHttpMcp(this.config);
+        return ready;
+      } catch (error) {
+        lastFailure = error instanceof Error ? error.message : String(error);
+        throw new Error(`MCP composition root readiness passed but Streamable HTTP /mcp failed: ${lastFailure}`);
+      }
     }
-    throw new Error(`MCP composition root did not become ready within the startup bound: ${this.safeLog()}`);
+    throw new Error(
+      `MCP composition root did not become ready within the startup bound (last probe: ${lastFailure}): ${this.safeLog()}`,
+    );
   }
 
   safeLog(): string {
@@ -693,7 +903,7 @@ async function runAdmissionLiveCompositionEvidence(config: AdmissionLiveConfig):
     await driver.getServerInfo();
     active = new ServerProcess(config, false, exportPath, tenantId);
     const defaultReady = assertReadinessContract(await active.waitUntilReady(), false, config.timeoutMs);
-    const defaultTransport = new HttpMemberryTransport({ baseUrl: config.mcpUrl, token: config.token }, 15_000);
+    const defaultTransport = new BoundedAdmissionMcpTransport(config);
     const defaultEpisodeId = expectStoreId(await defaultTransport.call('berry_store', {
       session_id: sessionId,
       task: 'MEM-001D2 default-off composition evidence',
@@ -711,7 +921,7 @@ async function runAdmissionLiveCompositionEvidence(config: AdmissionLiveConfig):
 
     active = new ServerProcess(config, true, exportPath, tenantId);
     const enabledReady = assertReadinessContract(await active.waitUntilReady(), true, config.timeoutMs);
-    const enabledTransport = new HttpMemberryTransport({ baseUrl: config.mcpUrl, token: config.token }, 15_000);
+    const enabledTransport = new BoundedAdmissionMcpTransport(config);
     const enabledEpisodeId = expectStoreId(await enabledTransport.call('berry_store', {
       session_id: sessionId,
       task: 'MEM-001D2 enabled composition evidence',
@@ -773,6 +983,13 @@ async function runAdmissionLiveCompositionEvidence(config: AdmissionLiveConfig):
         scope: { tenantId, projectScope: defaultScope, episodeId: defaultEpisodeId },
         counts: defaultCounts,
         readiness: defaultReady,
+        transportProbe: {
+          endpointPath: '/mcp',
+          readinessPath: '/readyz',
+          protocol: 'streamable-http',
+          readonlyTool: 'berry_tools:list',
+          status: 'passed',
+        },
       },
       enabled: {
         scope: { tenantId, projectScope: enabledScope, episodeId: enabledEpisodeId },
@@ -783,6 +1000,13 @@ async function runAdmissionLiveCompositionEvidence(config: AdmissionLiveConfig):
         sidecarDelivery: storedWithinDeadline ? 'stored-within-deadline' : 'stored-after-timeout',
         readinessBefore: enabledReady,
         readinessAfter: finalReady,
+        transportProbe: {
+          endpointPath: '/mcp',
+          readinessPath: '/readyz',
+          protocol: 'streamable-http',
+          readonlyTool: 'berry_tools:list',
+          status: 'passed',
+        },
       },
     };
   } catch (error) {

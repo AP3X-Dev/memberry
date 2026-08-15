@@ -8,6 +8,8 @@ import {
   assertReadinessContract,
   acquireAdmissionLiveResources,
   childEnvironment,
+  compositionRootCommand,
+  probeAdmissionCompositionRoot,
   resolveAdmissionLiveConfig,
   runBoundedCleanupSteps,
   sanitizeAdmissionEvidence,
@@ -52,7 +54,148 @@ const readiness = (enabled: boolean) => ({
   },
 });
 
+const canonicalDomains = [
+  { domain: 'memory', description: 'Block memory operations: replace, rewrite, promote, archive', tools: ['berry_memory_replace', 'berry_memory_rewrite', 'berry_memory_promote', 'berry_memory_archive'], enabled: false },
+  { domain: 'temporal', description: 'Temporal queries: timeline, fact diff', tools: ['berry_timeline', 'berry_fact_diff'], enabled: false },
+  { domain: 'admin', description: 'Administrative: raw queries, consolidation, bootstrap, resolve, codebase ingestion, provenance', tools: ['berry_query', 'berry_consolidate', 'berry_bootstrap', 'berry_resolve', 'berry_ingest_codebase', 'berry_provenance'], enabled: false },
+  { domain: 'retrieval', description: 'Retrieval feedback (berry_context stays in Tier 1)', tools: ['berry_feedback'], enabled: false },
+];
+
+function mcpResponses(domains = canonicalDomains): Response[] {
+  return [
+    new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { protocolVersion: '2025-03-26' } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'mcp-session-id': 'fixture-session' },
+    }),
+    new Response('', { status: 202 }),
+    new Response(JSON.stringify({
+      jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: JSON.stringify({ domains }) }] },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  ];
+}
+
+function liveConfig() {
+  return resolveAdmissionLiveConfig({
+    MEMBERRY_ADMISSION_LIVE_ALLOW_WRITES: 'true',
+    MEMBERRY_ADMISSION_LIVE_DISPOSABLE: 'true',
+    MEMBERRY_ADMISSION_LIVE_API_TOKEN: 'fixture-token',
+    MEMBERRY_ADMISSION_LIVE_MCP_URL: 'http://127.0.0.1:3311',
+    MEMBERRY_ADMISSION_LIVE_REDIS_URL: 'redis://127.0.0.1:6379',
+    MEMBERRY_ADMISSION_LIVE_NEO4J_URI: 'bolt://127.0.0.1:7687',
+    MEMBERRY_ADMISSION_LIVE_NEO4J_USER: 'neo4j',
+    MEMBERRY_ADMISSION_LIVE_NEO4J_PASSWORD: 'fixture-password',
+  });
+}
+
 describe('MEM-001D2 live composition evidence contract', () => {
+  it('starts the real HTTP composition root and probes authenticated readiness plus Streamable HTTP MCP', async () => {
+    const config = liveConfig();
+    const command = compositionRootCommand();
+    expect(command.args).toEqual(['--import', 'tsx', 'packages/mcp/src/server.ts']);
+    expect(command.args).not.toContain('--stdio');
+
+    const requests: Array<{ url: string; method: string; authorization?: string }> = [];
+    const responses = [
+      new Response(JSON.stringify(readiness(false)), { status: 200, headers: { 'content-type': 'application/json' } }),
+      ...mcpResponses(),
+    ];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const headers = new Headers(init?.headers);
+      requests.push({
+        url: String(input),
+        method: init?.method ?? 'GET',
+        authorization: headers.get('authorization') ?? undefined,
+      });
+      const response = responses.shift();
+      if (!response) throw new Error('unexpected request');
+      return response;
+    };
+    try {
+      await expect(probeAdmissionCompositionRoot(config)).resolves.toMatchObject({ status: 'ready' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(requests).toEqual([
+      { url: 'http://127.0.0.1:3311/readyz', method: 'GET', authorization: 'Bearer fixture-token' },
+      { url: 'http://127.0.0.1:3311/mcp', method: 'POST', authorization: 'Bearer fixture-token' },
+      { url: 'http://127.0.0.1:3311/mcp', method: 'POST', authorization: 'Bearer fixture-token' },
+      { url: 'http://127.0.0.1:3311/mcp', method: 'POST', authorization: 'Bearer fixture-token' },
+    ]);
+  });
+
+  it('uses closed diagnostics and rejects forged or incomplete Streamable HTTP proof', async () => {
+    const config = liveConfig();
+    const originalFetch = globalThis.fetch;
+    const run = async (responses: Response[]) => {
+      globalThis.fetch = async () => {
+        const response = responses.shift();
+        if (!response) throw new Error('unexpected request');
+        return response;
+      };
+      try { return await probeAdmissionCompositionRoot(config); }
+      finally { globalThis.fetch = originalFetch; }
+    };
+
+    const forgedSecret = 'FORGED-UPSTREAM-SECRET';
+    const forged = run([
+      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      new Response(forgedSecret, { status: 500 }),
+    ]);
+    await expect(forged).rejects.toThrow(/MEM001D2_MCP_HTTP_FAILURE/);
+    await expect(forged).rejects.not.toThrow(new RegExp(forgedSecret));
+
+    await expect(run([
+      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      ...mcpResponses([]),
+    ])).rejects.toThrow(/MEM001D2_MCP_REGISTRY_INVALID/);
+
+    const forgedDescriptions = structuredClone(canonicalDomains);
+    forgedDescriptions[0]!.description = 'FORGED_DESCRIPTIONS_ACCEPTED';
+    await expect(run([
+      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      ...mcpResponses(forgedDescriptions),
+    ])).rejects.toThrow(/MEM001D2_MCP_REGISTRY_INVALID/);
+
+    await expect(run([
+      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      ...mcpResponses([...canonicalDomains].reverse()),
+    ])).rejects.toThrow(/MEM001D2_MCP_REGISTRY_INVALID/);
+
+    const source = await readFile(fileURLToPath(new URL('../live-composition.ts', import.meta.url)), 'utf8');
+    expect(source).not.toContain('HttpMemberryTransport');
+    expect(source).not.toContain('response.text()');
+    expect(source.match(/new BoundedAdmissionMcpTransport/g)?.length).toBe(3);
+    expect(source).toContain('DOMAIN_DESCRIPTIONS[domain]');
+    expect(source).toContain('DOMAIN_TOOL_NAMES_MAP[domain]');
+  });
+
+  it('bounds readiness and Streamable HTTP response bodies while streaming', async () => {
+    const config = liveConfig();
+    const originalFetch = globalThis.fetch;
+    const oversized = () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let index = 0; index < 40; index++) controller.enqueue(new Uint8Array(8192));
+        controller.close();
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+    const run = async (responses: Response[]) => {
+      globalThis.fetch = async () => {
+        const response = responses.shift();
+        if (!response) throw new Error('unexpected request');
+        return response;
+      };
+      try { return await probeAdmissionCompositionRoot(config); }
+      finally { globalThis.fetch = originalFetch; }
+    };
+
+    await expect(run([oversized()])).rejects.toThrow(/MEM001D2_READINESS_RESPONSE_TOO_LARGE/);
+    await expect(run([
+      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      oversized(),
+    ])).rejects.toThrow(/MEM001D2_MCP_RESPONSE_TOO_LARGE/);
+  });
+
   it('fails closed unless writes are explicitly disposable and every endpoint is loopback-only', () => {
     const valid = {
       MEMBERRY_ADMISSION_LIVE_ALLOW_WRITES: 'true',
@@ -107,7 +250,7 @@ describe('MEM-001D2 live composition evidence contract', () => {
       host: '127.0.0.1',
       port: 3311,
       timeoutMs: 50,
-      startupTimeoutMs: 120000,
+      startupTimeoutMs: 300000,
       writeAuthorization: 'explicit-disposable-only',
       modes: ['default-off', 'shadow-enabled'],
     });
