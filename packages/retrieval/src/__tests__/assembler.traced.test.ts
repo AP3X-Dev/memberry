@@ -108,10 +108,10 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
     expect(result.trace.incompleteReasons.length).toBeGreaterThan(0);
   });
 
-  it('rejects deterministic routing because RET-001B1 is ranked-only', async () => {
+  it('still rejects auto routing because traced execution requires an explicit algorithm', async () => {
     const { assembler } = makeAssembler(0, 0);
-    await expect(assembler.assembleTraced('graph', { strategy: 'deterministic' }))
-      .rejects.toThrow('ranked');
+    await expect(assembler.assembleTraced('graph', { strategy: 'auto' }))
+      .rejects.toThrow('ranked or deterministic');
   });
 
   it('records a safe channel failure after settlement without changing surviving context', async () => {

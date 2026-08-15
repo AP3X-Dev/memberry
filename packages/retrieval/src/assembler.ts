@@ -324,18 +324,18 @@ export class UnifiedAssembler {
     return this.assembleRanked(task, opts, 'HYBRID', getQueryVector);
   }
 
-  /**
-   * Ranked-only RET-001B1 instrumentation entrypoint. No MCP/config/registry path
-   * calls this yet; deterministic tracing remains a separate approved packet.
-   */
+  /** Internal retrieval instrumentation entrypoint. No MCP/config/registry path
+   * calls this; ordinary assembly remains the production-compatible default. */
   async assembleTraced(
     task: string,
     options?: Partial<TenantRetrievalOptions>,
   ): Promise<TracedUnifiedContext> {
     const strategy = options?.strategy ?? 'ranked';
-    if (strategy !== 'ranked') throw new Error('assembleTraced supports ranked retrieval only');
+    if (strategy !== 'ranked' && strategy !== 'deterministic') {
+      throw new Error('assembleTraced requires ranked or deterministic retrieval');
+    }
     const opts: TenantRetrievalOptions = {
-      strategy: 'ranked',
+      strategy,
       include_code: options?.include_code ?? true,
       include_arch: options?.include_arch ?? true,
       include_memory: options?.include_memory ?? true,
@@ -346,6 +346,30 @@ export class UnifiedAssembler {
       as_of: options?.as_of,
       tenantId: resolveTenant(options?.tenantId),
     };
+    if (strategy === 'deterministic') {
+      const result = await this.deterministic.assembleTraced(task, {
+        entity_scope: opts.entity_scope,
+        project_name: opts.project_name,
+        max_tokens: opts.max_tokens,
+        as_of: opts.as_of,
+        tenantId: opts.tenantId,
+      });
+      const tokenCount = result.sections.reduce(
+        (sum, section) => sum + section.items.reduce(
+          (itemSum, item) => itemSum + Math.ceil(item.content.length / 4), 0,
+        ), 0,
+      );
+      return {
+        context: {
+          task,
+          strategy: 'deterministic',
+          sections: result.sections,
+          token_count: tokenCount,
+          assembled_at: new Date().toISOString(),
+        },
+        trace: result.trace,
+      };
+    }
     const stageFailures: Array<{ stage: RetrievalTraceFailureStage; code: RetrievalTraceFailureCode }> = [];
     const getQueryVector = this.makeSharedQueryVector(task, (code) => stageFailures.push({ stage: 'embedding', code }));
     const result = await this.assembleRankedInternal(task, opts, 'HYBRID', getQueryVector, true, stageFailures);

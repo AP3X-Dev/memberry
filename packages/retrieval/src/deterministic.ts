@@ -5,6 +5,12 @@
 import { type Driver } from 'neo4j-driver';
 import { tenantWhere, resolveTenant, TENANT_PARAM } from '@memberry/neo4j';
 import type { ContextSection, ContextItem } from './types.js';
+import { DeterministicRuntimeTraceAdapter } from './runtime-trace.js';
+import type {
+  RetrievalTraceChannelSettlement,
+  RetrievalTraceDeterministicOutputChannelV2,
+  RetrievalTraceV1,
+} from './trace.js';
 
 /**
  * Deterministic context assembly.
@@ -178,9 +184,170 @@ export class DeterministicAssembler {
     return sections;
   }
 
+  /** RET-001B2 trace-only execution. Ordinary assemble() remains untouched so
+   * its calls, allocations, ordering, and returned bytes retain the baseline. */
+  async assembleTraced(
+    task: string,
+    options?: { entity_scope?: string[]; project_name?: string; max_tokens?: number; as_of?: string; tenantId?: string },
+  ): Promise<{ sections: ContextSection[]; trace: RetrievalTraceV1 }> {
+    const maxTokens = options?.max_tokens ?? 8000;
+    const asOf = options?.as_of;
+    const tenant = resolveTenant(options?.tenantId);
+    const sections: ContextSection[] = [];
+    let tokenBudget = maxTokens;
+    let discovery: RetrievalTraceChannelSettlement | undefined;
+
+    const explicitTargets = options?.entity_scope?.length ? options.entity_scope : undefined;
+    const targets = explicitTargets ?? await this.matchEntities(
+      task,
+      options?.project_name,
+      (settlement) => { discovery = settlement; },
+    );
+    const trace = new DeterministicRuntimeTraceAdapter({
+      query: task,
+      maxTokens,
+      targetCount: targets.length,
+      projectScopeApplied: explicitTargets === undefined && normalizeProjectName(options?.project_name) !== null,
+      namedTenant: tenant !== 'default',
+      temporalFilterApplied: Boolean(asOf),
+      discovery,
+    });
+
+    if (targets.length === 0) {
+      sections.push({
+        heading: 'No matching entities found',
+        source_type: 'arch_entity',
+        items: [{ id: 'none', content: `No entities matched task: "${task}"`, score: 0, metadata: {} }],
+      });
+      return { sections, trace: trace.finalize() };
+    }
+
+    const ancestorsByTarget = await runTracedQuery(trace, 'arch.hierarchy', () => this.getAncestorsBatch(targets))
+      ?? new Map<string, Array<{ name: string; depth: number; responsibility: string }>>();
+    const hierarchyItems: ContextItem[] = [];
+    for (const target of targets) {
+      for (const a of ancestorsByTarget.get(target) ?? []) {
+        hierarchyItems.push({
+          id: `hier-${a.name}`,
+          content: `**${a.name}** (depth ${a.depth}): ${a.responsibility}`,
+          score: 1 - (a.depth * 0.1),
+          metadata: { depth: a.depth },
+        });
+      }
+    }
+    const hierarchy = budgetSection('Domain Hierarchy', 'arch_entity', hierarchyItems, tokenBudget);
+    if (hierarchyItems.length > 0) {
+      sections.push(hierarchy.section);
+      tokenBudget -= hierarchy.tokens;
+    }
+    trace.recordSourceFinal('arch.hierarchy', hierarchyItems, hierarchy.section.items);
+
+    const entitiesByTarget = await runTracedQuery(trace, 'arch.entity', () => this.getEntitiesBatch(targets))
+      ?? new Map<string, { name: string; category: string; responsibility: string; interface_desc: string; internals: string }>();
+    const targetItems: ContextItem[] = [];
+    for (const target of targets) {
+      const entity = entitiesByTarget.get(target);
+      if (!entity) continue;
+      const parts: string[] = [`# ${entity.name} (${entity.category})`];
+      if (entity.responsibility) parts.push(`**Responsibility:** ${entity.responsibility}`);
+      if (entity.interface_desc) parts.push(`**Interface:** ${entity.interface_desc}`);
+      if (entity.internals) parts.push(`**Internals:** ${entity.internals}`);
+      targetItems.push({
+        id: `target-${entity.name}`,
+        content: parts.join('\n'),
+        score: 1.0,
+        metadata: { category: entity.category },
+      });
+    }
+    const entitySection = budgetSection('Target Components', 'arch_entity', targetItems, tokenBudget);
+    if (targetItems.length > 0) {
+      sections.push(entitySection.section);
+      tokenBudget -= entitySection.tokens;
+    }
+    trace.recordSourceFinal('arch.entity', targetItems, entitySection.section.items);
+
+    trace.attempt('arch.dependency');
+    let dependencyFailure = false;
+    let depsByTarget = new Map<string, Array<{ name: string; relation: string; interface_desc: string }>>();
+    let dependentsByTarget = new Map<string, Array<{ name: string; relation: string }>>();
+    try { depsByTarget = await this.getDependenciesBatch(targets); } catch { dependencyFailure = true; }
+    try { dependentsByTarget = await this.getDependentsBatch(targets); } catch { dependencyFailure = true; }
+    trace.settle('arch.dependency', dependencyFailure
+      ? { outcome: 'safe-failure', code: 'query-failed' }
+      : { outcome: 'success' });
+    const depItems: ContextItem[] = [];
+    for (const target of targets) {
+      for (const d of depsByTarget.get(target) ?? []) {
+        depItems.push({
+          id: `dep-${target}-${d.name}`,
+          content: `**${target}** —[${d.relation}]→ **${d.name}**: ${d.interface_desc}`,
+          score: 0.8,
+          metadata: { relation: d.relation },
+        });
+      }
+      for (const d of dependentsByTarget.get(target) ?? []) {
+        depItems.push({
+          id: `dnt-${d.name}-${target}`,
+          content: `**${d.name}** —[${d.relation}]→ **${target}** (dependent)`,
+          score: 0.6,
+          metadata: { relation: d.relation, direction: 'dependent' },
+        });
+      }
+    }
+    const dependencySection = budgetSection('Dependencies & Dependents', 'arch_entity', depItems, tokenBudget);
+    if (depItems.length > 0) {
+      sections.push(dependencySection.section);
+      tokenBudget -= dependencySection.tokens;
+    }
+    trace.recordSourceFinal('arch.dependency', depItems, dependencySection.section.items);
+
+    const aspectsByTarget = await runTracedQuery(trace, 'arch.aspect', () => this.getAspectsBatch(targets))
+      ?? new Map<string, Array<{ name: string; stability_tier: string; description: string }>>();
+    const aspectItems: ContextItem[] = [];
+    for (const target of targets) {
+      for (const a of aspectsByTarget.get(target) ?? []) {
+        aspectItems.push({
+          id: `aspect-${a.name}`,
+          content: `**${a.name}** [${a.stability_tier}]: ${a.description}`,
+          score: a.stability_tier === 'schema' ? 0.9 : a.stability_tier === 'protocol' ? 0.7 : 0.5,
+          metadata: { stability_tier: a.stability_tier },
+        });
+      }
+    }
+    const aspectSection = budgetSection('Cross-Cutting Concerns', 'aspect', aspectItems, tokenBudget);
+    if (aspectItems.length > 0) {
+      sections.push(aspectSection.section);
+      tokenBudget -= aspectSection.tokens;
+    }
+    trace.recordSourceFinal('arch.aspect', aspectItems, aspectSection.section.items);
+
+    const semanticsByTarget = await runTracedQuery(trace, 'memory.graph', () => this.getScopedSemanticsBatch(targets, asOf, tenant))
+      ?? new Map<string, Array<{ id: string; content: string; confidence: number; tags: string[] }>>();
+    const semanticItems: ContextItem[] = [];
+    for (const target of targets) {
+      for (const memory of semanticsByTarget.get(target) ?? []) {
+        semanticItems.push({
+          id: memory.id,
+          content: memory.content,
+          score: memory.confidence,
+          metadata: { confidence: memory.confidence, tags: memory.tags },
+        });
+      }
+    }
+    const semanticSection = budgetSection('Semantic Knowledge', 'semantic', semanticItems, tokenBudget);
+    if (semanticItems.length > 0) sections.push(semanticSection.section);
+    trace.recordSourceFinal('memory.graph', semanticItems, semanticSection.section.items);
+
+    return { sections, trace: trace.finalize() };
+  }
+
   // ─── Private graph queries ──────────────────────────────────────────────
 
-  private async matchEntities(task: string, projectNameOption?: string): Promise<string[]> {
+  private async matchEntities(
+    task: string,
+    projectNameOption?: string,
+    onFulltextSettlement?: (settlement: RetrievalTraceChannelSettlement) => void,
+  ): Promise<string[]> {
     const session = this.driver.session();
     try {
       // Try fulltext search first (fast, uses index), fall back to CONTAINS
@@ -202,11 +369,13 @@ export class DeterministicAssembler {
            ORDER BY score DESC LIMIT 5`,
           { query: escaped.split(/\s+/).filter((w) => w.length > 2).join(' ') || escaped, projectName },
         );
+        onFulltextSettlement?.({ outcome: 'success' });
         if (ftResult.records.length > 0) {
           return ftResult.records.map((r) => r.get('name') as string);
         }
       } catch (err: unknown) {
         // Fulltext index may not exist yet — fall through
+        onFulltextSettlement?.({ outcome: 'safe-failure', code: 'query-failed' });
       }
 
       // Fallback: keyword CONTAINS match
@@ -492,4 +661,20 @@ function normalizeProjectName(projectName?: string): string | null {
   if (!trimmed) return null;
   const withoutPrefix = trimmed.replace(/^project:/i, '').trim();
   return withoutPrefix || null;
+}
+
+async function runTracedQuery<T>(
+  trace: DeterministicRuntimeTraceAdapter,
+  channel: RetrievalTraceDeterministicOutputChannelV2,
+  operation: () => Promise<T>,
+): Promise<T | undefined> {
+  trace.attempt(channel);
+  try {
+    const value = await operation();
+    trace.settle(channel, { outcome: 'success' });
+    return value;
+  } catch {
+    trace.settle(channel, { outcome: 'safe-failure', code: 'query-failed' });
+    return undefined;
+  }
 }

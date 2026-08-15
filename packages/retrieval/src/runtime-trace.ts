@@ -10,8 +10,10 @@ import {
   type RetrievalTraceScoreName,
   type RetrievalTraceFailureStage,
   type RetrievalTraceIncompleteReason,
+  type RetrievalTraceDeterministicOutputChannelV2,
+  type RetrievalTraceChannelSettlement,
 } from './trace.js';
-import type { RetrievalResult } from './types.js';
+import type { ContextItem, RetrievalResult } from './types.js';
 
 export type RuntimeStructuralChannel = RetrievalTraceChannel;
 export type RuntimeStructuralChannelObservation =
@@ -49,6 +51,131 @@ export interface RankedTraceRequestFacts {
   temporalFilterApplied: boolean;
   query: string;
   maxTokens: number;
+}
+
+export interface DeterministicTraceRequestFacts {
+  query: string;
+  maxTokens: number;
+  targetCount: number;
+  projectScopeApplied: boolean;
+  namedTenant: boolean;
+  temporalFilterApplied: boolean;
+  discovery?: RetrievalTraceChannelSettlement;
+}
+
+function deterministicSourceType(channel: RetrievalTraceDeterministicOutputChannelV2):
+  'semantic' | 'arch_entity' | 'aspect' {
+  return channel === 'memory.graph' ? 'semantic' : channel === 'arch.aspect' ? 'aspect' : 'arch_entity';
+}
+
+/** Trace-only adapter for the deterministic assembler. It receives already
+ * ordered source candidates and never exposes their IDs or content. */
+export class DeterministicRuntimeTraceAdapter {
+  private readonly collector: RetrievalTraceCollector;
+  private readonly requestShape: RetrievalTraceRequestShapeV1;
+  private failed = false;
+
+  constructor(private readonly facts: DeterministicTraceRequestFacts) {
+    const plannedChannels: RetrievalTraceChannel[] = [
+      ...(facts.discovery ? ['arch.fulltext' as const] : []),
+      ...(facts.targetCount > 0 ? [
+        'arch.hierarchy', 'arch.entity', 'arch.dependency', 'arch.aspect', 'memory.graph',
+      ] as const : []),
+    ];
+    this.requestShape = {
+      sources: { code: false, architecture: true, memory: true },
+      projectScopeApplied: facts.projectScopeApplied,
+      tenantScope: facts.namedTenant ? 'named' : 'default',
+      entityScope: cardinality(facts.targetCount),
+      tagScope: 'none',
+      temporalFilterApplied: facts.temporalFilterApplied,
+      queryLength: queryLength(facts.query),
+      queryForm: queryForm(facts.query),
+      tokenBudget: tokenBudget(facts.maxTokens),
+      diversification: 'none',
+      plannedChannels,
+    };
+    this.collector = new RetrievalTraceCollector('deterministic-v2', this.requestShape);
+    if (facts.discovery) {
+      this.safe(() => this.collector.attemptChannel('arch.fulltext'));
+      this.safe(() => this.collector.settleChannel('arch.fulltext', facts.discovery!));
+    }
+  }
+
+  attempt(channel: RetrievalTraceDeterministicOutputChannelV2): void {
+    this.safe(() => this.collector.attemptChannel(channel));
+  }
+
+  settle(
+    channel: RetrievalTraceDeterministicOutputChannelV2,
+    settlement: RetrievalTraceChannelSettlement,
+  ): void {
+    this.safe(() => this.collector.settleChannel(channel, settlement));
+  }
+
+  recordSourceFinal(
+    channel: RetrievalTraceDeterministicOutputChannelV2,
+    candidates: readonly ContextItem[],
+    included: readonly ContextItem[],
+  ): void {
+    if (this.failed) return;
+    const delivered = new Set(included);
+    const ordered = [...candidates].sort((a, b) => b.score - a.score);
+    for (let index = 0; index < ordered.length; index++) {
+      const item = ordered[index]!;
+      this.safe(() => {
+        const confidence = channel === 'memory.graph'
+          && typeof item.metadata.confidence === 'number'
+          && Number.isFinite(item.metadata.confidence)
+          && item.metadata.confidence >= 0
+          && item.metadata.confidence <= 1
+          ? item.metadata.confidence : undefined;
+        const handle = this.collector.addCandidate({
+          sourceType: deterministicSourceType(channel),
+          channels: [{ channel, rank: index + 1 }],
+          evidence: confidence === undefined ? {} : { confidence },
+          estimatedTokens: Math.ceil(item.content.length / 4),
+        });
+        const fromMemory = channel === 'memory.graph';
+        const accepted = delivered.has(item);
+        this.collector.recordFilter(handle, { name: 'source-enabled', outcome: 'pass' });
+        this.collector.recordFilter(handle, { name: 'tenant', outcome: fromMemory ? 'pass' : 'not-applicable' });
+        this.collector.recordFilter(handle, {
+          name: 'project', outcome: this.facts.projectScopeApplied ? 'pass' : 'not-applicable',
+        });
+        this.collector.recordFilter(handle, { name: 'entity', outcome: 'pass' });
+        this.collector.recordFilter(handle, {
+          name: 'temporal',
+          outcome: fromMemory && this.facts.temporalFilterApplied ? 'pass' : 'not-applicable',
+        });
+        this.collector.recordFilter(handle, { name: 'token-budget', outcome: accepted ? 'pass' : 'fail' });
+        this.collector.recordTerminal(handle, accepted
+          ? { outcome: 'included', reasons: [] }
+          : { outcome: 'excluded', reasons: ['token-budget'] });
+      });
+    }
+  }
+
+  finalize(): RetrievalTraceV1 {
+    try {
+      return this.collector.finalize();
+    } catch {
+      const fallback = new RetrievalTraceCollector('deterministic-v2', this.requestShape, {
+        maxCandidates: 1,
+        maxEvents: 1,
+      });
+      fallback.markIncomplete('candidate-output-gap');
+      return fallback.finalize();
+    }
+  }
+
+  private safe(action: () => void): void {
+    if (this.failed) return;
+    try { action(); } catch {
+      this.failed = true;
+      try { this.collector.markIncomplete('candidate-output-gap'); } catch { /* fail closed */ }
+    }
+  }
 }
 
 function cardinality(value: number): 'none' | 'one' | 'few' | 'many' {
