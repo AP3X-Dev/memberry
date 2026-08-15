@@ -20,6 +20,13 @@ policy with deterministic in-memory persistence. Its fidelity is reported
 exactly as `production-core / fixture-persistence`; it does not claim live Neo4j
 or MCP coverage.
 
+MEM-001D2 is registered separately as
+`composition-root / live-disposable-persistence`. It starts the real MCP
+composition root in default-off and enabled modes, enters through Streamable
+HTTP `berry_store`, and uses direct Neo4j only as a scorer-side oracle and exact
+fixture cleanup boundary. It does not relabel the structural suite or claim
+durable retry, healing, history completeness, or production readiness.
+
 Proxy scores are never labeled as live MemBerry results. An unsupported capability,
 adapter failure, and a real zero score are separate outcomes. Empty responses fail
 the joint recall and answer-coverage gates and cannot earn stale/isolation credit.
@@ -117,6 +124,36 @@ synthetic fact and verifies the exact episodic record through scoped `berry_grep
 which works without an embedding provider. This smoke proves MCP/database wiring
 and isolation; scored live queries still use `berry_load` and must report the real
 retrieval result. The adapter also confirms it does not claim destructive cleanup.
+
+## Admission live composition evidence
+
+Run this only with caller-owned disposable Redis and Neo4j services bound to
+loopback. All opt-ins and credentials are separate from ordinary deployment
+variables:
+
+```bash
+MEMBERRY_ADMISSION_LIVE_ALLOW_WRITES=true \
+MEMBERRY_ADMISSION_LIVE_DISPOSABLE=true \
+MEMBERRY_ADMISSION_LIVE_API_TOKEN=fixture-token \
+MEMBERRY_ADMISSION_LIVE_MCP_URL=http://127.0.0.1:3311 \
+MEMBERRY_ADMISSION_LIVE_REDIS_URL=redis://127.0.0.1:6379 \
+MEMBERRY_ADMISSION_LIVE_NEO4J_URI=bolt://127.0.0.1:7687 \
+MEMBERRY_ADMISSION_LIVE_NEO4J_USER=neo4j \
+MEMBERRY_ADMISSION_LIVE_NEO4J_PASSWORD=fixture-password \
+MEMBERRY_ADMISSION_LIVE_EVIDENCE_PATH=/tmp/memberry-admission-live/evidence.json \
+npm run bench:lab:admission:live
+```
+
+The runner rejects non-loopback endpoints plus non-root paths, URL credentials,
+percent encoding, query strings, and fragments; generates unique tenant/project/session/content
+fixtures, and does not inherit arbitrary parent environment secrets into either server process. It proves one default-off
+Episodic with no sidecar; one enabled, correctly scoped, content-free linked
+sidecar; no duplicate/invalid-store mutation; and truthful authenticated
+readiness limitations. Exact unique fixture scopes are deleted in `finally` and
+zero residual Episodic/AdmissionObservation/auto-created project Entity counts
+are recorded. Non-auto or externally managed Entity nodes are never deleted. Redis and
+container teardown remain the caller's responsibility and are labeled as such
+in the evidence instead of being implied by graph cleanup.
 
 ## Adding a scenario
 

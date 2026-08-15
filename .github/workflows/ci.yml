@@ -42,6 +42,12 @@ jobs:
           REDIS_URL: ""
           NEO4J_URI: ""
 
+      - name: Run full evaluation-lab unit tests
+        run: npm run bench:lab:test
+
+      - name: Type-check evaluation lab
+        run: npm run bench:lab:typecheck
+
       # Required deterministic lab gate: validates the pinned registries and immutable
       # baseline, runs the legacy quality control, then compares the proxy candidate
       # against the independent control over physically separated dev/holdout oracles.
@@ -181,5 +187,40 @@ jobs:
         with:
           name: memberry-live-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/memberry-live-evidence
+          if-no-files-found: error
+          retention-days: 14
+
+      # MEM-001D2 is a separately labeled composition-root proof. The runner
+      # starts the real MCP twice (default-off and enabled), enters only through
+      # Streamable HTTP, uses Neo4j as a scorer-side oracle, and deletes only its
+      # exact synthetic scopes. GitHub owns teardown of these disposable services.
+      - name: Admission live composition evidence
+        shell: bash
+        env:
+          MEMBERRY_ADMISSION_LIVE_ALLOW_WRITES: "true"
+          MEMBERRY_ADMISSION_LIVE_DISPOSABLE: "true"
+          MEMBERRY_ADMISSION_LIVE_API_TOKEN: admission-live-token
+          MEMBERRY_ADMISSION_LIVE_MCP_URL: http://127.0.0.1:3311
+          MEMBERRY_ADMISSION_LIVE_REDIS_URL: redis://127.0.0.1:6379
+          MEMBERRY_ADMISSION_LIVE_NEO4J_URI: bolt://127.0.0.1:7687
+          MEMBERRY_ADMISSION_LIVE_NEO4J_USER: neo4j
+          MEMBERRY_ADMISSION_LIVE_NEO4J_PASSWORD: testpassword
+          MEMBERRY_ADMISSION_LIVE_EVIDENCE_PATH: ${{ runner.temp }}/memberry-admission-live-composition/evidence.json
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/memberry-admission-live-composition"
+          mkdir -p "$evidence_dir"
+          npm run bench:lab:admission:live 2>&1 | sed -E \
+            -e 's/(Bearer )[A-Za-z0-9._~+\/-]+/\1[REDACTED]/g' \
+            -e 's/admission-live-token/[REDACTED]/g' \
+            -e 's/testpassword/[REDACTED]/g' \
+            | tee "$evidence_dir/run.log"
+
+      - name: Upload admission live composition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memberry-admission-live-composition-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memberry-admission-live-composition
           if-no-files-found: error
           retention-days: 14

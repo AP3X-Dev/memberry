@@ -119,3 +119,14 @@ test('admission structural systems cannot substitute proxy or wrong-fidelity reg
   assert.ok(errors.some((error) => error.includes('admission structural required systems must be fixture fidelity')));
   assert.ok(errors.some((error) => error.includes('cannot be proxies')));
 });
+
+test('admission live composition evidence cannot be relabeled as fixture or production-core evidence', async () => {
+  const registry = await json('systems.json') as { systems: Array<Record<string, unknown>> };
+  const system = registry.systems.find((entry) => entry.id === 'memberry-admission-live-composition-v1')!;
+  system.mode = 'fixture';
+  system.fidelity = 'fixture';
+  system.fidelityDetail = 'production-core / fixture-persistence';
+  const errors = validateSystemRegistry(registry);
+  assert.ok(errors.some((error) => error.includes('must use live fidelity')));
+  assert.ok(errors.some((error) => error.includes('composition-root / live-disposable-persistence')));
+});
