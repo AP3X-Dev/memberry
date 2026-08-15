@@ -14,6 +14,7 @@ import {
   runBoundedCleanupSteps,
   sanitizeAdmissionEvidence,
   stopChildProcessBounded,
+  waitForAdmissionReadiness,
 } from '../live-composition.js';
 
 const readiness = (enabled: boolean) => ({
@@ -87,6 +88,43 @@ function liveConfig() {
   });
 }
 
+const logicalMultiTenantLimitation =
+  'shared logical multi-tenant consolidation and wiki publication are disabled to prevent cross-tenant disclosure';
+const noProviderLimitation =
+  'recurring/synthesized semantic promotion is unavailable without an LLM/embedding provider; approved classified decisions still promote and episodic recall remains available';
+const disposableLimitation = `${logicalMultiTenantLimitation}; ${noProviderLimitation}`;
+
+function expectedDegradedReadiness() {
+  return {
+    status: 'ready',
+    service: 'memberry-mcp',
+    transport: 'sse',
+    active_sessions: 0,
+    registered_sessions: 0,
+    auth_required: true,
+    uptime_ms: 10,
+    consolidation_automation: {
+      enabled: false,
+      unhealthy: true,
+      degraded: true,
+      limitations: [`default: ${disposableLimitation}`],
+      workers: [{
+        name: 'default', enabled: false, readonly: false, running_scope: null,
+        queued_scopes: [], last_attempt_at: null, last_success_at: null, last_error: null,
+        limitation: disposableLimitation, health: 'unhealthy', stale: false,
+        exhausted_failure: false,
+        discovery: { last_error: null, pending_retry: null, exhausted_failure: false },
+        publication: {
+          needed_since: null, last_success_at: null, last_error: null, pending_retry: null,
+          exhausted_failure: false, dirty_version: null, published_version: null,
+        },
+        pending_retries: [],
+      }],
+    },
+    admission_shadow: readiness(false).admission_shadow,
+  };
+}
+
 describe('MEM-001D2 live composition evidence contract', () => {
   it('starts the real HTTP composition root and probes authenticated readiness plus Streamable HTTP MCP', async () => {
     const config = liveConfig();
@@ -96,7 +134,9 @@ describe('MEM-001D2 live composition evidence contract', () => {
 
     const requests: Array<{ url: string; method: string; authorization?: string }> = [];
     const responses = [
-      new Response(JSON.stringify(readiness(false)), { status: 200, headers: { 'content-type': 'application/json' } }),
+      new Response(JSON.stringify(expectedDegradedReadiness()), {
+        status: 503, headers: { 'content-type': 'application/json' },
+      }),
       ...mcpResponses(),
     ];
     const originalFetch = globalThis.fetch;
@@ -139,26 +179,26 @@ describe('MEM-001D2 live composition evidence contract', () => {
 
     const forgedSecret = 'FORGED-UPSTREAM-SECRET';
     const forged = run([
-      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      new Response(JSON.stringify(expectedDegradedReadiness()), { status: 503 }),
       new Response(forgedSecret, { status: 500 }),
     ]);
     await expect(forged).rejects.toThrow(/MEM001D2_MCP_HTTP_FAILURE/);
     await expect(forged).rejects.not.toThrow(new RegExp(forgedSecret));
 
     await expect(run([
-      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      new Response(JSON.stringify(expectedDegradedReadiness()), { status: 503 }),
       ...mcpResponses([]),
     ])).rejects.toThrow(/MEM001D2_MCP_REGISTRY_INVALID/);
 
     const forgedDescriptions = structuredClone(canonicalDomains);
     forgedDescriptions[0]!.description = 'FORGED_DESCRIPTIONS_ACCEPTED';
     await expect(run([
-      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      new Response(JSON.stringify(expectedDegradedReadiness()), { status: 503 }),
       ...mcpResponses(forgedDescriptions),
     ])).rejects.toThrow(/MEM001D2_MCP_REGISTRY_INVALID/);
 
     await expect(run([
-      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      new Response(JSON.stringify(expectedDegradedReadiness()), { status: 503 }),
       ...mcpResponses([...canonicalDomains].reverse()),
     ])).rejects.toThrow(/MEM001D2_MCP_REGISTRY_INVALID/);
 
@@ -191,9 +231,150 @@ describe('MEM-001D2 live composition evidence contract', () => {
 
     await expect(run([oversized()])).rejects.toThrow(/MEM001D2_READINESS_RESPONSE_TOO_LARGE/);
     await expect(run([
-      new Response(JSON.stringify(readiness(false)), { status: 200 }),
+      new Response(JSON.stringify(expectedDegradedReadiness()), { status: 503 }),
       oversized(),
     ])).rejects.toThrow(/MEM001D2_MCP_RESPONSE_TOO_LARGE/);
+  });
+
+  it('fails immediately on stable readiness HTTP errors and retries only explicit transient status', async () => {
+    const config = liveConfig();
+    const originalFetch = globalThis.fetch;
+    try {
+      for (const status of [401, 403, 404, 500]) {
+        let calls = 0;
+        globalThis.fetch = async () => {
+          calls += 1;
+          return new Response('FORGED-READINESS-BODY-SECRET', { status });
+        };
+        let failure: Error | undefined;
+        try {
+          await waitForAdmissionReadiness(() => probeAdmissionCompositionRoot(config), 1_000, {
+            now: () => 0,
+            sleep: async () => { throw new Error('nonretryable readiness status was retried'); },
+          });
+        } catch (error) { failure = error instanceof Error ? error : new Error(String(error)); }
+        expect(failure?.message).toBe(`MEM001D2_READINESS_HTTP_${status}`);
+        expect(failure?.message).not.toContain('FORGED-READINESS-BODY-SECRET');
+        expect(calls).toBe(1);
+      }
+
+      let clock = 0;
+      let transientCalls = 0;
+      globalThis.fetch = async () => {
+        transientCalls += 1;
+        return new Response('TRANSIENT-BODY-MUST-NOT-LEAK', { status: 503 });
+      };
+      let transientFailure: Error | undefined;
+      try {
+        await waitForAdmissionReadiness(() => probeAdmissionCompositionRoot(config), 600, {
+          now: () => clock,
+          sleep: async (ms) => { clock += ms; },
+        });
+      } catch (error) { transientFailure = error instanceof Error ? error : new Error(String(error)); }
+      expect(transientCalls).toBe(3);
+      expect(transientFailure?.message)
+        .toBe('MEM001D2_READINESS_STARTUP_TIMEOUT__MEM001D2_READINESS_HTTP_503');
+      expect(transientFailure?.message).not.toContain('TRANSIENT-BODY-MUST-NOT-LEAK');
+
+      const expectedDegraded = expectedDegradedReadiness();
+
+      globalThis.fetch = async () => new Response(JSON.stringify(expectedDegraded), { status: 200 });
+      await expect(probeAdmissionCompositionRoot(config))
+        .rejects.toThrow('MEM001D2_READINESS_STATUS_MISMATCH');
+      globalThis.fetch = async () => new Response(JSON.stringify(readiness(false)), { status: 200 });
+      await expect(probeAdmissionCompositionRoot(config))
+        .rejects.toThrow('MEM001D2_READINESS_STATUS_MISMATCH');
+      const wrongAutomationOver200 = structuredClone(expectedDegraded);
+      wrongAutomationOver200.consolidation_automation.unhealthy = false;
+      globalThis.fetch = async () => new Response(JSON.stringify(wrongAutomationOver200), { status: 200 });
+      await expect(probeAdmissionCompositionRoot(config))
+        .rejects.toThrow('MEM001D2_READINESS_STATUS_MISMATCH');
+
+      const negativeSessions = structuredClone(expectedDegraded);
+      negativeSessions.active_sessions = -1;
+      negativeSessions.registered_sessions = -1;
+      globalThis.fetch = async () => new Response(JSON.stringify(negativeSessions), { status: 503 });
+      await expect(probeAdmissionCompositionRoot(config))
+        .rejects.toThrow('MEM001D2_READINESS_HTTP_503');
+
+      let expected503Calls = 0;
+      const expected503Responses = [
+        new Response(JSON.stringify(expectedDegraded), { status: 503 }),
+        ...mcpResponses(),
+      ];
+      globalThis.fetch = async () => {
+        expected503Calls += 1;
+        const response = expected503Responses.shift();
+        if (!response) throw new Error('unexpected request');
+        return response;
+      };
+      await expect(waitForAdmissionReadiness(() => probeAdmissionCompositionRoot(config), 1_000, {
+        now: () => 0,
+        sleep: async () => { throw new Error('expected degraded readiness must not retry'); },
+      })).resolves.toMatchObject({
+        evidence_http_status: 503,
+        evidence_readiness_class: 'expected-logical-multitenant-degraded',
+      });
+      expect(expected503Calls).toBe(4);
+
+      const hostile: Array<Record<string, unknown>> = [];
+      const extraWorker = structuredClone(expectedDegraded) as any;
+      extraWorker.consolidation_automation.workers.push({ name: 'unrelated' });
+      hostile.push(extraWorker);
+      const duplicateDefault = structuredClone(expectedDegraded) as any;
+      duplicateDefault.consolidation_automation.workers.push(
+        structuredClone(duplicateDefault.consolidation_automation.workers[0]),
+      );
+      hostile.push(duplicateDefault);
+      const suffixInjection = structuredClone(expectedDegraded) as any;
+      suffixInjection.consolidation_automation.workers[0].limitation += '; FORGED-SECRET-OUTAGE';
+      hostile.push(suffixInjection);
+      const automationExtra = structuredClone(expectedDegraded) as any;
+      automationExtra.consolidation_automation.forged = true;
+      hostile.push(automationExtra);
+      const workerExtra = structuredClone(expectedDegraded) as any;
+      workerExtra.consolidation_automation.workers[0].forged = true;
+      hostile.push(workerExtra);
+      const forgedSummary = structuredClone(expectedDegraded) as any;
+      forgedSummary.consolidation_automation.limitations = ['default: FORGED-SUMMARY'];
+      hostile.push(forgedSummary);
+      const topLevelExtra = structuredClone(expectedDegraded) as any;
+      topLevelExtra.forged = 'FORGED-TOP-LEVEL';
+      hostile.push(topLevelExtra);
+      const missingAutomation = structuredClone(expectedDegraded) as any;
+      delete missingAutomation.consolidation_automation;
+      hostile.push(missingAutomation);
+      const shadowExtra = structuredClone(expectedDegraded) as any;
+      shadowExtra.admission_shadow.note = 'FORGED-UPSTREAM-SECRET';
+      hostile.push(shadowExtra);
+      const countersExtra = structuredClone(expectedDegraded) as any;
+      countersExtra.admission_shadow.counters.note = 'FORGED-UPSTREAM-SECRET';
+      hostile.push(countersExtra);
+
+      for (const forged of hostile) {
+        globalThis.fetch = async () => new Response(JSON.stringify(forged), { status: 503 });
+        let failure: Error | undefined;
+        try { await probeAdmissionCompositionRoot(config); }
+        catch (error) { failure = error instanceof Error ? error : new Error(String(error)); }
+        expect(failure?.message).toBe('MEM001D2_READINESS_HTTP_503');
+        expect(failure?.message).not.toMatch(/FORGED|SECRET|OUTAGE|SUMMARY/);
+      }
+
+      const bootstrapSource = await readFile(fileURLToPath(
+        new URL('../../../../packages/mcp/src/bootstrap.ts', import.meta.url),
+      ), 'utf8');
+      expect(bootstrapSource).toContain(`? '${logicalMultiTenantLimitation}'`);
+      expect(bootstrapSource).toContain(`? '${noProviderLimitation}'`);
+      expect(bootstrapSource).toContain('forceUnhealthy: logicalMultiTenant');
+      const coordinatorSource = await readFile(fileURLToPath(
+        new URL('../../../../packages/mcp/src/consolidation-coordinator.ts', import.meta.url),
+      ), 'utf8');
+      for (const required of [
+        'running_scope: this.runningScope', 'queued_scopes:', 'discovery:', 'publication:', 'pending_retries:',
+      ]) expect(coordinatorSource).toContain(required);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('fails closed unless writes are explicitly disposable and every endpoint is loopback-only', () => {
@@ -271,8 +452,33 @@ describe('MEM-001D2 live composition evidence contract', () => {
   });
 
   it('requires readiness to report the exact default-off and enabled limitations', () => {
-    expect(assertReadinessContract(readiness(false), false).mode).toBe('disabled');
-    expect(assertReadinessContract(readiness(true), true)).toMatchObject({
+    const defaultEvidence = {
+      ...readiness(false), evidence_http_status: 503,
+      evidence_readiness_class: 'expected-logical-multitenant-degraded',
+    };
+    const defaultProjection = assertReadinessContract(defaultEvidence, false);
+    expect(defaultProjection).toMatchObject({
+      mode: 'disabled',
+      evidence_http_status: 503,
+      evidence_readiness_class: 'expected-logical-multitenant-degraded',
+    });
+    expect(Object.keys(defaultProjection)).toEqual([
+      'schema_version', 'enabled', 'mode', 'health', 'affects_readiness', 'delivery',
+      'recovery', 'completeness', 'durable_retry', 'self_healing', 'history_complete',
+      'history_scope', 'crash_gap_possible', 'stopping', 'last_failure_code',
+      'registered_runtimes', 'timeout_ms', 'max_in_flight', 'counters',
+      'evidence_http_status', 'evidence_readiness_class',
+    ]);
+    const finalEvidenceShape = { result: { defaultOff: { readiness: defaultProjection } } };
+    expect(finalEvidenceShape.result.defaultOff.readiness).toMatchObject({
+      evidence_http_status: 503,
+      evidence_readiness_class: 'expected-logical-multitenant-degraded',
+    });
+    const enabledEvidence = {
+      ...readiness(true), evidence_http_status: 503,
+      evidence_readiness_class: 'expected-logical-multitenant-degraded',
+    };
+    expect(assertReadinessContract(enabledEvidence, true)).toMatchObject({
       mode: 'shadow',
       delivery: 'best-effort-bounded-terminal',
       durable_retry: false,
@@ -280,9 +486,25 @@ describe('MEM-001D2 live composition evidence contract', () => {
       history_complete: false,
       crash_gap_possible: true,
     });
-    const dishonest = structuredClone(readiness(true));
+    const dishonest = structuredClone(enabledEvidence);
     dishonest.admission_shadow.self_healing = true;
     expect(() => assertReadinessContract(dishonest, true)).toThrow(/self_healing/);
+
+    const shadowInjection = structuredClone(defaultEvidence) as any;
+    shadowInjection.admission_shadow.note = 'FORGED-UPSTREAM-SECRET';
+    expect(() => assertReadinessContract(shadowInjection, false)).toThrow(/admission_shadow shape/);
+
+    const topLevelInjection = structuredClone(defaultEvidence) as any;
+    topLevelInjection.note = 'FORGED-UPSTREAM-SECRET';
+    expect(() => assertReadinessContract(topLevelInjection, false)).toThrow(/readiness shape/);
+
+    const countersInjection = structuredClone(defaultEvidence) as any;
+    countersInjection.admission_shadow.counters.note = 'FORGED-UPSTREAM-SECRET';
+    expect(() => assertReadinessContract(countersInjection, false)).toThrow(/counters shape/);
+
+    const negativeCounter = structuredClone(defaultEvidence) as any;
+    negativeCounter.admission_shadow.counters.prepared = -1;
+    expect(() => assertReadinessContract(negativeCounter, false)).toThrow(/counters values/);
   });
 
   it('accepts only one correctly linked content-free observation', () => {

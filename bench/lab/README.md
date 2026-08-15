@@ -162,6 +162,17 @@ are recorded. Non-auto or externally managed Entity nodes are never deleted. Red
 container teardown remain the caller's responsibility and are labeled as such
 in the evidence instead of being implied by graph cleanup.
 
+The tenant-token fixture intentionally activates logical multi-tenant mode. In
+that mode the production composition root marks shared consolidation/wiki
+automation unhealthy and returns HTTP 503 from `/readyz` to expose the unsupported
+cross-tenant lifecycle path. The runner accepts 503 only when the authenticated
+body carries that exact disabled/default-worker limitation plus closed admission-shadow
+and counter shapes. Because this fixture always enables tenant-token mode, HTTP 200
+is a status mismatch even when paired with an otherwise exact unhealthy body. Evidence
+projects only the enumerated shadow fields and records the validated 503/class; unrelated 503s retry
+within the startup bound, while 401, 403, 404, 500, and other stable failures stop
+immediately with body-free numeric diagnostic codes.
+
 ## Adding a scenario
 
 1. Put memories and query text in an `*-inputs.ts` or `input.jsonl` file.

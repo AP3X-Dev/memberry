@@ -152,6 +152,29 @@ export function resolveAdmissionLiveConfig(
   });
 }
 
+const ADMISSION_SHADOW_KEYS = [
+  'schema_version', 'enabled', 'mode', 'health', 'affects_readiness', 'delivery',
+  'recovery', 'completeness', 'durable_retry', 'self_healing', 'history_complete',
+  'history_scope', 'crash_gap_possible', 'stopping', 'last_failure_code',
+  'registered_runtimes', 'timeout_ms', 'max_in_flight', 'counters',
+] as const;
+const ADMISSION_SHADOW_COUNTER_KEYS = [
+  'prepared', 'preparation_failures', 'append_attempts', 'appended', 'append_failures',
+  'timed_out', 'capacity_rejected', 'shutdown_skipped', 'late_appended', 'late_failures',
+  'reserved', 'in_flight',
+] as const;
+const ADMISSION_SHADOW_FAILURE_CODES = [
+  'preparation_failed', 'append_failed', 'timed_out', 'capacity_rejected', 'shutdown_skipped',
+] as const;
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function expectedArrayValue(value: unknown, index: number): unknown {
+  return Array.isArray(value) ? value[index] : undefined;
+}
+
 export function assertReadinessContract(
   value: unknown,
   expectedEnabled: boolean,
@@ -159,8 +182,14 @@ export function assertReadinessContract(
   allowDegraded = false,
 ): JsonRecord {
   const body = record(value, 'readiness');
+  if (!exactKeys(body, [
+    'status', 'admission_shadow', 'evidence_http_status', 'evidence_readiness_class',
+  ])) throw new Error('readiness shape is not closed');
   if (body.status !== 'ready') throw new Error('readiness.status must be ready');
   const shadow = record(body.admission_shadow, 'readiness.admission_shadow');
+  if (!exactKeys(shadow, ADMISSION_SHADOW_KEYS)) {
+    throw new Error('readiness admission_shadow shape is not closed');
+  }
   const exact: Record<string, unknown> = {
     schema_version: 1,
     enabled: expectedEnabled,
@@ -193,8 +222,55 @@ export function assertReadinessContract(
   if (shadow.max_in_flight !== 32) {
     throw new Error('readiness admission_shadow.max_in_flight must be exactly 32');
   }
-  record(shadow.counters, 'readiness.admission_shadow.counters');
-  return shadow;
+  if (shadow.last_failure_code !== null
+    && !ADMISSION_SHADOW_FAILURE_CODES.some((code) => code === shadow.last_failure_code)) {
+    throw new Error('readiness admission_shadow.last_failure_code is invalid');
+  }
+  const counters = record(shadow.counters, 'readiness.admission_shadow.counters');
+  if (!exactKeys(counters, ADMISSION_SHADOW_COUNTER_KEYS)) {
+    throw new Error('readiness admission_shadow counters shape is not closed');
+  }
+  if (ADMISSION_SHADOW_COUNTER_KEYS.some((key) => !isNonnegativeSafeInteger(counters[key]))) {
+    throw new Error('readiness admission_shadow counters values are invalid');
+  }
+  return readinessEvidenceProjection(body, shadow);
+}
+
+export function readinessEvidenceProjection(body: JsonRecord, shadow: JsonRecord): JsonRecord {
+  if (!exactKeys(body, [
+    'status', 'admission_shadow', 'evidence_http_status', 'evidence_readiness_class',
+  ]) || !hasClosedAdmissionShadowShape(shadow)) {
+    throw new Error('MEM001D2_READINESS_EVIDENCE_SHAPE_INVALID');
+  }
+  const httpStatus = body.evidence_http_status;
+  const readinessClass = body.evidence_readiness_class;
+  if (httpStatus !== 503 || readinessClass !== 'expected-logical-multitenant-degraded') {
+    throw new Error('MEM001D2_READINESS_EVIDENCE_CLASS_INVALID');
+  }
+  const counters = record(shadow.counters, 'readiness.admission_shadow.counters');
+  return {
+    schema_version: shadow.schema_version,
+    enabled: shadow.enabled,
+    mode: shadow.mode,
+    health: shadow.health,
+    affects_readiness: shadow.affects_readiness,
+    delivery: shadow.delivery,
+    recovery: shadow.recovery,
+    completeness: shadow.completeness,
+    durable_retry: shadow.durable_retry,
+    self_healing: shadow.self_healing,
+    history_complete: shadow.history_complete,
+    history_scope: shadow.history_scope,
+    crash_gap_possible: shadow.crash_gap_possible,
+    stopping: shadow.stopping,
+    last_failure_code: shadow.last_failure_code,
+    registered_runtimes: shadow.registered_runtimes,
+    timeout_ms: [expectedArrayValue(shadow.timeout_ms, 0)],
+    max_in_flight: shadow.max_in_flight,
+    counters: Object.fromEntries(ADMISSION_SHADOW_COUNTER_KEYS.map((key) => [key, counters[key]])),
+    evidence_http_status: httpStatus,
+    evidence_readiness_class: readinessClass,
+  };
 }
 
 export interface ObservationInspection {
@@ -501,11 +577,162 @@ async function readiness(config: AdmissionLiveConfig): Promise<JsonRecord> {
     throw new Error('MEM001D2_READINESS_NETWORK_FAILURE');
   }
   try {
+    if (!response.ok && response.status !== 503) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error(`MEM001D2_READINESS_HTTP_${response.status}`);
+    }
     const raw = await boundedResponseText(response, 'MEM001D2_READINESS');
-    if (!response.ok) throw new Error('MEM001D2_READINESS_HTTP_FAILURE');
-    try { return record(JSON.parse(raw), 'readiness'); }
-    catch { throw new Error('MEM001D2_READINESS_RESPONSE_INVALID'); }
+    let body: JsonRecord;
+    try { body = record(JSON.parse(raw), 'readiness'); }
+    catch {
+      if (response.status === 503) throw new Error('MEM001D2_READINESS_HTTP_503');
+      throw new Error('MEM001D2_READINESS_RESPONSE_INVALID');
+    }
+    if (response.status !== 503) {
+      throw new Error('MEM001D2_READINESS_STATUS_MISMATCH');
+    }
+    if (!isExpectedDisposableMultiTenantDegradation(body)) {
+      throw new Error('MEM001D2_READINESS_HTTP_503');
+    }
+    return {
+      status: body.status,
+      admission_shadow: body.admission_shadow,
+      evidence_http_status: 503,
+      evidence_readiness_class: 'expected-logical-multitenant-degraded',
+    };
   } finally { clearTimeout(timer); }
+}
+
+const LOGICAL_MULTI_TENANT_LIMITATION =
+  'shared logical multi-tenant consolidation and wiki publication are disabled to prevent cross-tenant disclosure';
+const NO_PROVIDER_LIMITATION =
+  'recurring/synthesized semantic promotion is unavailable without an LLM/embedding provider; approved classified decisions still promote and episodic recall remains available';
+const EXPECTED_DISPOSABLE_LIMITATION = `${LOGICAL_MULTI_TENANT_LIMITATION}; ${NO_PROVIDER_LIMITATION}`;
+const EXPECTED_AGGREGATE_LIMITATION = `default: ${EXPECTED_DISPOSABLE_LIMITATION}`;
+
+function exactKeys(value: JsonRecord, expected: readonly string[]): boolean {
+  const keys = Reflect.ownKeys(value);
+  return keys.length === expected.length
+    && keys.every((key) => typeof key === 'string' && expected.includes(key));
+}
+
+function hasClosedAdmissionShadowShape(value: unknown): boolean {
+  let shadow: JsonRecord;
+  let counters: JsonRecord;
+  try {
+    shadow = record(value, 'admission shadow');
+    counters = record(shadow.counters, 'admission shadow counters');
+  } catch { return false; }
+  return exactKeys(shadow, ADMISSION_SHADOW_KEYS)
+    && exactKeys(counters, ADMISSION_SHADOW_COUNTER_KEYS)
+    && ADMISSION_SHADOW_COUNTER_KEYS.every((key) => isNonnegativeSafeInteger(counters[key]))
+    && shadow.schema_version === 1
+    && typeof shadow.enabled === 'boolean'
+    && ['shadow', 'disabled'].includes(String(shadow.mode))
+    && ['healthy', 'degraded', 'disabled'].includes(String(shadow.health))
+    && shadow.affects_readiness === false
+    && shadow.delivery === 'best-effort-bounded-terminal'
+    && shadow.recovery === 'none'
+    && shadow.completeness === 'not-provable'
+    && shadow.durable_retry === false
+    && shadow.self_healing === false
+    && shadow.history_complete === false
+    && shadow.history_scope === 'process-lifetime'
+    && typeof shadow.crash_gap_possible === 'boolean'
+    && shadow.stopping === false
+    && (shadow.last_failure_code === null
+      || ADMISSION_SHADOW_FAILURE_CODES.some((code) => code === shadow.last_failure_code))
+    && shadow.registered_runtimes === 1
+    && Array.isArray(shadow.timeout_ms) && shadow.timeout_ms.length === 1
+    && isNonnegativeSafeInteger(shadow.timeout_ms[0]) && shadow.timeout_ms[0] > 0
+    && shadow.max_in_flight === 32;
+}
+
+function isExpectedDisposableMultiTenantDegradation(body: JsonRecord): boolean {
+  if (!exactKeys(body, [
+    'status', 'service', 'transport', 'active_sessions', 'registered_sessions',
+    'auth_required', 'uptime_ms', 'consolidation_automation', 'admission_shadow',
+  ]) || body.status !== 'ready' || body.service !== 'memberry-mcp' || body.transport !== 'sse'
+    || body.auth_required !== true || !isNonnegativeSafeInteger(body.active_sessions)
+    || !isNonnegativeSafeInteger(body.registered_sessions) || body.active_sessions !== body.registered_sessions
+    || typeof body.uptime_ms !== 'number' || !Number.isFinite(body.uptime_ms) || body.uptime_ms < 0
+    || !hasClosedAdmissionShadowShape(body.admission_shadow)) return false;
+  let automation: JsonRecord;
+  try { automation = record(body.consolidation_automation, 'consolidation automation'); }
+  catch { return false; }
+  if (!exactKeys(automation, ['enabled', 'unhealthy', 'degraded', 'limitations', 'workers'])
+    || automation.enabled !== false || automation.unhealthy !== true || automation.degraded !== true
+    || !Array.isArray(automation.limitations) || automation.limitations.length !== 1
+    || automation.limitations[0] !== EXPECTED_AGGREGATE_LIMITATION
+    || !Array.isArray(automation.workers) || automation.workers.length !== 1) return false;
+  let worker: JsonRecord;
+  try { worker = record(automation.workers[0], 'consolidation worker'); }
+  catch { return false; }
+  if (!exactKeys(worker, [
+    'name', 'enabled', 'readonly', 'running_scope', 'queued_scopes', 'last_attempt_at',
+    'last_success_at', 'last_error', 'limitation', 'health', 'stale', 'exhausted_failure',
+    'discovery', 'publication', 'pending_retries',
+  ]) || worker.name !== 'default' || worker.enabled !== false || worker.readonly !== false
+    || worker.running_scope !== null || !Array.isArray(worker.queued_scopes) || worker.queued_scopes.length !== 0
+    || worker.last_attempt_at !== null || worker.last_success_at !== null || worker.last_error !== null
+    || worker.limitation !== EXPECTED_DISPOSABLE_LIMITATION || worker.health !== 'unhealthy'
+    || worker.stale !== false || worker.exhausted_failure !== false
+    || !Array.isArray(worker.pending_retries) || worker.pending_retries.length !== 0) return false;
+  let discovery: JsonRecord;
+  let publication: JsonRecord;
+  try {
+    discovery = record(worker.discovery, 'consolidation discovery');
+    publication = record(worker.publication, 'consolidation publication');
+  } catch { return false; }
+  return exactKeys(discovery, ['last_error', 'pending_retry', 'exhausted_failure'])
+    && discovery.last_error === null && discovery.pending_retry === null && discovery.exhausted_failure === false
+    && exactKeys(publication, [
+      'needed_since', 'last_success_at', 'last_error', 'pending_retry', 'exhausted_failure',
+      'dirty_version', 'published_version',
+    ])
+    && publication.needed_since === null && publication.last_success_at === null
+    && publication.last_error === null && publication.pending_retry === null
+    && publication.exhausted_failure === false && publication.dirty_version === null
+    && publication.published_version === null;
+}
+
+export interface AdmissionReadinessWaitDependencies {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+const DEFAULT_READINESS_WAIT_DEPENDENCIES: AdmissionReadinessWaitDependencies = {
+  now: Date.now,
+  sleep: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
+};
+
+function readinessFailureCode(error: unknown): string {
+  return error instanceof Error && /^MEM001D2_[A-Z0-9_]+$/.test(error.message)
+    ? error.message
+    : 'MEM001D2_READINESS_UNKNOWN_FAILURE';
+}
+
+function retryableReadinessFailure(code: string): boolean {
+  return code === 'MEM001D2_READINESS_NETWORK_FAILURE' || code === 'MEM001D2_READINESS_HTTP_503';
+}
+
+export async function waitForAdmissionReadiness(
+  probe: () => Promise<JsonRecord>,
+  timeoutMs: number,
+  dependencies: AdmissionReadinessWaitDependencies = DEFAULT_READINESS_WAIT_DEPENDENCIES,
+): Promise<JsonRecord> {
+  const deadline = dependencies.now() + timeoutMs;
+  let lastFailure = 'MEM001D2_READINESS_NETWORK_FAILURE';
+  while (dependencies.now() < deadline) {
+    try { return await probe(); }
+    catch (error) {
+      const code = readinessFailureCode(error);
+      if (!retryableReadinessFailure(code)) throw new Error(code);
+      lastFailure = code;
+      await dependencies.sleep(250);
+    }
+  }
+  throw new Error(`MEM001D2_READINESS_STARTUP_TIMEOUT__${lastFailure}`);
 }
 
 async function assertStreamableHttpMcp(config: AdmissionLiveConfig): Promise<void> {
@@ -732,28 +959,21 @@ class ServerProcess {
   }
 
   async waitUntilReady(): Promise<JsonRecord> {
-    const deadline = Date.now() + this.config.startupTimeoutMs;
-    let lastFailure = 'composition root has not accepted an authenticated readiness probe';
-    while (Date.now() < deadline) {
-      if (this.child.exitCode !== null) throw new Error(`MCP composition root exited during startup: ${this.safeLog()}`);
-      let ready: JsonRecord;
-      try { ready = await readiness(this.config); }
-      catch (error) {
-        lastFailure = error instanceof Error ? error.message : String(error);
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-        continue;
-      }
-      try {
-        await assertStreamableHttpMcp(this.config);
-        return ready;
-      } catch (error) {
-        lastFailure = error instanceof Error ? error.message : String(error);
-        throw new Error(`MCP composition root readiness passed but Streamable HTTP /mcp failed: ${lastFailure}`);
-      }
+    let ready: JsonRecord;
+    try {
+      ready = await waitForAdmissionReadiness(async () => {
+        if (this.child.exitCode !== null) throw new Error('MEM001D2_COMPOSITION_ROOT_EXITED');
+        return readiness(this.config);
+      }, this.config.startupTimeoutMs);
+    } catch (error) {
+      throw new Error(`${readinessFailureCode(error)}: ${this.safeLog()}`);
     }
-    throw new Error(
-      `MCP composition root did not become ready within the startup bound (last probe: ${lastFailure}): ${this.safeLog()}`,
-    );
+    try {
+      await assertStreamableHttpMcp(this.config);
+      return ready;
+    } catch (error) {
+      throw new Error(`${readinessFailureCode(error)}: ${this.safeLog()}`);
+    }
   }
 
   safeLog(): string {
