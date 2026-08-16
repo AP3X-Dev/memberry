@@ -22,6 +22,7 @@ import {
   tenantIsolationForbiddenValues,
   traceFixtureForbiddenValues,
   traceFixtureQueries,
+  TRACE_INSPECTION_FIXED_CODES,
   TraceMcpTransport,
   waitForTraceReadiness,
 } from '../live-conformance.js';
@@ -74,6 +75,34 @@ const seedFixture = {
   defaultRankedMarker: 'ret001ddrun000000000001',
   namedRankedMarker: 'ret001dnrun000000000001',
 } as const;
+
+const rankedTracedInspectionDiagnostics = [
+  ['RET001D_MCP_RESULT_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MCP_RESULT_INVALID'],
+  ['RET001D_MCP_TOOL_FAILURE', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MCP_TOOL_FAILURE'],
+  ['RET001D_MARKDOWN_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MARKDOWN_INVALID'],
+  ['RET001D_MARKDOWN_REQUEST_MISMATCH', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MARKDOWN_REQUEST_MISMATCH'],
+  ['RET001D_SEEDED_RESULT_EMPTY', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_SEEDED_RESULT_EMPTY'],
+  ['RET001D_MARKDOWN_PROVENANCE_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MARKDOWN_PROVENANCE_INVALID'],
+  ['RET001D_MARKDOWN_RESULT_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MARKDOWN_RESULT_INVALID'],
+  ['RET001D_MARKDOWN_RESULT_COUNT_MISMATCH', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MARKDOWN_RESULT_COUNT_MISMATCH'],
+  ['RET001D_SEEDED_RESULT_MISSING', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_SEEDED_RESULT_MISSING'],
+  ['RET001D_MARKDOWN_RESULT_ORDER_MISMATCH', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MARKDOWN_RESULT_ORDER_MISMATCH'],
+  ['RET001D_NO_TRACE_BLOCK_COUNT', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_NO_TRACE_BLOCK_COUNT'],
+  ['RET001D_TRACE_TOO_LARGE', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_TOO_LARGE'],
+  ['RET001D_TRACE_JSON_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_JSON_INVALID'],
+  ['RET001D_TRACE_CONFORMANCE_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_CONFORMANCE_INVALID'],
+  ['RET001D_TRACE_ALGORITHM_MISMATCH', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_ALGORITHM_MISMATCH'],
+  ['RET001D_TRACE_INCOMPLETE', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_INCOMPLETE'],
+  ['RET001D_TRACE_BOUNDS_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_BOUNDS_INVALID'],
+  ['RET001D_TRACE_NONCANONICAL', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_NONCANONICAL'],
+  ['RET001D_TRACE_FORBIDDEN_VALUE', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_FORBIDDEN_VALUE'],
+  ['RET001D_TRACE_REPLAY_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_REPLAY_INVALID'],
+  ['RET001D_TRACE_REPLAY_MISMATCH', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_REPLAY_MISMATCH'],
+  ['RET001D_TRACE_CHANNEL_SETTLEMENT_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_CHANNEL_SETTLEMENT_INVALID'],
+  ['RET001D_TRACE_TERMINAL_COVERAGE_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_TERMINAL_COVERAGE_INVALID'],
+  ['RET001D_MARKDOWN_TRACE_BINDING_INVALID', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MARKDOWN_TRACE_BINDING_INVALID'],
+  ['RET001D_TRACE_BLOCK_COUNT', 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_BLOCK_COUNT'],
+] as const;
 
 function seedRecord(values: Record<string, unknown>): { get(key: string): unknown } {
   return { get: (key: string) => values[key] };
@@ -431,6 +460,65 @@ describe('RET-001D live composition harness', () => {
       expect(code).not.toContain(secret);
       expect(safeDiagnosticCode(new Error(code))).toBe(code);
     }
+  });
+
+  it.each(rankedTracedInspectionDiagnostics)(
+    'maps ranked traced-inspection fixed cause %s to exact subreason diagnostic',
+    (innerCode, expected) => {
+      const code = caseStageDiagnosticCode('ranked', 'traced-inspection', new Error(innerCode));
+      expect(code).toBe(expected);
+      expect(safeDiagnosticCode(new Error(code))).toBe(expected);
+    },
+  );
+
+  it('keeps the compile-time trace-inspection allowlist exact and fully exercised', () => {
+    expect(TRACE_INSPECTION_FIXED_CODES)
+      .toEqual(rankedTracedInspectionDiagnostics.map(([innerCode]) => innerCode));
+  });
+
+  it.each([
+    ['unknown Error', (): unknown => new Error('RET001D_UNKNOWN_TRACE_REASON')],
+    ['non-Error string', (): unknown => 'RET001D_TRACE_JSON_INVALID'],
+    ['non-Error object', (): unknown => ({ message: 'RET001D_TRACE_JSON_INVALID' })],
+    ['message accessor', (): unknown => Object.defineProperty(new Error('placeholder'), 'message', {
+      configurable: true,
+      get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+    ['Error proxy', (): unknown => new Proxy(new Error('RET001D_TRACE_JSON_INVALID'), {
+      get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+      getOwnPropertyDescriptor() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+    ['revoked Error proxy', (): unknown => {
+      const pair = Proxy.revocable(new Error('RET001D_TRACE_JSON_INVALID'), {});
+      pair.revoke();
+      return pair.proxy;
+    }],
+    ['secret message', (): unknown => new Error('RET001D_SECRET_FIXTURE')],
+    ['value-bearing suffix', (): unknown => new Error('RET001D_TRACE_JSON_INVALID__RET001D_SECRET_FIXTURE')],
+  ] as const)('maps ranked traced-inspection hostile or unapproved %s to UNKNOWN', (_label, cause) => {
+    let code: string | undefined;
+    expect(() => { code = caseStageDiagnosticCode('ranked', 'traced-inspection', cause()); }).not.toThrow();
+    expect(code).toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
+    expect(code).not.toContain('SECRET_FIXTURE');
+    expect(safeDiagnosticCode(new Error(code))).toBe(code);
+  });
+
+  it('does not add subreasons to any other case or stage', () => {
+    const cause = new Error('RET001D_TRACE_JSON_INVALID');
+    expect(caseStageDiagnosticCode('deterministic', 'traced-inspection', cause))
+      .toBe('RET001D_CASE_DETERMINISTIC_STAGE_TRACED_INSPECTION');
+    expect(caseStageDiagnosticCode('ranked', 'ordinary-inspection', cause))
+      .toBe('RET001D_CASE_RANKED_STAGE_ORDINARY_INSPECTION');
+  });
+
+  it.each([
+    'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION',
+    'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_RET001D_TRACE_JSON_INVALID',
+    'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_JSON_INVALID_SECRET',
+    'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_',
+    'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN_SECRET',
+  ])('rejects malformed or value-bearing ranked traced-inspection diagnostic %s', (code) => {
+    expect(safeDiagnosticCode(new Error(code))).toBe('RET001D_INTERNAL_FAILURE');
   });
 
   it('rejects cross-algorithm presentation-ID substitution', () => {
