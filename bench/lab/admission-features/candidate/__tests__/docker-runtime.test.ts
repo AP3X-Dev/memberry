@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -5,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  APPROVED_NODE_BASE_IMAGE_V1,
+  classifyAdmissionCandidateImagePolicyV1,
   hasExactDockerImageArgsEscapedV1,
 } from '../build.js';
 import {
@@ -16,6 +19,43 @@ import {
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '../../../../..');
 const id = 'd'.repeat(64);
 const otherId = 'e'.repeat(64);
+
+function candidateImagePolicyFixtureV1() {
+  const baseLayers = [1, 2, 3, 4].map((digit) => `sha256:${String(digit).repeat(64)}`);
+  const imageId = `sha256:${'d'.repeat(64)}`;
+  const candidate = `sha256:${'a'.repeat(64)}`;
+  const source = `sha256:${'b'.repeat(64)}`;
+  const base = {
+    RepoDigests: [APPROVED_NODE_BASE_IMAGE_V1], Os: 'linux', Architecture: 'amd64',
+    RootFS: { Type: 'layers', Layers: baseLayers }, Config: { Env: ['PATH=/usr/local/bin'] },
+  };
+  const config = {
+    User: '65532:65532',
+    Env: ['PATH=/usr/local/bin', 'LANG=C.UTF-8', 'LC_ALL=C.UTF-8', 'TZ=UTC'],
+    Entrypoint: ['/usr/local/bin/node'],
+    Cmd: [
+      '--permission', '--allow-fs-read=/run/input.json',
+      '--allow-fs-write=/tmp/memberry-sandbox-write-probe',
+      '--disable-proto=throw', '/app/worker.mjs', '/run/input.json',
+    ],
+    WorkingDir: '/app',
+    Labels: {
+      'org.memberry.candidate.sha256': candidate,
+      'org.memberry.source.sha256': source,
+      'org.memberry.base.image': APPROVED_NODE_BASE_IMAGE_V1,
+    },
+    ArgsEscaped: true,
+  };
+  const image = {
+    Id: imageId, Os: 'linux', Architecture: 'amd64',
+    RootFS: { Type: 'layers', Layers: [...baseLayers, `sha256:${'5'.repeat(64)}`, `sha256:${'6'.repeat(64)}`] },
+    Config: config,
+  };
+  const classify = (candidateImage: unknown, baseImage: unknown = base) => (
+    classifyAdmissionCandidateImagePolicyV1(baseImage, candidateImage, imageId, candidate, source)
+  );
+  return { base, baseLayers, candidate, classify, config, image, imageId, source };
+}
 
 function tar(
   name: 'worker.mjs' | 'attestation.json' | 'node',
@@ -94,6 +134,176 @@ describe('MEM-002C2 CID-file-only cleanup authority', () => {
 });
 
 describe('MEM-002C2 canonical Docker-copy USTAR boundary', () => {
+  it('classifies each candidate image-policy subboundary without values', () => {
+    const { baseLayers, candidate, classify, config, image } = candidateImagePolicyFixtureV1();
+    expect(classify(image)).toBe('VALID');
+    expect(classify({ ...image, Id: `sha256:${'e'.repeat(64)}` })).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify({
+      ...image,
+      RootFS: { Type: 'layers', Layers: [...baseLayers, `sha256:${'5'.repeat(64)}`] },
+    })).toBe('IMAGE_ROOTFS_POLICY');
+    const { ArgsEscaped: _argsEscaped, ...withoutArgsEscaped } = config;
+    expect(classify({ ...image, Config: withoutArgsEscaped })).toBe('IMAGE_ARGS_ESCAPED_POLICY');
+    expect(classify({ ...image, Config: { ...config, Extra: true } })).toBe('IMAGE_CONFIG_KEYS_POLICY');
+    expect(classify({ ...image, Config: { ...config, User: '0:0' } })).toBe('IMAGE_CONFIG_POLICY');
+    expect(classify({
+      ...image,
+      Config: { ...config, Labels: { ...config.Labels, 'org.memberry.source.sha256': candidate } },
+    })).toBe('IMAGE_LABEL_POLICY');
+  });
+
+  it('rejects accessor, proxy, revoked, and non-plain inspection graphs without invoking hooks', () => {
+    const { base, classify, config, image } = candidateImagePolicyFixtureV1();
+    const accessor = (target: object, key: string) => {
+      const getter = vi.fn(() => { throw new Error('must not execute'); });
+      return {
+        getter,
+        value: Object.defineProperty(target, key, { configurable: true, enumerable: true, get: getter }),
+      };
+    };
+    const accessorCases = [
+      accessor({ ...image }, 'Config'),
+      accessor({ ...image }, 'RootFS'),
+      accessor({ ...image.RootFS }, 'Layers'),
+      accessor({ ...config }, 'Labels'),
+      accessor({ ...config }, 'Env'),
+      accessor({ ...config }, 'Cmd'),
+      accessor({ ...base }, 'Config'),
+    ];
+    expect(classify(accessorCases[0].value)).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify(accessorCases[1].value)).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify({ ...image, RootFS: accessorCases[2].value })).toBe('IMAGE_INSPECT_POLICY');
+    for (const entry of accessorCases.slice(3, 6)) {
+      expect(classify({ ...image, Config: entry.value })).toBe('IMAGE_INSPECT_POLICY');
+    }
+    expect(classify(image, accessorCases[6].value)).toBe('IMAGE_INSPECT_POLICY');
+    expect(accessorCases.every((entry) => entry.getter.mock.calls.length === 0)).toBe(true);
+
+    const hostileProxy = (target: object) => {
+      const hooks = {
+        get: vi.fn(), getOwnPropertyDescriptor: vi.fn(), getPrototypeOf: vi.fn(), ownKeys: vi.fn(),
+      };
+      return { hooks, value: new Proxy(target, hooks) };
+    };
+    const proxyCases = [
+      hostileProxy(config), hostileProxy(image.RootFS), hostileProxy(image.RootFS.Layers),
+      hostileProxy(config.Labels), hostileProxy(config.Env), hostileProxy(config.Cmd), hostileProxy(base),
+    ];
+    expect(classify({ ...image, Config: proxyCases[0].value })).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify({ ...image, RootFS: proxyCases[1].value })).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify({ ...image, RootFS: { ...image.RootFS, Layers: proxyCases[2].value } }))
+      .toBe('IMAGE_INSPECT_POLICY');
+    for (let index = 3; index < 6; index += 1) {
+      const key = ['Labels', 'Env', 'Cmd'][index - 3];
+      expect(classify({ ...image, Config: { ...config, [key]: proxyCases[index].value } }))
+        .toBe('IMAGE_INSPECT_POLICY');
+    }
+    expect(classify(image, proxyCases[6].value)).toBe('IMAGE_INSPECT_POLICY');
+    expect(proxyCases.every((entry) => Object.values(entry.hooks)
+      .every((hook) => hook.mock.calls.length === 0))).toBe(true);
+
+    const revoked = Proxy.revocable(config, {});
+    revoked.revoke();
+    expect(classify({ ...image, Config: revoked.proxy })).toBe('IMAGE_INSPECT_POLICY');
+
+    for (const candidateImage of [
+      { ...image, RootFS: Object.create(image.RootFS) },
+      { ...image, RootFS: { ...image.RootFS, Layers: Object.create(image.RootFS.Layers) } },
+      { ...image, Config: Object.create(config) },
+      { ...image, Config: { ...config, Labels: Object.create(config.Labels) } },
+      { ...image, Config: { ...config, Env: Object.create(config.Env) } },
+      { ...image, Config: { ...config, Cmd: Object.create(config.Cmd) } },
+    ]) expect(classify(candidateImage)).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify(image, Object.create(base))).toBe('IMAGE_INSPECT_POLICY');
+  });
+
+  it('enforces exact dense object, dense array, string-byte, and depth graph bounds', () => {
+    const { classify, image } = candidateImagePolicyFixtureV1();
+    const denseObject = (count: number) => Object.fromEntries(
+      Array.from({ length: count }, (_, index) => [`key${index}`, null]),
+    );
+    const denseArray = (count: number) => Array.from({ length: count }, () => null);
+    const deepValue = (deepestDepthFromImage: number) => {
+      let value: unknown = null;
+      for (let depth = 1; depth < deepestDepthFromImage; depth += 1) value = { value };
+      return value;
+    };
+    expect(classify({ ...image, Probe: denseObject(256) })).toBe('VALID');
+    expect(classify({ ...image, Probe: denseObject(257) })).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify({ ...image, Probe: denseArray(512) })).toBe('VALID');
+    expect(classify({ ...image, Probe: denseArray(513) })).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify({ ...image, Probe: 'x'.repeat(65_536) })).toBe('VALID');
+    expect(classify({ ...image, Probe: 'x'.repeat(65_537) })).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify({ ...image, Probe: '\u00e9'.repeat(32_768) })).toBe('VALID');
+    expect(classify({ ...image, Probe: '\u00e9'.repeat(32_769) })).toBe('IMAGE_INSPECT_POLICY');
+    expect(classify({ ...image, Probe: deepValue(32) })).toBe('VALID');
+    expect(classify({ ...image, Probe: deepValue(33) })).toBe('IMAGE_INSPECT_POLICY');
+  });
+
+  it('shares exact total entry, value, and string-byte budgets across base and image', () => {
+    const { base, classify, image } = candidateImagePolicyFixtureV1();
+    const usage = (value: unknown): { entries: number; stringBytes: number; values: number } => {
+      if (typeof value === 'string') return { entries: 0, stringBytes: Buffer.byteLength(value), values: 1 };
+      if (value === null || typeof value !== 'object') return { entries: 0, stringBytes: 0, values: 1 };
+      const entries = Array.isArray(value) ? value : Object.values(value);
+      const children = entries.map(usage);
+      const keyBytes = Array.isArray(value) ? 0 : Object.keys(value)
+        .reduce((total, key) => total + Buffer.byteLength(key), 0);
+      return {
+        entries: entries.length + children.reduce((total, child) => total + child.entries, 0),
+        stringBytes: keyBytes + children.reduce((total, child) => total + child.stringBytes, 0),
+        values: 1 + children.reduce((total, child) => total + child.values, 0),
+      };
+    };
+    const entryTree = (entries: number): unknown[] => {
+      if (entries <= 512) return Array.from({ length: entries }, () => null);
+      const branches = Math.ceil(entries / 513);
+      let leaves = entries - branches;
+      return Array.from({ length: branches }, () => {
+        const count = Math.min(512, leaves);
+        leaves -= count;
+        return Array.from({ length: count }, () => null);
+      });
+    };
+    const stringPayload = (bytes: number): string[] => {
+      const chunks: string[] = [];
+      while (bytes > 0) {
+        const size = Math.min(65_536, bytes);
+        chunks.push('x'.repeat(size));
+        bytes -= size;
+      }
+      return chunks;
+    };
+
+    const baseline = usage(base);
+    const imageBaseline = usage(image);
+    const remainingEntries = 8_192 - baseline.entries - imageBaseline.entries;
+    const baseAddedEntries = Math.floor(remainingEntries / 2);
+    const imageAddedEntries = remainingEntries - baseAddedEntries;
+    const entryBase = { ...base, Probe: entryTree(baseAddedEntries - 1) };
+    const entryImage = { ...image, Probe: entryTree(imageAddedEntries - 1) };
+    expect(usage(entryBase).entries + usage(entryImage).entries).toBe(8_192);
+    expect(usage(entryBase).values + usage(entryImage).values).toBe(8_194);
+    expect(classify(entryImage, entryBase)).toBe('VALID');
+    const overEntryImage = { ...entryImage, Probe: entryTree(imageAddedEntries) };
+    expect(usage(entryBase).entries + usage(overEntryImage).entries).toBe(8_193);
+    expect(usage(entryBase).values + usage(overEntryImage).values).toBe(8_195);
+    expect(classify(overEntryImage, entryBase)).toBe('IMAGE_INSPECT_POLICY');
+
+    const probeKeyBytes = Buffer.byteLength('Probe');
+    const remainingStringBytes = 4_194_304 - baseline.stringBytes - imageBaseline.stringBytes
+      - probeKeyBytes * 2;
+    const baseAddedStringBytes = Math.floor(remainingStringBytes / 2);
+    const imageAddedStringBytes = remainingStringBytes - baseAddedStringBytes;
+    const stringBase = { ...base, Probe: stringPayload(baseAddedStringBytes) };
+    const stringImage = { ...image, Probe: stringPayload(imageAddedStringBytes) };
+    expect(usage(stringBase).stringBytes + usage(stringImage).stringBytes).toBe(4_194_304);
+    expect(classify(stringImage, stringBase)).toBe('VALID');
+    const overStringImage = { ...image, Probe: stringPayload(imageAddedStringBytes + 1) };
+    expect(usage(stringBase).stringBytes + usage(overStringImage).stringBytes).toBe(4_194_305);
+    expect(classify(overStringImage, stringBase)).toBe('IMAGE_INSPECT_POLICY');
+  });
+
   it('requires Docker 29 candidate image ArgsEscaped metadata as one exact data property', () => {
     expect(hasExactDockerImageArgsEscapedV1({ ArgsEscaped: true })).toBe(true);
     expect(hasExactDockerImageArgsEscapedV1({})).toBe(false);

@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { types as nodeUtilTypes } from 'node:util';
 
@@ -64,7 +65,18 @@ export type AdmissionCandidateBuildFailurePhaseV1 =
   | 'BASE_INSPECT'
   | 'BASE_PROOF'
   | 'CANDIDATE_BUILD'
-  | 'IMAGE_PROOF';
+  | 'IMAGE_INSPECT'
+  | AdmissionCandidateImagePolicyPhaseV1
+  | 'IMAGE_CONTENT_PROOF'
+  | 'RECEIPT';
+
+export type AdmissionCandidateImagePolicyPhaseV1 =
+  | 'IMAGE_INSPECT_POLICY'
+  | 'IMAGE_ROOTFS_POLICY'
+  | 'IMAGE_CONFIG_KEYS_POLICY'
+  | 'IMAGE_ARGS_ESCAPED_POLICY'
+  | 'IMAGE_CONFIG_POLICY'
+  | 'IMAGE_LABEL_POLICY';
 
 const BUILD_FAILURE_PHASES_V1 = new WeakMap<object, AdmissionCandidateBuildFailurePhaseV1>();
 
@@ -420,33 +432,166 @@ export function hasExactDockerImageArgsEscapedV1(config: unknown): boolean {
     && descriptor.configurable === true;
 }
 
-function verifyImageV1(base: any, image: any, imageId: string, candidate: string, source: string): readonly string[] {
-  const baseLayers = rootFsLayersV1(base);
-  const layers = rootFsLayersV1(image);
+const INVALID_DOCKER_INSPECTION_V1 = Symbol('invalid Docker inspection');
+const DOCKER_INSPECTION_MAX_DEPTH_V1 = 32;
+const DOCKER_INSPECTION_MAX_VALUES_V1 = 8_194;
+const DOCKER_INSPECTION_MAX_ENTRIES_V1 = 8_192;
+const DOCKER_INSPECTION_MAX_ARRAY_ENTRIES_V1 = 512;
+const DOCKER_INSPECTION_MAX_OBJECT_PROPERTIES_V1 = 256;
+const DOCKER_INSPECTION_MAX_STRING_BYTES_V1 = 65_536;
+const DOCKER_INSPECTION_MAX_TOTAL_STRING_BYTES_V1 = 4_194_304;
+
+type DockerInspectionBudgetV1 = {
+  remainingValues: number;
+  remainingEntries: number;
+  remainingStringBytes: number;
+};
+
+function chargeDockerInspectionStringV1(value: string, budget: DockerInspectionBudgetV1): boolean {
+  const bytes = Buffer.byteLength(value, 'utf8');
+  if (bytes > DOCKER_INSPECTION_MAX_STRING_BYTES_V1 || bytes > budget.remainingStringBytes) return false;
+  budget.remainingStringBytes -= bytes;
+  return true;
+}
+
+function snapshotPlainDockerInspectionV1(
+  value: unknown,
+  seen: WeakSet<object>,
+  budget: DockerInspectionBudgetV1,
+  depth = 0,
+): unknown | typeof INVALID_DOCKER_INSPECTION_V1 {
+  if (depth > DOCKER_INSPECTION_MAX_DEPTH_V1 || budget.remainingValues < 1) {
+    return INVALID_DOCKER_INSPECTION_V1;
+  }
+  budget.remainingValues -= 1;
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    return chargeDockerInspectionStringV1(value, budget) ? value : INVALID_DOCKER_INSPECTION_V1;
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : INVALID_DOCKER_INSPECTION_V1;
+  if (typeof value !== 'object' || nodeUtilTypes.isProxy(value) || seen.has(value)) {
+    return INVALID_DOCKER_INSPECTION_V1;
+  }
+  seen.add(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) {
+    if (prototype !== Array.prototype) return INVALID_DOCKER_INSPECTION_V1;
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (lengthDescriptor === undefined || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
+      || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0
+      || lengthDescriptor.value > DOCKER_INSPECTION_MAX_ARRAY_ENTRIES_V1
+      || lengthDescriptor.enumerable !== false || lengthDescriptor.writable !== true
+      || lengthDescriptor.configurable !== false || lengthDescriptor.value > budget.remainingEntries) {
+      return INVALID_DOCKER_INSPECTION_V1;
+    }
+    budget.remainingEntries -= lengthDescriptor.value;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== lengthDescriptor.value + 1 || keys.some((key) => key !== 'length'
+      && (typeof key !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(key)
+        || Number(key) >= lengthDescriptor.value))) return INVALID_DOCKER_INSPECTION_V1;
+    const snapshot: unknown[] = [];
+    for (let index = 0; index < lengthDescriptor.value; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === undefined || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+        || descriptor.enumerable !== true || descriptor.writable !== true || descriptor.configurable !== true) {
+        return INVALID_DOCKER_INSPECTION_V1;
+      }
+      const entry = snapshotPlainDockerInspectionV1(descriptor.value, seen, budget, depth + 1);
+      if (entry === INVALID_DOCKER_INSPECTION_V1) return entry;
+      Object.defineProperty(snapshot, String(index), {
+        configurable: true, enumerable: true, value: entry, writable: true,
+      });
+    }
+    return snapshot;
+  }
+  if (prototype !== Object.prototype && prototype !== null) return INVALID_DOCKER_INSPECTION_V1;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > DOCKER_INSPECTION_MAX_OBJECT_PROPERTIES_V1
+    || keys.length > budget.remainingEntries) return INVALID_DOCKER_INSPECTION_V1;
+  budget.remainingEntries -= keys.length;
+  const snapshot = Object.create(null) as Record<PropertyKey, unknown>;
+  for (const key of keys) {
+    if (typeof key !== 'string' || !chargeDockerInspectionStringV1(key, budget)) {
+      return INVALID_DOCKER_INSPECTION_V1;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined) return INVALID_DOCKER_INSPECTION_V1;
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      || descriptor.enumerable !== true || descriptor.writable !== true || descriptor.configurable !== true) {
+      return INVALID_DOCKER_INSPECTION_V1;
+    }
+    const entry = snapshotPlainDockerInspectionV1(descriptor.value, seen, budget, depth + 1);
+    if (entry === INVALID_DOCKER_INSPECTION_V1) return entry;
+    Object.defineProperty(snapshot, key, {
+      configurable: true, enumerable: true, value: entry, writable: true,
+    });
+  }
+  return snapshot;
+}
+
+export function classifyAdmissionCandidateImagePolicyV1(
+  base: any,
+  image: any,
+  imageId: string,
+  candidate: string,
+  source: string,
+): AdmissionCandidateImagePolicyPhaseV1 | 'VALID' {
+  const budget: DockerInspectionBudgetV1 = {
+    remainingValues: DOCKER_INSPECTION_MAX_VALUES_V1,
+    remainingEntries: DOCKER_INSPECTION_MAX_ENTRIES_V1,
+    remainingStringBytes: DOCKER_INSPECTION_MAX_TOTAL_STRING_BYTES_V1,
+  };
+  const baseSnapshot = snapshotPlainDockerInspectionV1(base, new WeakSet(), budget);
+  if (baseSnapshot === INVALID_DOCKER_INSPECTION_V1) return 'IMAGE_INSPECT_POLICY';
+  const imageSnapshot = snapshotPlainDockerInspectionV1(image, new WeakSet(), budget);
+  if (imageSnapshot === INVALID_DOCKER_INSPECTION_V1) return 'IMAGE_INSPECT_POLICY';
+  base = baseSnapshot;
+  image = imageSnapshot;
+  let baseLayers: readonly string[];
+  let layers: readonly string[];
+  try {
+    baseLayers = rootFsLayersV1(base);
+    layers = rootFsLayersV1(image);
+  } catch {
+    return 'IMAGE_ROOTFS_POLICY';
+  }
   const config = image?.Config;
+  if (!Array.isArray(base?.RepoDigests) || !base.RepoDigests.includes(APPROVED_NODE_BASE_IMAGE_V1)
+    || base?.Os !== 'linux' || base?.Architecture !== 'amd64'
+    || image?.Id !== imageId || image?.Os !== 'linux' || image?.Architecture !== 'amd64'
+    || typeof config !== 'object' || config === null) return 'IMAGE_INSPECT_POLICY';
+  if (!hasExactCandidateRootFsExtensionV1(baseLayers, layers)) return 'IMAGE_ROOTFS_POLICY';
   const allowedConfigKeys = new Set([
     'User', 'Env', 'Entrypoint', 'Cmd', 'WorkingDir', 'Labels', 'Volumes', 'Healthcheck',
     'Shell', 'OnBuild', 'ExposedPorts', 'StopSignal', 'ArgsEscaped',
   ]);
-  if (!Array.isArray(base?.RepoDigests) || !base.RepoDigests.includes(APPROVED_NODE_BASE_IMAGE_V1)
-    || base?.Os !== 'linux' || base?.Architecture !== 'amd64'
-    || image?.Id !== imageId || image?.Os !== 'linux' || image?.Architecture !== 'amd64'
-    || !hasExactCandidateRootFsExtensionV1(baseLayers, layers)
-    || typeof config !== 'object' || config === null || Object.keys(config).some((key) => !allowedConfigKeys.has(key))
-    || config.User !== '65532:65532' || !exactStrings(config.Env, expectedCandidateEnvironmentV1(base))
-    || !hasExactDockerImageArgsEscapedV1(config)
+  if (Object.keys(config).some((key) => !allowedConfigKeys.has(key))) return 'IMAGE_CONFIG_KEYS_POLICY';
+  if (!hasExactDockerImageArgsEscapedV1(config)) return 'IMAGE_ARGS_ESCAPED_POLICY';
+  let expectedEnvironment: readonly string[];
+  try {
+    expectedEnvironment = expectedCandidateEnvironmentV1(base);
+  } catch {
+    return 'IMAGE_CONFIG_POLICY';
+  }
+  if (config.User !== '65532:65532' || !exactStrings(config.Env, expectedEnvironment)
     || config.Env.some((entry: string) => PRELOAD_ENV_PATTERN.test(entry))
     || !exactStrings(config.Entrypoint, ['/usr/local/bin/node']) || !exactStrings(config.Cmd, CANDIDATE_ARGUMENTS)
     || config.WorkingDir !== '/app' || config.Volumes != null || config.Healthcheck != null
     || config.Shell != null || (config.OnBuild != null && !exactStrings(config.OnBuild, []))
-    || config.ExposedPorts != null || config.StopSignal != null
-    || Object.keys(config.Labels ?? {}).length !== 3
+    || config.ExposedPorts != null || config.StopSignal != null) return 'IMAGE_CONFIG_POLICY';
+  if (Object.keys(config.Labels ?? {}).length !== 3
     || config.Labels?.['org.memberry.candidate.sha256'] !== candidate
     || config.Labels?.['org.memberry.source.sha256'] !== source
     || config.Labels?.['org.memberry.base.image'] !== APPROVED_NODE_BASE_IMAGE_V1) {
-    throw new Error('built image policy mismatch');
+    return 'IMAGE_LABEL_POLICY';
   }
-  return layers;
+  return 'VALID';
+}
+
+function verifyImageV1(base: any, image: any, imageId: string, candidate: string, source: string): readonly string[] {
+  const policy = classifyAdmissionCandidateImagePolicyV1(base, image, imageId, candidate, source);
+  if (policy !== 'VALID') throw admissionCandidateBuildPhaseFailureV1(policy);
+  return rootFsLayersV1(image);
 }
 
 async function discoverProofV1(token: string, runner: DockerCommandRunnerV1): Promise<readonly string[]> {
@@ -625,7 +770,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   }));
   const imageSha256 = safeTextV1(built, true).trim();
   if (!IMAGE_PATTERN.test(imageSha256)) throw new Error('invalid built image ID');
-  phase = 'IMAGE_PROOF';
+  phase = 'IMAGE_INSPECT';
   const imageInspection = JSON.parse(safeTextV1(await runner(createDockerCommandInvocationV1([
     'image', 'inspect', '--format={{json .}}', imageSha256,
   ]))));
@@ -634,6 +779,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   );
   const imageConfigSha256 = canonicalImageConfigSha256V1(imageInspection.Config);
 
+  phase = 'IMAGE_CONTENT_PROOF';
   await withStoppedProofV1(imageSha256, imageSha256, runner, async (id) => {
     const copiedWorker = inspectDockerCopyArchiveV1(safeResultV1(await runner(
       createDockerCommandInvocationV1(['container', 'cp', `${id}:/app/worker.mjs`, '-'], undefined, 1_048_576),
@@ -656,6 +802,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
     return true;
   });
 
+  phase = 'RECEIPT';
   return Object.freeze({
     imageSha256: imageSha256 as `sha256:${string}`,
     candidateSha256: snapshot.candidateSha256,
@@ -665,7 +812,8 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
     imageConfigSha256,
     nodeSha256,
   });
-  } catch {
+  } catch (error) {
+    if (classifyAdmissionCandidateBuildFailurePhaseV1(error) !== 'UNKNOWN') throw error;
     throw admissionCandidateBuildPhaseFailureV1(phase);
   }
 }
