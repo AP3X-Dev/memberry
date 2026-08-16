@@ -21,6 +21,34 @@ export type { ExpandedQuery } from './expand.js';
 export { classifyIntent } from './intent.js';
 export type { QueryIntent, IntentResult } from './intent.js';
 
+// Closed, bounded query-planning boundary (RET-002A)
+export {
+  QUERY_PLAN_CONTRACT_ID,
+  QUERY_PLAN_CONTRACT_VERSION,
+  QUERY_PLAN_MAX_PROJECT_SCOPES,
+  QUERY_PLAN_MAX_HINTS_PER_KIND,
+  QUERY_PLAN_MAX_EVIDENCE_NEEDS,
+  QUERY_PLAN_MAX_RESOLVED_ENTITY_IDS,
+  QUERY_PLAN_INTENTS,
+  QUERY_PLAN_EVIDENCE_NEEDS,
+  QUERY_PLAN_RESOLUTION_STATES,
+  QueryPlanContractError,
+  parseQueryPlanV1,
+  canonicalQueryPlanV1,
+} from './query-plan.js';
+export type {
+  QueryPlanIntentV1,
+  QueryPlanEvidenceNeedV1,
+  QueryPlanResolutionStateV1,
+  QueryPlanAuthorityV1,
+  QueryPlanCallerScopesV1,
+  QueryPlanTemporalFrameV1,
+  QueryPlanTaskHintsV1,
+  QueryPlanResolutionV1,
+  QueryPlanV1,
+  QueryPlanContractErrorCode,
+} from './query-plan.js';
+
 // Scoring
 export {
   scaleRrfK,
