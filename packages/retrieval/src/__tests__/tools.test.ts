@@ -2,12 +2,18 @@
 // Tenant-isolation wiring for the retrieval tool layer: the container carries a
 // tenantId and registerRetrievalTools threads it into every assemble()/ask().
 import { readFileSync } from 'node:fs';
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   createRetrievalContainer,
+  RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED,
+  RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV,
+  RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES,
   registerRetrievalTools,
+  serializeApprovedRetrievalTrace,
   type IUnifiedAssembler,
   type IFeedbackTracker,
+  type RetrievalTraceValidationRuntime,
+  type RetrievalTraceValidationStage,
 } from '../tools.js';
 import { canonicalTraceJson } from '../trace.js';
 import type { RetrievalTraceV1 } from '../trace.js';
@@ -17,6 +23,85 @@ const approvedTrace = JSON.parse(readFileSync(
   new URL('./fixtures/retrieval-trace-deterministic-v2.json', import.meta.url),
   'utf8',
 )) as RetrievalTraceV1;
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
+
+function traceValidationRuntime(): RetrievalTraceValidationRuntime {
+  const canonical = canonicalTraceJson(approvedTrace);
+  return {
+    inMemoryConformance: vi.fn(),
+    inMemoryReplay: vi.fn(),
+    canonicalization: vi.fn(() => canonical),
+    exposedJsonParse: vi.fn(() => approvedTrace),
+    exposedConformance: vi.fn(),
+    exposedReplay: vi.fn(),
+  };
+}
+
+const validationStageRuntimeKeys = {
+  IN_MEMORY_CONFORMANCE: 'inMemoryConformance',
+  IN_MEMORY_REPLAY: 'inMemoryReplay',
+  CANONICALIZATION: 'canonicalization',
+  EXPOSED_JSON_PARSE: 'exposedJsonParse',
+  EXPOSED_CONFORMANCE: 'exposedConformance',
+  EXPOSED_REPLAY: 'exposedReplay',
+} as const satisfies Record<RetrievalTraceValidationStage, keyof RetrievalTraceValidationRuntime>;
+
+describe('retrieval trace validation runtime diagnostics', () => {
+  it.each(Object.keys(validationStageRuntimeKeys) as RetrievalTraceValidationStage[])(
+    'reports only the fixed %s stage and preserves the public error',
+    (stage) => {
+      vi.stubEnv(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV, RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED);
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const runtime = traceValidationRuntime();
+      vi.mocked(runtime[validationStageRuntimeKeys[stage]]).mockImplementation(() => {
+        throw new Error('sk_live_NEVER_REFLECT_STAGE_SECRET');
+      });
+
+      expect(() => serializeApprovedRetrievalTrace(approvedTrace, runtime))
+        .toThrowError('Retrieval trace validation failed');
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES[stage]);
+      expect(JSON.stringify(log.mock.calls)).not.toContain('sk_live_NEVER_REFLECT_STAGE_SECRET');
+    },
+  );
+
+  it.each([undefined, '', '1', 'true', 'ENABLED', 'enabled '])(
+    'does not log when the diagnostic opt-in is %s',
+    (flag) => {
+      if (flag === undefined) vi.stubEnv(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV, undefined);
+      else vi.stubEnv(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV, flag);
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const runtime = traceValidationRuntime();
+      vi.mocked(runtime.inMemoryConformance).mockImplementation(() => { throw new Error('secret'); });
+
+      expect(() => serializeApprovedRetrievalTrace(approvedTrace, runtime))
+        .toThrowError('Retrieval trace validation failed');
+      expect(log).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps successful bytes and logging unchanged while the opt-in is enabled', () => {
+    vi.stubEnv(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV, RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(serializeApprovedRetrievalTrace(approvedTrace)).toBe(canonicalTraceJson(approvedTrace));
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('still throws the fixed public error if console.error itself throws', () => {
+    vi.stubEnv(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV, RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED);
+    vi.spyOn(console, 'error').mockImplementation(() => { throw new Error('hostile stderr secret'); });
+    const runtime = traceValidationRuntime();
+    vi.mocked(runtime.inMemoryConformance).mockImplementation(() => { throw new Error('trace secret'); });
+
+    expect(() => serializeApprovedRetrievalTrace(approvedTrace, runtime))
+      .toThrowError('Retrieval trace validation failed');
+  });
+});
 
 function emptyCtx(): UnifiedContext {
   return { task: 'q', strategy: 'ranked', sections: [], token_count: 0, assembled_at: '2026-06-07T00:00:00.000Z' };

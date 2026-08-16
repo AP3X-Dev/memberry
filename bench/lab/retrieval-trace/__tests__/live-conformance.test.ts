@@ -14,6 +14,7 @@ import {
   parseResidualCounts,
   rankedFixtureMarkers,
   rankedTraceMcpErrorDiagnostic,
+  rankedTraceMcpErrorDiagnosticAfterCapture,
   readBoundedResponseText,
   requiredPresentationIdForCase,
   resolveTraceConformanceConfig,
@@ -25,8 +26,15 @@ import {
   traceFixtureQueries,
   TRACE_INSPECTION_FIXED_CODES,
   TraceMcpTransport,
+  TraceValidationStderrParser,
   waitForTraceReadiness,
 } from '../live-conformance.js';
+import {
+  RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED,
+  RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV,
+  RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES,
+  type RetrievalTraceValidationStage,
+} from '../../../../packages/retrieval/src/tools.js';
 import { observeOrderedMarkdownResultIds } from '../contract.js';
 import { validateSystemRegistry } from '../../registry/validate.js';
 
@@ -481,11 +489,22 @@ describe('RET-001D live composition harness', () => {
       .toEqual(rankedTracedInspectionDiagnostics.map(([innerCode]) => innerCode));
   });
 
-  it('classifies only the exact public retrieval-trace validation error envelope', () => {
-    const code = rankedTraceMcpErrorDiagnostic(traceValidationErrorResult());
-    expect(code).toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED');
-    expect(safeDiagnosticCode(new Error(code))).toBe(code);
-  });
+  it.each(Object.keys(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES) as RetrievalTraceValidationStage[])(
+    'classifies the exact public retrieval-trace validation envelope with captured stage %s',
+    (stage) => {
+      const code = rankedTraceMcpErrorDiagnostic(traceValidationErrorResult(), stage);
+      expect(code).toBe(`RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_${stage}`);
+      expect(safeDiagnosticCode(new Error(code))).toBe(code);
+    },
+  );
+
+  it.each([undefined, '', 'UNKNOWN', 'IN_MEMORY_CONFORMANCE_SECRET'])(
+    'maps exact trace-validation envelope with absent or invalid stage %s to UNKNOWN',
+    (stage) => {
+      expect(rankedTraceMcpErrorDiagnostic(traceValidationErrorResult(), stage))
+        .toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
+    },
+  );
 
   it.each([
     ['extra root key', () => ({ ...traceValidationErrorResult() as object, extra: true })],
@@ -547,7 +566,7 @@ describe('RET-001D live composition harness', () => {
     ['oversize text', () => traceValidationErrorResult('x'.repeat(513))],
   ] as const)('maps malformed or hostile MCP error envelope %s to exact UNKNOWN', (_label, createResult) => {
     let code: string | undefined;
-    expect(() => { code = rankedTraceMcpErrorDiagnostic(createResult()); }).not.toThrow();
+    expect(() => { code = rankedTraceMcpErrorDiagnostic(createResult(), 'IN_MEMORY_CONFORMANCE'); }).not.toThrow();
     expect(code).toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
     expect(code).not.toContain('SECRET_FIXTURE');
   });
@@ -562,16 +581,241 @@ describe('RET-001D live composition harness', () => {
     })).toBeUndefined();
   });
 
-  it('ties the exact classifier string to the production trace serializer source', async () => {
+  it('ties the exact classifier string and stage lines to the production trace serializer source', async () => {
     const tools = await readFile(
       fileURLToPath(new URL('../../../../packages/retrieval/src/tools.ts', import.meta.url)), 'utf8',
     );
-    const serializer = tools.match(
-      /function serializeApprovedRetrievalTrace\(trace: unknown\): string \{[\s\S]+?\n\}/,
-    )?.[0];
-    expect(serializer).toBeDefined();
-    expect(serializer).toContain("throw new Error('Retrieval trace validation failed')");
-    expect(serializer?.match(/Retrieval trace validation failed/g)).toHaveLength(1);
+    expect(tools.match(/throw new Error\('Retrieval trace validation failed'\)/g)).toHaveLength(1);
+    for (const [stage, line] of Object.entries(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES)) {
+      expect(line).toBe(`MEMBERRY_TRACE_VALIDATION_STAGE=${stage}`);
+      expect(tools.split(`'${line}'`)).toHaveLength(2);
+    }
+  });
+
+  it.each(Object.entries(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES))(
+    'stderr parser recognizes only exact fixed line for %s across chunks and CRLF',
+    (stage, line) => {
+      const parser = new TraceValidationStderrParser();
+      const split = Math.floor(line.length / 2);
+      parser.push(Buffer.from(line.slice(0, split)));
+      expect(parser.stage()).toBeUndefined();
+      parser.push(`${line.slice(split)}\r\n`);
+      expect(parser.stage()).toBe(stage);
+    },
+  );
+
+  it.each([
+    'MEMBERRY_TRACE_VALIDATION_STAGE=UNKNOWN\n',
+    'prefix MEMBERRY_TRACE_VALIDATION_STAGE=IN_MEMORY_REPLAY\n',
+    'MEMBERRY_TRACE_VALIDATION_STAGE=IN_MEMORY_REPLAY suffix\n',
+    'RET001D_SECRET_FIXTURE\n',
+    `${'x'.repeat(257)}\n`,
+  ])('stderr parser discards unknown or overlong line without retaining its value', (line) => {
+    const parser = new TraceValidationStderrParser();
+    parser.push(line);
+    expect(parser.stage()).toBeUndefined();
+    expect(JSON.stringify(parser)).not.toContain('SECRET_FIXTURE');
+  });
+
+  it('stderr parser requires newline, rejects repeat/conflict, and resets all request state', () => {
+    const parser = new TraceValidationStderrParser();
+    const first = RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES.IN_MEMORY_REPLAY;
+    const second = RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES.CANONICALIZATION;
+
+    parser.push(first);
+    expect(parser.stage()).toBeUndefined();
+    parser.reset();
+    parser.push(`${first}\n${first}\n`);
+    expect(parser.stage()).toBeUndefined();
+    parser.reset();
+    parser.push(`${first}\n${second}\n`);
+    expect(parser.stage()).toBeUndefined();
+    parser.reset();
+    parser.push(`${'x'.repeat(300)}\n${second}\n`);
+    expect(parser.stage()).toBe('CANONICALIZATION');
+    parser.invalidate();
+    expect(parser.stage()).toBeUndefined();
+    parser.reset();
+    parser.push(`${first}\n`);
+    expect(parser.stage()).toBe('IN_MEMORY_REPLAY');
+  });
+
+  it('awaits an exact stage that arrives after the exact MCP validation result', async () => {
+    vi.useFakeTimers();
+    try {
+      const parser = new TraceValidationStderrParser();
+      const generation = parser.reset();
+      const awaitTerminal = vi.fn(() => parser.waitForTerminal(generation));
+      let resolved = false;
+      const diagnostic = rankedTraceMcpErrorDiagnosticAfterCapture(
+        traceValidationErrorResult(), awaitTerminal,
+      ).then((code) => {
+        resolved = true;
+        return code;
+      });
+      expect(awaitTerminal).toHaveBeenCalledOnce();
+      parser.push(`${RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES.EXPOSED_REPLAY}\n`, generation);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(resolved).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(diagnostic).resolves.toBe(
+        'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_EXPOSED_REPLAY',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['non-error', { content: [{ type: 'text', text: 'ordinary' }] }],
+    ['nonexact validation error', traceValidationErrorResult('Retrieval trace validation failed suffix')],
+    ['malformed error', { isError: true, content: [] }],
+  ] as const)('does not wait for parser state for %s envelope', async (_label, result) => {
+    const awaitTerminal = vi.fn(async () => 'IN_MEMORY_REPLAY' as const);
+    const diagnostic = await rankedTraceMcpErrorDiagnosticAfterCapture(result, awaitTerminal);
+    expect(awaitTerminal).not.toHaveBeenCalled();
+    expect(diagnostic).toBe(_label === 'non-error'
+      ? undefined
+      : 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
+  });
+
+  it('maps a hard-bounded parser timeout to UNKNOWN', async () => {
+    vi.useFakeTimers();
+    try {
+      const parser = new TraceValidationStderrParser();
+      const generation = parser.reset();
+      const diagnostic = rankedTraceMcpErrorDiagnosticAfterCapture(
+        traceValidationErrorResult(), () => parser.waitForTerminal(generation),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(diagnostic).resolves.toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['end', 'error', 'close'] as const)('maps child stderr %s terminal to UNKNOWN', async (terminal) => {
+    const parser = new TraceValidationStderrParser();
+    const generation = parser.reset();
+    const diagnostic = rankedTraceMcpErrorDiagnosticAfterCapture(
+      traceValidationErrorResult(), () => parser.waitForTerminal(generation),
+    );
+    parser[terminal](generation);
+    await expect(diagnostic).resolves.toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
+  });
+
+  it('invalidates prior-generation waiters, bytes, and terminal callbacks on reset', async () => {
+    vi.useFakeTimers();
+    try {
+      const parser = new TraceValidationStderrParser();
+      const prior = parser.reset();
+      const priorWait = parser.waitForTerminal(prior);
+      parser.push(`${RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES.IN_MEMORY_REPLAY}\n`, prior);
+      const current = parser.reset();
+      await expect(priorWait).resolves.toBeUndefined();
+      parser.push(`${RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES.IN_MEMORY_REPLAY}\n`, prior);
+      parser.close(prior);
+      let currentResolved = false;
+      const currentWait = parser.waitForTerminal(current).then((stage) => {
+        currentResolved = true;
+        return stage;
+      });
+      await vi.advanceTimersByTimeAsync(5);
+      expect(currentResolved).toBe(false);
+      parser.push(`${RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES.CANONICALIZATION}\n`, current);
+      await vi.advanceTimersByTimeAsync(94);
+      expect(currentResolved).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(currentWait).resolves.toBe('CANONICALIZATION');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['repeat', 'IN_MEMORY_REPLAY', 'IN_MEMORY_REPLAY'],
+    ['conflict', 'IN_MEMORY_REPLAY', 'CANONICALIZATION'],
+  ] as const)('maps %s exact stage lines to UNKNOWN', async (_label, first, second) => {
+    const parser = new TraceValidationStderrParser();
+    const generation = parser.reset();
+    const diagnostic = rankedTraceMcpErrorDiagnosticAfterCapture(
+      traceValidationErrorResult(), () => parser.waitForTerminal(generation),
+    );
+    parser.push(
+      `${RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES[first]}\n`
+      + `${RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES[second]}\n`,
+      generation,
+    );
+    await expect(diagnostic).resolves.toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
+  });
+
+  it.each([
+    ['delayed repeat', 'IN_MEMORY_REPLAY', 'IN_MEMORY_REPLAY'],
+    ['delayed conflict', 'IN_MEMORY_REPLAY', 'CANONICALIZATION'],
+  ] as const)('observes the full deadline and maps %s after the old quiet point to UNKNOWN', async (
+    _label, first, second,
+  ) => {
+    vi.useFakeTimers();
+    try {
+      const parser = new TraceValidationStderrParser();
+      const generation = parser.reset();
+      let resolved = false;
+      const diagnostic = rankedTraceMcpErrorDiagnosticAfterCapture(
+        traceValidationErrorResult(), () => parser.waitForTerminal(generation),
+      ).then((code) => {
+        resolved = true;
+        return code;
+      });
+      parser.push(`${RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES[first]}\n`, generation);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(resolved).toBe(false);
+      parser.push(`${RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES[second]}\n`, generation);
+      await expect(diagnostic).resolves.toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears deadline timers across sequential reset generations', async () => {
+    vi.useFakeTimers();
+    try {
+      const parser = new TraceValidationStderrParser();
+      const first = parser.reset();
+      const firstWait = parser.waitForTerminal(first);
+      expect(vi.getTimerCount()).toBe(1);
+      const second = parser.reset();
+      await expect(firstWait).resolves.toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+      const secondWait = parser.waitForTerminal(second);
+      parser.push(`${RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES.CANONICALIZATION}\n`, second);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(secondWait).resolves.toBe('CANONICALIZATION');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drains heavy unknown stderr without retaining or reflecting it before timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const parser = new TraceValidationStderrParser();
+      const generation = parser.reset();
+      const secret = 'RET001D_SECRET_FIXTURE';
+      const diagnostic = rankedTraceMcpErrorDiagnosticAfterCapture(
+        traceValidationErrorResult(), () => parser.waitForTerminal(generation),
+      );
+      parser.push(`${`${secret}\n`.repeat(20_000)}${'x'.repeat(10_000)}`, generation);
+      expect(JSON.stringify(parser)).not.toContain(secret);
+      await vi.advanceTimersByTimeAsync(100);
+      const code = await diagnostic;
+      expect(code).toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
+      expect(code).not.toContain(secret);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([
@@ -613,7 +857,9 @@ describe('RET-001D live composition harness', () => {
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION',
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_RET001D_TRACE_JSON_INVALID',
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_JSON_INVALID_SECRET',
+    'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED',
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_SECRET',
+    'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_UNKNOWN',
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_',
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN_SECRET',
   ])('rejects malformed or value-bearing ranked traced-inspection diagnostic %s', (code) => {
@@ -663,6 +909,7 @@ describe('RET-001D live composition harness', () => {
       args: ['--import', 'tsx', 'packages/mcp/src/server.ts'],
     });
     const config = resolveTraceConformanceConfig(validEnv);
+    const parentDiagnosticFlag = process.env[RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV];
     const env = childEnvironment(config, 'single-default', 'C:\\fixture\\export');
     expect(env).toMatchObject({
       NODE_ENV: 'test',
@@ -672,12 +919,24 @@ describe('RET-001D live composition harness', () => {
       MEMBERRY_API_TOKEN: 'default-trace-token',
       MEMBERRY_CONSOLIDATION_ENABLED: 'false',
       MEMBERRY_WIKI_AUTOREFRESH: 'false',
+      [RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV]: RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED,
       OPENAI_API_KEY: '',
     });
+    expect(process.env[RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV]).toBe(parentDiagnosticFlag);
     expect(env.MEMBERRY_TENANT_TOKENS).toBeUndefined();
     const named = childEnvironment(config, 'named-tenant', 'C:\\fixture\\export');
     expect(named.MEMBERRY_API_TOKEN).toBeUndefined();
     expect(named.MEMBERRY_TENANT_TOKENS).toBe(`ret001d-named:${config.namedToken}`);
+  });
+
+  it('wires an immediately drained child stderr parser and resets it before every traced request', async () => {
+    const source = await readFile(
+      fileURLToPath(new URL('../live-conformance.ts', import.meta.url)), 'utf8',
+    );
+    expect(source).toContain("stdio: ['ignore', 'ignore', 'pipe']");
+    expect(source).toMatch(/this\.child\.stderr\.on\('data',[\s\S]+traceValidationDiagnostics\.push/);
+    expect(source).toMatch(/removeListener\('data', this\.stderrDataListener\)[\s\S]+on\('data', this\.stderrDataListener\)/);
+    expect(source).toMatch(/resetTraceValidationDiagnostic\(\);[\s\S]+include_trace: true/);
   });
 
   it('bounds streamed bodies before retaining oversized evidence', async () => {

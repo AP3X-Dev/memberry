@@ -127,20 +127,69 @@ function tracedTextContent(markdown: string, traceJson: string): {
   ] };
 }
 
+export const RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV = 'MEMBERRY_TRACE_VALIDATION_DIAGNOSTICS';
+export const RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED = 'enabled';
+
+export const RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES = Object.freeze({
+  IN_MEMORY_CONFORMANCE: 'MEMBERRY_TRACE_VALIDATION_STAGE=IN_MEMORY_CONFORMANCE',
+  IN_MEMORY_REPLAY: 'MEMBERRY_TRACE_VALIDATION_STAGE=IN_MEMORY_REPLAY',
+  CANONICALIZATION: 'MEMBERRY_TRACE_VALIDATION_STAGE=CANONICALIZATION',
+  EXPOSED_JSON_PARSE: 'MEMBERRY_TRACE_VALIDATION_STAGE=EXPOSED_JSON_PARSE',
+  EXPOSED_CONFORMANCE: 'MEMBERRY_TRACE_VALIDATION_STAGE=EXPOSED_CONFORMANCE',
+  EXPOSED_REPLAY: 'MEMBERRY_TRACE_VALIDATION_STAGE=EXPOSED_REPLAY',
+} as const);
+
+export type RetrievalTraceValidationStage = keyof typeof RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES;
+
+export interface RetrievalTraceValidationRuntime {
+  readonly inMemoryConformance: (trace: unknown) => void;
+  readonly inMemoryReplay: (trace: RetrievalTraceV1) => unknown;
+  readonly canonicalization: (trace: RetrievalTraceV1) => string;
+  readonly exposedJsonParse: (canonical: string) => unknown;
+  readonly exposedConformance: (trace: unknown) => void;
+  readonly exposedReplay: (trace: RetrievalTraceV1) => unknown;
+}
+
+const DEFAULT_TRACE_VALIDATION_RUNTIME: RetrievalTraceValidationRuntime = Object.freeze({
+  inMemoryConformance: assertRetrievalTraceConformant,
+  inMemoryReplay: replayRetrievalTrace,
+  canonicalization: canonicalTraceJson,
+  exposedJsonParse: JSON.parse,
+  exposedConformance: assertRetrievalTraceConformant,
+  exposedReplay: replayRetrievalTrace,
+});
+
+function failTraceValidation(stage: RetrievalTraceValidationStage): never {
+  if (process.env[RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV]
+    === RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED) {
+    try { console.error(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES[stage]); }
+    catch { /* The public failure remains stable even if stderr is unavailable. */ }
+  }
+  throw new Error('Retrieval trace validation failed');
+}
+
 /** Validate both the in-memory value and the exact canonical bytes before they
  * cross the MCP boundary. All rejection paths are deliberately value-free. */
-function serializeApprovedRetrievalTrace(trace: unknown): string {
-  try {
-    assertRetrievalTraceConformant(trace);
-    replayRetrievalTrace(trace);
-    const canonical = canonicalTraceJson(trace);
-    const exposed = JSON.parse(canonical) as unknown;
-    assertRetrievalTraceConformant(exposed);
-    replayRetrievalTrace(exposed);
-    return canonical;
-  } catch {
-    throw new Error('Retrieval trace validation failed');
-  }
+export function serializeApprovedRetrievalTrace(
+  trace: unknown,
+  runtime: RetrievalTraceValidationRuntime = DEFAULT_TRACE_VALIDATION_RUNTIME,
+): string {
+  try { runtime.inMemoryConformance(trace); }
+  catch { return failTraceValidation('IN_MEMORY_CONFORMANCE'); }
+  const inMemory = trace as RetrievalTraceV1;
+  try { runtime.inMemoryReplay(inMemory); }
+  catch { return failTraceValidation('IN_MEMORY_REPLAY'); }
+  let canonical: string;
+  try { canonical = runtime.canonicalization(inMemory); }
+  catch { return failTraceValidation('CANONICALIZATION'); }
+  let exposed: unknown;
+  try { exposed = runtime.exposedJsonParse(canonical); }
+  catch { return failTraceValidation('EXPOSED_JSON_PARSE'); }
+  try { runtime.exposedConformance(exposed); }
+  catch { return failTraceValidation('EXPOSED_CONFORMANCE'); }
+  try { runtime.exposedReplay(exposed as RetrievalTraceV1); }
+  catch { return failTraceValidation('EXPOSED_REPLAY'); }
+  return canonical;
 }
 
 // ─── Tool registration ────────────────────────────────────────────────────────

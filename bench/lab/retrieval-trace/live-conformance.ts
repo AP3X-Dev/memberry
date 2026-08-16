@@ -17,6 +17,12 @@ import { createNeo4jDriver } from '../../../packages/neo4j/src/driver.js';
 import { createRedisClient } from '../../../packages/redis/src/client.js';
 import type { RetrievalTraceAlgorithmVersion } from '../../../packages/retrieval/src/index.js';
 import {
+  RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED,
+  RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV,
+  RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES,
+  type RetrievalTraceValidationStage,
+} from '../../../packages/retrieval/src/tools.js';
+import {
   assertTraceConformanceManifest,
   inspectTraceToolResult,
   sanitizeTraceConformanceManifest,
@@ -356,12 +362,18 @@ type RankedTracedInspectionByCause = {
 };
 type RankedTracedInspectionDiagnostic = RankedTracedInspectionByCause[TraceInspectionFixedCode]
   | 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN'
-  | 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED';
+  | typeof RANKED_TRACE_VALIDATION_BY_STAGE[RetrievalTraceValidationStage];
 
 const RANKED_TRACED_INSPECTION_UNKNOWN = 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN';
-const RANKED_TRACED_INSPECTION_TRACE_VALIDATION_FAILED =
-  'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED';
 const TRACE_VALIDATION_PUBLIC_MESSAGE = 'Retrieval trace validation failed';
+const RANKED_TRACE_VALIDATION_BY_STAGE = Object.freeze({
+  IN_MEMORY_CONFORMANCE: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_IN_MEMORY_CONFORMANCE',
+  IN_MEMORY_REPLAY: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_IN_MEMORY_REPLAY',
+  CANONICALIZATION: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_CANONICALIZATION',
+  EXPOSED_JSON_PARSE: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_EXPOSED_JSON_PARSE',
+  EXPOSED_CONFORMANCE: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_EXPOSED_CONFORMANCE',
+  EXPOSED_REPLAY: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_EXPOSED_REPLAY',
+} as const satisfies Record<RetrievalTraceValidationStage, string>);
 const RANKED_TRACED_INSPECTION_BY_CAUSE = Object.freeze({
   RET001D_MCP_RESULT_INVALID: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MCP_RESULT_INVALID',
   RET001D_MCP_TOOL_FAILURE: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MCP_TOOL_FAILURE',
@@ -391,7 +403,7 @@ const RANKED_TRACED_INSPECTION_BY_CAUSE = Object.freeze({
 } as const satisfies RankedTracedInspectionByCause);
 const RANKED_TRACED_INSPECTION_DIAGNOSTICS = new Set<string>([
   RANKED_TRACED_INSPECTION_UNKNOWN,
-  RANKED_TRACED_INSPECTION_TRACE_VALIDATION_FAILED,
+  ...Object.values(RANKED_TRACE_VALIDATION_BY_STAGE),
   ...Object.values(RANKED_TRACED_INSPECTION_BY_CAUSE),
 ]);
 
@@ -633,6 +645,138 @@ export function compositionRootCommand(): { readonly executable: string; readonl
   return { executable: process.execPath, args: ['--import', 'tsx', 'packages/mcp/src/server.ts'] };
 }
 
+const MAX_TRACE_VALIDATION_DIAGNOSTIC_LINE_BYTES = 256;
+const TRACE_VALIDATION_DIAGNOSTIC_WAIT_MS = 100;
+const TRACE_VALIDATION_STAGE_BY_LINE = new Map<string, RetrievalTraceValidationStage>(
+  Object.entries(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES)
+    .map(([stage, line]) => [line, stage as RetrievalTraceValidationStage]),
+);
+
+/** A bounded line parser for the disposable child's diagnostic-only stderr.
+ * Unknown bytes are discarded; the observable state contains only a closed
+ * stage enum, or no stage when the stream repeats/conflicts. */
+export class TraceValidationStderrParser {
+  private line: number[] = [];
+  private overlong = false;
+  private captured: RetrievalTraceValidationStage | undefined;
+  private conflicted = false;
+  private generation = 0;
+  private streamClosed = false;
+  private terminal: { readonly kind: 'stage'; readonly stage: RetrievalTraceValidationStage }
+    | { readonly kind: 'invalid' } | undefined;
+  private readonly waiters = new Set<{
+    readonly generation: number;
+    readonly resolve: (stage: RetrievalTraceValidationStage | undefined) => void;
+    readonly timer: ReturnType<typeof setTimeout>;
+  }>();
+
+  reset(): number {
+    this.resolveWaiters(undefined);
+    this.generation += 1;
+    this.line = [];
+    this.overlong = false;
+    this.captured = undefined;
+    this.conflicted = false;
+    this.terminal = this.streamClosed ? { kind: 'invalid' } : undefined;
+    return this.generation;
+  }
+
+  invalidate(): void {
+    this.line = [];
+    this.overlong = false;
+    this.captured = undefined;
+    this.conflicted = true;
+    this.settle({ kind: 'invalid' });
+  }
+
+  push(chunk: Uint8Array | string, generation = this.generation): void {
+    if (generation !== this.generation || this.terminal !== undefined || this.streamClosed) return;
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+    for (const byte of bytes) {
+      if (byte === 10) {
+        if (!this.overlong) this.acceptLine();
+        this.line = [];
+        this.overlong = false;
+      } else if (!this.overlong) {
+        if (this.line.length >= MAX_TRACE_VALIDATION_DIAGNOSTIC_LINE_BYTES) {
+          this.line = [];
+          this.overlong = true;
+        } else {
+          this.line.push(byte);
+        }
+      }
+    }
+  }
+
+  stage(): RetrievalTraceValidationStage | undefined {
+    if (this.terminal?.kind === 'stage') return this.terminal.stage;
+    return this.terminal !== undefined || this.conflicted ? undefined : this.captured;
+  }
+
+  waitForTerminal(generation: number): Promise<RetrievalTraceValidationStage | undefined> {
+    if (generation !== this.generation) return Promise.resolve(undefined);
+    if (this.terminal !== undefined) {
+      return Promise.resolve(this.terminal.kind === 'stage' ? this.terminal.stage : undefined);
+    }
+    return new Promise((resolvePromise) => {
+      const waiter = {
+        generation,
+        resolve: resolvePromise,
+        timer: setTimeout(() => {
+          if (generation === this.generation) {
+            this.settle(this.captured !== undefined && !this.conflicted
+              ? { kind: 'stage', stage: this.captured }
+              : { kind: 'invalid' });
+          } else {
+            this.waiters.delete(waiter);
+            resolvePromise(undefined);
+          }
+        }, TRACE_VALIDATION_DIAGNOSTIC_WAIT_MS),
+      };
+      this.waiters.add(waiter);
+    });
+  }
+
+  end(generation = this.generation): void { this.closeStream(generation); }
+
+  error(generation = this.generation): void { this.closeStream(generation); }
+
+  close(generation = this.generation): void { this.closeStream(generation); }
+
+  private closeStream(generation: number): void {
+    if (generation !== this.generation) return;
+    this.streamClosed = true;
+    this.settle({ kind: 'invalid' });
+  }
+
+  private acceptLine(): void {
+    if (this.line.at(-1) === 13) this.line.pop();
+    const stage = TRACE_VALIDATION_STAGE_BY_LINE.get(String.fromCharCode(...this.line));
+    if (stage === undefined) return;
+    if (this.captured !== undefined || this.conflicted) {
+      this.captured = undefined;
+      this.conflicted = true;
+      this.settle({ kind: 'invalid' });
+      return;
+    }
+    this.captured = stage;
+  }
+
+  private settle(terminal: NonNullable<TraceValidationStderrParser['terminal']>): void {
+    if (this.terminal !== undefined) return;
+    this.terminal = terminal;
+    this.resolveWaiters(terminal.kind === 'stage' ? terminal.stage : undefined);
+  }
+
+  private resolveWaiters(stage: RetrievalTraceValidationStage | undefined): void {
+    for (const waiter of this.waiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(stage);
+    }
+    this.waiters.clear();
+  }
+}
+
 export function childEnvironment(
   config: TraceConformanceConfig,
   mode: 'single-default' | 'named-tenant',
@@ -658,6 +802,7 @@ export function childEnvironment(
     MEMBERRY_EXPORT_PATH: exportPath,
     MEMBERRY_CONSOLIDATION_ENABLED: 'false',
     MEMBERRY_WIKI_AUTOREFRESH: 'false',
+    [RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV]: RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED,
     OPENAI_API_KEY: '',
   };
 }
@@ -691,6 +836,8 @@ async function stopChild(child: ChildProcess, timeoutMs = 10_000): Promise<void>
 
 class CompositionRoot {
   private readonly child: ChildProcess;
+  private readonly traceValidationDiagnostics = new TraceValidationStderrParser();
+  private stderrDataListener: ((chunk: Buffer) => void) | undefined;
 
   constructor(
     private readonly config: TraceConformanceConfig,
@@ -699,8 +846,18 @@ class CompositionRoot {
   ) {
     const command = compositionRootCommand();
     this.child = spawn(command.executable, command.args, {
-      cwd: process.cwd(), env: childEnvironment(config, mode, exportPath), stdio: 'ignore',
+      cwd: process.cwd(), env: childEnvironment(config, mode, exportPath),
+      stdio: ['ignore', 'ignore', 'pipe'],
     });
+    if (this.child.stderr === null) {
+      this.traceValidationDiagnostics.invalidate();
+    } else {
+      this.stderrDataListener = (chunk: Buffer) => this.traceValidationDiagnostics.push(chunk, 0);
+      this.child.stderr.on('data', this.stderrDataListener);
+      this.child.stderr.on('error', () => this.traceValidationDiagnostics.error());
+      this.child.stderr.on('end', () => this.traceValidationDiagnostics.end());
+      this.child.stderr.on('close', () => this.traceValidationDiagnostics.close());
+    }
   }
 
   async waitUntilReady(): Promise<{ status: number; classification: 'ready' | 'expected-logical-multitenant-degraded' }> {
@@ -716,6 +873,20 @@ class CompositionRoot {
     } catch (error) {
       throw new Error(readinessErrorCode(error));
     }
+  }
+
+  resetTraceValidationDiagnostic(): number {
+    const generation = this.traceValidationDiagnostics.reset();
+    if (this.child.stderr !== null && this.stderrDataListener !== undefined) {
+      this.child.stderr.removeListener('data', this.stderrDataListener);
+      this.stderrDataListener = (chunk: Buffer) => this.traceValidationDiagnostics.push(chunk, generation);
+      this.child.stderr.on('data', this.stderrDataListener);
+    }
+    return generation;
+  }
+
+  traceValidationDiagnosticStage(generation: number): Promise<RetrievalTraceValidationStage | undefined> {
+    return this.traceValidationDiagnostics.waitForTerminal(generation);
   }
 
   stop(): Promise<void> { return stopChild(this.child); }
@@ -1236,26 +1407,60 @@ function exactSingleDenseItem(value: unknown): unknown | undefined {
   return item.value;
 }
 
-export function rankedTraceMcpErrorDiagnostic(result: unknown): RankedTracedInspectionDiagnostic | undefined {
+type RankedTraceMcpEnvelope = 'non-error' | 'trace-validation-failed' | 'unknown-error';
+
+function classifyRankedTraceMcpEnvelope(result: unknown): RankedTraceMcpEnvelope {
   try {
     const nonErrorRoot = exactPlainDataRecord(result, ['content']);
-    if (nonErrorRoot) return undefined;
+    if (nonErrorRoot) return 'non-error';
     const root = exactPlainDataRecord(result, ['content', 'isError']);
-    if (!root) return RANKED_TRACED_INSPECTION_UNKNOWN;
+    if (!root) return 'unknown-error';
     const isError = Object.getOwnPropertyDescriptor(root, 'isError')!.value;
-    if (isError === false) return undefined;
-    if (isError !== true) return RANKED_TRACED_INSPECTION_UNKNOWN;
+    if (isError === false) return 'non-error';
+    if (isError !== true) return 'unknown-error';
     const content = Object.getOwnPropertyDescriptor(root, 'content')!.value;
     const rawItem = exactSingleDenseItem(content);
-    if (rawItem === undefined) return RANKED_TRACED_INSPECTION_UNKNOWN;
+    if (rawItem === undefined) return 'unknown-error';
     const item = exactPlainDataRecord(rawItem, ['type', 'text']);
-    if (!item) return RANKED_TRACED_INSPECTION_UNKNOWN;
+    if (!item) return 'unknown-error';
     const type = Object.getOwnPropertyDescriptor(item, 'type')!.value;
     const text = Object.getOwnPropertyDescriptor(item, 'text')!.value;
     if (type !== 'text' || text !== TRACE_VALIDATION_PUBLIC_MESSAGE) {
-      return RANKED_TRACED_INSPECTION_UNKNOWN;
+      return 'unknown-error';
     }
-    return RANKED_TRACED_INSPECTION_TRACE_VALIDATION_FAILED;
+    return 'trace-validation-failed';
+  } catch {
+    return 'unknown-error';
+  }
+}
+
+function rankedTraceValidationStageDiagnostic(traceValidationStage: unknown): RankedTracedInspectionDiagnostic {
+  if (typeof traceValidationStage !== 'string'
+    || !Object.prototype.hasOwnProperty.call(RANKED_TRACE_VALIDATION_BY_STAGE, traceValidationStage)) {
+    return RANKED_TRACED_INSPECTION_UNKNOWN;
+  }
+  return RANKED_TRACE_VALIDATION_BY_STAGE[traceValidationStage as RetrievalTraceValidationStage];
+}
+
+export function rankedTraceMcpErrorDiagnostic(
+  result: unknown,
+  traceValidationStage?: unknown,
+): RankedTracedInspectionDiagnostic | undefined {
+  const envelope = classifyRankedTraceMcpEnvelope(result);
+  if (envelope === 'non-error') return undefined;
+  if (envelope === 'unknown-error') return RANKED_TRACED_INSPECTION_UNKNOWN;
+  return rankedTraceValidationStageDiagnostic(traceValidationStage);
+}
+
+export async function rankedTraceMcpErrorDiagnosticAfterCapture(
+  result: unknown,
+  awaitTerminal: () => Promise<unknown>,
+): Promise<RankedTracedInspectionDiagnostic | undefined> {
+  const envelope = classifyRankedTraceMcpEnvelope(result);
+  if (envelope === 'non-error') return undefined;
+  if (envelope === 'unknown-error') return RANKED_TRACED_INSPECTION_UNKNOWN;
+  try {
+    return rankedTraceValidationStageDiagnostic(await awaitTerminal());
   } catch {
     return RANKED_TRACED_INSPECTION_UNKNOWN;
   }
@@ -1423,6 +1628,7 @@ export function requiredPresentationIdForCase(
 
 async function executeCase(
   transport: TraceMcpTransport,
+  compositionRoot: CompositionRoot,
   liveCase: LiveCase,
   readback: VerifiedSeedReadback,
   forbidden: readonly string[],
@@ -1466,10 +1672,14 @@ async function executeCase(
   const explicitFalse = await atCaseStage(liveCase.id, 'false-inspection', () => inspectTraceToolResult(explicitFalseResult, {
     mode: 'false', ...responseExpectation,
   }));
+  const traceValidationGeneration = compositionRoot.resetTraceValidationDiagnostic();
   const tracedResult = await atCaseStage(liveCase.id, 'traced-call',
     () => transport.call('berry_context', { ...baseArgs, include_trace: true }));
   if (liveCase.id === 'ranked') {
-    const mcpErrorDiagnostic = rankedTraceMcpErrorDiagnostic(tracedResult);
+    const mcpErrorDiagnostic = await rankedTraceMcpErrorDiagnosticAfterCapture(
+      tracedResult,
+      () => compositionRoot.traceValidationDiagnosticStage(traceValidationGeneration),
+    );
     if (mcpErrorDiagnostic !== undefined) throw new Error(mcpErrorDiagnostic);
   }
   const traced = await atCaseStage(liveCase.id, 'traced-inspection', () => {
@@ -1615,18 +1825,18 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     readinessEvidence.push({ mode: 'single-default', ...await active.waitUntilReady() });
     const defaultTransport = new TraceMcpTransport(config, config.defaultToken);
     const defaultIsolation = tenantIsolationForbiddenValues('default', fixture);
-    cases.push(await executeCase(defaultTransport, {
+    cases.push(await executeCase(defaultTransport, active, {
       id: 'deterministic', requestedStrategy: 'deterministic', expectedAlgorithm: 'deterministic-v2',
       authScope: 'default', task: queries.deterministic, projectName: fixture.defaultProject,
       expectedStrategy: 'deterministic',
       requiredPresentationId: requiredPresentationIdForCase('deterministic', seedReadback),
     }, seedReadback, [...forbidden, ...defaultIsolation], defaultIsolation));
-    cases.push(await executeCase(defaultTransport, {
+    cases.push(await executeCase(defaultTransport, active, {
       id: 'ranked', requestedStrategy: 'ranked', expectedAlgorithm: 'ranked-v1',
       authScope: 'default', task: queries.ranked, projectName: fixture.defaultProject,
       expectedStrategy: 'ranked', requiredPresentationId: requiredPresentationIdForCase('ranked', seedReadback),
     }, seedReadback, [...forbidden, ...defaultIsolation], defaultIsolation));
-    cases.push(await executeCase(defaultTransport, {
+    cases.push(await executeCase(defaultTransport, active, {
       id: 'auto', requestedStrategy: 'auto', expectedAlgorithm: 'deterministic-v2',
       authScope: 'default', task: queries.auto, projectName: fixture.defaultProject,
       expectedStrategy: 'deterministic', requiredPresentationId: requiredPresentationIdForCase('auto', seedReadback),
@@ -1638,7 +1848,7 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     readinessEvidence.push({ mode: 'named-tenant', ...await active.waitUntilReady() });
     const namedTransport = new TraceMcpTransport(config, config.namedToken);
     const namedIsolation = tenantIsolationForbiddenValues('named-tenant', fixture);
-    cases.push(await executeCase(namedTransport, {
+    cases.push(await executeCase(namedTransport, active, {
       id: 'named-tenant-forced-ranked', requestedStrategy: 'deterministic', expectedAlgorithm: 'ranked-v1',
       authScope: 'named-tenant', task: queries.named, projectName: fixture.namedProject,
       expectedStrategy: 'ranked',
