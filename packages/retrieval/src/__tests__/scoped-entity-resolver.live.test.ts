@@ -172,7 +172,7 @@ addRelationship(FOREIGN_SAFE_CANDIDATE, FOREIGN_ROOT.id);
 addRelationship(FOREIGN_SAFE.id, FOREIGN_SAFE_CANDIDATE);
 addLateForeignNode(
   FOREIGN_ROOT.id,
-  FOREIGN_SAFE_CANDIDATE,
+  `${RUN}-foreign-malformed-candidate`,
   [`${RUN}-malformed-name`],
   `${RUN}-malformed-aliases`,
 );
@@ -792,6 +792,7 @@ describe('ScopedEntityResolver disposable Neo4j containment proof', () => {
   let available = false;
 
   it('keeps hostile oversized names beyond resolver bounds but within the index-safe fixture budget', () => {
+    if (new Set(NODE_IDS).size !== NODE_IDS.length) throw fixedFailure('node_id_fixture_collision');
     for (const id of [FOREIGN_OVERSIZED_PROJECT, `${RUN}-foreign-oversized-candidate`]) {
       const fixture = NODES.find((node) => node.id === id);
       if (typeof fixture?.name !== 'string'
