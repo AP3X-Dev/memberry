@@ -7,11 +7,54 @@ const BOOTSTRAP_SOURCE = fs.readFileSync(
   path.resolve(__dirname, '../bootstrap.ts'),
   'utf-8',
 );
+const COMPOSE_SOURCE = fs.readFileSync(
+  path.resolve(__dirname, '../../../../docker-compose.yml'),
+  'utf-8',
+);
+
+function parseComposePlannerValue(value: string | undefined): unknown {
+  const template = COMPOSE_SOURCE.split(/\r?\n/)
+    .find((line) => line.includes('MEMBERRY_QUERY_PLANNER_V1:'))
+    ?.split('MEMBERRY_QUERY_PLANNER_V1: ')[1];
+  if (template === undefined) return undefined;
+  const interpolated = template.replace(
+    '${MEMBERRY_QUERY_PLANNER_V1:-}',
+    value === undefined || value.length === 0 ? '' : value,
+  );
+  if (interpolated.startsWith('"') && interpolated.endsWith('"')) {
+    return JSON.parse(interpolated) as unknown;
+  }
+  const scalar = interpolated.trim();
+  if (scalar.length === 0 || scalar === 'null' || scalar === '~') return null;
+  if (scalar === 'true') return true;
+  if (scalar === 'false') return false;
+  if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(scalar)) return Number(scalar);
+  return scalar;
+}
 
 describe('bootstrap.ts regression', () => {
   it('RET-002C2 keeps runtime planning exact-value default-off and injects a driver-backed resolver', () => {
     expect(BOOTSTRAP_SOURCE).toContain("queryPlannerEnabled: process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1'");
     expect(BOOTSTRAP_SOURCE).toContain('new ScopedEntityResolver(driver, authority)');
+  });
+  it('RET-002C2 passes the default-off planner flag only into the production MCP service', () => {
+    const mcpService = COMPOSE_SOURCE.split('\n  mcp:')[1]?.split('\n  wiki:')[0];
+    const wikiService = COMPOSE_SOURCE.split('\n  wiki:')[1]?.split('\nvolumes:')[0];
+    const exactEntry = 'MEMBERRY_QUERY_PLANNER_V1: "${MEMBERRY_QUERY_PLANNER_V1:-}"';
+    expect(mcpService).toContain(exactEntry);
+    expect(COMPOSE_SOURCE.split(exactEntry)).toHaveLength(2);
+    expect(wikiService).not.toContain('MEMBERRY_QUERY_PLANNER_V1');
+  });
+  it.each([
+    ['unset', undefined, ''],
+    ['empty', '', ''],
+    ['one', '1', '1'],
+    ['leading zero', '01', '01'],
+    ['decimal', '1.0', '1.0'],
+    ['boolean-like', 'true', 'true'],
+    ['trailing space', '1 ', '1 '],
+  ] as const)('RET-002C2 preserves %s planner input as a string', (_label, value, expected) => {
+    expect(parseComposePlannerValue(value)).toBe(expected);
   });
   it('BUG-0007: apply adapter wraps reviewProposal in try/catch and returns failure on error', () => {
     // Before the fix, the apply adapter always returned { applied: true }
