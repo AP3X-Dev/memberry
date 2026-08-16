@@ -7,6 +7,8 @@ import { loadAdmissionFeatureInputs } from '../inputs.js';
 import type { AdmissionFeatureScenarioInputV1 } from '../contract.js';
 import {
   buildAdmissionFeatureCandidateImageV1,
+  classifyAdmissionCandidateBuildFailurePhaseV1,
+  type AdmissionCandidateBuildFailurePhaseV1,
   type AdmissionCandidateBuildReceiptV1,
 } from './build.js';
 import {
@@ -32,10 +34,24 @@ export type AdmissionFeatureCandidateLiveFailureCodeV1 = SandboxFailureCodeV1
   | 'EVIDENCE_WRITE_FAILED';
 
 const FIXED_FAILURES_V1 = new WeakMap<object, AdmissionFeatureCandidateLiveFailureCodeV1>();
+export type AdmissionFeatureCandidateLiveFailurePhaseV1 =
+  | AdmissionCandidateBuildFailurePhaseV1
+  | 'SANDBOX';
+const FAILURE_PHASES_V1 = new WeakMap<object, AdmissionFeatureCandidateLiveFailurePhaseV1>();
 
-function fixedFailureV1(code: AdmissionFeatureCandidateLiveFailureCodeV1): Error {
+function fixedFailureV1(
+  code: AdmissionFeatureCandidateLiveFailureCodeV1,
+  phase?: AdmissionFeatureCandidateLiveFailurePhaseV1,
+): Error {
   const error = new Error(`admission_candidate_live:${code}`);
   FIXED_FAILURES_V1.set(error, code);
+  if (phase !== undefined) FAILURE_PHASES_V1.set(error, phase);
+  return error;
+}
+
+function phaseFailureV1(phase: AdmissionFeatureCandidateLiveFailurePhaseV1 | 'UNKNOWN'): Error {
+  const error = new Error('admission_candidate_live:FAILED');
+  if (phase !== 'UNKNOWN') FAILURE_PHASES_V1.set(error, phase);
   return error;
 }
 
@@ -50,6 +66,31 @@ export function classifyAdmissionFeatureCandidateLiveFailureV1(
 
 export function formatAdmissionFeatureCandidateLiveFailureV1(error: unknown): string {
   return `admission_candidate_live:${classifyAdmissionFeatureCandidateLiveFailureV1(error)}`;
+}
+
+export function classifyAdmissionFeatureCandidateLiveFailurePhaseV1(
+  error: unknown,
+): AdmissionFeatureCandidateLiveFailurePhaseV1 | 'UNKNOWN' {
+  if ((typeof error === 'object' && error !== null) || typeof error === 'function') {
+    return FAILURE_PHASES_V1.get(error) ?? 'UNKNOWN';
+  }
+  return 'UNKNOWN';
+}
+
+export interface AdmissionFeatureCandidateLiveFailureEvidenceV1 {
+  readonly schemaVersion: 'memberry.admission-feature-candidate-live-failure-phase.v1';
+  readonly ok: false;
+  readonly phase: AdmissionFeatureCandidateLiveFailurePhaseV1 | 'UNKNOWN';
+}
+
+export function admissionFeatureCandidateLiveFailureEvidenceV1(
+  error: unknown,
+): AdmissionFeatureCandidateLiveFailureEvidenceV1 {
+  return Object.freeze({
+    schemaVersion: 'memberry.admission-feature-candidate-live-failure-phase.v1',
+    ok: false,
+    phase: classifyAdmissionFeatureCandidateLiveFailurePhaseV1(error),
+  });
 }
 
 export interface AdmissionFeatureCandidateLiveEvidenceV1 {
@@ -78,12 +119,12 @@ function successfulEvidenceV1(
   const devScenarioCount = inputs.filter((input) => input.split === 'dev').length;
   const holdoutScenarioCount = inputs.filter((input) => input.split === 'holdout').length;
   if (inputs.length !== 6 || devScenarioCount !== 3 || holdoutScenarioCount !== 3) {
-    throw fixedFailureV1('INPUT_MANIFEST_INVALID');
+    throw fixedFailureV1('INPUT_MANIFEST_INVALID', 'SOURCE_SNAPSHOT');
   }
   if (result.hashes.candidateSha256 !== receipt.candidateSha256
     || result.hashes.sourceSha256 !== receipt.sourceSha256
     || result.hashes.imageSha256 !== receipt.imageSha256) {
-    throw fixedFailureV1('ATTESTATION_INVALID');
+    throw fixedFailureV1('ATTESTATION_INVALID', 'SANDBOX');
   }
   return Object.freeze({
     schemaVersion: 'memberry.admission-feature-candidate-live-evidence.v1',
@@ -112,9 +153,19 @@ function successfulEvidenceV1(
 export async function runAdmissionFeatureCandidateLiveCoreV1(
   inputs: readonly AdmissionFeatureScenarioInputV1[],
 ): Promise<AdmissionFeatureCandidateLiveEvidenceV1> {
-  const receipt = await buildAdmissionFeatureCandidateImageV1();
-  const result = await runAdmissionFeatureSandboxV1({ receipt, inputs });
-  if (!result.ok) throw fixedFailureV1(result.failureCode);
+  let receipt: AdmissionCandidateBuildReceiptV1;
+  try {
+    receipt = await buildAdmissionFeatureCandidateImageV1();
+  } catch (error) {
+    throw phaseFailureV1(classifyAdmissionCandidateBuildFailurePhaseV1(error));
+  }
+  let result: AdmissionSandboxResultV1;
+  try {
+    result = await runAdmissionFeatureSandboxV1({ receipt, inputs });
+  } catch {
+    throw phaseFailureV1('SANDBOX');
+  }
+  if (!result.ok) throw fixedFailureV1(result.failureCode, 'SANDBOX');
   return successfulEvidenceV1(receipt, result, inputs);
 }
 
@@ -249,7 +300,7 @@ function validateLeafV1(
 }
 
 async function writeEvidenceCoreV1(
-  evidence: AdmissionFeatureCandidateLiveEvidenceV1,
+  evidence: AdmissionFeatureCandidateLiveEvidenceV1 | AdmissionFeatureCandidateLiveFailureEvidenceV1,
   afterOpen?: () => Promise<void>,
 ): Promise<void> {
   const authority = evidenceAuthorityV1();
@@ -305,6 +356,12 @@ export async function writeAdmissionFeatureCandidateLiveEvidenceV1(
   await writeEvidenceCoreV1(evidence);
 }
 
+export async function writeAdmissionFeatureCandidateLiveFailureEvidenceV1(
+  error: unknown,
+): Promise<void> {
+  await writeEvidenceCoreV1(admissionFeatureCandidateLiveFailureEvidenceV1(error));
+}
+
 /** @internal Deterministic race barrier for the focused filesystem tests only. */
 export async function writeAdmissionFeatureCandidateLiveEvidenceTestCoreV1(
   evidence: AdmissionFeatureCandidateLiveEvidenceV1,
@@ -323,7 +380,12 @@ async function main(): Promise<void> {
 
 const invokedPath = process.argv[1] === undefined ? undefined : resolve(process.argv[1]);
 if (invokedPath === resolve(fileURLToPath(import.meta.url))) {
-  void main().catch((error: unknown) => {
+  void main().catch(async (error: unknown) => {
+    try {
+      await writeAdmissionFeatureCandidateLiveFailureEvidenceV1(error);
+    } catch {
+      // The public failure remains fixed even when the optional phase artifact cannot be written.
+    }
     process.stderr.write(`${formatAdmissionFeatureCandidateLiveFailureV1(error)}\n`);
     process.exitCode = 1;
   });

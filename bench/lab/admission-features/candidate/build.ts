@@ -59,6 +59,32 @@ export interface AdmissionCandidateBuildReceiptV1 extends AdmissionSandboxAttest
   readonly receiptVersion: 'memberry.admission-build-receipt.v1';
 }
 
+export type AdmissionCandidateBuildFailurePhaseV1 =
+  | 'SOURCE_SNAPSHOT'
+  | 'BASE_INSPECT'
+  | 'BASE_PROOF'
+  | 'CANDIDATE_BUILD'
+  | 'IMAGE_PROOF';
+
+const BUILD_FAILURE_PHASES_V1 = new WeakMap<object, AdmissionCandidateBuildFailurePhaseV1>();
+
+function admissionCandidateBuildPhaseFailureV1(
+  phase: AdmissionCandidateBuildFailurePhaseV1,
+): Error {
+  const failure = new Error('admission candidate build failed');
+  BUILD_FAILURE_PHASES_V1.set(failure, phase);
+  return failure;
+}
+
+export function classifyAdmissionCandidateBuildFailurePhaseV1(
+  error: unknown,
+): AdmissionCandidateBuildFailurePhaseV1 | 'UNKNOWN' {
+  if ((typeof error === 'object' && error !== null) || typeof error === 'function') {
+    return BUILD_FAILURE_PHASES_V1.get(error) ?? 'UNKNOWN';
+  }
+  return 'UNKNOWN';
+}
+
 const RECEIPTS_V1 = new WeakMap<object, AdmissionCandidateBuildReceiptV1>();
 
 function immutableReceiptV1(value: Omit<AdmissionCandidateBuildReceiptV1, 'receiptVersion'>): AdmissionCandidateBuildReceiptV1 {
@@ -538,7 +564,9 @@ async function withStoppedProofV1<T>(
 async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   runner: DockerCommandRunnerV1,
 ): Promise<Omit<AdmissionCandidateBuildReceiptV1, 'receiptVersion'>> {
-  const snapshot = await captureAdmissionCandidateSnapshotV1();
+  let phase: AdmissionCandidateBuildFailurePhaseV1 = 'SOURCE_SNAPSHOT';
+  try {
+    const snapshot = await captureAdmissionCandidateSnapshotV1();
   const dockerfile = new TextDecoder('utf-8', { fatal: true }).decode(snapshot.files.get('container/Dockerfile')!);
   const dockerignore = new TextDecoder('utf-8', { fatal: true })
     .decode(snapshot.files.get('.dockerignore')!).replace(/\r\n?/g, '\n');
@@ -549,6 +577,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   )) as unknown;
   validateAdmissionCandidateBuildAssetsV1({ dockerfile, manifest });
 
+  phase = 'BASE_INSPECT';
   const baseInspection = JSON.parse(safeTextV1(await runner(createDockerCommandInvocationV1([
     'image', 'inspect', '--format={{json .}}', APPROVED_NODE_BASE_IMAGE_V1,
   ]))));
@@ -559,6 +588,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
     || baseInspection?.Os !== 'linux' || baseInspection?.Architecture !== 'amd64') {
     throw new Error('approved base inspection mismatch');
   }
+  phase = 'BASE_PROOF';
   const baseNode = await withStoppedProofV1(
     APPROVED_NODE_BASE_IMAGE_V1, baseInspection.Id, runner, async (id) => {
       const copied = await runner(createDockerCommandInvocationV1([
@@ -574,6 +604,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
     sourceSha256: snapshot.sourceSha256,
     nodeSha256,
   }));
+  phase = 'CANDIDATE_BUILD';
   const context = createCanonicalBuildContextV1([
     { path: '.dockerignore', bytes: snapshot.files.get('.dockerignore')! },
     { path: 'container/Dockerfile', bytes: snapshot.files.get('container/Dockerfile')! },
@@ -594,6 +625,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   }));
   const imageSha256 = safeTextV1(built, true).trim();
   if (!IMAGE_PATTERN.test(imageSha256)) throw new Error('invalid built image ID');
+  phase = 'IMAGE_PROOF';
   const imageInspection = JSON.parse(safeTextV1(await runner(createDockerCommandInvocationV1([
     'image', 'inspect', '--format={{json .}}', imageSha256,
   ]))));
@@ -633,6 +665,9 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
     imageConfigSha256,
     nodeSha256,
   });
+  } catch {
+    throw admissionCandidateBuildPhaseFailureV1(phase);
+  }
 }
 
 export async function buildAdmissionFeatureCandidateImageV1(

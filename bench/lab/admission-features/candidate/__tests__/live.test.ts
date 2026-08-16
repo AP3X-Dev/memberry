@@ -40,21 +40,26 @@ const success = Object.freeze({
 
 const mocks = vi.hoisted(() => ({
   buildImage: vi.fn(),
+  classifyBuildFailure: vi.fn(),
   runSandbox: vi.fn(),
 }));
 
 vi.mock('../build.js', () => ({
   buildAdmissionFeatureCandidateImageV1: mocks.buildImage,
+  classifyAdmissionCandidateBuildFailurePhaseV1: mocks.classifyBuildFailure,
 }));
 vi.mock('../sandbox.js', () => ({
   runAdmissionFeatureSandboxV1: mocks.runSandbox,
 }));
 
 import {
+  admissionFeatureCandidateLiveFailureEvidenceV1,
   classifyAdmissionFeatureCandidateLiveFailureV1,
+  classifyAdmissionFeatureCandidateLiveFailurePhaseV1,
   formatAdmissionFeatureCandidateLiveFailureV1,
   hasExactEvidenceParentPermissionsV1,
   runAdmissionFeatureCandidateLiveCoreV1,
+  writeAdmissionFeatureCandidateLiveFailureEvidenceV1,
   writeAdmissionFeatureCandidateLiveEvidenceTestCoreV1,
   writeAdmissionFeatureCandidateLiveEvidenceV1,
 } from '../live.js';
@@ -89,6 +94,7 @@ const inputs: readonly AdmissionFeatureScenarioInputV1[] = Object.freeze([
 describe('MEM-002C2 value-free live CLI orchestration', () => {
   beforeEach(() => {
     mocks.buildImage.mockReset().mockResolvedValue(buildReceipt);
+    mocks.classifyBuildFailure.mockReset().mockReturnValue('UNKNOWN');
     mocks.runSandbox.mockReset().mockResolvedValue(success);
   });
 
@@ -126,6 +132,7 @@ describe('MEM-002C2 value-free live CLI orchestration', () => {
     mocks.runSandbox.mockResolvedValueOnce(Object.freeze({ ok: false, failureCode: 'CLEANUP_FAILED' }));
     const error = await runAdmissionFeatureCandidateLiveCoreV1(inputs).catch((failure: unknown) => failure);
     expect(classifyAdmissionFeatureCandidateLiveFailureV1(error)).toBe('CLEANUP_FAILED');
+    expect(classifyAdmissionFeatureCandidateLiveFailurePhaseV1(error)).toBe('SANDBOX');
     expect(formatAdmissionFeatureCandidateLiveFailureV1(error))
       .toBe('admission_candidate_live:CLEANUP_FAILED');
   });
@@ -141,12 +148,29 @@ describe('MEM-002C2 value-free live CLI orchestration', () => {
       .toBe(`admission_candidate_live:${failureCode}`);
   });
 
-  it('maps unknown failures to one generic code without retaining exception text', async () => {
-    mocks.buildImage.mockRejectedValueOnce(new Error('secret-bearing Docker failure'));
+  it('classifies an unexpected sandbox exception without retaining its text', async () => {
+    mocks.runSandbox.mockRejectedValueOnce(new Error('secret-bearing sandbox failure'));
     const error = await runAdmissionFeatureCandidateLiveCoreV1(inputs).catch((failure: unknown) => failure);
     expect(classifyAdmissionFeatureCandidateLiveFailureV1(error)).toBe('FAILED');
+    expect(classifyAdmissionFeatureCandidateLiveFailurePhaseV1(error)).toBe('SANDBOX');
+    expect(formatAdmissionFeatureCandidateLiveFailureV1(error)).toBe('admission_candidate_live:FAILED');
+    expect(JSON.stringify(admissionFeatureCandidateLiveFailureEvidenceV1(error))).not.toContain('secret');
+  });
+
+  it('maps unknown failures to one generic code without retaining exception text', async () => {
+    mocks.buildImage.mockRejectedValueOnce(new Error('secret-bearing Docker failure'));
+    mocks.classifyBuildFailure.mockReturnValueOnce('BASE_PROOF');
+    const error = await runAdmissionFeatureCandidateLiveCoreV1(inputs).catch((failure: unknown) => failure);
+    expect(classifyAdmissionFeatureCandidateLiveFailureV1(error)).toBe('FAILED');
+    expect(classifyAdmissionFeatureCandidateLiveFailurePhaseV1(error)).toBe('BASE_PROOF');
     expect(formatAdmissionFeatureCandidateLiveFailureV1(error)).toBe('admission_candidate_live:FAILED');
     expect(formatAdmissionFeatureCandidateLiveFailureV1(error)).not.toContain('secret');
+    expect(admissionFeatureCandidateLiveFailureEvidenceV1(error)).toEqual({
+      schemaVersion: 'memberry.admission-feature-candidate-live-failure-phase.v1',
+      ok: false,
+      phase: 'BASE_PROOF',
+    });
+    expect(JSON.stringify(admissionFeatureCandidateLiveFailureEvidenceV1(error))).not.toContain('secret');
   });
 });
 
@@ -228,6 +252,21 @@ describe('MEM-002C2 evidence-file authority', () => {
     await writeAdmissionFeatureCandidateLiveEvidenceV1(evidence);
     const content = await import('node:fs/promises').then(({ readFile }) => readFile(authority.evidencePath, 'utf8'));
     expect(JSON.parse(content)).toEqual(evidence);
+  });
+
+  linuxOnly('writes only one fixed phase for a failed live build', async () => {
+    const authority = await evidenceAuthority();
+    mocks.buildImage.mockRejectedValueOnce(new Error('secret-bearing Docker failure'));
+    mocks.classifyBuildFailure.mockReturnValueOnce('CANDIDATE_BUILD');
+    const error = await runAdmissionFeatureCandidateLiveCoreV1(inputs).catch((failure: unknown) => failure);
+    await writeAdmissionFeatureCandidateLiveFailureEvidenceV1(error);
+    const content = await import('node:fs/promises').then(({ readFile }) => readFile(authority.evidencePath, 'utf8'));
+    expect(JSON.parse(content)).toEqual({
+      schemaVersion: 'memberry.admission-feature-candidate-live-failure-phase.v1',
+      ok: false,
+      phase: 'CANDIDATE_BUILD',
+    });
+    expect(content).not.toContain('secret');
   });
 
   linuxOnly('rejects an existing regular final leaf', async () => {
