@@ -478,7 +478,7 @@ export class UnifiedAssembler {
     stageFailures?: Array<{ stage: RetrievalTraceFailureStage; code: RetrievalTraceFailureCode }>,
   ): Promise<{ context: UnifiedContext; trace?: RetrievalTraceV1 }> {
     const lists: RetrievalResult[][] = [];
-    const settledLists: Partial<Record<'arch' | 'code' | 'memory', RetrievalResult[]>> | undefined = traced ? {} : undefined;
+    const settledLists: Partial<Record<'arch' | 'code' | 'memory', RetrievalResult[]>> = {};
     const settledObservations: Partial<Record<'arch' | 'code' | 'memory', RuntimeStructuralObservation>> | undefined = traced ? {} : undefined;
     const traceIncompleteReasons = traced ? new Set<RetrievalTraceIncompleteReason>() : undefined;
     const tenant = resolveTenant(opts.tenantId);
@@ -511,11 +511,11 @@ export class UnifiedAssembler {
               const wrapper = parseRuntimeObservedWrapper(result);
               if (!wrapper || !Array.isArray(wrapper.value)) {
                 traceIncompleteReasons?.add('candidate-output-gap');
-                settledLists!.arch = [];
+                settledLists.arch = [];
                 return;
               }
               const results = wrapper.value as RetrievalResult[];
-              settledLists!.arch = results;
+              settledLists.arch = results;
               const observation = parseRuntimeStructuralObservation(wrapper.observation);
               if (observation && exactFinalIds(results.map((entry) => entry.id), observation.finalIds)) {
                 settledObservations!.arch = observation;
@@ -523,7 +523,7 @@ export class UnifiedAssembler {
                 traceIncompleteReasons?.add('candidate-output-gap');
                 if (observation) settledObservations!.arch = channelOnlyObservation(observation);
               }
-            } else lists.push(result as RetrievalResult[]);
+            } else settledLists.arch = result as RetrievalResult[];
           })
           .catch((err) => {
             if (traced) settledObservations!.arch = structuralObservationFromError(err) ?? {
@@ -567,7 +567,7 @@ export class UnifiedAssembler {
               ? parseRuntimeObservedWrapper(result) : undefined;
             if (traced && this.codeLayer!.searchObserved && (!wrapper || !Array.isArray(wrapper.value))) {
               traceIncompleteReasons?.add('candidate-output-gap');
-              settledLists!.code = [];
+              settledLists.code = [];
               return;
             }
             const results = wrapper
@@ -581,8 +581,8 @@ export class UnifiedAssembler {
               score: r.score,
               metadata: { kind: r.kind, file_path: r.file_path },
             }));
+            settledLists.code = mapped;
             if (traced) {
-              settledLists!.code = mapped;
               if (this.codeLayer!.searchObserved) {
                 const observation = parseRuntimeStructuralObservation(wrapper!.observation);
                 if (observation && exactFinalIds(results.map((entry) => entry.id), observation.finalIds)) {
@@ -592,7 +592,7 @@ export class UnifiedAssembler {
                   if (observation) settledObservations!.code = channelOnlyObservation(observation);
                 }
               } else traceIncompleteReasons?.add('candidate-output-gap');
-            } else lists.push(mapped);
+            }
           })
           .catch((err) => {
             if (traced) settledObservations!.code = structuralObservationFromError(err) ?? {
@@ -623,26 +623,23 @@ export class UnifiedAssembler {
               ? parseRuntimeObservedWrapper(result) : undefined;
             if (traced && this.memoryLayer!.loadFreshObserved && !wrapper) {
               traceIncompleteReasons?.add('candidate-output-gap');
-              settledLists!.memory = [];
+              settledLists.memory = [];
               return;
             }
             const ctx = wrapper
               ? wrapper.value as Awaited<ReturnType<AssemblerMemoryLayer['load']>>
               : result as Awaited<ReturnType<AssemblerMemoryLayer['load']>>;
             // AMPService prepends an exact presentation-only H1/task block to
-            // its source-final `## [id]` sections. Ordinary assembly retains
-            // the historical parser bytes; traced assembly alone removes that
-            // exact task-bound preamble so it cannot become a fabricated result.
-            const tracedMarkdown = traced
-              ? normalizeTracedMemoryMarkdown(ctx.markdown, task)
-              : ctx.markdown;
-            const parsed = parseMemoryMarkdown(tracedMarkdown, ctx.sources);
+            // its source-final `## [id]` sections. Remove that exact task-bound
+            // wrapper in both modes so it cannot become a fabricated result.
+            const memoryMarkdown = normalizeMemoryMarkdown(ctx.markdown, task);
+            const parsed = parseMemoryMarkdown(memoryMarkdown, ctx.sources);
+            settledLists.memory = parsed;
             if (traced) {
-              settledLists!.memory = parsed;
               if (this.memoryLayer!.loadFreshObserved) {
                 const observation = parseRuntimeStructuralObservation(wrapper!.observation);
                 if (observation && exactFinalIds(ctx.sources, observation.finalIds)) {
-                  const mapped = mapMemoryObservationToOuter(tracedMarkdown, parsed, observation);
+                  const mapped = mapMemoryObservationToOuter(memoryMarkdown, parsed, observation);
                   settledObservations!.memory = mapped.observation;
                   if (!mapped.complete) traceIncompleteReasons?.add('candidate-output-gap');
                 } else {
@@ -650,7 +647,7 @@ export class UnifiedAssembler {
                   if (observation) settledObservations!.memory = channelOnlyObservation(observation);
                 }
               } else traceIncompleteReasons?.add('candidate-output-gap');
-            } else lists.push(parsed);
+            }
           })
           .catch((err) => {
             if (traced) settledObservations!.memory = structuralObservationFromError(err) ?? {
@@ -664,12 +661,12 @@ export class UnifiedAssembler {
 
     await Promise.all(promises);
     const observations: RuntimeStructuralObservation[] | undefined = traced ? [] : undefined;
-    if (traced) {
-      // Match the frozen trace channel order so score ties resolve identically
-      // to collector-local refs, independent of async source settlement order.
-      for (const key of ['memory', 'code', 'arch'] as const) {
-        const list = settledLists![key];
-        if (list) lists.push(list);
+    // Use one frozen channel order in both modes so score ties and duplicate
+    // representatives never depend on async source settlement order.
+    for (const key of ['memory', 'code', 'arch'] as const) {
+      const list = settledLists[key];
+      if (list) lists.push(list);
+      if (traced) {
         const observation = settledObservations![key];
         if (observation) observations!.push(observation);
       }
@@ -926,11 +923,11 @@ function normalizeProjectName(projectName?: string): string | null {
 }
 
 /**
- * Traced-only normalization for AMPService's exact presentation wrapper.
+ * Shared normalization for AMPService's exact presentation wrapper.
  * Arbitrary H1s, mismatched task text, aggregate sections, and other markdown
  * remain untouched and therefore fail closed at the source-final bijection.
  */
-function normalizeTracedMemoryMarkdown(markdown: string, task: string): string {
+function normalizeMemoryMarkdown(markdown: string, task: string): string {
   const exactPreamble = `# Memory Context\n\n**Task:** ${task}\n\n`;
   if (markdown.startsWith(exactPreamble)) return markdown.slice(exactPreamble.length);
   const exactEmpty = `# Memory Context\n\n_No relevant memories found for task: ${task}_\n`;

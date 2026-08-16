@@ -76,7 +76,208 @@ function makeAssembler(codeDelay: number, memoryDelay: number, malformed = false
   return { assembler: new UnifiedAssembler(driver as never, redis, codeLayer, memoryLayer, embedding), codeLayer, memoryLayer };
 }
 
+interface ParityAssemblerOptions {
+  task: string;
+  codeDelay?: number;
+  memoryDelay?: number;
+  codeId?: string;
+  codeReject?: boolean;
+  memoryMarkdown: string;
+  memorySources: string[];
+}
+
+const PARITY_CODE_RESULT = {
+  source_type: 'symbol' as const,
+  name: 'alpha',
+  kind: 'function',
+  file_path: 'src/a.ts',
+  start_line: 1,
+  signature: 'function alpha()',
+  doc_comment: '',
+  score: 0.5,
+};
+
+const PARITY_CODE_CONTENT = '**alpha** (function) — `src/a.ts:1`\n`function alpha()`';
+
+function makeParityAssembler(options: ParityAssemblerOptions) {
+  const codeId = options.codeId ?? 'code-tie';
+  const codeResult = { id: codeId, ...PARITY_CODE_RESULT };
+  const memoryValue = {
+    markdown: options.memoryMarkdown,
+    tokens: 10,
+    sources: options.memorySources,
+  };
+  const codeLayer = {
+    search: vi.fn(async () => {
+      await delay(options.codeDelay ?? 0);
+      if (options.codeReject) throw new Error('ordinary code failure');
+      return [codeResult];
+    }),
+    searchObserved: vi.fn(async () => {
+      await delay(options.codeDelay ?? 0);
+      if (options.codeReject) throw new Error('observed code failure');
+      return {
+        value: [codeResult],
+        observation: {
+          channels: [{ channel: 'code.fulltext', outcome: 'success' }],
+          candidates: [{
+            privateId: codeId,
+            sourceType: 'symbol',
+            channels: [{ channel: 'code.fulltext', rank: 1, score: 0.5 }],
+            evidence: {},
+            estimatedTokens: 4,
+          }],
+          finalIds: [codeId],
+        },
+      };
+    }),
+  };
+  const memoryLayer = {
+    load: vi.fn(async () => {
+      await delay(options.memoryDelay ?? 0);
+      return memoryValue;
+    }),
+    loadFreshObserved: vi.fn(async () => {
+      await delay(options.memoryDelay ?? 0);
+      return {
+        value: memoryValue,
+        observation: {
+          channels: [{ channel: 'memory.scope', outcome: 'success' }],
+          candidates: options.memorySources.map((privateId, index) => ({
+            privateId,
+            sourceType: 'semantic',
+            channels: [{ channel: 'memory.scope', rank: index + 1 }],
+            evidence: {},
+            estimatedTokens: 4,
+          })),
+          finalIds: options.memorySources,
+        },
+      };
+    }),
+  };
+  const driver = {
+    session: () => ({
+      run: vi.fn(async () => ({ records: [{ get: () => 0 }] })),
+      close: vi.fn(async () => undefined),
+    }),
+  };
+  const redis = { get: vi.fn(async () => null), set: vi.fn(async () => undefined) };
+  const embedding = { available: false, embed: vi.fn(), embedBatch: vi.fn() };
+  return new UnifiedAssembler(driver as never, redis, codeLayer, memoryLayer, embedding);
+}
+
+function orderedIds(context: Awaited<ReturnType<UnifiedAssembler['assemble']>>): string[] {
+  return context.sections.flatMap((section) => section.items.map((item) => item.id));
+}
+
 describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
+  it('keeps ordinary and traced presentation identical for an exact nonempty AMP wrapper', async () => {
+    const task = 'exact wrapped task';
+    const assembler = makeParityAssembler({
+      task,
+      memoryMarkdown: `# Memory Context\n\n**Task:** ${task}\n\n## [sem-wrapper] (confidence: 0.90)\nremembered`,
+      memorySources: ['sem-wrapper'],
+    });
+    const options = { strategy: 'ranked' as const, include_arch: false, include_code: false };
+
+    const ordinary = await assembler.assemble(task, options);
+    const traced = await assembler.assembleTraced(task, options);
+
+    expect(orderedIds(ordinary)).toEqual(['sem-wrapper']);
+    expect(orderedIds(traced.context)).toEqual(['sem-wrapper']);
+    expect(assembler.renderMarkdown(ordinary)).toBe(assembler.renderMarkdown(traced.context));
+    expect(assembler.renderMarkdown(ordinary)).not.toContain('<!-- mem-');
+  });
+
+  it('treats the exact empty AMP wrapper as no memory in both modes', async () => {
+    const task = 'exact empty task';
+    const assembler = makeParityAssembler({
+      task,
+      memoryMarkdown: `# Memory Context\n\n_No relevant memories found for task: ${task}_\n`,
+      memorySources: [],
+    });
+    const options = { strategy: 'ranked' as const, include_arch: false, include_code: false };
+
+    const ordinary = await assembler.assemble(task, options);
+    const traced = await assembler.assembleTraced(task, options);
+
+    expect(orderedIds(ordinary)).toEqual([]);
+    expect(orderedIds(traced.context)).toEqual([]);
+    expect(assembler.renderMarkdown(ordinary)).toBe(assembler.renderMarkdown(traced.context));
+    expect(assembler.renderMarkdown(ordinary)).not.toContain('<!-- mem-');
+  });
+
+  it('keeps equal-score ranked output canonical across opposite settlement permutations', async () => {
+    const task = 'settlement parity';
+    const memoryMarkdown = '## [memory-tie]\nneutral memory';
+    const options = { strategy: 'ranked' as const, include_arch: false };
+    const memoryFirst = makeParityAssembler({
+      task, codeDelay: 20, memoryDelay: 1, memoryMarkdown, memorySources: ['memory-tie'],
+    });
+    const codeFirst = makeParityAssembler({
+      task, codeDelay: 1, memoryDelay: 20, memoryMarkdown, memorySources: ['memory-tie'],
+    });
+
+    const memoryFirstOrdinary = await memoryFirst.assemble(task, options);
+    const codeFirstOrdinary = await codeFirst.assemble(task, options);
+    const memoryFirstTraced = await memoryFirst.assembleTraced(task, options);
+    const codeFirstTraced = await codeFirst.assembleTraced(task, options);
+
+    expect(orderedIds(memoryFirstOrdinary)).toEqual(['memory-tie', 'code-tie']);
+    expect(orderedIds(codeFirstOrdinary)).toEqual(['memory-tie', 'code-tie']);
+    expect(memoryFirst.renderMarkdown(memoryFirstOrdinary)).toBe(
+      memoryFirst.renderMarkdown(memoryFirstTraced.context),
+    );
+    expect(codeFirst.renderMarkdown(codeFirstOrdinary)).toBe(
+      codeFirst.renderMarkdown(codeFirstTraced.context),
+    );
+  });
+
+  it('preserves ordinary and traced parity when a ranked channel rejects safely', async () => {
+    const task = 'safe failure task';
+    const assembler = makeParityAssembler({
+      task,
+      codeReject: true,
+      memoryMarkdown: `# Memory Context\n\n**Task:** ${task}\n\n## [safe-memory]\nsurvives`,
+      memorySources: ['safe-memory'],
+    });
+    const options = { strategy: 'ranked' as const, include_arch: false };
+
+    const ordinary = await assembler.assemble(task, options);
+    const traced = await assembler.assembleTraced(task, options);
+
+    expect(orderedIds(ordinary)).toEqual(['safe-memory']);
+    expect(orderedIds(traced.context)).toEqual(['safe-memory']);
+    expect(assembler.renderMarkdown(ordinary)).toBe(assembler.renderMarkdown(traced.context));
+    expect(traced.trace.events).toContainEqual(expect.objectContaining({
+      kind: 'channel-terminal', channel: 'code.fulltext', outcome: 'safe-failure', code: 'query-failed',
+    }));
+  });
+
+  it('keeps the canonical memory representative for equal-length duplicate cross-channel IDs', async () => {
+    const task = 'duplicate parity';
+    const heading = '[shared-id]';
+    const memoryContent = `${heading}\n${'m'.repeat(PARITY_CODE_CONTENT.length - heading.length - 1)}`;
+    expect(memoryContent).toHaveLength(PARITY_CODE_CONTENT.length);
+    const assembler = makeParityAssembler({
+      task,
+      codeDelay: 1,
+      memoryDelay: 20,
+      codeId: 'shared-id',
+      memoryMarkdown: `## ${memoryContent}`,
+      memorySources: ['shared-id'],
+    });
+    const options = { strategy: 'ranked' as const, include_arch: false };
+
+    const ordinary = await assembler.assemble(task, options);
+    const traced = await assembler.assembleTraced(task, options);
+
+    expect(orderedIds(ordinary)).toEqual(['shared-id']);
+    expect(ordinary.sections[0]?.source_type).toBe('semantic');
+    expect(ordinary.sections[0]?.items[0]?.content).toBe(memoryContent);
+    expect(assembler.renderMarkdown(ordinary)).toBe(assembler.renderMarkdown(traced.context));
+  });
+
   it('is deterministic across source settlement permutations, secret-safe, and does not use ordinary layer methods', async () => {
     const first = makeAssembler(20, 1);
     const second = makeAssembler(1, 20);
@@ -366,7 +567,7 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
     expect(result.trace.candidates).toHaveLength(0);
   });
 
-  it('normalizes only the exact AMPService Memory Context presentation preamble in traced mapping', async () => {
+  it('normalizes only the exact AMPService Memory Context presentation preamble in ranked mapping', async () => {
     const { assembler, memoryLayer } = makeAssembler(0, 0);
     memoryLayer.loadFreshObserved.mockResolvedValueOnce({
       value: {
