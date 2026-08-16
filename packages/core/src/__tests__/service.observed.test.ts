@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { int } from 'neo4j-driver';
 import { describe, expect, it, vi } from 'vitest';
 
 import { AMPService } from '../service.js';
@@ -15,12 +16,12 @@ const config: AMPConfig = {
   exportPath: '',
 };
 
-function semantic(id: string): SemanticNode {
+function semantic(id: string, signalCount: unknown = 2): SemanticNode {
   return {
     id,
     content: `content-${id}`,
     confidence: 0.9,
-    signal_count: 2,
+    signal_count: signalCount as number,
     created_at: '2026-08-14T00:00:00.000Z',
     updated_at: '2026-08-14T00:00:00.000Z',
     decay_class: 'stable',
@@ -54,6 +55,81 @@ function fixture() {
 }
 
 describe('AMPService.loadFreshObserved', () => {
+  it('accepts only primitive safe integer source counts in the closed 0..64 range', async () => {
+    const { service, byScope, byVector } = fixture();
+    const values = [
+      ['zero', 0],
+      ['one', 1],
+      ['max', 64],
+      ['negative', -1],
+      ['fractional', 1.5],
+      ['over-max', 65],
+      ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+      ['nan', Number.NaN],
+      ['infinity', Number.POSITIVE_INFINITY],
+      ['string', '1'],
+      ['bigint', 1n],
+    ] as const;
+    byScope.mockResolvedValueOnce(values.map(([id, value]) => semantic(id, value)));
+    byVector.mockResolvedValueOnce([]);
+
+    const observed = await service.loadFreshObserved({ task: 'primitive counts', tags: ['project:test'] });
+    const candidates = new Map(observed.observation.candidates.map(
+      (candidate) => [candidate.privateId, candidate],
+    ));
+
+    expect(candidates.get('zero')?.evidence.sourceCount).toBe(0);
+    expect(candidates.get('one')?.evidence.sourceCount).toBe(1);
+    expect(candidates.get('max')?.evidence.sourceCount).toBe(64);
+    for (const [id] of values.slice(3)) {
+      expect(candidates.get(id)?.evidence, id).not.toHaveProperty('sourceCount');
+    }
+  });
+
+  it('omits every object source count, including official Integers and direct prototype spoofs, without invoking hooks', async () => {
+    const { service, byScope, byVector } = fixture();
+    const officialPrototype = Object.getPrototypeOf(int(0));
+    const createSpoof = Object.assign(Object.create(officialPrototype), { low: 1, high: 0 });
+    const setPrototypeSpoof = { low: 1, high: 0 };
+    Object.setPrototypeOf(setPrototypeSpoof, officialPrototype);
+    let hookCalls = 0;
+    const hooked = Object.create(null) as Record<string, unknown>;
+    for (const key of ['__isInteger__', 'low', 'high', 'valueOf', 'toString']) {
+      Object.defineProperty(hooked, key, {
+        get() {
+          hookCalls += 1;
+          throw new Error('source-count-hook-must-not-run');
+        },
+      });
+    }
+    const proxied = new Proxy(int(1), {
+      get() {
+        hookCalls += 1;
+        throw new Error('source-count-proxy-must-not-run');
+      },
+    });
+    const values = [
+      ['official-integer', int(1)],
+      ['create-spoof', createSpoof],
+      ['set-prototype-spoof', setPrototypeSpoof],
+      ['plain-object', { low: 1, high: 0 }],
+      ['hooked-object', hooked],
+      ['proxied-object', proxied],
+    ] as const;
+    byScope.mockResolvedValueOnce(values.map(([id, value]) => semantic(id, value)));
+    byVector.mockResolvedValueOnce([]);
+
+    const observed = await service.loadFreshObserved({ task: 'object counts', tags: ['project:test'] });
+    const candidates = new Map(observed.observation.candidates.map(
+      (candidate) => [candidate.privateId, candidate],
+    ));
+
+    for (const [id] of values) {
+      expect(candidates.get(id)?.evidence, id).not.toHaveProperty('sourceCount');
+    }
+    expect(hookCalls).toBe(0);
+  });
+
   it('shares the ordinary assembly implementation but bypasses cache get/set and reports settled source-final provenance', async () => {
     const { service, cache, byScope, byVector } = fixture();
     const scope = { task: 'trace this', tags: ['project:test'], max_tokens: 1000 };

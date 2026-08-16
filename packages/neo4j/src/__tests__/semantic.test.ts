@@ -1,5 +1,6 @@
 // packages/neo4j/src/__tests__/semantic.test.ts
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { int } from 'neo4j-driver';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { createNeo4jDriver } from '../driver.js';
 import { SemanticStore } from '../semantic.js';
 import type { SemanticNode } from '@memberry/core';
@@ -36,12 +37,51 @@ function makeSemanticNode(suffix: string): SemanticNode {
   };
 }
 
+it('maps official Neo4j Integer signal_count values through getById and getByIds', async () => {
+  const byIdProps = {
+    ...makeSemanticNode('integer-mapper'),
+    signal_count: int(3),
+  };
+  const byIdsProps = {
+    ...makeSemanticNode('integer-mapper-batch'),
+    signal_count: int(4),
+  };
+  const close = vi.fn(async () => undefined);
+  const run = vi.fn(async (cypher: string) => ({
+    records: [{
+      get: () => ({ properties: cypher.includes('s.id IN $ids') ? byIdsProps : byIdProps }),
+    }],
+  }));
+  const store = new SemanticStore({ session: () => ({ run, close }) } as never);
+
+  const fetchedById = await store.getById(byIdProps.id);
+  const [fetchedByIds] = await store.getByIds([byIdsProps.id]);
+
+  expect(fetchedById?.signal_count).toBe(3);
+  expect(typeof fetchedById?.signal_count).toBe('number');
+  expect(fetchedByIds.signal_count).toBe(4);
+  expect(typeof fetchedByIds.signal_count).toBe('number');
+  expect(close).toHaveBeenCalledTimes(2);
+});
+
 describe('SemanticStore', () => {
   let neo4jAvailable = false;
   const driver = createNeo4jDriver(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
   let store: SemanticStore;
 
   const createdIds: string[] = [];
+
+  async function persistSignalCountsAsIntegers(ids: string[]): Promise<void> {
+    const session = driver.session();
+    try {
+      await session.run(
+        'MATCH (s:Semantic) WHERE s.id IN $ids SET s.signal_count = toInteger(s.signal_count)',
+        { ids },
+      );
+    } finally {
+      await session.close();
+    }
+  }
 
   beforeAll(async () => {
     neo4jAvailable = await isNeo4jReachable(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
@@ -99,6 +139,7 @@ describe('SemanticStore', () => {
     const node = makeSemanticNode('retrieve');
     const id = await store.create(node);
     createdIds.push(id);
+    await persistSignalCountsAsIntegers([id]);
 
     const fetched = await store.getById(id);
     expect(fetched).not.toBeNull();
@@ -106,6 +147,7 @@ describe('SemanticStore', () => {
     expect(fetched!.content).toBe(node.content);
     expect(fetched!.confidence).toBe(node.confidence);
     expect(fetched!.signal_count).toBe(node.signal_count);
+    expect(typeof fetched!.signal_count).toBe('number');
     expect(fetched!.decay_class).toBe(node.decay_class);
     expect(fetched!.tags).toEqual(node.tags);
     // No tenant specified → defaults to 'default'
@@ -130,6 +172,7 @@ describe('SemanticStore', () => {
     const idA = await store.create(a);
     const idB = await store.create(b);
     createdIds.push(idA, idB);
+    await persistSignalCountsAsIntegers([idA, idB]);
 
     const fetched = await store.getByIds([idA, idB, `${TEST_PREFIX}-byids-missing`]);
     // Exactly the two existing nodes, missing id omitted.
@@ -138,7 +181,12 @@ describe('SemanticStore', () => {
     const fa = fetched.find((n) => n.id === idA)!;
     expect(fa.content).toBe(a.content);
     expect(fa.confidence).toBe(a.confidence);
+    expect(fa.signal_count).toBe(a.signal_count);
+    expect(typeof fa.signal_count).toBe('number');
     expect(fa.tenant_id).toBe('default');
+    const fb = fetched.find((n) => n.id === idB)!;
+    expect(fb.signal_count).toBe(b.signal_count);
+    expect(typeof fb.signal_count).toBe('number');
 
     // Empty input → empty result, no query.
     expect(await store.getByIds([])).toEqual([]);

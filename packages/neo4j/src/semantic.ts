@@ -2,6 +2,7 @@
 import { type Driver } from 'neo4j-driver';
 import { type SemanticNode, type EmbeddingProvider, DEFAULT_TENANT } from '@memberry/core';
 import { temporalSetClause } from './temporal-edges.js';
+import { normalizeSemanticSignalCount } from './semantic-signal-count.js';
 
 /**
  * Canonical project scope for a semantic node: the explicit scope when set,
@@ -109,7 +110,7 @@ export class SemanticStore {
       id: props.id as string,
       content: props.content as string,
       confidence: props.confidence as number,
-      signal_count: props.signal_count as number,
+      signal_count: normalizeSemanticSignalCount(props.signal_count),
       created_at: props.created_at as string,
       updated_at: props.updated_at as string,
       decay_class: props.decay_class as SemanticNode['decay_class'],

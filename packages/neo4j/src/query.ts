@@ -4,6 +4,7 @@ import type { SemanticNode, FactNode, EpisodicNode, TemporalOptions } from '@mem
 import { readEnv, DEFAULT_TENANT } from '@memberry/core';
 import { activeRelationshipFilter } from './temporal-edges.js';
 import { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from './tenant.js';
+import { normalizeSemanticSignalCount } from './semantic-signal-count.js';
 
 /**
  * OPT-72: default bounded transaction timeout applied to EVERY rawCypher call
@@ -671,7 +672,7 @@ function mapSemanticNode(props: Record<string, unknown>): SemanticNode {
     id: props.id as string,
     content: props.content as string,
     confidence: props.confidence as number,
-    signal_count: props.signal_count as number,
+    signal_count: normalizeSemanticSignalCount(props.signal_count),
     created_at: props.created_at as string,
     updated_at: props.updated_at as string,
     decay_class: props.decay_class as SemanticNode['decay_class'],

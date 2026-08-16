@@ -615,18 +615,26 @@ export class AMPService {
 
     if (observation) {
       const finalIds = new Set(sources);
-      const memoryCandidates = merged.map((node) => ({
-        privateId: node.id,
+      const memoryCandidates = merged.map((node) => {
+        const signalCount = node.signal_count;
+        return {
+          privateId: node.id,
           sourceType: sourceTypeById!.get(node.id) ?? 'semantic',
           channels: candidateChannels!.get(node.id) ?? [],
-        evidence: {
-          confidence: node.confidence,
-          sourceCount: node.signal_count,
-          ...(('superseded' in node) ? { superseded: Boolean((node as unknown as { superseded?: boolean }).superseded) } : {}),
-          ...(('invalidated' in node) ? { invalidated: Boolean((node as unknown as { invalidated?: boolean }).invalidated) } : {}),
-        },
-        estimatedTokens: estimateTokens(node.content),
-      } satisfies InternalRetrievalCandidateObservation));
+          evidence: {
+            confidence: node.confidence,
+            ...(typeof signalCount === 'number'
+              && Number.isSafeInteger(signalCount)
+              && signalCount >= 0
+              && signalCount <= 64
+              ? { sourceCount: signalCount }
+              : {}),
+            ...(('superseded' in node) ? { superseded: Boolean((node as unknown as { superseded?: boolean }).superseded) } : {}),
+            ...(('invalidated' in node) ? { invalidated: Boolean((node as unknown as { invalidated?: boolean }).invalidated) } : {}),
+          },
+          estimatedTokens: estimateTokens(node.content),
+        } satisfies InternalRetrievalCandidateObservation;
+      });
       const factCandidates = facts.map((fact, index) => ({
         privateId: fact.id,
         sourceType: 'fact' as const,
