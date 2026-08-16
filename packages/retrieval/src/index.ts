@@ -49,6 +49,22 @@ export type {
   QueryPlanContractErrorCode,
 } from './query-plan.js';
 
+// Read-only project/tenant-qualified stable Entity-ID resolution (RET-002B)
+export {
+  SCOPED_ENTITY_RESOLVER_MAX_RESULTS,
+  SCOPED_ENTITY_RESOLVER_MAX_CONTAINMENT_DEPTH,
+  SCOPED_ENTITY_RESOLVER_MAX_AUTHORITATIVE_DEPTH,
+  SCOPED_ENTITY_RESOLVER_TIMEOUT_MS,
+  ScopedEntityResolver,
+  ScopedEntityResolverError,
+} from './scoped-entity-resolver.js';
+export type {
+  ScopedEntityResolverDiagnosticCode,
+  ScopedEntityResolverErrorCode,
+  ScopedEntityResolutionResultV1,
+  ScopedEntityTrustedAuthorityV1,
+} from './scoped-entity-resolver.js';
+
 // Scoring
 export {
   scaleRrfK,
