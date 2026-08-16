@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  hasExactDockerImageArgsEscapedV1,
+} from '../build.js';
+import {
+  hasExactCandidateRootFsExtensionV1,
   inspectDockerCopyArchiveV1,
   selectCidFileCleanupAuthorityV1,
 } from '../sandbox.js';
@@ -32,6 +36,8 @@ function tar(
   header[156] = 0x30;
   header.set(new TextEncoder().encode('ustar\0'), 257);
   header.set(new TextEncoder().encode('00'), 263);
+  header.set(octal(0, 8), 329);
+  header.set(octal(0, 8), 337);
   const checksum = header.reduce((sum, byte) => sum + byte, 0);
   header.set(new TextEncoder().encode(`${checksum.toString(8).padStart(6, '0')}\0 `), 148);
   const archive = new Uint8Array(512 + Math.ceil(content.byteLength / 512) * 512 + 1_024);
@@ -88,6 +94,28 @@ describe('MEM-002C2 CID-file-only cleanup authority', () => {
 });
 
 describe('MEM-002C2 canonical Docker-copy USTAR boundary', () => {
+  it('requires Docker 29 candidate image ArgsEscaped metadata as one exact data property', () => {
+    expect(hasExactDockerImageArgsEscapedV1({ ArgsEscaped: true })).toBe(true);
+    expect(hasExactDockerImageArgsEscapedV1({})).toBe(false);
+    expect(hasExactDockerImageArgsEscapedV1({ ArgsEscaped: false })).toBe(false);
+    const getter = vi.fn(() => true);
+    const accessor = Object.defineProperty({}, 'ArgsEscaped', { enumerable: true, get: getter });
+    expect(hasExactDockerImageArgsEscapedV1(accessor)).toBe(false);
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it('requires the exact two-layer WORKDIR plus COPY extension over the approved base prefix', () => {
+    const base = [1, 2, 3, 4].map((digit) => `sha256:${String(digit).repeat(64)}`);
+    const candidate = [...base, `sha256:${'5'.repeat(64)}`, `sha256:${'6'.repeat(64)}`];
+    expect(hasExactCandidateRootFsExtensionV1(base, candidate)).toBe(true);
+    expect(hasExactCandidateRootFsExtensionV1(base, candidate.slice(0, -1))).toBe(false);
+    expect(hasExactCandidateRootFsExtensionV1(base, [...candidate, `sha256:${'7'.repeat(64)}`])).toBe(false);
+    expect(hasExactCandidateRootFsExtensionV1(
+      base,
+      [`sha256:${'0'.repeat(64)}`, ...candidate.slice(1)],
+    )).toBe(false);
+  });
+
   it.each(['worker.mjs', 'attestation.json', 'node'] as const)(
     'accepts one exact canonical regular-file archive for %s',
     (name) => {
@@ -125,6 +153,14 @@ describe('MEM-002C2 canonical Docker-copy USTAR boundary', () => {
     const checksum = tar('worker.mjs', Uint8Array.of(1));
     checksum[154] = 0x20;
     expect(() => inspectDockerCopyArchiveV1(checksum, 'worker.mjs')).toThrow('invalid Docker copy archive');
+  });
+
+  it('rejects NUL-filled device fields instead of accepting two zero encodings', () => {
+    const archive = tar('worker.mjs', Uint8Array.of(1));
+    archive.fill(0, 329, 345);
+    recalculateChecksum(archive);
+    expect(() => inspectDockerCopyArchiveV1(archive, 'worker.mjs'))
+      .toThrow('invalid Docker copy archive');
   });
 
   it('rejects path suffix garbage after NUL and nonzero content padding/trailer', () => {

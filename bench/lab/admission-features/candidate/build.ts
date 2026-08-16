@@ -8,6 +8,7 @@ import {
   cleanupOwnedTemporaryDirectoryV1,
   createDockerCommandInvocationV1,
   createOwnedTemporaryDirectoryV1,
+  hasExactCandidateRootFsExtensionV1,
   inspectDockerCopyArchiveV1,
   readOwnedContainerIdFileV1,
   runDockerCommandV1,
@@ -28,6 +29,10 @@ const CANDIDATE_ARGUMENTS = Object.freeze([
   '--permission', '--allow-fs-read=/run/input.json',
   '--allow-fs-write=/tmp/memberry-sandbox-write-probe',
   '--disable-proto=throw', '/app/worker.mjs', '/run/input.json',
+]);
+const SANDBOX_ARGUMENTS = Object.freeze([
+  '--permission', '--allow-fs-write=/tmp/memberry-sandbox-write-probe',
+  '--disable-proto=throw', '/app/worker.mjs', '-',
 ]);
 const PRELOAD_ENV_PATTERN = /^(?:NODE_OPTIONS|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.+|BASH_ENV|ENV)=/;
 const EXPECTED_DOCKERIGNORE_V1 = '**\n!container/\n!container/Dockerfile\n!container/worker.mjs\n!container/manifest.json\n!container/attestation.json\n';
@@ -208,12 +213,12 @@ export function validateAdmissionCandidateBuildAssetsV1(value: unknown): Readonl
     || runtime.pids !== 32 || runtime.cpus !== '0.5' || runtime.memory !== '128m'
     || runtime.memorySwap !== '128m' || runtime.timeoutMs !== 5_000
     || runtime.inputBytes !== 32_768 || runtime.outputBytes !== 32_768 || runtime.stderrBytes !== 1_024
-    || inputDelivery.transport !== 'stopped-container-tar-copy' || inputDelivery.path !== '/run/input.json'
-    || inputDelivery.uid !== 65_532 || inputDelivery.gid !== 65_532 || inputDelivery.mode !== '0400'
+    || inputDelivery.transport !== 'attached-stdin' || inputDelivery.path !== null
+    || inputDelivery.uid !== null || inputDelivery.gid !== null || inputDelivery.mode !== null
     || inputDelivery.runtimeRoot !== 'read-only' || inputDelivery.mounts !== 0
     || environment.LANG !== 'C.UTF-8' || environment.LC_ALL !== 'C.UTF-8' || environment.TZ !== 'UTC'
     || runtime.executable !== 'node' || runtime.entrypoint !== '/usr/local/bin/node'
-    || !exactArray(runtime.arguments, CANDIDATE_ARGUMENTS)
+    || !exactArray(runtime.arguments, SANDBOX_ARGUMENTS)
     || cleanup.identity !== 'bounded nofollow owned cidfile is sole deletion authority; label is residue proof only'
     || cleanup.runningAction !== 'docker container kill by inspected ID'
     || cleanup.removalAction !== 'docker container rm -fv by inspected ID'
@@ -227,7 +232,7 @@ export function validateAdmissionCandidateBuildAssetsV1(value: unknown): Readonl
       'container image equals attested local image ID',
       'network mode is none', 'mount list is empty', 'root filesystem is read-only',
       'user is 65532:65532', 'capabilities are dropped', 'no-new-privileges is enabled',
-      'PID CPU and memory bounds are exact', 'entrypoint and arguments are exact',
+      'PID CPU and memory bounds are exact', 'entrypoint arguments and attached stdin are exact',
       'stdout artifact is validated by independent closed host protocol with exact input hash identity and order bindings',
     ])
     || !exactArray(runtime.runtimeAssertions, [
@@ -243,14 +248,19 @@ export function validateAdmissionCandidateBuildAssetsV1(value: unknown): Readonl
   return Object.freeze({ baseImage: APPROVED_NODE_BASE_IMAGE_V1 });
 }
 
-function safeResultV1(result: DockerCommandResultV1, allowStderr = false): Uint8Array {
+export function snapshotSuccessfulDockerCommandBytesV1(
+  result: DockerCommandResultV1,
+  allowStderr = false,
+): Uint8Array {
   result = snapshotDockerCommandResultV1(result);
   if (result.launchFailed || result.timedOut || result.outputExceeded || result.stderrExceeded
     || result.exitCode !== 0 || (!allowStderr && result.stderr.byteLength !== 0)) {
     throw new Error('candidate image command failed');
   }
-  return new Uint8Array(result.stdout);
+  return snapshotExactUint8ArrayV1(result.stdout, 0, 134_219_776);
 }
+
+const safeResultV1 = snapshotSuccessfulDockerCommandBytesV1;
 
 function safeTextV1(result: DockerCommandResultV1, allowStderr = false): string {
   return new TextDecoder('utf-8', { fatal: true }).decode(safeResultV1(result, allowStderr));
@@ -373,20 +383,32 @@ function expectedCandidateEnvironmentV1(base: any): readonly string[] {
   return Object.freeze([...retained, 'LANG=C.UTF-8', 'LC_ALL=C.UTF-8', 'TZ=UTC']);
 }
 
+export function hasExactDockerImageArgsEscapedV1(config: unknown): boolean {
+  if (typeof config !== 'object' || config === null || nodeUtilTypes.isProxy(config)) return false;
+  const descriptor = Object.getOwnPropertyDescriptor(config, 'ArgsEscaped');
+  return descriptor !== undefined
+    && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    && descriptor.value === true
+    && descriptor.enumerable === true
+    && descriptor.writable === true
+    && descriptor.configurable === true;
+}
+
 function verifyImageV1(base: any, image: any, imageId: string, candidate: string, source: string): readonly string[] {
   const baseLayers = rootFsLayersV1(base);
   const layers = rootFsLayersV1(image);
   const config = image?.Config;
   const allowedConfigKeys = new Set([
     'User', 'Env', 'Entrypoint', 'Cmd', 'WorkingDir', 'Labels', 'Volumes', 'Healthcheck',
-    'Shell', 'OnBuild', 'ExposedPorts', 'StopSignal',
+    'Shell', 'OnBuild', 'ExposedPorts', 'StopSignal', 'ArgsEscaped',
   ]);
   if (!Array.isArray(base?.RepoDigests) || !base.RepoDigests.includes(APPROVED_NODE_BASE_IMAGE_V1)
     || base?.Os !== 'linux' || base?.Architecture !== 'amd64'
     || image?.Id !== imageId || image?.Os !== 'linux' || image?.Architecture !== 'amd64'
-    || layers.length !== baseLayers.length + 1 || !baseLayers.every((layer, index) => layers[index] === layer)
+    || !hasExactCandidateRootFsExtensionV1(baseLayers, layers)
     || typeof config !== 'object' || config === null || Object.keys(config).some((key) => !allowedConfigKeys.has(key))
     || config.User !== '65532:65532' || !exactStrings(config.Env, expectedCandidateEnvironmentV1(base))
+    || !hasExactDockerImageArgsEscapedV1(config)
     || config.Env.some((entry: string) => PRELOAD_ENV_PATTERN.test(entry))
     || !exactStrings(config.Entrypoint, ['/usr/local/bin/node']) || !exactStrings(config.Cmd, CANDIDATE_ARGUMENTS)
     || config.WorkingDir !== '/app' || config.Volumes != null || config.Healthcheck != null

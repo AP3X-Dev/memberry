@@ -51,11 +51,11 @@
     "outputBytes": 32768,
     "stderrBytes": 1024,
     "inputDelivery": {
-      "transport": "stopped-container-tar-copy",
-      "path": "/run/input.json",
-      "uid": 65532,
-      "gid": 65532,
-      "mode": "0400",
+      "transport": "attached-stdin",
+      "path": null,
+      "uid": null,
+      "gid": null,
+      "mode": null,
       "runtimeRoot": "read-only",
       "mounts": 0
     },
@@ -68,11 +68,10 @@
     "entrypoint": "/usr/local/bin/node",
     "arguments": [
       "--permission",
-      "--allow-fs-read=/run/input.json",
       "--allow-fs-write=/tmp/memberry-sandbox-write-probe",
       "--disable-proto=throw",
       "/app/worker.mjs",
-      "/run/input.json"
+      "-"
     ],
     "inspectionAssertions": [
       "image labels equal current candidate and source hashes as supplemental metadata",
@@ -87,7 +86,7 @@
       "capabilities are dropped",
       "no-new-privileges is enabled",
       "PID CPU and memory bounds are exact",
-      "entrypoint and arguments are exact",
+      "entrypoint arguments and attached stdin are exact",
       "stdout artifact is validated by independent closed host protocol with exact input hash identity and order bindings"
     ],
     "runtimeAssertions": [

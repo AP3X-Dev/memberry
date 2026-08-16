@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import { unlink, writeFile } from 'node:fs/promises';
 import { Socket } from 'node:net';
 import { pathToFileURL } from 'node:url';
@@ -194,6 +193,21 @@ export function runAdmissionFeatureWorkerBytesV1(inputBytes: Uint8Array): Admiss
   }
 }
 
+async function readAdmissionWorkerStdinV1(): Promise<Uint8Array> {
+  const bytes = new Uint8Array(ADMISSION_SANDBOX_LIMITS_V1.inputBytes);
+  let length = 0;
+  for await (const chunk of process.stdin) {
+    if (!(chunk instanceof Uint8Array)
+      || length + chunk.byteLength > ADMISSION_SANDBOX_LIMITS_V1.inputBytes) {
+      throw new Error('invalid');
+    }
+    bytes.set(chunk, length);
+    length += chunk.byteLength;
+  }
+  if (length < 1) throw new Error('invalid');
+  return bytes.slice(0, length);
+}
+
 async function main(): Promise<void> {
   sanitizeWorkerEnvironmentV1();
   let result: AdmissionFeatureWorkerResultV1;
@@ -207,10 +221,10 @@ async function main(): Promise<void> {
       process.exitCode = result.exitCode;
       return;
     }
-    if (process.argv.length !== 3 || process.argv[2] !== '/run/input.json') {
+    if (process.argv.length !== 3 || process.argv[2] !== '-') {
       throw new Error('invalid');
     }
-    const bytes = await readFile('/run/input.json');
+    const bytes = await readAdmissionWorkerStdinV1();
     result = runAdmissionFeatureWorkerBytesV1(bytes);
   } catch {
     result = Object.freeze({

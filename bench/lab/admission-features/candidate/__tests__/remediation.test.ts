@@ -10,6 +10,7 @@ import {
   APPROVED_NODE_BASE_IMAGE_V1,
   buildAdmissionFeatureCandidateImageV1,
   createCanonicalBuildContextV1,
+  snapshotSuccessfulDockerCommandBytesV1,
   validateStoppedProofInspectionV1,
   validateAdmissionCandidateBuildAssetsV1,
 } from '../build.js';
@@ -19,7 +20,6 @@ import {
   buildAdmissionFeatureSandboxInvocationV1,
   cleanupOwnedTemporaryDirectoryV1,
   createOwnedTemporaryDirectoryV1,
-  createAdmissionInputArchiveV1,
   dockerCliEnvironmentV1,
   prepareDockerSpawnV1,
   readOwnedContainerIdFileV1,
@@ -72,6 +72,23 @@ function stoppedProofRecord(
 }
 
 describe('MEM-002C2 hostile remediation contract', () => {
+  it('preserves sealed trusted Docker stdout instead of returning an extensible large-copy boundary', () => {
+    const original = Uint8Array.of(1, 2, 3);
+    const bytes = snapshotSuccessfulDockerCommandBytesV1({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: original,
+      stderr: new Uint8Array(),
+      outputExceeded: false,
+      stderrExceeded: false,
+      launchFailed: false,
+    });
+    original.fill(0xff);
+    expect(bytes).toEqual(Uint8Array.of(1, 2, 3));
+    expect(Object.isExtensible(bytes)).toBe(false);
+  });
+
   it('binds a stopped proof to both the requested image reference and immutable image ID', () => {
     const containerId = 'c'.repeat(64);
     const imageId = `sha256:${'d'.repeat(64)}`;
@@ -170,7 +187,6 @@ describe('MEM-002C2 hostile remediation contract', () => {
     const entries = canonicalEntries();
     entries[0] = { path: '.dockerignore', bytes: hostile };
     expect(() => createCanonicalBuildContextV1(entries)).toThrow();
-    expect(() => createAdmissionInputArchiveV1(hostile)).toThrow();
     expect(() => snapshotAdmissionOutputEvidenceV1(hostile)).toThrow();
     expect(() => prepareDockerSpawnV1({
       executable: 'docker', args: ['version'], env: {}, shell: false, stdin: hostile,
@@ -388,6 +404,24 @@ describe('MEM-002C2 hostile remediation contract', () => {
     child.stdin.emit('error', new Error('broken pipe'));
     child.emit('close', null, 'SIGKILL');
     await expect(result).resolves.toMatchObject({ launchFailed: true, signal: 'SIGKILL' });
+  });
+
+  it('writes exact stdin bytes once and closes stdin before awaiting the container', async () => {
+    const stdin = new PassThrough();
+    const received: Buffer[] = [];
+    stdin.on('data', (chunk: Buffer) => received.push(chunk));
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(), stderr: new PassThrough(), stdin, kill: vi.fn(() => true),
+    });
+    stdin.once('finish', () => child.emit('close', 0, null));
+    const result = await runDockerCommandWithSpawnV1({
+      executable: 'docker', args: ['container', 'start', '--attach', '--interactive', 'c'.repeat(64)],
+      env: dockerCliEnvironmentV1(process.env), shell: false,
+      stdin: Uint8Array.of(1, 2, 3), timeoutMs: 1_000,
+    }, (() => child) as any, async () => trustedDockerTestExecutable);
+    expect(Buffer.concat(received)).toEqual(Buffer.from([1, 2, 3]));
+    expect(stdin.writableEnded).toBe(true);
+    expect(result).toMatchObject({ exitCode: 0, launchFailed: false });
   });
 
   it('freezes the exact base and validates the full nested manifest without hooks', async () => {

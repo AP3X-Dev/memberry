@@ -74,20 +74,20 @@ const IMMUTABLE_CANDIDATE_GIT_BLOBS_V1 = Object.freeze({
     sha256: 'sha256:954667045d8aae708c115df28c31b4d698908e87c00cc8b70d4916b87d3f49ba',
   }),
   'worker.ts': Object.freeze({
-    oid: '3d520cdebb485ba2af4b52be07e2b56c77a44a13',
-    sha256: 'sha256:8a3c2e85e9225a28c22c1902a4b5284f54537abcb1dd6c112bb2691e91705471',
+    oid: '01d99687503ba7fe985b706b138c008f091551e9',
+    sha256: 'sha256:270984d01e8f817349a75c439c3ace13dddd862e57d98d53111f22951d47c422',
   }),
   'container/Dockerfile': Object.freeze({
     oid: '60911c76ab5dd27016a2ba939ed3637b798c4de1',
     sha256: 'sha256:999d3e38f341c0c2f1c440375d00e5cc3cd9a7ccc6ee68d7253884cd62470c44',
   }),
   'container/manifest.json': Object.freeze({
-    oid: '1f0a04ad741ca085f25cc4b12c66ff3c869fb2fb',
-    sha256: 'sha256:4d8c152cecffa1c546899eac2a014c032694c06f6800e2d5379585428f9512ed',
+    oid: '6b28963aa5455c2808e7d89a134c34fa92f19454',
+    sha256: 'sha256:20acbfad6167d75727b66c2d58fbc4fac0364f232f249b2b856f2972e6600c46',
   }),
   'container/worker.mjs': Object.freeze({
-    oid: 'cb706c3a27e6f5afe1026890d9dfda9ac4140cb2',
-    sha256: 'sha256:b1f3b0f9d23b7bf212c5e20844e05a44aef9694dbcc8888ab908137eb95d4211',
+    oid: '529ab77b19d43fdb604c5b6d1194486ac7f08d8d',
+    sha256: 'sha256:474459f8359fe8a117547453dc1e728b4aab9a69f69f7faa4cf188e27e4742ca',
   }),
 } as const);
 const TYPED_ARRAY_PROTOTYPE_V1 = Object.getPrototypeOf(Uint8Array.prototype);
@@ -159,35 +159,6 @@ function octalField(value: number, width: number): Uint8Array {
   return new TextEncoder().encode(`${encoded}\0`);
 }
 
-function writeField(target: Uint8Array, offset: number, width: number, value: Uint8Array): void {
-  if (value.byteLength > width) throw new Error('tar field out of bounds');
-  target.set(value, offset);
-}
-
-export function createAdmissionInputArchiveV1(content: Uint8Array): Uint8Array {
-  content = snapshotExactUint8ArrayV1(content, 1, ADMISSION_SANDBOX_LIMITS_V1.inputBytes);
-  const header = new Uint8Array(512);
-  writeField(header, 0, 100, new TextEncoder().encode('run/input.json'));
-  writeField(header, 100, 8, octalField(0o400, 8));
-  writeField(header, 108, 8, octalField(ADMISSION_SANDBOX_UID_V1, 8));
-  writeField(header, 116, 8, octalField(ADMISSION_SANDBOX_GID_V1, 8));
-  writeField(header, 124, 12, octalField(content.byteLength, 12));
-  writeField(header, 136, 12, octalField(0, 12));
-  header.fill(0x20, 148, 156);
-  header[156] = 0x30;
-  writeField(header, 257, 6, new TextEncoder().encode('ustar\0'));
-  writeField(header, 263, 2, new TextEncoder().encode('00'));
-  const checksum = header.reduce((total, byte) => total + byte, 0);
-  writeField(header, 148, 8, new TextEncoder().encode(
-    `${checksum.toString(8).padStart(6, '0')}\0 `,
-  ));
-  const paddedContentLength = Math.ceil(content.byteLength / 512) * 512;
-  const archive = new Uint8Array(512 + paddedContentLength + 1_024);
-  archive.set(header, 0);
-  archive.set(content, 512);
-  return sealTrustedExactBytesV1(archive);
-}
-
 function parseTarOctal(bytes: Uint8Array): number {
   const value = new TextDecoder('ascii').decode(bytes).replace(/[\0 ]+$/g, '');
   if (!/^[0-7]+$/.test(value)) throw new Error('invalid tar integer');
@@ -244,7 +215,10 @@ export function inspectDockerCopyArchiveV1(
     || !header.subarray(157, 257).every((byte) => byte === 0)
     || !header.subarray(257, 263).every((byte, index) => byte === [0x75, 0x73, 0x74, 0x61, 0x72, 0][index])
     || !header.subarray(263, 265).every((byte, index) => byte === [0x30, 0x30][index])
-    || !header.subarray(265, 512).every((byte) => byte === 0)
+    || !header.subarray(265, 329).every((byte) => byte === 0)
+    || !exactTarOctalFieldV1(header.subarray(329, 337), 0)
+    || !exactTarOctalFieldV1(header.subarray(337, 345), 0)
+    || !header.subarray(345, 512).every((byte) => byte === 0)
     || !header.subarray(148, 156).every((byte, index) => byte
       === new TextEncoder().encode(`${calculatedChecksum.toString(8).padStart(6, '0')}\0 `)[index])
     || storedChecksum !== calculatedChecksum || archive.byteLength !== expectedLength
@@ -252,40 +226,6 @@ export function inspectDockerCopyArchiveV1(
     throw new Error('invalid Docker copy archive');
   }
   return sealTrustedExactBytesV1(archive.slice(512, 512 + size));
-}
-
-export function inspectAdmissionInputArchiveV1(archive: Uint8Array): Readonly<{
-  path: 'run/input.json';
-  type: 'file';
-  mode: 0o400;
-  uid: typeof ADMISSION_SANDBOX_UID_V1;
-  gid: typeof ADMISSION_SANDBOX_GID_V1;
-  content: Uint8Array;
-}> {
-  archive = snapshotExactUint8ArrayV1(
-    archive, 1_536, ADMISSION_SANDBOX_LIMITS_V1.inputBytes + 2_048,
-  );
-  const header = archive.subarray(0, 512);
-  const path = new TextDecoder('ascii').decode(header.subarray(0, 100)).replace(/\0+$/g, '');
-  const mode = parseTarOctal(header.subarray(100, 108));
-  const uid = parseTarOctal(header.subarray(108, 116));
-  const gid = parseTarOctal(header.subarray(116, 124));
-  const size = parseTarOctal(header.subarray(124, 136));
-  if (path !== 'run/input.json' || mode !== 0o400 || uid !== ADMISSION_SANDBOX_UID_V1
-    || gid !== ADMISSION_SANDBOX_GID_V1 || header[156] !== 0x30
-    || size < 1 || size > ADMISSION_SANDBOX_LIMITS_V1.inputBytes
-    || archive.byteLength !== 512 + Math.ceil(size / 512) * 512 + 1_024
-    || archive.subarray(512 + size).some((byte) => byte !== 0)) {
-    throw new Error('invalid input archive');
-  }
-  return Object.freeze({
-    path: 'run/input.json',
-    type: 'file',
-    mode: 0o400,
-    uid: ADMISSION_SANDBOX_UID_V1,
-    gid: ADMISSION_SANDBOX_GID_V1,
-    content: sealTrustedExactBytesV1(archive.slice(512, 512 + size)),
-  });
 }
 
 export function dockerCliEnvironmentV1(value: unknown): Readonly<Record<string, string>> {
@@ -373,7 +313,7 @@ export interface AdmissionSandboxAttestationV1 {
 
 export interface AdmissionSandboxJobV1 {
   readonly image: `sha256:${string}`;
-  readonly inputArchive: Uint8Array;
+  readonly inputBytes: Uint8Array;
   readonly temporary: OwnedTemporaryDirectoryV1;
   readonly expectedAttestation: AdmissionSandboxAttestationV1;
 }
@@ -694,7 +634,7 @@ export function buildAdmissionFeatureSandboxInvocationV1(value: unknown): Admiss
   const args = Object.freeze([
     'create', `--cidfile=${parsed.cidFile}`, '--pull=never',
     `--label=org.memberry.run-token=${parsed.runToken}`, '--network=none',
-    '--read-only', '--user=65532:65532',
+    '--read-only', '--interactive', '--user=65532:65532',
     '--cap-drop=ALL', '--security-opt=no-new-privileges:true',
     `--pids-limit=${ADMISSION_SANDBOX_LIMITS_V1.pids}`,
     `--cpus=${ADMISSION_SANDBOX_LIMITS_V1.cpu}`,
@@ -703,11 +643,23 @@ export function buildAdmissionFeatureSandboxInvocationV1(value: unknown): Admiss
     '--env=LANG=C.UTF-8', '--env=LC_ALL=C.UTF-8', '--env=TZ=UTC',
     '--entrypoint=/usr/local/bin/node',
     '--platform=linux/amd64', parsed.image,
-    '--permission', '--allow-fs-read=/run/input.json',
-    '--allow-fs-write=/tmp/memberry-sandbox-write-probe',
-    '--disable-proto=throw', '/app/worker.mjs', '/run/input.json',
+    '--permission', '--allow-fs-write=/tmp/memberry-sandbox-write-probe',
+    '--disable-proto=throw', '/app/worker.mjs', '-',
   ]);
   return Object.freeze({ executable: 'docker', args, env: hostEnvironment, shell: false });
+}
+
+export function buildAdmissionFeatureSandboxStartInvocationV1(
+  containerId: unknown,
+  inputBytes: unknown,
+): AdmissionSandboxInvocationV1 {
+  if (typeof containerId !== 'string' || !/^[0-9a-f]{64}$/.test(containerId)) {
+    throw new Error('invalid sandbox start invocation');
+  }
+  return createDockerCommandInvocationV1(
+    ['container', 'start', '--attach', '--interactive', containerId],
+    snapshotExactUint8ArrayV1(inputBytes, 1, ADMISSION_SANDBOX_LIMITS_V1.inputBytes),
+  );
 }
 
 function appendBounded(
@@ -1076,6 +1028,31 @@ function rootFsLayersV1(inspection: any): readonly string[] {
   return layers;
 }
 
+export function hasExactCandidateRootFsExtensionV1(
+  baseLayers: unknown,
+  candidateLayers: unknown,
+): boolean {
+  const snapshot = (value: unknown): readonly string[] | undefined => {
+    if (!Array.isArray(value) || nodeUtilTypes.isProxy(value)
+      || Object.getPrototypeOf(value) !== Array.prototype
+      || value.length < 1 || value.length > 256
+      || Reflect.ownKeys(value).length !== value.length + 1) return undefined;
+    const layers: string[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+        || typeof descriptor.value !== 'string' || !IMAGE_PATTERN.test(descriptor.value)) return undefined;
+      layers.push(descriptor.value);
+    }
+    return layers;
+  };
+  const base = snapshot(baseLayers);
+  const candidate = snapshot(candidateLayers);
+  return base !== undefined && candidate !== undefined
+    && candidate.length === base.length + 2
+    && base.every((layer, index) => candidate[index] === layer);
+}
+
 function verifyImageInspectionV1(
   baseInspection: any,
   inspection: any,
@@ -1088,8 +1065,7 @@ function verifyImageInspectionV1(
     || !baseInspection.RepoDigests.includes(APPROVED_NODE_BASE_IMAGE_V1)
     || baseInspection?.Os !== 'linux' || baseInspection?.Architecture !== 'amd64'
     || inspection?.Os !== 'linux' || inspection?.Architecture !== 'amd64'
-    || imageLayers.length !== baseLayers.length + 1
-    || !baseLayers.every((layer, index) => imageLayers[index] === layer)
+    || !hasExactCandidateRootFsExtensionV1(baseLayers, imageLayers)
     || !exactStringArray(imageLayers, job.expectedAttestation.rootFsLayers)
     || inspection?.Id !== job.image || typeof labels !== 'object' || labels === null
     || canonicalImageConfigSha256V1(inspection?.Config) !== job.expectedAttestation.imageConfigSha256
@@ -1131,11 +1107,12 @@ function verifyContainerInspectionV1(inspection: any, job: AdmissionSandboxJobV1
     || config?.Labels?.['org.memberry.run-token'] !== job.temporary.runToken
     || config?.Labels?.['org.memberry.candidate.sha256'] !== job.expectedAttestation.candidateSha256
     || config?.User !== `${ADMISSION_SANDBOX_UID_V1}:${ADMISSION_SANDBOX_GID_V1}`
+    || config?.OpenStdin !== true || config?.StdinOnce !== true
+    || config?.AttachStdin !== true || config?.Tty !== false
     || !exactStringArray(config?.Entrypoint, ['/usr/local/bin/node'])
     || !exactStringArray(config?.Cmd, [
-      '--permission', '--allow-fs-read=/run/input.json',
-      '--allow-fs-write=/tmp/memberry-sandbox-write-probe',
-      '--disable-proto=throw', '/app/worker.mjs', '/run/input.json',
+      '--permission', '--allow-fs-write=/tmp/memberry-sandbox-write-probe',
+      '--disable-proto=throw', '/app/worker.mjs', '-',
     ])
     || host?.NetworkMode !== 'none' || host?.ReadonlyRootfs !== true
     || !Array.isArray(host?.CapDrop) || host.CapDrop.length !== 1 || host.CapDrop[0] !== 'ALL'
@@ -1326,12 +1303,8 @@ async function executeAdmissionSandboxDockerWithRunnerV1(
       inspectDockerCopyArchiveV1(attestationArchive.stdout, 'attestation.json'),
       job.expectedAttestation,
     );
-    resultText(await runner(createDockerCommandInvocationV1(
-      ['container', 'cp', '-a', '-', `${cidId}:/`],
-      job.inputArchive,
-    )));
     const started = snapshotDockerCommandResultV1(await runner(
-      createDockerCommandInvocationV1(['container', 'start', '--attach', cidId]),
+      buildAdmissionFeatureSandboxStartInvocationV1(cidId, job.inputBytes),
     ));
     execution = {
       exitCode: started.exitCode,
@@ -2072,7 +2045,7 @@ export async function runAdmissionFeatureSandboxV1(
     });
     const execution = snapshotAdmissionExecutionV1(await executeAdmissionSandboxDockerV1(Object.freeze({
       image: request.image as `sha256:${string}`,
-      inputArchive: createAdmissionInputArchiveV1(inputBytes),
+      inputBytes,
       temporary,
       expectedAttestation,
     })));

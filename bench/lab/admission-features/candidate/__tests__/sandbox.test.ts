@@ -11,8 +11,7 @@ import * as sandboxModule from '../sandbox.js';
 import {
   ADMISSION_SANDBOX_LIMITS_V1,
   buildAdmissionFeatureSandboxInvocationV1,
-  createAdmissionInputArchiveV1,
-  inspectAdmissionInputArchiveV1,
+  buildAdmissionFeatureSandboxStartInvocationV1,
   prepareDockerSpawnV1,
   runAdmissionFeatureSandboxV1,
   snapshotAdmissionOutputEvidenceV1,
@@ -117,7 +116,7 @@ describe('MEM-002C2 fixed worker protocol', () => {
     const hooks = { get: vi.fn(), getPrototypeOf: vi.fn() };
     const proxy = new Proxy(new Uint8Array([1]), hooks);
     expect(runAdmissionFeatureWorkerBytesV1(proxy).exitCode).toBe(20);
-    expect(() => createAdmissionInputArchiveV1(proxy)).toThrow();
+    expect(() => buildAdmissionFeatureSandboxStartInvocationV1('c'.repeat(64), proxy)).toThrow();
     expect(hooks.get).not.toHaveBeenCalled();
     expect(hooks.getPrototypeOf).not.toHaveBeenCalled();
   });
@@ -190,7 +189,7 @@ describe('MEM-002C2 closed public sandbox boundary', () => {
 });
 
 describe('MEM-002C2 hardened sandbox invocation', () => {
-  it('is offline, non-root, read-only, capability-free, bounded, and mount-free', () => {
+  it('is offline, non-root, read-only, interactive, capability-free, bounded, and mount-free', () => {
     const runToken = 'b'.repeat(32);
     const cidFile = resolve(tmpdir(), `memberry-admission-run-${runToken}-abcdef`, 'container.cid');
     const invocation = buildAdmissionFeatureSandboxInvocationV1({
@@ -198,17 +197,31 @@ describe('MEM-002C2 hardened sandbox invocation', () => {
     });
     expect(invocation.args).toContain('--network=none');
     expect(invocation.args).toContain('--read-only');
+    expect(invocation.args).toContain('--interactive');
     expect(invocation.args).toContain('--user=65532:65532');
     expect(invocation.args).toContain('--pids-limit=32');
     expect(invocation.args.join(' ')).not.toMatch(/--allow-child-process|--allow-worker|--allow-net/);
     expect(invocation.args.join(' ')).not.toMatch(/--mount|--volume|docker\.sock|\.git|scorer-only|oracle/i);
+    expect(invocation.args.join(' ')).not.toContain('/run/input.json');
+    expect(invocation.args.join(' ')).not.toContain('--allow-fs-read');
   });
 
-  it('round-trips one canonical owner-only input archive', () => {
+  it('snapshots one exact bounded stdin payload for attached start and rejects substitution', () => {
     const content = new TextEncoder().encode('{"bounded":true}');
-    expect(inspectAdmissionInputArchiveV1(createAdmissionInputArchiveV1(content))).toMatchObject({
-      path: 'run/input.json', type: 'file', mode: 0o400, uid: 65_532, gid: 65_532, content,
-    });
+    const invocation = buildAdmissionFeatureSandboxStartInvocationV1('c'.repeat(64), content);
+    content.fill(0xff);
+    expect(invocation.args).toEqual(['container', 'start', '--attach', '--interactive', 'c'.repeat(64)]);
+    expect(invocation.stdin).toEqual(new TextEncoder().encode('{"bounded":true}'));
+    expect(Object.isExtensible(invocation.stdin!)).toBe(false);
+    expect(() => buildAdmissionFeatureSandboxStartInvocationV1(
+      'c'.repeat(64), new Uint8Array(ADMISSION_SANDBOX_LIMITS_V1.inputBytes + 1),
+    )).toThrow();
+    expect(() => buildAdmissionFeatureSandboxStartInvocationV1(
+      'c'.repeat(64), new Uint8Array(),
+    )).toThrow();
+    expect(() => buildAdmissionFeatureSandboxStartInvocationV1(
+      'c'.repeat(63), Uint8Array.of(1),
+    )).toThrow();
   });
 
   it('bounds Docker argv count and argument width before spawn', () => {
