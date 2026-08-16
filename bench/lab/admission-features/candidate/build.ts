@@ -413,11 +413,17 @@ async function discoverProofV1(token: string, runner: DockerCommandRunnerV1): Pr
   return ids;
 }
 
-async function inspectOwnedProofV1(id: string, image: string, token: string, runner: DockerCommandRunnerV1): Promise<any> {
-  const inspected = JSON.parse(safeTextV1(await runner(createDockerCommandInvocationV1([
-    'container', 'inspect', '--format={{json .}}', id,
-  ]))));
-  if (inspected?.Id !== id || inspected?.Image !== image
+export function validateStoppedProofInspectionV1(
+  inspected: any,
+  id: string,
+  requestedImage: string,
+  expectedImageId: string,
+  token: string,
+): any {
+  if (!CONTAINER_ID_PATTERN.test(id) || !IMAGE_PATTERN.test(expectedImageId)
+    || (requestedImage !== APPROVED_NODE_BASE_IMAGE_V1 && !IMAGE_PATTERN.test(requestedImage))
+    || inspected?.Id !== id || inspected?.Image !== expectedImageId
+    || inspected?.Config?.Image !== requestedImage
     || inspected?.Config?.Labels?.['org.memberry.build-token'] !== token
     || inspected?.Config?.Volumes != null
     || !Array.isArray(inspected?.Mounts) || inspected.Mounts.length !== 0) {
@@ -426,8 +432,22 @@ async function inspectOwnedProofV1(id: string, image: string, token: string, run
   return inspected;
 }
 
+async function inspectOwnedProofV1(
+  id: string,
+  requestedImage: string,
+  expectedImageId: string,
+  token: string,
+  runner: DockerCommandRunnerV1,
+): Promise<any> {
+  const inspected = JSON.parse(safeTextV1(await runner(createDockerCommandInvocationV1([
+    'container', 'inspect', '--format={{json .}}', id,
+  ]))));
+  return validateStoppedProofInspectionV1(inspected, id, requestedImage, expectedImageId, token);
+}
+
 async function cleanupProofV1(
-  image: string, temporary: Awaited<ReturnType<typeof createOwnedTemporaryDirectoryV1>>,
+  requestedImage: string, expectedImageId: string,
+  temporary: Awaited<ReturnType<typeof createOwnedTemporaryDirectoryV1>>,
   runner: DockerCommandRunnerV1, authoritativeId: string | undefined,
   creationAttempted: boolean, createStdout: string | undefined,
 ): Promise<boolean> {
@@ -441,7 +461,7 @@ async function cleanupProofV1(
       if (!id) return false;
     }
     if (selectCidFileCleanupAuthorityV1(cidId, createStdout, discovered) !== id) return false;
-    await inspectOwnedProofV1(id, image, temporary.runToken, runner);
+    await inspectOwnedProofV1(id, requestedImage, expectedImageId, temporary.runToken, runner);
     safeTextV1(await runner(createDockerCommandInvocationV1(['container', 'rm', '-fv', id])));
     return (await discoverProofV1(temporary.runToken, runner)).length === 0;
   } catch {
@@ -450,7 +470,8 @@ async function cleanupProofV1(
 }
 
 async function withStoppedProofV1<T>(
-  image: string,
+  requestedImage: string,
+  expectedImageId: string,
   runner: DockerCommandRunnerV1,
   inspect: (id: string) => Promise<T>,
 ): Promise<T> {
@@ -465,7 +486,7 @@ async function withStoppedProofV1<T>(
     const created = await runner(createDockerCommandInvocationV1([
       'create', `--cidfile=${temporary.cidFile}`, '--platform=linux/amd64', '--pull=never',
       `--label=org.memberry.build-token=${temporary.runToken}`, '--entrypoint=/usr/local/bin/node',
-      image, '--version',
+      requestedImage, '--version',
     ]));
     const createdSnapshot = snapshotDockerCommandResultV1(created);
     try {
@@ -479,13 +500,13 @@ async function withStoppedProofV1<T>(
       throw new Error('proof identity mismatch');
     }
     id = cidId;
-    await inspectOwnedProofV1(id, image, temporary.runToken, runner);
+    await inspectOwnedProofV1(id, requestedImage, expectedImageId, temporary.runToken, runner);
     outcome = await inspect(id);
   } catch {
     failed = true;
   }
   const containersClean = await cleanupProofV1(
-    image, temporary, runner, id, creationAttempted, createStdout,
+    requestedImage, expectedImageId, temporary, runner, id, creationAttempted, createStdout,
   );
   const hostClean = containersClean && await cleanupOwnedTemporaryDirectoryV1(temporary);
   if (failed || !containersClean || !hostClean || outcome === undefined) throw new Error('build proof failed');
@@ -512,15 +533,18 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   rootFsLayersV1(baseInspection);
   if (!Array.isArray(baseInspection?.RepoDigests)
     || !baseInspection.RepoDigests.includes(APPROVED_NODE_BASE_IMAGE_V1)
+    || typeof baseInspection?.Id !== 'string' || !IMAGE_PATTERN.test(baseInspection.Id)
     || baseInspection?.Os !== 'linux' || baseInspection?.Architecture !== 'amd64') {
     throw new Error('approved base inspection mismatch');
   }
-  const baseNode = await withStoppedProofV1(APPROVED_NODE_BASE_IMAGE_V1, runner, async (id) => {
-    const copied = await runner(createDockerCommandInvocationV1([
-      'container', 'cp', `${id}:/usr/local/bin/node`, '-',
-    ], undefined, 134_219_776));
-    return inspectDockerCopyArchiveV1(safeResultV1(copied), 'node');
-  });
+  const baseNode = await withStoppedProofV1(
+    APPROVED_NODE_BASE_IMAGE_V1, baseInspection.Id, runner, async (id) => {
+      const copied = await runner(createDockerCommandInvocationV1([
+        'container', 'cp', `${id}:/usr/local/bin/node`, '-',
+      ], undefined, 134_219_776));
+      return inspectDockerCopyArchiveV1(safeResultV1(copied), 'node');
+    },
+  );
   const nodeSha256 = sha256(baseNode);
   const contentAttestation = new TextEncoder().encode(JSON.stringify({
     baseImage: APPROVED_NODE_BASE_IMAGE_V1,
@@ -556,7 +580,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   );
   const imageConfigSha256 = canonicalImageConfigSha256V1(imageInspection.Config);
 
-  await withStoppedProofV1(imageSha256, runner, async (id) => {
+  await withStoppedProofV1(imageSha256, imageSha256, runner, async (id) => {
     const copiedWorker = inspectDockerCopyArchiveV1(safeResultV1(await runner(
       createDockerCommandInvocationV1(['container', 'cp', `${id}:/app/worker.mjs`, '-'], undefined, 1_048_576),
     )), 'worker.mjs');

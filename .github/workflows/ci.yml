@@ -106,15 +106,23 @@ jobs:
           set -euo pipefail
           mkdir -p \
             "${RUNNER_TEMP}/memberry-admission-candidate-live" \
-            "${RUNNER_TEMP}/memberry-retrieval-scope-live"
+            "${RUNNER_TEMP}/memberry-retrieval-scope-live" \
+            "${RUNNER_TEMP}/memberry-admission-live-composition" \
+            "${RUNNER_TEMP}/memberry-retrieval-trace-live-conformance"
           chmod 0700 \
             "${RUNNER_TEMP}/memberry-admission-candidate-live" \
-            "${RUNNER_TEMP}/memberry-retrieval-scope-live"
+            "${RUNNER_TEMP}/memberry-retrieval-scope-live" \
+            "${RUNNER_TEMP}/memberry-admission-live-composition" \
+            "${RUNNER_TEMP}/memberry-retrieval-trace-live-conformance"
           printf '{"repository":"%s","sha":"%s","run_id":"%s","run_attempt":"%s"}\n' \
             "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             >"${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json"
           cp "${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json" \
             "${RUNNER_TEMP}/memberry-retrieval-scope-live/workflow.json"
+          cp "${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json" \
+            "${RUNNER_TEMP}/memberry-admission-live-composition/workflow.json"
+          cp "${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json" \
+            "${RUNNER_TEMP}/memberry-retrieval-trace-live-conformance/workflow.json"
 
       - name: Use Node.js 22
         uses: actions/setup-node@v4

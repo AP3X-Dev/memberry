@@ -10,6 +10,7 @@ import {
   APPROVED_NODE_BASE_IMAGE_V1,
   buildAdmissionFeatureCandidateImageV1,
   createCanonicalBuildContextV1,
+  validateStoppedProofInspectionV1,
   validateAdmissionCandidateBuildAssetsV1,
 } from '../build.js';
 import {
@@ -48,7 +49,85 @@ function canonicalEntries(): Array<{ path: string; bytes: Uint8Array }> {
   ];
 }
 
+function stoppedProofRecord(
+  containerId: string,
+  requestedImage: string,
+  imageId: string,
+): {
+  Id: string;
+  Image: string;
+  Config: { Image: string; Labels: Record<string, string>; Volumes: null };
+  Mounts: unknown[];
+} {
+  return {
+    Id: containerId,
+    Image: imageId,
+    Config: {
+      Image: requestedImage,
+      Labels: { 'org.memberry.build-token': token },
+      Volumes: null,
+    },
+    Mounts: [],
+  };
+}
+
 describe('MEM-002C2 hostile remediation contract', () => {
+  it('binds a stopped proof to both the requested image reference and immutable image ID', () => {
+    const containerId = 'c'.repeat(64);
+    const imageId = `sha256:${'d'.repeat(64)}`;
+    const requestedImage = APPROVED_NODE_BASE_IMAGE_V1;
+    const record = stoppedProofRecord(containerId, requestedImage, imageId);
+
+    expect(validateStoppedProofInspectionV1(
+      record, containerId, requestedImage, imageId, token,
+    )).toBe(record);
+  });
+
+  it('rejects immutable image ID substitution while the exact requested reference remains valid', () => {
+    const containerId = 'c'.repeat(64);
+    const imageId = `sha256:${'d'.repeat(64)}`;
+    const requestedImage = APPROVED_NODE_BASE_IMAGE_V1;
+    const baseline = stoppedProofRecord(containerId, requestedImage, imageId);
+    expect(validateStoppedProofInspectionV1(
+      baseline, containerId, requestedImage, imageId, token,
+    )).toBe(baseline);
+    const substituted = { ...baseline, Image: `sha256:${'e'.repeat(64)}` };
+    expect(substituted.Config).toBe(baseline.Config);
+    expect(substituted.Config.Image).toBe(requestedImage);
+
+    expect(() => validateStoppedProofInspectionV1(
+      substituted, containerId, requestedImage, imageId, token,
+    )).toThrow('proof ownership mismatch');
+  });
+
+  it('rejects requested image substitution with every other ownership invariant intact', () => {
+    const containerId = 'c'.repeat(64);
+    const imageId = `sha256:${'d'.repeat(64)}`;
+    const requestedImage = APPROVED_NODE_BASE_IMAGE_V1;
+    const baseline = stoppedProofRecord(containerId, requestedImage, imageId);
+    expect(validateStoppedProofInspectionV1(
+      baseline, containerId, requestedImage, imageId, token,
+    )).toBe(baseline);
+    const substituted = {
+      ...baseline,
+      Config: { ...baseline.Config, Image: `node@sha256:${'f'.repeat(64)}` },
+    };
+    expect(substituted).toMatchObject({
+      Id: containerId,
+      Image: imageId,
+      Config: {
+        Labels: { 'org.memberry.build-token': token },
+        Volumes: null,
+      },
+      Mounts: [],
+    });
+    expect(substituted.Config.Labels).toBe(baseline.Config.Labels);
+
+    expect(() => validateStoppedProofInspectionV1(
+      substituted, containerId, requestedImage, imageId, token,
+    )).toThrow('proof ownership mismatch');
+  });
+
   it('closes the public build API to every runner override without reading it', async () => {
     expect(buildAdmissionFeatureCandidateImageV1.length).toBe(0);
     const getter = vi.fn(() => vi.fn());
@@ -335,5 +414,26 @@ describe('MEM-002C2 hostile remediation contract', () => {
     expect(() => prepareDockerSpawnV1({
       executable: 'docker', args: Array.from({ length: 129 }, () => 'x'), env: {}, shell: false,
     })).toThrow();
+  });
+
+  it('initializes every always-upload phase-2 evidence directory before hosted setup can fail', async () => {
+    const workflow = await readFile(resolve(root, '.github/workflows/ci.yml'), 'utf8');
+    const initialization = workflow.slice(
+      workflow.indexOf('- name: Initialize phase-2 hosted evidence'),
+      workflow.indexOf('- name: Use Node.js 22'),
+    );
+    expect(initialization).toContain('${RUNNER_TEMP}/memberry-admission-candidate-live');
+    expect(initialization).toContain('${RUNNER_TEMP}/memberry-retrieval-scope-live');
+    expect(initialization).toContain('${RUNNER_TEMP}/memberry-admission-live-composition');
+    expect(initialization).toContain('${RUNNER_TEMP}/memberry-retrieval-trace-live-conformance');
+    for (const directory of [
+      'memberry-admission-candidate-live',
+      'memberry-retrieval-scope-live',
+      'memberry-admission-live-composition',
+      'memberry-retrieval-trace-live-conformance',
+    ]) {
+      expect(initialization).toContain(`${directory}/workflow.json`);
+    }
+    expect(workflow).toContain('if-no-files-found: error');
   });
 });
