@@ -152,6 +152,33 @@ describe('MEM-002C2 canonical Docker-copy USTAR boundary', () => {
     })).toBe('IMAGE_LABEL_POLICY');
   });
 
+  it('accepts only the complete inert Docker 28 legacy image Config shape or no legacy fields', () => {
+    const { classify, config, image } = candidateImagePolicyFixtureV1();
+    const legacyDefaults = {
+      Hostname: '', Domainname: '', AttachStdin: false, AttachStdout: false,
+      AttachStderr: false, Tty: false, OpenStdin: false, StdinOnce: false, Image: '',
+    };
+    expect(classify(image)).toBe('VALID');
+    expect(classify({ ...image, Config: { ...config, ...legacyDefaults } })).toBe('VALID');
+    for (const [key, inert] of Object.entries(legacyDefaults)) {
+      const partial = { ...config, ...legacyDefaults } as Record<string, unknown>;
+      delete partial[key];
+      expect(classify({ ...image, Config: partial })).toBe('IMAGE_CONFIG_POLICY');
+      expect(classify({
+        ...image,
+        Config: { ...config, ...legacyDefaults, [key]: typeof inert === 'boolean' ? true : 'set' },
+      })).toBe('IMAGE_CONFIG_POLICY');
+    }
+    expect(classify({ ...image, Config: { ...config, ...legacyDefaults, Unknown: false } }))
+      .toBe('IMAGE_CONFIG_KEYS_POLICY');
+    for (const optionalLegacy of [
+      { NetworkDisabled: false }, { MacAddress: '' }, { StopTimeout: null },
+    ]) {
+      expect(classify({ ...image, Config: { ...config, ...legacyDefaults, ...optionalLegacy } }))
+        .toBe('IMAGE_CONFIG_KEYS_POLICY');
+    }
+  });
+
   it('rejects accessor, proxy, revoked, and non-plain inspection graphs without invoking hooks', () => {
     const { base, classify, config, image } = candidateImagePolicyFixtureV1();
     const accessor = (target: object, key: string) => {

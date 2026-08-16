@@ -441,6 +441,22 @@ const DOCKER_INSPECTION_MAX_OBJECT_PROPERTIES_V1 = 256;
 const DOCKER_INSPECTION_MAX_STRING_BYTES_V1 = 65_536;
 const DOCKER_INSPECTION_MAX_TOTAL_STRING_BYTES_V1 = 4_194_304;
 
+// Moby API v1.50 removed these deprecated image-inspect Config fields; older APIs returned the
+// complete non-omitempty container.Config subset at inert zero values. Keep all-or-none parity only.
+// https://github.com/moby/moby/blob/master/api/docs/CHANGELOG.md#v150-api-changes
+// https://github.com/moby/moby/blob/master/api/types/container/config.go
+const LEGACY_IMAGE_CONFIG_DEFAULTS_V1 = Object.freeze({
+  Hostname: '',
+  Domainname: '',
+  AttachStdin: false,
+  AttachStdout: false,
+  AttachStderr: false,
+  Tty: false,
+  OpenStdin: false,
+  StdinOnce: false,
+  Image: '',
+} as const);
+
 type DockerInspectionBudgetV1 = {
   remainingValues: number;
   remainingEntries: number;
@@ -452,6 +468,13 @@ function chargeDockerInspectionStringV1(value: string, budget: DockerInspectionB
   if (bytes > DOCKER_INSPECTION_MAX_STRING_BYTES_V1 || bytes > budget.remainingStringBytes) return false;
   budget.remainingStringBytes -= bytes;
   return true;
+}
+
+function hasExactLegacyImageConfigDefaultsV1(config: Record<string, unknown>): boolean {
+  const entries = Object.entries(LEGACY_IMAGE_CONFIG_DEFAULTS_V1);
+  const present = entries.filter(([key]) => Object.prototype.hasOwnProperty.call(config, key));
+  return present.length === 0 || (present.length === entries.length
+    && entries.every(([key, expected]) => config[key] === expected));
 }
 
 function snapshotPlainDockerInspectionV1(
@@ -564,8 +587,10 @@ export function classifyAdmissionCandidateImagePolicyV1(
   const allowedConfigKeys = new Set([
     'User', 'Env', 'Entrypoint', 'Cmd', 'WorkingDir', 'Labels', 'Volumes', 'Healthcheck',
     'Shell', 'OnBuild', 'ExposedPorts', 'StopSignal', 'ArgsEscaped',
+    ...Object.keys(LEGACY_IMAGE_CONFIG_DEFAULTS_V1),
   ]);
   if (Object.keys(config).some((key) => !allowedConfigKeys.has(key))) return 'IMAGE_CONFIG_KEYS_POLICY';
+  if (!hasExactLegacyImageConfigDefaultsV1(config)) return 'IMAGE_CONFIG_POLICY';
   if (!hasExactDockerImageArgsEscapedV1(config)) return 'IMAGE_ARGS_ESCAPED_POLICY';
   let expectedEnvironment: readonly string[];
   try {
