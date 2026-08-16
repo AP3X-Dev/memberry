@@ -3,7 +3,7 @@
 // reconciler's changed/added/removed/unchanged behaviour against a mock graph.
 
 import { describe, it, expect, vi } from 'vitest';
-import type { Driver, Session } from 'neo4j-driver';
+import { int, type Driver, type Session } from 'neo4j-driver';
 import { WikiEditReconciler, parseFrontmatter, parseClaimBlocks } from '../reconcile.js';
 import { claimAnchor } from '../renderers.js';
 
@@ -42,8 +42,8 @@ function createDriver(graph: Map<string, GraphNode>): { driver: Driver; calls: (
         if (!node) return { records: [] };
         const props = {
           id: p.id, content: node.content, confidence: node.confidence ?? 0.5,
-          // Neo4j returns integers as BigInt — mirror that so arithmetic is exercised.
-          signal_count: BigInt(2), created_at: 't', updated_at: 't',
+          // Mirror neo4j-driver's lossless Integer so mapper conversion is exercised.
+          signal_count: int(2), created_at: 't', updated_at: 't',
           decay_class: 'volatile', tags: node.tags ?? [],
         };
         return { records: [{ get: (k: string) => (k === 's' ? { properties: props } : undefined) }] };
