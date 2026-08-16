@@ -10,6 +10,7 @@ import {
   compositionRootCommand,
   parseResidualCounts,
   readBoundedResponseText,
+  requiredPresentationIdForCase,
   resolveTraceConformanceConfig,
   runAbortableOperation,
   safeDiagnosticCode,
@@ -17,6 +18,7 @@ import {
   TraceMcpTransport,
   waitForTraceReadiness,
 } from '../live-conformance.js';
+import { observeOrderedMarkdownResultIds } from '../contract.js';
 import { validateSystemRegistry } from '../../registry/validate.js';
 
 const validEnv = {
@@ -34,7 +36,50 @@ const validEnv = {
   MEMBERRY_TRACE_LIVE_NEO4J_IMAGE_ID: `sha256:${'d'.repeat(64)}`,
 } as const;
 
+const mappingFixture = {
+  run: 'run-1',
+  defaultTarget: 'ret001d-default-target-run-1',
+} as const;
+
+function presentationResult(id: string): unknown {
+  return { content: [{ type: 'text', text: [
+    '# Unified Context',
+    '**Task:** fixture query',
+    '**Strategy:** deterministic | **Tokens:** ~1 | **Sources:** arch_entity:1 | **IDs:** 1',
+    '',
+    '## Architecture',
+    '',
+    `<!-- ${id} -->`,
+    'seeded presentation',
+  ].join('\n') }] };
+}
+
 describe('RET-001D live composition harness', () => {
+  it.each([
+    ['deterministic', 'target-ret001d-default-target-run-1'],
+    ['ranked', 'ret001d-dt-run-1'],
+    ['auto', 'target-ret001d-default-target-run-1'],
+    ['named-tenant-forced-ranked', 'ret001d-nt-run-1'],
+  ] as const)('maps %s to its exact seeded presentation ID', (id, expected) => {
+    expect(requiredPresentationIdForCase(id, mappingFixture)).toBe(expected);
+  });
+
+  it('rejects cross-algorithm presentation-ID substitution', () => {
+    const deterministicId = requiredPresentationIdForCase('deterministic', mappingFixture);
+    const rankedId = requiredPresentationIdForCase('ranked', mappingFixture);
+    expect(deterministicId).not.toBe(rankedId);
+    expect(() => observeOrderedMarkdownResultIds(presentationResult(deterministicId), {
+      expectedTask: 'fixture query', expectedStrategy: 'deterministic', requiredResultIds: [rankedId],
+    })).toThrow('RET001D_SEEDED_RESULT_MISSING');
+  });
+
+  it('fails closed when the seeded presentation ID is missing', () => {
+    const required = requiredPresentationIdForCase('deterministic', mappingFixture);
+    expect(() => observeOrderedMarkdownResultIds(presentationResult('unrelated-result'), {
+      expectedTask: 'fixture query', expectedStrategy: 'deterministic', requiredResultIds: [required],
+    })).toThrow('RET001D_SEEDED_RESULT_MISSING');
+  });
+
   it('is loopback/disposable fail-closed and exposes only sanitized config', () => {
     const config = resolveTraceConformanceConfig(validEnv);
     expect(config.safeConfig).toEqual({

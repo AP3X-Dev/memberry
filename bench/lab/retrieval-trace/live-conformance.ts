@@ -710,7 +710,22 @@ interface LiveCase {
   readonly task: string;
   readonly projectName: string;
   readonly expectedStrategy: 'deterministic' | 'ranked';
-  readonly requiredResultId: string;
+  readonly requiredPresentationId: string;
+}
+
+export function requiredPresentationIdForCase(
+  id: LiveCase['id'],
+  fixture: Pick<FixtureIdentity, 'run' | 'defaultTarget'>,
+): string {
+  switch (id) {
+    case 'deterministic':
+    case 'auto':
+      return `target-${fixture.defaultTarget}`;
+    case 'ranked':
+      return `ret001d-dt-${fixture.run}`;
+    case 'named-tenant-forced-ranked':
+      return `ret001d-nt-${fixture.run}`;
+  }
 }
 
 async function executeCase(
@@ -732,7 +747,7 @@ async function executeCase(
   const expectedResultIds = observeOrderedMarkdownResultIds(ordinaryResult, {
     expectedTask: liveCase.task,
     expectedStrategy: liveCase.expectedStrategy,
-    requiredResultIds: [liveCase.requiredResultId],
+    requiredResultIds: [liveCase.requiredPresentationId],
   });
   const responseExpectation = {
     expectedTask: liveCase.task,
@@ -885,17 +900,18 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     cases.push(await executeCase(defaultTransport, {
       id: 'deterministic', requestedStrategy: 'deterministic', expectedAlgorithm: 'deterministic-v2',
       authScope: 'default', task: queries.deterministic, projectName: fixture.defaultProject,
-      expectedStrategy: 'deterministic', requiredResultId: `ret001d-dt-${run}`,
+      expectedStrategy: 'deterministic',
+      requiredPresentationId: requiredPresentationIdForCase('deterministic', fixture),
     }, [...forbidden, ...defaultIsolation], defaultIsolation));
     cases.push(await executeCase(defaultTransport, {
       id: 'ranked', requestedStrategy: 'ranked', expectedAlgorithm: 'ranked-v1',
       authScope: 'default', task: queries.ranked, projectName: fixture.defaultProject,
-      expectedStrategy: 'ranked', requiredResultId: `ret001d-dt-${run}`,
+      expectedStrategy: 'ranked', requiredPresentationId: requiredPresentationIdForCase('ranked', fixture),
     }, [...forbidden, ...defaultIsolation], defaultIsolation));
     cases.push(await executeCase(defaultTransport, {
       id: 'auto', requestedStrategy: 'auto', expectedAlgorithm: 'deterministic-v2',
       authScope: 'default', task: queries.auto, projectName: fixture.defaultProject,
-      expectedStrategy: 'deterministic', requiredResultId: `ret001d-dt-${run}`,
+      expectedStrategy: 'deterministic', requiredPresentationId: requiredPresentationIdForCase('auto', fixture),
     }, [...forbidden, ...defaultIsolation], defaultIsolation));
     await active.stop();
     active = undefined;
@@ -907,7 +923,8 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     cases.push(await executeCase(namedTransport, {
       id: 'named-tenant-forced-ranked', requestedStrategy: 'deterministic', expectedAlgorithm: 'ranked-v1',
       authScope: 'named-tenant', task: queries.named, projectName: fixture.namedProject,
-      expectedStrategy: 'ranked', requiredResultId: `ret001d-nt-${run}`,
+      expectedStrategy: 'ranked',
+      requiredPresentationId: requiredPresentationIdForCase('named-tenant-forced-ranked', fixture),
     }, [...forbidden, ...namedIsolation], namedIsolation));
     await active.stop();
     active = undefined;
