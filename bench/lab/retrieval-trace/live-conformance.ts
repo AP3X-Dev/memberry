@@ -359,6 +359,7 @@ const STATIC_DIAGNOSTIC_CODES = new Set([
   'RET001D_READINESS_NETWORK',
   'RET001D_READINESS_TIMEOUT__RET001D_READINESS_NETWORK',
   'RET001D_READINESS_UNKNOWN',
+  'RET001D_RANKED_MARKER_INVALID',
   'RET001D_REDIS_CLEANUP_FAILED',
   'RET001D_REDIS_KEY_BOUND',
   'RET001D_REDIS_OWNERSHIP_FAILED',
@@ -642,6 +643,8 @@ interface FixtureIdentity {
   readonly defaultTarget: string;
   readonly namedProject: string;
   readonly namedTarget: string;
+  readonly defaultRankedMarker: string;
+  readonly namedRankedMarker: string;
   readonly defaultContent: string;
   readonly namedContent: string;
   readonly decoyContent: string;
@@ -653,6 +656,8 @@ interface SeedReadbackFixture {
   readonly defaultTarget: string;
   readonly namedProject: string;
   readonly namedTarget: string;
+  readonly defaultRankedMarker: string;
+  readonly namedRankedMarker: string;
 }
 
 export interface VerifiedSeedTarget {
@@ -662,6 +667,7 @@ export interface VerifiedSeedTarget {
   readonly targetId: string;
   readonly targetName: string;
   readonly targetTenant: 'default' | typeof NAMED_TENANT;
+  readonly targetResponsibility: string;
 }
 
 export interface VerifiedSeedReadback {
@@ -670,23 +676,92 @@ export interface VerifiedSeedReadback {
   readonly named: VerifiedSeedTarget;
 }
 
+const MIN_LIVE_RUN_TIMESTAMP_LENGTH = 1;
+const MAX_LIVE_RUN_TIMESTAMP_LENGTH = 11;
+const LIVE_RUN_NONCE_HEX_LENGTH = 12;
+const RANKED_MARKER_PREFIX_LENGTH = 8;
+const MAX_RANKED_MARKER_LENGTH = RANKED_MARKER_PREFIX_LENGTH
+  + MAX_LIVE_RUN_TIMESTAMP_LENGTH + LIVE_RUN_NONCE_HEX_LENGTH;
+const CANONICAL_LIVE_RUN_PATTERN = new RegExp(
+  `^(?:0|[1-9a-z][0-9a-z]{${MIN_LIVE_RUN_TIMESTAMP_LENGTH - 1},${MAX_LIVE_RUN_TIMESTAMP_LENGTH - 1}})`
+  + `-[0-9a-f]{${LIVE_RUN_NONCE_HEX_LENGTH}}$`,
+);
+
+function rankedMarkerInvalid(): never {
+  throw new Error('RET001D_RANKED_MARKER_INVALID');
+}
+
+function validRankedMarker(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_RANKED_MARKER_LENGTH
+    && /^[a-z0-9]+$/.test(value);
+}
+
+export function rankedFixtureMarkers(run: string): Readonly<{ default: string; named: string }> {
+  if (typeof run !== 'string' || !CANONICAL_LIVE_RUN_PATTERN.test(run)) return rankedMarkerInvalid();
+  const compact = run.replaceAll('-', '');
+  const markers = { default: `ret001dd${compact}`, named: `ret001dn${compact}` };
+  if (!validRankedMarker(markers.default) || !validRankedMarker(markers.named)
+    || markers.default === markers.named) return rankedMarkerInvalid();
+  return Object.freeze(markers);
+}
+
+interface TraceFixtureQueryIdentity {
+  readonly defaultTarget: string;
+  readonly namedTarget: string;
+  readonly defaultRankedMarker: string;
+  readonly namedRankedMarker: string;
+}
+
+export function traceFixtureQueries(fixture: TraceFixtureQueryIdentity): Readonly<{
+  deterministic: string;
+  ranked: string;
+  auto: string;
+  named: string;
+}> {
+  if (!validRankedMarker(fixture.defaultRankedMarker) || !validRankedMarker(fixture.namedRankedMarker)
+    || fixture.defaultRankedMarker === fixture.namedRankedMarker
+    || typeof fixture.defaultTarget !== 'string' || fixture.defaultTarget.length === 0
+    || typeof fixture.namedTarget !== 'string' || fixture.namedTarget.length === 0) return rankedMarkerInvalid();
+  return Object.freeze({
+    deterministic: fixture.defaultTarget,
+    ranked: fixture.defaultRankedMarker,
+    auto: `what depends on ${fixture.defaultTarget}`,
+    named: fixture.namedRankedMarker,
+  });
+}
+
+export function traceFixtureForbiddenValues(
+  secrets: readonly string[],
+  fixture: Pick<FixtureIdentity,
+    'defaultContent' | 'namedContent' | 'decoyContent' | 'defaultRankedMarker' | 'namedRankedMarker'>,
+  queries: Readonly<Record<string, string>>,
+): readonly string[] {
+  return Object.freeze([...new Set([
+    ...secrets,
+    fixture.defaultContent, fixture.namedContent, fixture.decoyContent,
+    fixture.defaultRankedMarker, fixture.namedRankedMarker,
+    ...Object.values(queries),
+  ])]);
+}
+
 export function tenantIsolationForbiddenValues(
   scope: 'default' | 'named-tenant',
-  fixture: Pick<FixtureIdentity, 'run' | 'defaultContent' | 'namedContent' | 'decoyContent'>,
+  fixture: Pick<FixtureIdentity,
+    'run' | 'defaultContent' | 'namedContent' | 'decoyContent' | 'defaultRankedMarker' | 'namedRankedMarker'>,
 ): readonly string[] {
   const decoy = [`ret001d-decoy-${fixture.run}`, fixture.decoyContent];
   if (scope === 'default') {
     return Object.freeze([
       `ret001d-np-${fixture.run}`, `ret001d-nt-${fixture.run}`, `ret001d-ns-${fixture.run}`,
       `ret001d-named-project-${fixture.run}`, `ret001d-named-target-${fixture.run}`,
-      fixture.namedContent, ...decoy,
+      fixture.namedContent, fixture.namedRankedMarker, ...decoy,
     ]);
   }
   return Object.freeze([
     `ret001d-dp-${fixture.run}`, `ret001d-dt-${fixture.run}`, `ret001d-dd-${fixture.run}`,
     `ret001d-da-${fixture.run}`, `ret001d-ds-${fixture.run}`,
     `ret001d-default-project-${fixture.run}`, `ret001d-default-target-${fixture.run}`,
-    `ret001d-dependency-${fixture.run}`, fixture.defaultContent, ...decoy,
+    `ret001d-dependency-${fixture.run}`, fixture.defaultContent, fixture.defaultRankedMarker, ...decoy,
   ]);
 }
 
@@ -709,7 +784,7 @@ async function seedFixtures(driver: Driver, fixture: FixtureIdentity, timeoutMs:
   try {
     await neo4jRun(session,
       `CREATE (dp:Entity {id:$dpid, name:$defaultProject, type:'project', category:'project', tenant_id:'default', ret001d_run:$run, created_at:$now})
-       CREATE (dt:Entity {id:$dtid, name:$defaultTarget, type:'service', category:'service', tenant_id:'default', ret001d_run:$run, responsibility:'synthetic trace target', created_at:$now})
+       CREATE (dt:Entity {id:$dtid, name:$defaultTarget, type:'service', category:'service', tenant_id:'default', ret001d_run:$run, responsibility:$defaultRankedMarker, created_at:$now})
        CREATE (dd:Entity {id:$ddid, name:$defaultDependency, type:'module', category:'module', tenant_id:'default', ret001d_run:$run, interface_desc:'synthetic interface', created_at:$now})
        CREATE (da:Aspect {id:$daid, name:'ret001d-safety', stability_tier:'protocol', description:'synthetic trace aspect', ret001d_run:$run})
        CREATE (ds:Semantic {id:$dsid, content:$defaultContent, confidence:0.91, signal_count:1, created_at:$now, updated_at:$now, decay_class:'stable', memory_type:'architecture', tags:[$defaultScope], scope:$defaultScope, tenant_id:'default', ret001d_run:$run})
@@ -718,7 +793,7 @@ async function seedFixtures(driver: Driver, fixture: FixtureIdentity, timeoutMs:
        CREATE (da)-[:APPLIES_TO {ret001d_run:$run}]->(dt)
        CREATE (ds)-[:ABOUT {ret001d_run:$run}]->(dt)
        CREATE (np:Entity {id:$npid, name:$namedProject, type:'project', category:'project', tenant_id:$namedTenant, ret001d_run:$run, created_at:$now})
-       CREATE (nt:Entity {id:$ntid, name:$namedTarget, type:'service', category:'service', tenant_id:$namedTenant, ret001d_run:$run, responsibility:'synthetic named trace target', created_at:$now})
+       CREATE (nt:Entity {id:$ntid, name:$namedTarget, type:'service', category:'service', tenant_id:$namedTenant, ret001d_run:$run, responsibility:$namedRankedMarker, created_at:$now})
        CREATE (ns:Semantic {id:$nsid, content:$namedContent, confidence:0.89, signal_count:1, created_at:$now, updated_at:$now, decay_class:'stable', memory_type:'architecture', tags:[$namedScope], scope:$namedScope, tenant_id:$namedTenant, ret001d_run:$run})
        CREATE (np)-[:CONTAINS {ret001d_run:$run}]->(nt)
        CREATE (ns)-[:ABOUT {ret001d_run:$run}]->(nt)
@@ -730,8 +805,10 @@ async function seedFixtures(driver: Driver, fixture: FixtureIdentity, timeoutMs:
         npid: `ret001d-np-${fixture.run}`, ntid: `ret001d-nt-${fixture.run}`, nsid: `ret001d-ns-${fixture.run}`,
         decoyId: `ret001d-decoy-${fixture.run}`,
         defaultProject: fixture.defaultProject, defaultTarget: fixture.defaultTarget,
+        defaultRankedMarker: fixture.defaultRankedMarker,
         defaultDependency: `ret001d-dependency-${fixture.run}`, defaultScope: `project:${fixture.defaultProject}`,
         namedProject: fixture.namedProject, namedTarget: fixture.namedTarget, namedScope: `project:${fixture.namedProject}`,
+        namedRankedMarker: fixture.namedRankedMarker,
         defaultContent: fixture.defaultContent, namedContent: fixture.namedContent, decoyContent: fixture.decoyContent,
       }, timeoutMs, 'RET001D_NEO4J_SEED_FAILED');
   } finally {
@@ -779,21 +856,37 @@ function seedReadbackString(
 }
 
 function seedReadbackFixture(fixture: SeedReadbackFixture): SeedReadbackFixture {
-  const keys = ['run', 'defaultProject', 'defaultTarget', 'namedProject', 'namedTarget'] as const;
+  const keys = [
+    'run', 'defaultProject', 'defaultTarget', 'namedProject', 'namedTarget',
+    'defaultRankedMarker', 'namedRankedMarker',
+  ] as const;
+  let values: SeedReadbackFixture;
   try {
     if (typeof fixture !== 'object' || fixture === null || Array.isArray(fixture) || isProxy(fixture)) {
       return seedReadbackInvalid();
     }
-    const values = Object.fromEntries(keys.map((key) => {
+    values = Object.fromEntries(keys.map((key) => {
       const descriptor = Object.getOwnPropertyDescriptor(fixture, key);
       if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'string'
         || descriptor.value.length === 0 || descriptor.value.length > 512) return seedReadbackInvalid();
       return [key, descriptor.value];
     })) as unknown as SeedReadbackFixture;
-    return Object.freeze(values);
   } catch {
     return seedReadbackInvalid();
   }
+  let derivedMarkers: Readonly<{ default: string; named: string }>;
+  try { derivedMarkers = rankedFixtureMarkers(values.run); }
+  catch { return seedReadbackInvalid(); }
+  if (values.defaultRankedMarker === values.namedRankedMarker
+    || values.defaultRankedMarker !== derivedMarkers.default
+    || values.namedRankedMarker !== derivedMarkers.named) {
+    throw new Error('RET001D_NEO4J_SEED_READBACK_MISMATCH');
+  }
+  return Object.freeze({
+    ...values,
+    defaultRankedMarker: derivedMarkers.default,
+    namedRankedMarker: derivedMarkers.named,
+  });
 }
 
 export function parseSeedReadback(
@@ -816,6 +909,7 @@ export function parseSeedReadback(
     return seedReadbackInvalid();
   }
   const truthFixture = seedReadbackFixture(fixture);
+  const expectedMarkers = rankedFixtureMarkers(truthFixture.run);
   if (safeRecords.length !== 2) {
     throw new Error('RET001D_NEO4J_SEED_READBACK_CARDINALITY');
   }
@@ -828,6 +922,7 @@ export function parseSeedReadback(
       targetId: seedReadbackString(record, method, 'targetId'),
       targetName: seedReadbackString(record, method, 'targetName'),
       targetTenant: seedReadbackString(record, method, 'targetTenant'),
+      targetResponsibility: seedReadbackString(record, method, 'targetResponsibility'),
     });
   });
   const expected = [
@@ -838,6 +933,7 @@ export function parseSeedReadback(
       targetId: `ret001d-dt-${truthFixture.run}`,
       targetName: truthFixture.defaultTarget,
       targetTenant: 'default',
+      targetResponsibility: expectedMarkers.default,
     }),
     Object.freeze({
       projectId: `ret001d-np-${truthFixture.run}`,
@@ -846,6 +942,7 @@ export function parseSeedReadback(
       targetId: `ret001d-nt-${truthFixture.run}`,
       targetName: truthFixture.namedTarget,
       targetTenant: NAMED_TENANT,
+      targetResponsibility: expectedMarkers.named,
     }),
   ] as const;
   for (let index = 0; index < expected.length; index++) {
@@ -879,7 +976,8 @@ async function readBackSeedFixtures(
               project.tenant_id AS projectTenant,
               target.id AS targetId,
               target.name AS targetName,
-              target.tenant_id AS targetTenant
+              target.tenant_id AS targetTenant,
+              target.responsibility AS targetResponsibility
        ORDER BY target.id
        LIMIT 3`,
       { run: fixture.run }, timeoutMs, 'RET001D_NEO4J_SEED_READBACK_FAILED');
@@ -1293,6 +1391,7 @@ async function observeNeo4jVersion(driver: Driver, timeoutMs: number): Promise<s
 
 export async function runTraceLiveConformanceEvidence(config: TraceConformanceConfig): Promise<JsonRecord> {
   const run = `${Date.now().toString(36)}-${randomUUID().replaceAll('-', '').slice(0, 12)}`.toLowerCase();
+  const rankedMarkers = rankedFixtureMarkers(run);
   const ownedRedisKeys = [`memberry:lab:ret001d:${run}:ownership`];
   const fixture: FixtureIdentity = {
     run,
@@ -1300,21 +1399,16 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     defaultTarget: `ret001d-default-target-${run}`,
     namedProject: `ret001d-named-project-${run}`,
     namedTarget: `ret001d-named-target-${run}`,
+    defaultRankedMarker: rankedMarkers.default,
+    namedRankedMarker: rankedMarkers.named,
     defaultContent: `RET001D ${run} default synthetic semantic content`,
     namedContent: `RET001D ${run} named synthetic semantic content`,
     decoyContent: `RET001D ${run} cross-tenant decoy must never appear`,
   };
-  const queries = {
-    deterministic: fixture.defaultTarget,
-    ranked: `describe ${fixture.defaultTarget}`,
-    auto: `what depends on ${fixture.defaultTarget}`,
-    named: `describe ${fixture.namedTarget}`,
-  };
-  const forbidden = [
-    config.defaultToken, config.namedToken, config.neo4jPassword,
-    fixture.defaultContent, fixture.namedContent, fixture.decoyContent,
-    ...Object.values(queries),
-  ];
+  const queries = traceFixtureQueries(fixture);
+  const forbidden = traceFixtureForbiddenValues(
+    [config.defaultToken, config.namedToken, config.neo4jPassword], fixture, queries,
+  );
   let driver: Driver | undefined;
   let redis: Redis | undefined;
   let tempPath: string | undefined;

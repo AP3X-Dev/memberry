@@ -12,6 +12,7 @@ import {
   compositionRootCommand,
   parseSeedReadback,
   parseResidualCounts,
+  rankedFixtureMarkers,
   readBoundedResponseText,
   requiredPresentationIdForCase,
   resolveTraceConformanceConfig,
@@ -19,6 +20,8 @@ import {
   safeDiagnosticCode,
   seededMissingDiagnosticCode,
   tenantIsolationForbiddenValues,
+  traceFixtureForbiddenValues,
+  traceFixtureQueries,
   TraceMcpTransport,
   waitForTraceReadiness,
 } from '../live-conformance.js';
@@ -41,31 +44,35 @@ const validEnv = {
 } as const;
 
 const mappingFixture = {
-  run: 'run-1',
+  run: 'run-000000000001',
   default: {
-    projectId: 'ret001d-dp-run-1',
-    projectName: 'ret001d-default-project-run-1',
+    projectId: 'ret001d-dp-run-000000000001',
+    projectName: 'ret001d-default-project-run-000000000001',
     projectTenant: 'default',
-    targetId: 'ret001d-dt-run-1',
-    targetName: 'ret001d-default-target-run-1',
+    targetId: 'ret001d-dt-run-000000000001',
+    targetName: 'ret001d-default-target-run-000000000001',
     targetTenant: 'default',
+    targetResponsibility: 'ret001ddrun000000000001',
   },
   named: {
-    projectId: 'ret001d-np-run-1',
-    projectName: 'ret001d-named-project-run-1',
+    projectId: 'ret001d-np-run-000000000001',
+    projectName: 'ret001d-named-project-run-000000000001',
     projectTenant: 'ret001d-named',
-    targetId: 'ret001d-nt-run-1',
-    targetName: 'ret001d-named-target-run-1',
+    targetId: 'ret001d-nt-run-000000000001',
+    targetName: 'ret001d-named-target-run-000000000001',
     targetTenant: 'ret001d-named',
+    targetResponsibility: 'ret001dnrun000000000001',
   },
 } as const;
 
 const seedFixture = {
-  run: 'run-1',
-  defaultProject: 'ret001d-default-project-run-1',
-  defaultTarget: 'ret001d-default-target-run-1',
-  namedProject: 'ret001d-named-project-run-1',
-  namedTarget: 'ret001d-named-target-run-1',
+  run: 'run-000000000001',
+  defaultProject: 'ret001d-default-project-run-000000000001',
+  defaultTarget: 'ret001d-default-target-run-000000000001',
+  namedProject: 'ret001d-named-project-run-000000000001',
+  namedTarget: 'ret001d-named-target-run-000000000001',
+  defaultRankedMarker: 'ret001ddrun000000000001',
+  namedRankedMarker: 'ret001dnrun000000000001',
 } as const;
 
 function seedRecord(values: Record<string, unknown>): { get(key: string): unknown } {
@@ -75,21 +82,46 @@ function seedRecord(values: Record<string, unknown>): { get(key: string): unknow
 function validSeedRecords(): Array<{ get(key: string): unknown }> {
   return [
     seedRecord({
-      projectId: 'ret001d-dp-run-1', projectName: seedFixture.defaultProject, projectTenant: 'default',
-      targetId: 'ret001d-dt-run-1', targetName: seedFixture.defaultTarget, targetTenant: 'default',
+      projectId: 'ret001d-dp-run-000000000001', projectName: seedFixture.defaultProject, projectTenant: 'default',
+      targetId: 'ret001d-dt-run-000000000001', targetName: seedFixture.defaultTarget, targetTenant: 'default',
+      targetResponsibility: seedFixture.defaultRankedMarker,
     }),
     seedRecord({
-      projectId: 'ret001d-np-run-1', projectName: seedFixture.namedProject, projectTenant: 'ret001d-named',
-      targetId: 'ret001d-nt-run-1', targetName: seedFixture.namedTarget, targetTenant: 'ret001d-named',
+      projectId: 'ret001d-np-run-000000000001', projectName: seedFixture.namedProject, projectTenant: 'ret001d-named',
+      targetId: 'ret001d-nt-run-000000000001', targetName: seedFixture.namedTarget, targetTenant: 'ret001d-named',
+      targetResponsibility: seedFixture.namedRankedMarker,
     }),
   ];
 }
 
-function presentationResult(id: string): unknown {
+function seedRecordsFor(
+  run: string,
+  defaultResponsibility: string,
+  namedResponsibility: string,
+): Array<{ get(key: string): unknown }> {
+  return [
+    seedRecord({
+      projectId: `ret001d-dp-${run}`, projectName: seedFixture.defaultProject, projectTenant: 'default',
+      targetId: `ret001d-dt-${run}`, targetName: seedFixture.defaultTarget, targetTenant: 'default',
+      targetResponsibility: defaultResponsibility,
+    }),
+    seedRecord({
+      projectId: `ret001d-np-${run}`, projectName: seedFixture.namedProject, projectTenant: 'ret001d-named',
+      targetId: `ret001d-nt-${run}`, targetName: seedFixture.namedTarget, targetTenant: 'ret001d-named',
+      targetResponsibility: namedResponsibility,
+    }),
+  ];
+}
+
+function presentationResult(
+  id: string,
+  task = 'fixture query',
+  strategy: 'deterministic' | 'ranked' = 'deterministic',
+): unknown {
   return { content: [{ type: 'text', text: [
     '# Unified Context',
-    '**Task:** fixture query',
-    '**Strategy:** deterministic | **Tokens:** ~1 | **Sources:** arch_entity:1 | **IDs:** 1',
+    `**Task:** ${task}`,
+    `**Strategy:** ${strategy} | **Tokens:** ~1 | **Sources:** arch_entity:1 | **IDs:** 1`,
     '',
     '## Architecture',
     '',
@@ -100,12 +132,104 @@ function presentationResult(id: string): unknown {
 
 describe('RET-001D live composition harness', () => {
   it.each([
-    ['deterministic', 'target-ret001d-default-target-run-1'],
-    ['ranked', 'ret001d-dt-run-1'],
-    ['auto', 'target-ret001d-default-target-run-1'],
-    ['named-tenant-forced-ranked', 'ret001d-nt-run-1'],
+    ['deterministic', 'target-ret001d-default-target-run-000000000001'],
+    ['ranked', 'ret001d-dt-run-000000000001'],
+    ['auto', 'target-ret001d-default-target-run-000000000001'],
+    ['named-tenant-forced-ranked', 'ret001d-nt-run-000000000001'],
   ] as const)('maps %s to its exact seeded presentation ID', (id, expected) => {
     expect(requiredPresentationIdForCase(id, mappingFixture)).toBe(expected);
+  });
+
+  it('derives separate bounded alphanumeric ranked markers from the run', () => {
+    const markers = rankedFixtureMarkers(seedFixture.run);
+    expect(markers).toEqual({
+      default: 'ret001ddrun000000000001',
+      named: 'ret001dnrun000000000001',
+    });
+    expect(markers.default).not.toBe(markers.named);
+    expect(markers.default).toMatch(/^[a-z0-9]+$/);
+    expect(markers.named).toMatch(/^[a-z0-9]+$/);
+    expect(markers.default.length).toBeLessThanOrEqual(64);
+    expect(markers.named.length).toBeLessThanOrEqual(64);
+  });
+
+  it.each([
+    ['minimum timestamp', '0-000000000000'],
+    ['maximum timestamp', 'abcdefghijk-ffffffffffff'],
+  ])('accepts the canonical live run grammar at the %s boundary', (_label, run) => {
+    const markers = rankedFixtureMarkers(run);
+    expect(markers.default).toMatch(/^[a-z0-9]{1,64}$/);
+    expect(markers.named).toMatch(/^[a-z0-9]{1,64}$/);
+  });
+
+  it.each([
+    'ab',
+    'a-b',
+    'a-b-c',
+    'ab-c',
+    '-000000000000',
+    '00-000000000000',
+    'abcdefghijkl-000000000000',
+    'a-00000000000',
+    'a-0000000000000',
+    'a-00000000000A',
+  ])('rejects non-canonical live run %j', (run) => {
+    expect(() => rankedFixtureMarkers(run)).toThrow('RET001D_RANKED_MARKER_INVALID');
+  });
+
+  it.each([
+    ['ab', 'a-b'],
+    ['a-b-c', 'ab-c'],
+    ['a-bbbbbbbbbbbb', 'ab-bbbbbbbbbbb'],
+  ])('never accepts both members of the exact prior compacting collision pair %j / %j', (left, right) => {
+    expect(left.replaceAll('-', '')).toBe(right.replaceAll('-', ''));
+    const accepted = [left, right].flatMap((run) => {
+      try { return [rankedFixtureMarkers(run)]; }
+      catch { return []; }
+    });
+    expect(accepted.length).toBeLessThanOrEqual(1);
+  });
+
+  it('is injective across accepted live runs and marker families', () => {
+    const runs = [
+      '0-000000000000',
+      'a-000000000000',
+      'a-000000000001',
+      'ab-000000000000',
+      'abcdefghijk-ffffffffffff',
+    ];
+    const markers = runs.flatMap((run) => Object.values(rankedFixtureMarkers(run)));
+    expect(new Set(markers)).toHaveLength(markers.length);
+  });
+
+  it('maps each ranked marker only to its intended target query while preserving deterministic and auto tasks', () => {
+    expect(traceFixtureQueries({
+      defaultTarget: seedFixture.defaultTarget,
+      namedTarget: seedFixture.namedTarget,
+      defaultRankedMarker: seedFixture.defaultRankedMarker,
+      namedRankedMarker: seedFixture.namedRankedMarker,
+    })).toEqual({
+      deterministic: seedFixture.defaultTarget,
+      ranked: seedFixture.defaultRankedMarker,
+      auto: `what depends on ${seedFixture.defaultTarget}`,
+      named: seedFixture.namedRankedMarker,
+    });
+  });
+
+  it.each([
+    ['missing default marker', { defaultRankedMarker: '' }],
+    ['missing named marker', { namedRankedMarker: '' }],
+    ['crossed identical markers', { namedRankedMarker: seedFixture.defaultRankedMarker }],
+    ['non-alphanumeric marker', { defaultRankedMarker: 'ret001d-default-marker' }],
+    ['oversized marker', { defaultRankedMarker: 'a'.repeat(65) }],
+  ])('fails closed for %s', (_label, override) => {
+    expect(() => traceFixtureQueries({
+      defaultTarget: seedFixture.defaultTarget,
+      namedTarget: seedFixture.namedTarget,
+      defaultRankedMarker: seedFixture.defaultRankedMarker,
+      namedRankedMarker: seedFixture.namedRankedMarker,
+      ...override,
+    })).toThrow('RET001D_RANKED_MARKER_INVALID');
   });
 
   it('accepts only the exact two truth-bound seeded containment rows', () => {
@@ -114,6 +238,34 @@ describe('RET-001D live composition harness', () => {
       .toThrow('RET001D_NEO4J_SEED_READBACK_CARDINALITY');
     expect(() => parseSeedReadback([...validSeedRecords(), validSeedRecords()[0]!], seedFixture))
       .toThrow('RET001D_NEO4J_SEED_READBACK_CARDINALITY');
+  });
+
+  it('rejects a same-marker readback even when the caller repeats that marker as expected truth', () => {
+    const repeatedMarker = seedFixture.defaultRankedMarker;
+    expect(() => parseSeedReadback(
+      seedRecordsFor(seedFixture.run, repeatedMarker, repeatedMarker),
+      { ...seedFixture, namedRankedMarker: repeatedMarker },
+    )).toThrow('RET001D_NEO4J_SEED_READBACK_MISMATCH');
+  });
+
+  it.each([
+    ['default', 'ret001ddforged000000000001', seedFixture.namedRankedMarker],
+    ['named', seedFixture.defaultRankedMarker, 'ret001dnforged000000000001'],
+  ])('rejects a caller-supplied %s marker that does not derive from the run', (
+    _label, defaultRankedMarker, namedRankedMarker,
+  ) => {
+    expect(() => parseSeedReadback(
+      seedRecordsFor(seedFixture.run, defaultRankedMarker, namedRankedMarker),
+      { ...seedFixture, defaultRankedMarker, namedRankedMarker },
+    )).toThrow('RET001D_NEO4J_SEED_READBACK_MISMATCH');
+  });
+
+  it('rejects run and marker truth copied from different canonical runs', () => {
+    const run = 'abc-abcdefabcdef';
+    expect(() => parseSeedReadback(
+      seedRecordsFor(run, seedFixture.defaultRankedMarker, seedFixture.namedRankedMarker),
+      { ...seedFixture, run },
+    )).toThrow('RET001D_NEO4J_SEED_READBACK_MISMATCH');
   });
 
   it.each([
@@ -145,11 +297,13 @@ describe('RET-001D live composition harness', () => {
     ['projectName', 'ret001d-unexpected-project-name'],
     ['targetTenant', 'ret001d-unexpected-tenant'],
     ['projectTenant', 'ret001d-unexpected-tenant'],
+    ['targetResponsibility', 'ret001dwrongmarker'],
   ] as const)('rejects a seeded read-back %s mismatch', (field, value) => {
     const records = validSeedRecords();
     const first = {
-      projectId: 'ret001d-dp-run-1', projectName: seedFixture.defaultProject, projectTenant: 'default',
-      targetId: 'ret001d-dt-run-1', targetName: seedFixture.defaultTarget, targetTenant: 'default',
+      projectId: 'ret001d-dp-run-000000000001', projectName: seedFixture.defaultProject, projectTenant: 'default',
+      targetId: 'ret001d-dt-run-000000000001', targetName: seedFixture.defaultTarget, targetTenant: 'default',
+      targetResponsibility: seedFixture.defaultRankedMarker,
       [field]: value,
     };
     records[0] = seedRecord(first);
@@ -157,9 +311,9 @@ describe('RET-001D live composition harness', () => {
   });
 
   it.each([
-    [['target-ret001d-default-target-run-1'], 'expected', 1, 0, 0, 0],
-    [['ret001d-dt-run-1'], 'alternate', 0, 1, 0, 0],
-    [['ret001d-dp-run-1', 'target-ret001d-default-project-run-1'], 'project-only', 0, 0, 2, 0],
+    [['target-ret001d-default-target-run-000000000001'], 'expected', 1, 0, 0, 0],
+    [['ret001d-dt-run-000000000001'], 'alternate', 0, 1, 0, 0],
+    [['ret001d-dp-run-000000000001', 'target-ret001d-default-project-run-000000000001'], 'project-only', 0, 0, 2, 0],
     [['unrelated-result'], 'none', 0, 0, 0, 1],
   ] as const)('classifies seeded presentation evidence without returning identifiers: %j', (
     resultIds, classification, expectedCount, alternateCount, projectCount, otherCount,
@@ -447,19 +601,60 @@ describe('RET-001D live composition harness', () => {
 
   it('builds explicit cross-tenant and decoy forbidden sets for every live case', () => {
     const fixture = {
-      run: 'run-1',
+      run: 'run-000000000001',
       defaultContent: 'default-content',
       namedContent: 'named-content',
       decoyContent: 'decoy-content',
+      defaultRankedMarker: seedFixture.defaultRankedMarker,
+      namedRankedMarker: seedFixture.namedRankedMarker,
     };
     expect(tenantIsolationForbiddenValues('default', fixture)).toEqual(expect.arrayContaining([
-      'ret001d-np-run-1', 'ret001d-nt-run-1', 'ret001d-ns-run-1', 'named-content',
-      'ret001d-decoy-run-1', 'decoy-content',
+      'ret001d-np-run-000000000001', 'ret001d-nt-run-000000000001',
+      'ret001d-ns-run-000000000001', 'named-content',
+      seedFixture.namedRankedMarker, 'ret001d-decoy-run-000000000001', 'decoy-content',
     ]));
     expect(tenantIsolationForbiddenValues('named-tenant', fixture)).toEqual(expect.arrayContaining([
-      'ret001d-dp-run-1', 'ret001d-dt-run-1', 'ret001d-dd-run-1', 'ret001d-da-run-1',
-      'ret001d-ds-run-1', 'default-content', 'ret001d-decoy-run-1', 'decoy-content',
+      'ret001d-dp-run-000000000001', 'ret001d-dt-run-000000000001',
+      'ret001d-dd-run-000000000001', 'ret001d-da-run-000000000001',
+      'ret001d-ds-run-000000000001', 'default-content', seedFixture.defaultRankedMarker,
+      'ret001d-decoy-run-000000000001', 'decoy-content',
     ]));
+  });
+
+  it('fails strict seed and isolation checks for missing or cross-tenant ranked markers', () => {
+    const queries = traceFixtureQueries({
+      defaultTarget: seedFixture.defaultTarget,
+      namedTarget: seedFixture.namedTarget,
+      defaultRankedMarker: seedFixture.defaultRankedMarker,
+      namedRankedMarker: seedFixture.namedRankedMarker,
+    });
+    expect(() => observeOrderedMarkdownResultIds(presentationResult('unrelated-result', queries.ranked, 'ranked'), {
+      expectedTask: queries.ranked, expectedStrategy: 'ranked',
+      requiredResultIds: [mappingFixture.default.targetId],
+    })).toThrow('RET001D_SEEDED_RESULT_MISSING');
+    expect(tenantIsolationForbiddenValues('default', {
+      run: seedFixture.run, defaultContent: 'default-content', namedContent: 'named-content',
+      decoyContent: 'decoy-content', defaultRankedMarker: seedFixture.defaultRankedMarker,
+      namedRankedMarker: seedFixture.namedRankedMarker,
+    })).toContain(seedFixture.namedRankedMarker);
+  });
+
+  it('places both ranked markers in trace and artifact forbidden values', () => {
+    const queries = traceFixtureQueries({
+      defaultTarget: seedFixture.defaultTarget,
+      namedTarget: seedFixture.namedTarget,
+      defaultRankedMarker: seedFixture.defaultRankedMarker,
+      namedRankedMarker: seedFixture.namedRankedMarker,
+    });
+    const forbidden = traceFixtureForbiddenValues(['token-a', 'token-b'], {
+      defaultContent: 'default-content', namedContent: 'named-content', decoyContent: 'decoy-content',
+      defaultRankedMarker: seedFixture.defaultRankedMarker, namedRankedMarker: seedFixture.namedRankedMarker,
+    }, queries);
+    expect(forbidden).toEqual(expect.arrayContaining([
+      seedFixture.defaultRankedMarker, seedFixture.namedRankedMarker,
+    ]));
+    const evidence = JSON.stringify({ packet: 'RET-001D', cases: [{ id: 'ranked', trace: { candidateCount: 1 } }] });
+    expect(forbidden.some((value) => evidence.includes(value))).toBe(false);
   });
 
   it('requires an explicit single residual row and never defaults missing Neo4j evidence to clean', () => {
@@ -576,6 +771,7 @@ describe('RET-001D live composition harness', () => {
     'RET001D_READINESS_NETWORK',
     'RET001D_READINESS_TIMEOUT__RET001D_READINESS_NETWORK',
     'RET001D_READINESS_UNKNOWN',
+    'RET001D_RANKED_MARKER_INVALID',
     'RET001D_REDIS_CLEANUP_FAILED',
     'RET001D_REDIS_KEY_BOUND',
     'RET001D_REDIS_OWNERSHIP_FAILED',
@@ -676,6 +872,16 @@ describe('RET-001D live composition harness', () => {
     expect(workflow).toContain('MEMBERRY_TRACE_LIVE_NEO4J_IMAGE_ID');
     expect(systems).toContain('memberry-retrieval-trace-live-conformance-v1');
     expect(validator).toContain("system.contract === 'retrieval-trace-live-conformance-v1'");
+  });
+
+  it('binds ranked fixture markers to the actual architecture fulltext index fields, never entity name', async () => {
+    const schema = await readFile(
+      fileURLToPath(new URL('../../../../packages/arch/src/schema.ts', import.meta.url)), 'utf8',
+    );
+    expect(schema).toContain(
+      "ON EACH [e.responsibility, e.interface_desc, e.internals]",
+    );
+    expect(schema).not.toMatch(/entity_arch_content[^\n]+e\.name/);
   });
 
   it('rejects relabeled or redirected trace conformance registrations', async () => {
