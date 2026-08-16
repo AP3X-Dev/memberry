@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, it } from 'vitest';
 import neo4j, {
@@ -47,6 +48,9 @@ const RUN = `ret002b${OWNER}`;
 const TENANT = 'tenant-alpha';
 const FOREIGN_TENANT = 'tenant-beta';
 const WRITER_LOCK_TIMEOUT_MS = 750;
+const HOSTILE_NAME_BOUND = 200;
+const HOSTILE_NAME_PAYLOAD_LENGTH = 2_000;
+const HOSTILE_FIXTURE_NAME_BYTE_BUDGET = 4_096;
 
 const nodeManifest: NodeManifestEntry[] = [];
 const relationshipManifest: RelationshipManifestEntry[] = [];
@@ -155,7 +159,7 @@ nodeManifest[nodeManifest.length - 1] = {
 const FOREIGN_OVERSIZED_PROJECT = addNode(`${RUN}-foreign-oversized-project`, 'project', FOREIGN_TENANT);
 nodeManifest[nodeManifest.length - 1] = {
   id: FOREIGN_OVERSIZED_PROJECT,
-  name: `${RUN}-${'y'.repeat(10_000)}`,
+  name: `${RUN}-${'y'.repeat(HOSTILE_NAME_PAYLOAD_LENGTH)}`,
   type: 'project',
   tenantId: FOREIGN_TENANT,
 };
@@ -175,7 +179,7 @@ addLateForeignNode(
 addLateForeignNode(
   FOREIGN_ROOT.id,
   `${RUN}-foreign-oversized-candidate`,
-  `${RUN}-${'x'.repeat(10_000)}`,
+  `${RUN}-${'x'.repeat(HOSTILE_NAME_PAYLOAD_LENGTH)}`,
   Array.from({ length: 512 }, (_, index) => `${RUN}-alias-${index}`),
 );
 const FOREIGN_CONTINUATION_IDS = addChain(FOREIGN_SAFE.id, 'foreign-continuation', 16);
@@ -786,6 +790,17 @@ async function requireHintResolution(
 describe('ScopedEntityResolver disposable Neo4j containment proof', () => {
   let driver: Driver | undefined;
   let available = false;
+
+  it('keeps hostile oversized names beyond resolver bounds but within the index-safe fixture budget', () => {
+    for (const id of [FOREIGN_OVERSIZED_PROJECT, `${RUN}-foreign-oversized-candidate`]) {
+      const fixture = NODES.find((node) => node.id === id);
+      if (typeof fixture?.name !== 'string'
+        || fixture.name.length <= HOSTILE_NAME_BOUND
+        || Buffer.byteLength(fixture.name, 'utf8') > HOSTILE_FIXTURE_NAME_BYTE_BUDGET) {
+        throw fixedFailure('hostile_name_fixture_bounds');
+      }
+    }
+  });
 
   it('rejects extra manifest properties and audits an acknowledged-late setup on a fresh session', async () => {
     if (!exactPropertyKeys(['id', 'name', 'type', 'ret002b_owner'], [
