@@ -2,8 +2,9 @@
 // Yggdrasil-inspired 5-step deterministic context assembly.
 // Same graph state always produces the same output — no ranking heuristics.
 
-import { type Driver } from 'neo4j-driver';
-import { tenantWhere, resolveTenant, TENANT_PARAM } from '@memberry/neo4j';
+import { Record as Neo4jRecord, type Driver } from 'neo4j-driver';
+import { isProxy } from 'node:util/types';
+import { activeRelationshipFilter, tenantWhere, resolveTenant, TENANT_PARAM } from '@memberry/neo4j';
 import type { ContextSection, ContextItem } from './types.js';
 import { DeterministicRuntimeTraceAdapter } from './runtime-trace.js';
 import type {
@@ -43,8 +44,9 @@ export class DeterministicAssembler {
 
   async assemble(
     task: string,
-    options?: { entity_scope?: string[]; project_name?: string; max_tokens?: number; as_of?: string; tenantId?: string },
+    options?: { entity_scope?: string[]; resolvedEntityIds?: unknown; project_name?: string; max_tokens?: number; as_of?: string; tenantId?: string },
   ): Promise<ContextSection[]> {
+    options = snapshotDeterministicOptions(options);
     const maxTokens = options?.max_tokens ?? 8000;
     const asOf = options?.as_of;
     const tenant = resolveTenant(options?.tenantId);
@@ -52,9 +54,11 @@ export class DeterministicAssembler {
     let tokenBudget = maxTokens;
 
     // Step 1: Identify target entities
-    const targets = options?.entity_scope?.length
+    const resolvedEntityIds = normalizeResolvedEntityIds(options?.resolvedEntityIds);
+    const stableIdLane = resolvedEntityIds !== undefined;
+    const targets = resolvedEntityIds ?? (options?.entity_scope?.length
       ? options.entity_scope
-      : await this.matchEntities(task, options?.project_name);
+      : await this.matchEntities(task, options?.project_name));
 
     if (targets.length === 0) {
       sections.push({
@@ -68,7 +72,9 @@ export class DeterministicAssembler {
     // Step 2: Hierarchy walk — ancestors provide domain context
     // Batched: one UNWIND query for all targets, regrouped in JS to preserve the
     // exact per-target iteration order the per-target loop produced.
-    const ancestorsByTarget = await this.getAncestorsBatch(targets);
+    const ancestorsByTarget = stableIdLane
+      ? new Map<string, Array<{ name: string; depth: number; responsibility: string }>>()
+      : await this.getAncestorsBatch(targets);
     const hierarchyItems: ContextItem[] = [];
     for (const target of targets) {
       const ancestors = ancestorsByTarget.get(target) ?? [];
@@ -88,7 +94,9 @@ export class DeterministicAssembler {
     }
 
     // Step 3: Target entities with full properties
-    const entitiesByTarget = await this.getEntitiesBatch(targets);
+    const entitiesByTarget = stableIdLane
+      ? await this.getEntitiesBatch(targets, true, options?.project_name)
+      : await this.getEntitiesBatch(targets);
     const targetItems: ContextItem[] = [];
     for (const target of targets) {
       const entity = entitiesByTarget.get(target);
@@ -112,15 +120,20 @@ export class DeterministicAssembler {
     }
 
     // Step 4: Dependencies — what targets depend on
-    const depsByTarget = await this.getDependenciesBatch(targets);
-    const dependentsByTarget = await this.getDependentsBatch(targets);
+    const depsByTarget = stableIdLane
+      ? new Map<string, Array<{ name: string; relation: string; interface_desc: string }>>()
+      : await this.getDependenciesBatch(targets);
+    const dependentsByTarget = stableIdLane
+      ? new Map<string, Array<{ name: string; relation: string }>>()
+      : await this.getDependentsBatch(targets);
     const depItems: ContextItem[] = [];
     for (const target of targets) {
+      const targetLabel = stableIdLane ? (entitiesByTarget.get(target)?.name ?? target) : target;
       const deps = depsByTarget.get(target) ?? [];
       for (const d of deps) {
         depItems.push({
           id: `dep-${target}-${d.name}`,
-          content: `**${target}** —[${d.relation}]→ **${d.name}**: ${d.interface_desc}`,
+          content: `**${targetLabel}** —[${d.relation}]→ **${d.name}**: ${d.interface_desc}`,
           score: 0.8,
           metadata: { relation: d.relation },
         });
@@ -129,7 +142,7 @@ export class DeterministicAssembler {
       for (const d of dependents) {
         depItems.push({
           id: `dnt-${d.name}-${target}`,
-          content: `**${d.name}** —[${d.relation}]→ **${target}** (dependent)`,
+          content: `**${d.name}** —[${d.relation}]→ **${targetLabel}** (dependent)`,
           score: 0.6,
           metadata: { relation: d.relation, direction: 'dependent' },
         });
@@ -142,7 +155,9 @@ export class DeterministicAssembler {
     }
 
     // Step 5: Aspects — cross-cutting concerns
-    const aspectsByTarget = await this.getAspectsBatch(targets);
+    const aspectsByTarget = stableIdLane
+      ? new Map<string, Array<{ name: string; stability_tier: string; description: string }>>()
+      : await this.getAspectsBatch(targets);
     const aspectItems: ContextItem[] = [];
     for (const target of targets) {
       const aspects = aspectsByTarget.get(target) ?? [];
@@ -162,7 +177,9 @@ export class DeterministicAssembler {
     }
 
     // Step 6: Semantic memories scoped to target entities (and to the tenant)
-    const semanticsByTarget = await this.getScopedSemanticsBatch(targets, asOf, tenant);
+    const semanticsByTarget = stableIdLane
+      ? await this.getScopedSemanticsBatch(targets, asOf, tenant, true, options?.project_name)
+      : await this.getScopedSemanticsBatch(targets, asOf, tenant);
     const semanticItems: ContextItem[] = [];
     for (const target of targets) {
       const memories = semanticsByTarget.get(target) ?? [];
@@ -188,8 +205,9 @@ export class DeterministicAssembler {
    * its calls, allocations, ordering, and returned bytes retain the baseline. */
   async assembleTraced(
     task: string,
-    options?: { entity_scope?: string[]; project_name?: string; max_tokens?: number; as_of?: string; tenantId?: string },
+    options?: { entity_scope?: string[]; resolvedEntityIds?: unknown; project_name?: string; max_tokens?: number; as_of?: string; tenantId?: string },
   ): Promise<{ sections: ContextSection[]; trace: RetrievalTraceV1 }> {
+    options = snapshotDeterministicOptions(options);
     const maxTokens = options?.max_tokens ?? 8000;
     const asOf = options?.as_of;
     const tenant = resolveTenant(options?.tenantId);
@@ -197,7 +215,9 @@ export class DeterministicAssembler {
     let tokenBudget = maxTokens;
     let discovery: RetrievalTraceChannelSettlement | undefined;
 
-    const explicitTargets = options?.entity_scope?.length ? options.entity_scope : undefined;
+    const resolvedEntityIds = normalizeResolvedEntityIds(options?.resolvedEntityIds);
+    const stableIdLane = resolvedEntityIds !== undefined;
+    const explicitTargets = resolvedEntityIds ?? (options?.entity_scope?.length ? options.entity_scope : undefined);
     const targets = explicitTargets ?? await this.matchEntities(
       task,
       options?.project_name,
@@ -207,7 +227,7 @@ export class DeterministicAssembler {
       query: task,
       maxTokens,
       targetCount: targets.length,
-      projectScopeApplied: explicitTargets === undefined && normalizeProjectName(options?.project_name) !== null,
+      projectScopeApplied: normalizeProjectName(options?.project_name) !== null,
       namedTenant: tenant !== 'default',
       temporalFilterApplied: Boolean(asOf),
       discovery,
@@ -222,8 +242,14 @@ export class DeterministicAssembler {
       return { sections, trace: trace.finalize() };
     }
 
-    const ancestorsByTarget = await runTracedQuery(trace, 'arch.hierarchy', () => this.getAncestorsBatch(targets))
-      ?? new Map<string, Array<{ name: string; depth: number; responsibility: string }>>();
+    let ancestorsByTarget = new Map<string, Array<{ name: string; depth: number; responsibility: string }>>();
+    if (stableIdLane) {
+      trace.attempt('arch.hierarchy');
+      trace.settle('arch.hierarchy', { outcome: 'safe-failure', code: 'unavailable' });
+    } else {
+      ancestorsByTarget = await runTracedQuery(trace, 'arch.hierarchy', () => this.getAncestorsBatch(targets))
+        ?? ancestorsByTarget;
+    }
     const hierarchyItems: ContextItem[] = [];
     for (const target of targets) {
       for (const a of ancestorsByTarget.get(target) ?? []) {
@@ -242,7 +268,9 @@ export class DeterministicAssembler {
     }
     trace.recordSourceFinal('arch.hierarchy', hierarchyItems, hierarchy.section.items);
 
-    const entitiesByTarget = await runTracedQuery(trace, 'arch.entity', () => this.getEntitiesBatch(targets))
+    const entitiesByTarget = await runTracedQuery(trace, 'arch.entity', () => stableIdLane
+      ? this.getEntitiesBatch(targets, true, options?.project_name)
+      : this.getEntitiesBatch(targets))
       ?? new Map<string, { name: string; category: string; responsibility: string; interface_desc: string; internals: string }>();
     const targetItems: ContextItem[] = [];
     for (const target of targets) {
@@ -270,17 +298,22 @@ export class DeterministicAssembler {
     let dependencyFailure = false;
     let depsByTarget = new Map<string, Array<{ name: string; relation: string; interface_desc: string }>>();
     let dependentsByTarget = new Map<string, Array<{ name: string; relation: string }>>();
-    try { depsByTarget = await this.getDependenciesBatch(targets); } catch { dependencyFailure = true; }
-    try { dependentsByTarget = await this.getDependentsBatch(targets); } catch { dependencyFailure = true; }
-    trace.settle('arch.dependency', dependencyFailure
+    if (!stableIdLane) {
+      try { depsByTarget = await this.getDependenciesBatch(targets); } catch { dependencyFailure = true; }
+      try { dependentsByTarget = await this.getDependentsBatch(targets); } catch { dependencyFailure = true; }
+    }
+    trace.settle('arch.dependency', stableIdLane
+      ? { outcome: 'safe-failure', code: 'unavailable' }
+      : dependencyFailure
       ? { outcome: 'safe-failure', code: 'query-failed' }
       : { outcome: 'success' });
     const depItems: ContextItem[] = [];
     for (const target of targets) {
+      const targetLabel = stableIdLane ? (entitiesByTarget.get(target)?.name ?? target) : target;
       for (const d of depsByTarget.get(target) ?? []) {
         depItems.push({
           id: `dep-${target}-${d.name}`,
-          content: `**${target}** —[${d.relation}]→ **${d.name}**: ${d.interface_desc}`,
+          content: `**${targetLabel}** —[${d.relation}]→ **${d.name}**: ${d.interface_desc}`,
           score: 0.8,
           metadata: { relation: d.relation },
         });
@@ -288,7 +321,7 @@ export class DeterministicAssembler {
       for (const d of dependentsByTarget.get(target) ?? []) {
         depItems.push({
           id: `dnt-${d.name}-${target}`,
-          content: `**${d.name}** —[${d.relation}]→ **${target}** (dependent)`,
+          content: `**${d.name}** —[${d.relation}]→ **${targetLabel}** (dependent)`,
           score: 0.6,
           metadata: { relation: d.relation, direction: 'dependent' },
         });
@@ -301,8 +334,14 @@ export class DeterministicAssembler {
     }
     trace.recordSourceFinal('arch.dependency', depItems, dependencySection.section.items);
 
-    const aspectsByTarget = await runTracedQuery(trace, 'arch.aspect', () => this.getAspectsBatch(targets))
-      ?? new Map<string, Array<{ name: string; stability_tier: string; description: string }>>();
+    let aspectsByTarget = new Map<string, Array<{ name: string; stability_tier: string; description: string }>>();
+    if (stableIdLane) {
+      trace.attempt('arch.aspect');
+      trace.settle('arch.aspect', { outcome: 'safe-failure', code: 'unavailable' });
+    } else {
+      aspectsByTarget = await runTracedQuery(trace, 'arch.aspect', () => this.getAspectsBatch(targets))
+        ?? aspectsByTarget;
+    }
     const aspectItems: ContextItem[] = [];
     for (const target of targets) {
       for (const a of aspectsByTarget.get(target) ?? []) {
@@ -321,7 +360,9 @@ export class DeterministicAssembler {
     }
     trace.recordSourceFinal('arch.aspect', aspectItems, aspectSection.section.items);
 
-    const semanticsByTarget = await runTracedQuery(trace, 'memory.graph', () => this.getScopedSemanticsBatch(targets, asOf, tenant))
+    const semanticsByTarget = await runTracedQuery(trace, 'memory.graph', () => stableIdLane
+      ? this.getScopedSemanticsBatch(targets, asOf, tenant, true, options?.project_name)
+      : this.getScopedSemanticsBatch(targets, asOf, tenant))
       ?? new Map<string, Array<{ id: string; content: string; confidence: number; tags: string[] }>>();
     const semanticItems: ContextItem[] = [];
     for (const target of targets) {
@@ -462,17 +503,29 @@ export class DeterministicAssembler {
     }
   }
 
-  private async getEntitiesBatch(names: string[]): Promise<Map<string, {
+  private async getEntitiesBatch(names: string[], stableIds = false, projectNameOption?: string): Promise<Map<string, {
     name: string; category: string; responsibility: string; interface_desc: string; internals: string;
   }>> {
     const session = this.driver.session();
     try {
       const result = await session.run(
-        `UNWIND $names AS targetName
+        stableIds ? `UNWIND range(0, size($ids) - 1) AS ordinal
+         WITH ordinal, $ids[ordinal] AS targetId
+         OPTIONAL MATCH (e:Entity {id: targetId})
+         WHERE $projectName IS NULL
+            OR toLower(COALESCE(e.name, '')) = toLower($projectName)
+            OR EXISTS {
+              MATCH (project:Entity)-[:CONTAINS*0..64]->(e)
+              WHERE toLower(COALESCE(project.name, '')) = toLower($projectName)
+            }
+         WITH ordinal, targetId, e ORDER BY ordinal
+         RETURN toString(ordinal) AS ordinal, targetId, e,
+           CASE WHEN e IS NULL THEN null ELSE $projectName END AS projectName` : `UNWIND $names AS targetName
          MATCH (e:Entity {name: targetName})
          RETURN targetName AS targetName, e`,
-        { names },
+        stableIds ? { ids: names, projectName: normalizeProjectName(projectNameOption) } : { names },
       );
+      if (stableIds) return parseStableEntityRecords(result, names, normalizeProjectName(projectNameOption));
       const map = new Map<string, {
         name: string; category: string; responsibility: string; interface_desc: string; internals: string;
       }>();
@@ -583,6 +636,8 @@ export class DeterministicAssembler {
     names: string[],
     asOf: string | undefined,
     tenantId: string,
+    stableIds = false,
+    projectNameOption?: string,
   ): Promise<Map<string, Array<{ id: string; content: string; confidence: number; tags: string[] }>>> {
     const session = this.driver.session();
     try {
@@ -593,8 +648,26 @@ export class DeterministicAssembler {
       // single-tenant), and bars a named tenant's semantics in multi-tenant. The
       // $tenantId value is a bound parameter (injection-safe).
       const temporalFilter = asOf ? ' AND s.created_at <= $asOf' : '';
+      const projectScope = normalizeProjectTag(projectNameOption);
       const result = await session.run(
-        `UNWIND $names AS targetName
+        stableIds ? `UNWIND range(0, size($ids) - 1) AS ordinal
+         WITH ordinal, $ids[ordinal] AS targetId
+         CALL {
+           WITH targetId
+           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {id: targetId})
+           WHERE ${activeRelationshipFilter('r', asOf ? 'asOf' : undefined)}
+             AND ${tenantWhere('s', tenantId)}${temporalFilter}
+             AND $projectScope IS NOT NULL
+             AND (toLower(COALESCE(s.scope, '')) = $projectScope
+               OR (s.scope IS NULL AND ANY(tag IN COALESCE(s.tags, []) WHERE toLower(tag) = $projectScope)))
+           RETURN s.id AS id, s.content AS content, s.confidence AS confidence, s.tags AS tags,
+             s.tenant_id AS tenantId, s.scope AS scope
+           ORDER BY s.confidence DESC, s.id ASC
+           LIMIT 10
+         }
+         WITH ordinal, targetId, id, content, confidence, tags, tenantId, scope
+         ORDER BY ordinal ASC, confidence DESC, id ASC
+         RETURN toString(ordinal) AS ordinal, targetId, id, content, confidence, tags, tenantId, scope` : `UNWIND $names AS targetName
          CALL {
            WITH targetName
            MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: targetName})
@@ -604,8 +677,11 @@ export class DeterministicAssembler {
            LIMIT 10
          }
          RETURN targetName AS targetName, id, content, confidence, tags`,
-        { names, [TENANT_PARAM]: tenantId, ...(asOf ? { asOf } : {}) },
+        stableIds
+          ? { ids: names, [TENANT_PARAM]: tenantId, projectScope, ...(asOf ? { asOf } : {}) }
+          : { names, [TENANT_PARAM]: tenantId, ...(asOf ? { asOf } : {}) },
       );
+      if (stableIds) return parseStableSemanticRecords(result, names, tenantId, projectScope);
       return this.groupByTarget(result.records, (r) => ({
         target: r.get('targetName') as string,
         value: {
@@ -622,6 +698,306 @@ export class DeterministicAssembler {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const MAX_RESOLVED_ENTITY_IDS = 32;
+const MAX_ENTITY_ID_LENGTH = 200;
+const SAFE_ENTITY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const DETERMINISTIC_OPTION_KEYS = new Set([
+  'entity_scope', 'resolvedEntityIds', 'project_name', 'max_tokens', 'as_of', 'tenantId',
+]);
+
+function snapshotDeterministicOptions<T extends object | undefined>(options: T): T {
+  if (options === undefined) return options;
+  if (options === null || typeof options !== 'object'
+    || isProxy(options) || Object.getPrototypeOf(options) !== Object.prototype) {
+    throw new Error('deterministic_options_invalid');
+  }
+  const stableDescriptor = Object.getOwnPropertyDescriptor(options, 'resolvedEntityIds');
+  if (stableDescriptor === undefined) return options;
+  if (!('value' in stableDescriptor)) throw new Error('deterministic_options_invalid');
+  const snapshot: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== 'string' || !DETERMINISTIC_OPTION_KEYS.has(key)) {
+      throw new Error('deterministic_options_invalid');
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(options, key);
+    if (!descriptor || !('value' in descriptor)) throw new Error('deterministic_options_invalid');
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot as T;
+}
+
+const MAX_STABLE_DETERMINISTIC_RECORDS = MAX_RESOLVED_ENTITY_IDS * 10;
+const MAX_STABLE_DETERMINISTIC_PROPERTIES = 64;
+const MAX_STABLE_DETERMINISTIC_ARRAY = 256;
+const MAX_STABLE_DETERMINISTIC_STRING_BYTES = 65_536;
+const MAX_STABLE_DETERMINISTIC_TOTAL_STRING_BYTES = 2 * 1024 * 1024;
+const MAX_STABLE_DETERMINISTIC_TOTAL_VALUES = 16_384;
+type StableDeterministicBudget = { values: number; stringBytes: number };
+
+function stableDeterministicInvalid(): never {
+  throw new Error('stable_deterministic_result_invalid');
+}
+
+function deterministicDataValue(object: object, key: PropertyKey): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  if (!descriptor || !('value' in descriptor)) return stableDeterministicInvalid();
+  return descriptor.value;
+}
+
+function createStableDeterministicBudget(): StableDeterministicBudget {
+  return { values: 0, stringBytes: 0 };
+}
+
+function consumeStableDeterministicValue(budget: StableDeterministicBudget, value: unknown): void {
+  budget.values += 1;
+  if (budget.values > MAX_STABLE_DETERMINISTIC_TOTAL_VALUES) stableDeterministicInvalid();
+  if (typeof value === 'string') {
+    const bytes = Buffer.byteLength(value, 'utf8');
+    if (bytes > MAX_STABLE_DETERMINISTIC_STRING_BYTES) stableDeterministicInvalid();
+    budget.stringBytes += bytes;
+    if (budget.stringBytes > MAX_STABLE_DETERMINISTIC_TOTAL_STRING_BYTES) stableDeterministicInvalid();
+  }
+}
+
+function snapshotDeterministicDenseArray(value: unknown, maxLength: number): unknown[] {
+  if (isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    return stableDeterministicInvalid();
+  }
+  const length = deterministicDataValue(value, 'length');
+  if (!Number.isInteger(length) || (length as number) < 0 || (length as number) > maxLength) {
+    return stableDeterministicInvalid();
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== (length as number) + 1 || keys[keys.length - 1] !== 'length') {
+    return stableDeterministicInvalid();
+  }
+  const snapshot: unknown[] = [];
+  for (let index = 0; index < (length as number); index += 1) {
+    if (keys[index] !== String(index)) return stableDeterministicInvalid();
+    snapshot.push(deterministicDataValue(value, String(index)));
+  }
+  return snapshot;
+}
+
+function snapshotDeterministicProperties(
+  value: unknown, budget: StableDeterministicBudget,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || isProxy(value)) return stableDeterministicInvalid();
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return stableDeterministicInvalid();
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > MAX_STABLE_DETERMINISTIC_PROPERTIES) return stableDeterministicInvalid();
+  const snapshot: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (typeof key !== 'string') return stableDeterministicInvalid();
+    const item = deterministicDataValue(value, key);
+    consumeStableDeterministicValue(budget, item);
+    if (Array.isArray(item)) {
+      const items = snapshotDeterministicDenseArray(item, MAX_STABLE_DETERMINISTIC_ARRAY);
+      for (const nested of items) consumeStableDeterministicValue(budget, nested);
+      snapshot[key] = items;
+    } else if (item === null || ['string', 'number', 'boolean', 'undefined'].includes(typeof item)) {
+      snapshot[key] = item;
+    } else {
+      return stableDeterministicInvalid();
+    }
+  }
+  return snapshot;
+}
+
+function snapshotDeterministicNodeProperties(
+  value: unknown, budget: StableDeterministicBudget,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || isProxy(value)) return stableDeterministicInvalid();
+  return snapshotDeterministicProperties(deterministicDataValue(value, 'properties'), budget);
+}
+
+function snapshotDeterministicRecords(
+  result: unknown,
+  fields: readonly string[],
+  maxRecords: number,
+  budget: StableDeterministicBudget,
+): unknown[][] {
+  if (result === null || typeof result !== 'object' || isProxy(result)) return stableDeterministicInvalid();
+  const records = snapshotDeterministicDenseArray(
+    deterministicDataValue(result, 'records'),
+    Math.min(MAX_STABLE_DETERMINISTIC_RECORDS, maxRecords),
+  );
+  return records.map((record) => {
+    if (record === null || typeof record !== 'object' || isProxy(record)
+      || Object.getPrototypeOf(record) !== Neo4jRecord.prototype) return stableDeterministicInvalid();
+    const ownKeys = Reflect.ownKeys(record);
+    if (ownKeys.length !== 4 || !['keys', 'length', '_fields', '_fieldLookup'].every((key) => ownKeys.includes(key))) {
+      return stableDeterministicInvalid();
+    }
+    if (deterministicDataValue(record, 'length') !== fields.length) return stableDeterministicInvalid();
+    const keys = snapshotDeterministicDenseArray(deterministicDataValue(record, 'keys'), fields.length);
+    const values = snapshotDeterministicDenseArray(deterministicDataValue(record, '_fields'), fields.length);
+    if (keys.length !== fields.length || fields.some((field, index) => keys[index] !== field)) {
+      return stableDeterministicInvalid();
+    }
+    const lookup = deterministicDataValue(record, '_fieldLookup');
+    if (lookup === null || typeof lookup !== 'object' || isProxy(lookup)) return stableDeterministicInvalid();
+    const lookupProto = Object.getPrototypeOf(lookup);
+    if (lookupProto !== Object.prototype && lookupProto !== null) return stableDeterministicInvalid();
+    const lookupKeys = Reflect.ownKeys(lookup);
+    if (lookupKeys.length !== fields.length || fields.some((field) => !lookupKeys.includes(field))) {
+      return stableDeterministicInvalid();
+    }
+    fields.forEach((field, index) => {
+      if (deterministicDataValue(lookup, field) !== index) stableDeterministicInvalid();
+    });
+    for (const value of values) consumeStableDeterministicValue(budget, value);
+    return values;
+  });
+}
+
+function parseStableOrdinal(value: unknown, length: number): number {
+  if (typeof value !== 'string' || !/^(?:0|[1-9][0-9]?)$/.test(value)) return stableDeterministicInvalid();
+  const ordinal = Number(value);
+  if (!Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal >= length || String(ordinal) !== value) {
+    return stableDeterministicInvalid();
+  }
+  return ordinal;
+}
+
+function parseStableEntityRecords(
+  result: unknown,
+  ids: readonly string[],
+  projectName: string | null,
+): Map<string, { name: string; category: string; responsibility: string; interface_desc: string; internals: string }> {
+  const budget = createStableDeterministicBudget();
+  const rows = snapshotDeterministicRecords(
+    result, ['ordinal', 'targetId', 'e', 'projectName'], ids.length, budget,
+  );
+  if (rows.length !== ids.length) return stableDeterministicInvalid();
+  const map = new Map<string, { name: string; category: string; responsibility: string; interface_desc: string; internals: string }>();
+  rows.forEach(([rawOrdinal, targetId, entity, returnedProjectName], index) => {
+    const ordinal = parseStableOrdinal(rawOrdinal, ids.length);
+    if (ordinal !== index || targetId !== ids[ordinal]) stableDeterministicInvalid();
+    if (entity === null) {
+      if (returnedProjectName !== null) stableDeterministicInvalid();
+      return;
+    }
+    if (returnedProjectName !== projectName) stableDeterministicInvalid();
+    const props = snapshotDeterministicNodeProperties(entity, budget);
+    if (props.id !== targetId || typeof props.id !== 'string' || !SAFE_ENTITY_ID.test(props.id)
+      || typeof props.name !== 'string'
+      || (props.category !== undefined && props.category !== null && typeof props.category !== 'string')
+      || (props.type !== undefined && props.type !== null && typeof props.type !== 'string')
+      || (props.responsibility !== undefined && props.responsibility !== null && typeof props.responsibility !== 'string')
+      || (props.interface_desc !== undefined && props.interface_desc !== null && typeof props.interface_desc !== 'string')
+      || (props.internals !== undefined && props.internals !== null && typeof props.internals !== 'string')) {
+      stableDeterministicInvalid();
+    }
+    map.set(targetId, {
+      name: props.name,
+      category: typeof props.category === 'string' ? props.category
+        : typeof props.type === 'string' ? props.type : 'unknown',
+      responsibility: typeof props.responsibility === 'string' ? props.responsibility : '',
+      interface_desc: typeof props.interface_desc === 'string' ? props.interface_desc : '',
+      internals: typeof props.internals === 'string' ? props.internals : '',
+    });
+  });
+  return map;
+}
+
+function parseStableSemanticRecords(
+  result: unknown,
+  ids: readonly string[],
+  tenant: string,
+  projectScope: string | null,
+): Map<string, Array<{ id: string; content: string; confidence: number; tags: string[] }>> {
+  const budget = createStableDeterministicBudget();
+  const rows = snapshotDeterministicRecords(
+    result, ['ordinal', 'targetId', 'id', 'content', 'confidence', 'tags', 'tenantId', 'scope'],
+    ids.length * 10, budget,
+  );
+  const map = new Map<string, Array<{ id: string; content: string; confidence: number; tags: string[] }>>();
+  const seen = new Set<string>();
+  const perTargetCounts = new Array(ids.length).fill(0) as number[];
+  const previousPerTarget = new Map<number, { confidence: number; id: string }>();
+  let previousOrdinal = -1;
+  for (const [rawOrdinal, targetId, id, content, confidence, rawTags, tenantId, scope] of rows) {
+    const ordinal = parseStableOrdinal(rawOrdinal, ids.length);
+    if (ordinal < previousOrdinal || targetId !== ids[ordinal]
+      || typeof id !== 'string' || !SAFE_ENTITY_ID.test(id)
+      || typeof content !== 'string' || typeof confidence !== 'number' || !Number.isFinite(confidence)
+      || (tenant === 'default'
+        ? tenantId !== undefined && tenantId !== null && tenantId !== 'default'
+        : tenantId !== tenant)
+      || projectScope === null) {
+      return stableDeterministicInvalid();
+    }
+    previousOrdinal = ordinal;
+    const duplicateKey = `${ordinal}\u0000${id}`;
+    if (seen.has(duplicateKey)) return stableDeterministicInvalid();
+    seen.add(duplicateKey);
+    const tags = snapshotDeterministicDenseArray(rawTags, MAX_STABLE_DETERMINISTIC_ARRAY);
+    for (const tag of tags) consumeStableDeterministicValue(budget, tag);
+    if (!tags.every((tag) => typeof tag === 'string')) return stableDeterministicInvalid();
+    if (typeof scope === 'string' && scope.length > 0) {
+      if (scope.toLowerCase() !== projectScope) return stableDeterministicInvalid();
+    } else if (scope !== null && scope !== undefined) {
+      return stableDeterministicInvalid();
+    } else if (!(tags as string[]).some((tag) => tag.toLowerCase() === projectScope)) {
+      return stableDeterministicInvalid();
+    }
+    perTargetCounts[ordinal] = (perTargetCounts[ordinal] ?? 0) + 1;
+    if (perTargetCounts[ordinal]! > 10) return stableDeterministicInvalid();
+    const previous = previousPerTarget.get(ordinal);
+    if (previous && (confidence > previous.confidence
+      || (confidence === previous.confidence && compareStableCodeUnits(id, previous.id) <= 0))) {
+      return stableDeterministicInvalid();
+    }
+    previousPerTarget.set(ordinal, { confidence, id });
+    const bucket = map.get(targetId) ?? [];
+    bucket.push({ id, content, confidence, tags: tags as string[] });
+    map.set(targetId, bucket);
+  }
+  return map;
+}
+
+function compareStableCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** @internal RET-002C stable-ID boundary. Undefined preserves the legacy lane. */
+export function normalizeResolvedEntityIds(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new Error('resolved_entity_ids_invalid');
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  const length = lengthDescriptor && 'value' in lengthDescriptor ? lengthDescriptor.value : undefined;
+  if (!Number.isInteger(length) || length < 0 || length > MAX_RESOLVED_ENTITY_IDS) {
+    throw new Error('resolved_entity_ids_invalid');
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== length + 1 || !keys.includes('length')) {
+    throw new Error('resolved_entity_ids_invalid');
+  }
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index);
+    if (!keys.includes(key)) throw new Error('resolved_entity_ids_invalid');
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'string') {
+      throw new Error('resolved_entity_ids_invalid');
+    }
+    const id = descriptor.value;
+    if (id.length === 0 || id.length > MAX_ENTITY_ID_LENGTH || !SAFE_ENTITY_ID.test(id)) {
+      throw new Error('resolved_entity_ids_invalid');
+    }
+    if (!seen.has(id)) {
+      seen.add(id);
+      normalized.push(id);
+    }
+  }
+  return Object.freeze(normalized) as string[];
+}
 
 function budgetSection(
   heading: string,
@@ -661,6 +1037,11 @@ function normalizeProjectName(projectName?: string): string | null {
   if (!trimmed) return null;
   const withoutPrefix = trimmed.replace(/^project:/i, '').trim();
   return withoutPrefix || null;
+}
+
+function normalizeProjectTag(projectName?: string): string | null {
+  const normalized = normalizeProjectName(projectName);
+  return normalized === null ? null : `project:${normalized.toLowerCase()}`;
 }
 
 async function runTracedQuery<T>(

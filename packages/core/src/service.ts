@@ -1,5 +1,6 @@
 // packages/core/src/service.ts
 import { createHash } from 'crypto';
+import { isProxy } from 'node:util/types';
 import { nanoid } from 'nanoid';
 import type {
   LoadScope,
@@ -77,6 +78,8 @@ export interface FactLayer {
    *  one array per input name, in input order, each identical to getActive(name).
    *  Optional — load() falls back to per-entity getActive when absent. */
   getActiveBatch?(entityNames: string[], options?: TemporalOptions, tenantId?: string): Promise<FactNode[][]>;
+  /** @internal Stable-ID batch path. Absence must never fall back to name resolution. */
+  getActiveByEntityIdsBatch?(entityIds: string[], options?: TemporalOptions, tenantId?: string): Promise<FactNode[][]>;
   create(fact: FactNode): Promise<string>;
   /** OPT-70: `includeTentative` opts into surfacing tentative contenders for
    *  corroboration/promotion. Default (omitted) = active-only, as before. */
@@ -109,8 +112,9 @@ export interface Neo4jLayer {
     linkSignal(episodicId: string, signal: Signal, tenantId?: string): Promise<void>;
   };
   query: {
-    byScope(scope: { entities?: string[]; tags?: string[]; limit: number; asOf?: string; tenantId?: string; projectScope?: string }): Promise<SemanticNode[]>;
+    byScope(scope: { entities?: string[]; entityIds?: string[]; tags?: string[]; limit: number; asOf?: string; tenantId?: string; projectScope?: string }): Promise<SemanticNode[]>;
     byVector(embedding: number[], limit: number, tenantId?: string, projectScope?: string): Promise<Array<SemanticNode & { score: number }>>;
+    /** @internal Vector search hard-filtered through ABOUT exact Entity IDs. */
     /** Vector similarity over raw EPISODIC memories (optional). Surfaces captured
      *  episodes directly so freshly stored knowledge is recallable before (or
      *  without) consolidation into a Semantic. */
@@ -266,6 +270,7 @@ export class AMPService {
   // ─── LOAD ──────────────────────────────────────────────────────────────────
 
   async load(scope: LoadScope): Promise<MemoryContext> {
+    scope = normalizeStableIdScope(scope);
     const scopeHash = hashScope(scope);
 
     // 1. Cache hit (tenant-scoped: A's cache must never satisfy B's load)
@@ -293,6 +298,7 @@ export class AMPService {
    * observation describes the current source executions rather than cached bytes.
    */
   async loadFreshObserved(scope: LoadScope): Promise<InternallyObserved<MemoryContext>> {
+    scope = normalizeStableIdScope(scope);
     const observation: InternalRetrievalObservation = { channels: [], candidates: [], finalIds: [] };
     try {
       const value = await this._assembleLoad(scope, hashScope(scope), { observation, cacheResult: false });
@@ -338,6 +344,7 @@ export class AMPService {
     const projectScope = requestedProjectScope(scope.tags);
     // Pass asOf from temporal options so semantic queries filter inactive ABOUT edges consistently
     const asOf = scope.temporal?.as_of;
+    const resolvedEntityIds = scope.resolvedEntityIds as string[] | undefined;
 
     let blocksPromise: Promise<[MemoryBlock[], MemoryBlock[]]> =
       this.blocks && projectTag
@@ -357,6 +364,7 @@ export class AMPService {
 
     const rawScopedSemanticsPromise = this.neo4j.query.byScope({
         entities: scope.entities,
+        ...(resolvedEntityIds !== undefined ? { entityIds: resolvedEntityIds } : {}),
         tags: scope.tags,
         limit: 50,
         asOf,
@@ -371,10 +379,10 @@ export class AMPService {
       : rawScopedSemanticsPromise;
     const semanticVectorPromise = observation
       ? this._vectorSearch(
-          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, settle,
+          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, settle, resolvedEntityIds, asOf,
         )
       : this._vectorSearch(
-          scope.task, 20, scope.tenantId, projectScope, scope.queryVector,
+          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, undefined, resolvedEntityIds, asOf,
         );
     // Preserve the ordinary nested aggregate (and therefore its failure timing)
     // only on the ordinary path. The observed path awaits both promises below.
@@ -388,23 +396,33 @@ export class AMPService {
     // channel, captured knowledge stays write-only until (if ever) consolidated.
     const episodicVectorPromise = observation
       ? this._vectorSearchEpisodic(
-          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, settle,
+          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, settle, resolvedEntityIds, asOf,
         )
       : this._vectorSearchEpisodic(
-          scope.task, 20, scope.tenantId, projectScope, scope.queryVector,
+          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, undefined, resolvedEntityIds, asOf,
         );
 
     // OPT-41: one batched fact fetch (UNWIND ids) instead of one getActive per
     // entity. getActiveBatch returns per-entity arrays in input order, each
     // identical to getActive — so the dedup+rank below is byte-identical. Falls
     // back to the per-entity fan-out for fact layers (e.g. mocks) without it.
-    const factsPromise: Promise<FactNode[][]> =
-      this.neo4j.fact && scope.entities && scope.entities.length > 0
+    const factsPromise: Promise<FactNode[][]> = resolvedEntityIds !== undefined
+      ? this.neo4j.fact && resolvedEntityIds.length > 0 && this.neo4j.fact.getActiveByEntityIdsBatch
+        ? this.neo4j.fact.getActiveByEntityIdsBatch(resolvedEntityIds, scope.temporal, scope.tenantId)
+        : Promise.resolve([])
+      : this.neo4j.fact && scope.entities && scope.entities.length > 0
         ? this.neo4j.fact.getActiveBatch
           ? this.neo4j.fact.getActiveBatch(scope.entities, scope.temporal, scope.tenantId)
           : Promise.all(scope.entities.map((e) => this.neo4j.fact!.getActive(e, scope.temporal, scope.tenantId)))
         : Promise.resolve([]);
-    const observedFactsPromise = observation && this.neo4j.fact && scope.entities && scope.entities.length > 0
+    const stableFactRequested = resolvedEntityIds !== undefined && resolvedEntityIds.length > 0;
+    const stableFactAvailable = stableFactRequested && !!this.neo4j.fact?.getActiveByEntityIdsBatch;
+    if (observation && stableFactRequested && !stableFactAvailable) {
+      settle!({ channel: 'memory.fact', outcome: 'safe-failure', code: 'unavailable' });
+    }
+    const observedFactsPromise = observation && this.neo4j.fact && (
+      resolvedEntityIds !== undefined ? stableFactAvailable : !!this.neo4j.fact && !!scope.entities?.length
+    )
       ? factsPromise.then(
           (value) => { settle!({ channel: 'memory.fact', outcome: 'success' }); return value; },
           (error) => { settle!({ channel: 'memory.fact', outcome: 'safe-failure', code: 'query-failed' }); throw error; },
@@ -549,7 +567,7 @@ export class AMPService {
     }
 
     // 3c. Graph expansion — pull in structurally connected knowledge
-    if (merged.length > 0 && this.neo4j.query.expandByGraph) {
+    if (resolvedEntityIds === undefined && merged.length > 0 && this.neo4j.query.expandByGraph) {
       const seedEntities = extractEntityNames(merged);
       if (seedEntities.length > 0) {
         try {
@@ -1210,7 +1228,17 @@ export class AMPService {
     projectScope?: string,
     queryVector?: number[],
     observe?: (entry: InternalRetrievalChannelObservation) => void,
+    resolvedEntityIds?: string[],
+    asOf?: string,
   ): Promise<Array<SemanticNode & { score: number }>> {
+    // RET-002C: a global vector-index top-K is selected before any Entity.id
+    // predicate, so foreign nearer neighbours can starve every authorized hit.
+    // Stable-ID vector retrieval remains unavailable until it has a bounded,
+    // project-authorized candidate index. Fail before embedding or opening DB work.
+    if (resolvedEntityIds !== undefined) {
+      observe?.({ channel: 'memory.semantic-vector', outcome: 'safe-failure', code: 'unavailable' });
+      return [];
+    }
     // Skip vector search when embeddings are unavailable (no API key): querying
     // the index with zero vectors yields uniform cosine scores and arbitrary
     // ordering. Returning [] lets scoped + graph-expanded retrieval carry load().
@@ -1249,14 +1277,21 @@ export class AMPService {
     projectScope?: string,
     queryVector?: number[],
     observe?: (entry: InternalRetrievalChannelObservation) => void,
+    resolvedEntityIds?: string[],
+    asOf?: string,
   ): Promise<Array<EpisodicNode & { score: number }>> {
+    // See _vectorSearch: global top-K cannot safely implement the stable-ID lane.
+    if (resolvedEntityIds !== undefined) {
+      observe?.({ channel: 'memory.episodic-vector', outcome: 'safe-failure', code: 'unavailable' });
+      return [];
+    }
     if (this.embedding.available === false || !this.neo4j.query.byVectorEpisodic) {
       observe?.({ channel: 'memory.episodic-vector', outcome: 'safe-failure', code: 'unavailable' });
       return [];
     }
     try {
       const emb = queryVector ?? await this._getEmbedding(text);
-      const value = await this.neo4j.query.byVectorEpisodic(emb, limit, tenantId, projectScope);
+      const value = await this.neo4j.query.byVectorEpisodic!(emb, limit, tenantId, projectScope);
       observe?.({ channel: 'memory.episodic-vector', outcome: 'success' });
       return value;
     } catch (err: unknown) {
@@ -1299,8 +1334,61 @@ export class AMPService {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+const MAX_RESOLVED_ENTITY_IDS = 32;
+const MAX_ENTITY_ID_LENGTH = 200;
+const SAFE_ENTITY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const LOAD_SCOPE_KEYS = new Set([
+  'task', 'entities', 'resolvedEntityIds', 'tags', 'max_tokens', 'temporal',
+  'session_id', 'tenantId', 'queryVector',
+]);
+
+function normalizeStableIdScope(scope: LoadScope): LoadScope {
+  if (scope === null || typeof scope !== 'object' || isProxy(scope)
+    || Object.getPrototypeOf(scope) !== Object.prototype) {
+    throw new Error('load_scope_invalid');
+  }
+  const stableDescriptor = Object.getOwnPropertyDescriptor(scope, 'resolvedEntityIds');
+  if (stableDescriptor === undefined) return scope;
+  if (!('value' in stableDescriptor)) throw new Error('load_scope_invalid');
+  const snapshot: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(scope)) {
+    if (typeof key !== 'string' || !LOAD_SCOPE_KEYS.has(key)) throw new Error('load_scope_invalid');
+    const descriptor = Object.getOwnPropertyDescriptor(scope, key);
+    if (!descriptor || !('value' in descriptor)) throw new Error('load_scope_invalid');
+    snapshot[key] = descriptor.value;
+  }
+  const value = stableDescriptor.value;
+  if (isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new Error('resolved_entity_ids_invalid');
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  const length = lengthDescriptor && 'value' in lengthDescriptor ? lengthDescriptor.value : undefined;
+  if (!Number.isInteger(length) || length < 0 || length > MAX_RESOLVED_ENTITY_IDS) {
+    throw new Error('resolved_entity_ids_invalid');
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== length + 1 || !keys.includes('length')) throw new Error('resolved_entity_ids_invalid');
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index);
+    if (!keys.includes(key)) throw new Error('resolved_entity_ids_invalid');
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'string') {
+      throw new Error('resolved_entity_ids_invalid');
+    }
+    const id = descriptor.value;
+    if (id.length === 0 || id.length > MAX_ENTITY_ID_LENGTH || !SAFE_ENTITY_ID.test(id)) {
+      throw new Error('resolved_entity_ids_invalid');
+    }
+    if (!seen.has(id)) { seen.add(id); ids.push(id); }
+  }
+  snapshot.resolvedEntityIds = Object.freeze(ids) as string[];
+  return snapshot as unknown as LoadScope;
+}
+
 function hashScope(scope: LoadScope): string {
-  const canonical = JSON.stringify({
+  const ordinary = {
     // tenant first — the assembled-context cache MUST NOT be shared across
     // tenants even when task/entities/tags are identical.
     tenant: (scope.tenantId && scope.tenantId.trim()) || DEFAULT_TENANT,
@@ -1309,7 +1397,10 @@ function hashScope(scope: LoadScope): string {
     tags: (scope.tags ?? []).slice().sort(),
     max_tokens: scope.max_tokens ?? 4096,
     temporal: scope.temporal ?? null,
-  });
+  };
+  const canonical = JSON.stringify(scope.resolvedEntityIds === undefined
+    ? ordinary
+    : { ...ordinary, resolved_entity_ids: scope.resolvedEntityIds });
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }
 
@@ -1322,6 +1413,9 @@ function cacheScopeKeysForLoad(scope: LoadScope): string[] {
   for (const entity of scope.entities ?? []) {
     const trimmed = entity.trim();
     if (trimmed) keys.add(trimmed);
+  }
+  for (const entityId of (scope.resolvedEntityIds as string[] | undefined) ?? []) {
+    keys.add(entityId);
   }
   return Array.from(keys);
 }

@@ -2,7 +2,7 @@
 // The unified context assembler — the "super-load" that blends
 // architecture + code + memory into a single context package.
 
-import { type Driver } from 'neo4j-driver';
+import { Record as Neo4jRecord, type Driver } from 'neo4j-driver';
 import { isProxy } from 'node:util/types';
 import type {
   UnifiedContext,
@@ -13,7 +13,7 @@ import type {
   BoostFactors,
 } from './types.js';
 import { rrfFusion, dedup } from './fusion.js';
-import { DeterministicAssembler } from './deterministic.js';
+import { DeterministicAssembler, normalizeResolvedEntityIds } from './deterministic.js';
 import { FeedbackTracker, type FeedbackRedisLayer } from './feedback.js';
 import { expandQuery } from './expand.js';
 import { computeQueryStats, lexicalTextScore, adaptiveWeights, inferSourceTypeBoost } from './scoring.js';
@@ -23,6 +23,7 @@ import type {
   EmbeddingProvider,
   LlmClient,
   ChatMessage,
+  TemporalOptions,
 } from '@memberry/core';
 import { readEnv } from '@memberry/core';
 import { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from '@memberry/neo4j';
@@ -45,7 +46,33 @@ import type {
 // the assembler threads an optional tenantId through every direct memory/graph
 // query. We extend the shared type locally so the live retrieval path is
 // tenant-isolated (berry_context / berry_ask) the same way every other read is.
-type TenantRetrievalOptions = RetrievalOptions & { tenantId?: string };
+type TenantRetrievalOptions = RetrievalOptions & { tenantId?: string; resolvedEntityIds?: unknown };
+
+const RETRIEVAL_OPTION_KEYS = new Set([
+  'strategy', 'include_code', 'include_arch', 'include_memory', 'max_tokens',
+  'entity_scope', 'tag_scope', 'project_name', 'as_of', 'tenantId', 'resolvedEntityIds',
+]);
+
+function snapshotRetrievalOptions<T extends object | undefined>(options: T): T {
+  if (options === undefined) return options;
+  if (options === null || typeof options !== 'object'
+    || isProxy(options) || Object.getPrototypeOf(options) !== Object.prototype) {
+    throw new Error('retrieval_options_invalid');
+  }
+  const stableDescriptor = Object.getOwnPropertyDescriptor(options, 'resolvedEntityIds');
+  if (stableDescriptor === undefined) return options;
+  if (!('value' in stableDescriptor)) throw new Error('retrieval_options_invalid');
+  const snapshot: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== 'string' || !RETRIEVAL_OPTION_KEYS.has(key)) {
+      throw new Error('retrieval_options_invalid');
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(options, key);
+    if (!descriptor || !('value' in descriptor)) throw new Error('retrieval_options_invalid');
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot as T;
+}
 
 // ─── Dependency interfaces ───────────────────────────────────────────────────
 
@@ -60,11 +87,11 @@ export interface AssemblerCodeLayer {
 }
 
 export interface AssemblerMemoryLayer {
-  load(scope: { task: string; entities?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; temporal?: { time_mode?: string; as_of?: string; from?: string; to?: string; include_invalidated?: boolean } }): Promise<{
+  load(scope: { task: string; entities?: string[]; resolvedEntityIds?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; temporal?: TemporalOptions }): Promise<{
     markdown: string; tokens: number; sources: string[];
   }>;
   /** @internal RET-001B1 fresh path; bypasses memory cache and single-flight. */
-  loadFreshObserved?(scope: { task: string; entities?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; temporal?: { time_mode?: string; as_of?: string; from?: string; to?: string; include_invalidated?: boolean } }): Promise<RuntimeObserved<{
+  loadFreshObserved?(scope: { task: string; entities?: string[]; resolvedEntityIds?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; temporal?: TemporalOptions }): Promise<RuntimeObserved<{
     markdown: string; tokens: number; sources: string[];
   }>>;
 }
@@ -279,6 +306,8 @@ export class UnifiedAssembler {
    * - 'deterministic': Yggdrasil 5-step algorithm. Same graph → same output. Best for architecture queries.
    */
   async assemble(task: string, options?: Partial<TenantRetrievalOptions>): Promise<UnifiedContext> {
+    options = snapshotRetrievalOptions(options);
+    const resolvedEntityIds = normalizeResolvedEntityIds(options?.resolvedEntityIds);
     const opts: TenantRetrievalOptions = {
       strategy: options?.strategy ?? 'auto',
       include_code: options?.include_code ?? true,
@@ -290,6 +319,7 @@ export class UnifiedAssembler {
       project_name: options?.project_name,
       as_of: options?.as_of,
       tenantId: resolveTenant(options?.tenantId),
+      ...(resolvedEntityIds !== undefined ? { resolvedEntityIds } : {}),
     };
 
     // Shared query embedding: embed the task at most ONCE per assemble() and reuse
@@ -330,6 +360,8 @@ export class UnifiedAssembler {
     task: string,
     options?: Partial<TenantRetrievalOptions>,
   ): Promise<TracedUnifiedContext> {
+    options = snapshotRetrievalOptions(options);
+    const resolvedEntityIds = normalizeResolvedEntityIds(options?.resolvedEntityIds);
     const strategy = options?.strategy ?? 'ranked';
     if (strategy !== 'auto' && strategy !== 'ranked' && strategy !== 'deterministic') {
       throw new Error('assembleTraced requires auto, ranked, or deterministic retrieval');
@@ -345,6 +377,7 @@ export class UnifiedAssembler {
       project_name: options?.project_name,
       as_of: options?.as_of,
       tenantId: resolveTenant(options?.tenantId),
+      ...(resolvedEntityIds !== undefined ? { resolvedEntityIds } : {}),
     };
     const assembleDeterministicTraced = async (): Promise<TracedUnifiedContext> => {
       const result = await this.deterministic.assembleTraced(task, {
@@ -353,6 +386,7 @@ export class UnifiedAssembler {
         max_tokens: opts.max_tokens,
         as_of: opts.as_of,
         tenantId: opts.tenantId,
+        ...(opts.resolvedEntityIds !== undefined ? { resolvedEntityIds: opts.resolvedEntityIds } : {}),
       });
       const tokenCount = result.sections.reduce(
         (sum, section) => sum + section.items.reduce(
@@ -526,6 +560,8 @@ export class UnifiedAssembler {
             } else settledLists.arch = result as RetrievalResult[];
           })
           .catch((err) => {
+            if (opts.resolvedEntityIds !== undefined && err instanceof Error
+              && err.message === 'stable_arch_result_invalid') throw err;
             if (traced) settledObservations!.arch = structuralObservationFromError(err) ?? {
               channels: [{ channel: 'arch.fulltext', outcome: 'safe-failure', code: 'query-failed' }],
               candidates: [], finalIds: [],
@@ -608,6 +644,7 @@ export class UnifiedAssembler {
       const memoryScope = {
         task,
         entities: opts.entity_scope,
+        ...(opts.resolvedEntityIds !== undefined ? { resolvedEntityIds: opts.resolvedEntityIds as string[] } : {}),
         tags: memoryTagScope,
         max_tokens: Math.floor(opts.max_tokens / 3),
         tenantId: tenant,
@@ -759,6 +796,7 @@ export class UnifiedAssembler {
       max_tokens: opts.max_tokens,
       as_of: opts.as_of,
       tenantId: opts.tenantId,
+      ...(opts.resolvedEntityIds !== undefined ? { resolvedEntityIds: opts.resolvedEntityIds } : {}),
     });
 
     const tokenCount = sections.reduce(
@@ -793,8 +831,13 @@ export class UnifiedAssembler {
     opts: TenantRetrievalOptions,
     observed: boolean,
   ): Promise<RuntimeObserved<RetrievalResult[]>> {
-    const session = this.driver.session();
     const observation: RuntimeStructuralObservation = { channels: [], candidates: [], finalIds: [] };
+    const resolvedEntityIds = opts.resolvedEntityIds as string[] | undefined;
+    if (resolvedEntityIds !== undefined && resolvedEntityIds.length === 0) {
+      if (observed) observation.channels = [{ channel: 'arch.fulltext', outcome: 'success' }];
+      return { value: [], observation };
+    }
+    const session = this.driver.session();
     try {
       // Fulltext search on entity architectural properties
       const escaped = task
@@ -803,7 +846,19 @@ export class UnifiedAssembler {
       const projectName = normalizeProjectName(opts.project_name);
       const tenant = resolveTenant(opts.tenantId);
       const result = await session.run(
-        `CALL db.index.fulltext.queryNodes('entity_arch_content', $query)
+        resolvedEntityIds !== undefined ? `UNWIND range(0, size($entityIds) - 1) AS ordinal
+         WITH ordinal, $entityIds[ordinal] AS targetId
+         OPTIONAL MATCH (e:Entity)
+         WHERE e.id = targetId AND e.id IN $entityIds
+           AND ($projectName IS NULL
+             OR toLower(COALESCE(e.name, '')) = toLower($projectName)
+             OR EXISTS {
+               MATCH (project:Entity)-[:CONTAINS*0..64]->(e)
+               WHERE toLower(COALESCE(project.name, '')) = toLower($projectName)
+             })
+         WITH ordinal, targetId, e ORDER BY ordinal
+         RETURN toString(ordinal) AS ordinal, targetId, e, 1.0 AS score,
+           CASE WHEN e IS NULL THEN null ELSE $projectName END AS projectName` : `CALL db.index.fulltext.queryNodes('entity_arch_content', $query)
          YIELD node AS e, score
          WHERE ${tenantWhere('e', tenant)}
            AND (
@@ -816,10 +871,14 @@ export class UnifiedAssembler {
            )
          RETURN e, score
          ORDER BY score DESC LIMIT 15`,
-        { query: `${escaped}*`, projectName, [TENANT_PARAM]: tenant },
+        resolvedEntityIds !== undefined
+          ? { entityIds: resolvedEntityIds, projectName }
+          : { query: `${escaped}*`, projectName, [TENANT_PARAM]: tenant },
       );
 
-      const value = result.records.map((r) => {
+      const value = resolvedEntityIds !== undefined
+        ? parseStableArchResult(result, resolvedEntityIds, projectName)
+        : result.records.map((r) => {
         const props = r.get('e').properties as Record<string, unknown>;
         const parts: string[] = [`**${props.name}** (${props.category ?? props.type ?? 'entity'})`];
         if (props.responsibility) parts.push(`Responsibility: ${props.responsibility}`);
@@ -833,7 +892,7 @@ export class UnifiedAssembler {
           score: r.get('score') as number,
           metadata: { category: props.category, name: props.name },
         };
-      });
+        });
       if (observed) {
         observation.channels = [{ channel: 'arch.fulltext', outcome: 'success' }];
         observation.candidates = value.map((candidate, index) => ({
@@ -847,6 +906,8 @@ export class UnifiedAssembler {
       }
       return { value, observation };
     } catch (err) {
+      if (resolvedEntityIds !== undefined && err instanceof Error
+        && err.message === 'stable_arch_result_invalid') throw err;
       if (observed) console.error('[memberry-retrieval] Arch entity search failed [query-failed]');
       else console.error('[memberry-retrieval] Arch entity search failed (index may not exist):', err instanceof Error ? err.message : err);
       if (observed) observation.channels = [{ channel: 'arch.fulltext', outcome: 'safe-failure', code: 'query-failed' }];
@@ -858,6 +919,153 @@ export class UnifiedAssembler {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const MAX_STABLE_ARCH_RECORDS = 32;
+const MAX_STABLE_ARCH_PROPERTIES = 64;
+const MAX_STABLE_ARCH_ARRAY = 256;
+const SAFE_STABLE_ARCH_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const MAX_STABLE_ARCH_STRING_BYTES = 65_536;
+const MAX_STABLE_ARCH_TOTAL_STRING_BYTES = 512 * 1024;
+const MAX_STABLE_ARCH_TOTAL_VALUES = 8_192;
+type StableArchBudget = { values: number; stringBytes: number };
+
+function stableArchInvalid(): never {
+  throw new Error('stable_arch_result_invalid');
+}
+
+function archDataValue(object: object, key: PropertyKey): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  if (!descriptor || !('value' in descriptor)) return stableArchInvalid();
+  return descriptor.value;
+}
+
+function createStableArchBudget(): StableArchBudget {
+  return { values: 0, stringBytes: 0 };
+}
+
+function consumeStableArchValue(budget: StableArchBudget, value: unknown): void {
+  budget.values += 1;
+  if (budget.values > MAX_STABLE_ARCH_TOTAL_VALUES) stableArchInvalid();
+  if (typeof value === 'string') {
+    const bytes = Buffer.byteLength(value, 'utf8');
+    if (bytes > MAX_STABLE_ARCH_STRING_BYTES) stableArchInvalid();
+    budget.stringBytes += bytes;
+    if (budget.stringBytes > MAX_STABLE_ARCH_TOTAL_STRING_BYTES) stableArchInvalid();
+  }
+}
+
+function snapshotArchDenseArray(value: unknown, maxLength: number): unknown[] {
+  if (isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    return stableArchInvalid();
+  }
+  const length = archDataValue(value, 'length');
+  if (!Number.isInteger(length) || (length as number) < 0 || (length as number) > maxLength) {
+    return stableArchInvalid();
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== (length as number) + 1 || keys[keys.length - 1] !== 'length') return stableArchInvalid();
+  const snapshot: unknown[] = [];
+  for (let index = 0; index < (length as number); index += 1) {
+    if (keys[index] !== String(index)) return stableArchInvalid();
+    snapshot.push(archDataValue(value, String(index)));
+  }
+  return snapshot;
+}
+
+function snapshotArchProperties(value: unknown, budget: StableArchBudget): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || isProxy(value)) return stableArchInvalid();
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return stableArchInvalid();
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > MAX_STABLE_ARCH_PROPERTIES) return stableArchInvalid();
+  const snapshot: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (typeof key !== 'string') return stableArchInvalid();
+    const item = archDataValue(value, key);
+    consumeStableArchValue(budget, item);
+    if (Array.isArray(item)) {
+      const items = snapshotArchDenseArray(item, MAX_STABLE_ARCH_ARRAY);
+      for (const nested of items) consumeStableArchValue(budget, nested);
+      snapshot[key] = items;
+    }
+    else if (item === null || ['string', 'number', 'boolean', 'undefined'].includes(typeof item)) snapshot[key] = item;
+    else return stableArchInvalid();
+  }
+  return snapshot;
+}
+
+function snapshotStableArchRecords(result: unknown, budget: StableArchBudget): unknown[][] {
+  if (result === null || typeof result !== 'object' || isProxy(result)) return stableArchInvalid();
+  const records = snapshotArchDenseArray(archDataValue(result, 'records'), MAX_STABLE_ARCH_RECORDS);
+  const fields = ['ordinal', 'targetId', 'e', 'score', 'projectName'] as const;
+  return records.map((record) => {
+    if (record === null || typeof record !== 'object' || isProxy(record)
+      || Object.getPrototypeOf(record) !== Neo4jRecord.prototype) return stableArchInvalid();
+    const ownKeys = Reflect.ownKeys(record);
+    if (ownKeys.length !== 4 || !['keys', 'length', '_fields', '_fieldLookup'].every((key) => ownKeys.includes(key))) {
+      return stableArchInvalid();
+    }
+    if (archDataValue(record, 'length') !== fields.length) return stableArchInvalid();
+    const keys = snapshotArchDenseArray(archDataValue(record, 'keys'), fields.length);
+    const values = snapshotArchDenseArray(archDataValue(record, '_fields'), fields.length);
+    if (fields.some((field, index) => keys[index] !== field)) return stableArchInvalid();
+    const lookup = archDataValue(record, '_fieldLookup');
+    if (lookup === null || typeof lookup !== 'object' || isProxy(lookup)) return stableArchInvalid();
+    const lookupProto = Object.getPrototypeOf(lookup);
+    if (lookupProto !== Object.prototype && lookupProto !== null) return stableArchInvalid();
+    const lookupKeys = Reflect.ownKeys(lookup);
+    if (lookupKeys.length !== fields.length || fields.some((field) => !lookupKeys.includes(field))) {
+      return stableArchInvalid();
+    }
+    fields.forEach((field, index) => {
+      if (archDataValue(lookup, field) !== index) stableArchInvalid();
+    });
+    for (const value of values) consumeStableArchValue(budget, value);
+    return values;
+  });
+}
+
+function parseStableArchResult(
+  result: unknown, ids: readonly string[], projectName: string | null,
+): RetrievalResult[] {
+  const budget = createStableArchBudget();
+  const rows = snapshotStableArchRecords(result, budget);
+  if (rows.length !== ids.length) return stableArchInvalid();
+  return rows.flatMap(([rawOrdinal, targetId, entity, score, returnedProjectName], index) => {
+    if (typeof rawOrdinal !== 'string' || rawOrdinal !== String(index) || targetId !== ids[index]
+      || typeof score !== 'number' || !Number.isFinite(score)) return stableArchInvalid();
+    if (entity === null) {
+      if (returnedProjectName !== null) return stableArchInvalid();
+      return [];
+    }
+    if (returnedProjectName !== projectName) return stableArchInvalid();
+    if (typeof entity !== 'object' || isProxy(entity)) return stableArchInvalid();
+    const props = snapshotArchProperties(archDataValue(entity, 'properties'), budget);
+    if (props.id !== targetId || typeof props.id !== 'string' || !SAFE_STABLE_ARCH_ID.test(props.id)
+      || typeof props.name !== 'string'
+      || (props.category !== undefined && props.category !== null && typeof props.category !== 'string')
+      || (props.type !== undefined && props.type !== null && typeof props.type !== 'string')
+      || (props.responsibility !== undefined && props.responsibility !== null && typeof props.responsibility !== 'string')
+      || (props.interface_desc !== undefined && props.interface_desc !== null && typeof props.interface_desc !== 'string')) {
+      return stableArchInvalid();
+    }
+    const parts: string[] = [`**${props.name}** (${props.category ?? props.type ?? 'entity'})`];
+    if (typeof props.responsibility === 'string' && props.responsibility) {
+      parts.push(`Responsibility: ${props.responsibility}`);
+    }
+    if (typeof props.interface_desc === 'string' && props.interface_desc) {
+      parts.push(`Interface: ${props.interface_desc.slice(0, 200)}`);
+    }
+    return [{
+      id: props.id,
+      source_type: 'arch_entity' as const,
+      title: props.name,
+      content: parts.join('\n'),
+      score,
+      metadata: { category: props.category, name: props.name },
+    }];
+  });
+}
 
 function parseMemoryMarkdown(markdown: string, sourceIds: string[]): RetrievalResult[] {
   // Parse the rendered memory markdown back into individual results

@@ -1,5 +1,6 @@
 // packages/neo4j/src/query.ts
-import neo4j, { type Driver } from 'neo4j-driver';
+import neo4j, { Record as Neo4jRecord, type Driver } from 'neo4j-driver';
+import { isProxy } from 'node:util/types';
 import type { SemanticNode, FactNode, EpisodicNode, TemporalOptions } from '@memberry/core';
 import { readEnv, DEFAULT_TENANT } from '@memberry/core';
 import { activeRelationshipFilter } from './temporal-edges.js';
@@ -24,6 +25,8 @@ function defaultRawCypherTimeoutMs(): number {
 
 export interface QueryScope {
   entities?: string[];
+  /** @internal Authoritative exact Entity.id scope; takes precedence over names. */
+  entityIds?: unknown;
   tags?: string[];
   limit: number;
   /** ISO timestamp — when provided, only traverse relationships active at this time */
@@ -154,6 +157,67 @@ function normalizeRawCypherLimit(limit: number): number {
   return Math.min(MAX_RAW_CYPHER_LIMIT, Math.max(1, floored));
 }
 
+const MAX_RESOLVED_ENTITY_IDS = 32;
+const MAX_ENTITY_ID_LENGTH = 200;
+const SAFE_ENTITY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const QUERY_SCOPE_KEYS = new Set([
+  'entities', 'entityIds', 'tags', 'limit', 'asOf', 'tenantId', 'projectScope',
+]);
+
+function snapshotQueryScope(scope: QueryScope): QueryScope {
+  if (scope === null || typeof scope !== 'object' || isProxy(scope)
+    || Object.getPrototypeOf(scope) !== Object.prototype) {
+    throw new Error('query_scope_invalid');
+  }
+  const stableDescriptor = Object.getOwnPropertyDescriptor(scope, 'entityIds');
+  if (stableDescriptor === undefined) return scope;
+  if (!('value' in stableDescriptor)) throw new Error('query_scope_invalid');
+  const snapshot: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(scope)) {
+    if (typeof key !== 'string' || !QUERY_SCOPE_KEYS.has(key)) throw new Error('query_scope_invalid');
+    const descriptor = Object.getOwnPropertyDescriptor(scope, key);
+    if (!descriptor || !('value' in descriptor)) throw new Error('query_scope_invalid');
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot as unknown as QueryScope;
+}
+
+/** Validate exact Entity IDs without invoking user-controlled hooks. */
+function normalizeResolvedEntityIds(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new Error('resolved_entity_ids_invalid');
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  const length = lengthDescriptor && 'value' in lengthDescriptor ? lengthDescriptor.value : undefined;
+  if (!Number.isInteger(length) || length < 0 || length > MAX_RESOLVED_ENTITY_IDS) {
+    throw new Error('resolved_entity_ids_invalid');
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== length + 1 || !keys.includes('length')) {
+    throw new Error('resolved_entity_ids_invalid');
+  }
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index);
+    if (!keys.includes(key)) throw new Error('resolved_entity_ids_invalid');
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'string') {
+      throw new Error('resolved_entity_ids_invalid');
+    }
+    const id = descriptor.value;
+    if (id.length === 0 || id.length > MAX_ENTITY_ID_LENGTH || !SAFE_ENTITY_ID.test(id)) {
+      throw new Error('resolved_entity_ids_invalid');
+    }
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return Object.freeze(ids);
+}
+
 export class ScopedQuery {
   constructor(private driver: Driver) {}
 
@@ -205,7 +269,10 @@ export class ScopedQuery {
   }
 
   async byScope(scope: QueryScope): Promise<SemanticNode[]> {
+    scope = snapshotQueryScope(scope);
+    const entityIds = normalizeResolvedEntityIds(scope.entityIds);
     const { entities = [], tags = [], limit, asOf } = scope;
+    if (entityIds !== undefined && entityIds.length === 0) return [];
     const session = this.driver.session();
     try {
       // Build query that handles entities and/or tags with DISTINCT results
@@ -224,7 +291,30 @@ export class ScopedQuery {
         pFilter = ` AND ${projectScopeWhere('s')}`;
       }
 
-      if (entities.length > 0 && tags.length > 0) {
+      if (entityIds !== undefined && tags.length > 0) {
+        params.entityIds = entityIds;
+        params.tags = tags;
+        cypher = `
+          MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
+          WHERE e.id IN $entityIds AND ANY(t IN $tags WHERE toLower(t) IN [x IN s.tags | toLower(x)])
+            AND ${relFilter} AND ${tFilter}${pFilter}
+          WITH s, head(collect(e.id)) AS entityId
+          RETURN entityId, s { .id, .content, .confidence, .signal_count, .created_at, .updated_at,
+            .decay_class, .memory_type, .tags, .scope, .tenant_id, embedding: null } AS s
+          ORDER BY s.confidence DESC, s.updated_at DESC, s.id ASC
+          LIMIT $limit`;
+      } else if (entityIds !== undefined) {
+        params.entityIds = entityIds;
+        cypher = `
+          MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
+          WHERE e.id IN $entityIds
+            AND ${relFilter} AND ${tFilter}${pFilter}
+          WITH s, head(collect(e.id)) AS entityId
+          RETURN entityId, s { .id, .content, .confidence, .signal_count, .created_at, .updated_at,
+            .decay_class, .memory_type, .tags, .scope, .tenant_id, embedding: null } AS s
+          ORDER BY s.confidence DESC, s.updated_at DESC, s.id ASC
+          LIMIT $limit`;
+      } else if (entities.length > 0 && tags.length > 0) {
         params.entities = entities;
         params.tags = tags;
         cypher = `
@@ -262,6 +352,12 @@ export class ScopedQuery {
       }
 
       const result = await session.run(cypher, params);
+      if (entityIds !== undefined) {
+        return parseStableScopedSemanticResult(
+          result, entityIds, limit, tenantId,
+          typeof params.projectScope === 'string' ? params.projectScope : undefined,
+        );
+      }
       return result.records.map((r) => mapSemanticNode(nodeProps(r.get('s'))));
     } finally {
       await session.close();
@@ -662,6 +758,236 @@ export class ScopedQuery {
 // OFF the read wire (no consumer of these reads uses it; GDS reads the stored
 // property via its own Cypher and getById/getByIds keep it). Normalise both to a
 // plain property bag so the mappers (and mock-based unit tests) work either way.
+const MAX_STABLE_QUERY_RECORDS = 200;
+const MAX_STABLE_PROPERTY_KEYS = 64;
+const MAX_STABLE_NESTED_VALUES = 2048;
+const MAX_STABLE_QUERY_STRING_BYTES = 65_536;
+const MAX_STABLE_QUERY_TOTAL_STRING_BYTES = 2 * 1024 * 1024;
+const MAX_STABLE_QUERY_TOTAL_VALUES = 16_384;
+const STABLE_SEMANTIC_KEYS = Object.freeze([
+  'id', 'content', 'confidence', 'signal_count', 'created_at', 'updated_at',
+  'decay_class', 'memory_type', 'tags', 'scope', 'tenant_id', 'embedding',
+] as const);
+type StableQueryBudget = { values: number; stringBytes: number };
+
+function stableQueryInvalid(): never {
+  throw new Error('stable_query_result_invalid');
+}
+
+function stableDataValue(object: object, key: PropertyKey): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  if (!descriptor || !('value' in descriptor)) return stableQueryInvalid();
+  return descriptor.value;
+}
+
+function createStableQueryBudget(): StableQueryBudget {
+  return { values: 0, stringBytes: 0 };
+}
+
+function consumeStableQueryValue(budget: StableQueryBudget, value: unknown): void {
+  budget.values += 1;
+  if (budget.values > MAX_STABLE_QUERY_TOTAL_VALUES) return stableQueryInvalid();
+  if (typeof value === 'string') {
+    const bytes = Buffer.byteLength(value, 'utf8');
+    if (bytes > MAX_STABLE_QUERY_STRING_BYTES) return stableQueryInvalid();
+    budget.stringBytes += bytes;
+    if (budget.stringBytes > MAX_STABLE_QUERY_TOTAL_STRING_BYTES) return stableQueryInvalid();
+  }
+}
+
+function snapshotStableDenseArray(value: unknown, maxLength: number): unknown[] {
+  if (isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    return stableQueryInvalid();
+  }
+  const length = stableDataValue(value, 'length');
+  if (!Number.isInteger(length) || (length as number) < 0 || (length as number) > maxLength) {
+    return stableQueryInvalid();
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== (length as number) + 1 || keys[keys.length - 1] !== 'length') {
+    return stableQueryInvalid();
+  }
+  const snapshot: unknown[] = [];
+  for (let index = 0; index < (length as number); index += 1) {
+    if (keys[index] !== String(index)) return stableQueryInvalid();
+    snapshot.push(stableDataValue(value, String(index)));
+  }
+  return snapshot;
+}
+
+function snapshotStableProjection(value: unknown, budget: StableQueryBudget): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || isProxy(value)) return stableQueryInvalid();
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return stableQueryInvalid();
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > MAX_STABLE_PROPERTY_KEYS) return stableQueryInvalid();
+  const snapshot: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (typeof key !== 'string') return stableQueryInvalid();
+    const rawItem = stableDataValue(value, key);
+    const item = key === 'signal_count'
+      ? normalizeOfficialStableSignalCount(rawItem)
+      : rawItem;
+    consumeStableQueryValue(budget, item);
+    if (Array.isArray(item)) {
+      const items = snapshotStableDenseArray(item, MAX_STABLE_NESTED_VALUES);
+      for (const nested of items) consumeStableQueryValue(budget, nested);
+      snapshot[key] = items;
+    } else if (item === null || ['string', 'number', 'boolean', 'undefined'].includes(typeof item)) {
+      snapshot[key] = item;
+    } else {
+      return stableQueryInvalid();
+    }
+  }
+  return snapshot;
+}
+
+function normalizeOfficialStableSignalCount(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) return stableQueryInvalid();
+    return value;
+  }
+  if (value === null || typeof value !== 'object' || isProxy(value)
+    || Object.getPrototypeOf(value) !== neo4j.Integer.prototype) return stableQueryInvalid();
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 2 || keys[0] !== 'low' || keys[1] !== 'high') return stableQueryInvalid();
+  const lowDescriptor = Object.getOwnPropertyDescriptor(value, 'low');
+  const highDescriptor = Object.getOwnPropertyDescriptor(value, 'high');
+  if (!lowDescriptor || !highDescriptor || !('value' in lowDescriptor) || !('value' in highDescriptor)
+    || lowDescriptor.enumerable !== true || lowDescriptor.writable !== true || lowDescriptor.configurable !== true
+    || highDescriptor.enumerable !== true || highDescriptor.writable !== true || highDescriptor.configurable !== true) {
+    return stableQueryInvalid();
+  }
+  const low = lowDescriptor.value;
+  const high = highDescriptor.value;
+  if (!Number.isInteger(low) || low < -0x8000_0000 || low > 0x7fff_ffff
+    || !Number.isInteger(high) || high < 0 || high > 0x7fff_ffff) return stableQueryInvalid();
+  const count = high * 0x1_0000_0000 + (low >>> 0);
+  if (!Number.isSafeInteger(count)) return stableQueryInvalid();
+  return count;
+}
+
+function snapshotStableRecords(
+  result: unknown,
+  fields: readonly string[],
+  maxRecords: number,
+  budget: StableQueryBudget,
+): unknown[][] {
+  if (result === null || typeof result !== 'object' || isProxy(result)) return stableQueryInvalid();
+  const records = snapshotStableDenseArray(
+    stableDataValue(result, 'records'),
+    Math.min(MAX_STABLE_QUERY_RECORDS, Math.max(0, maxRecords)),
+  );
+  return records.map((record) => {
+    if (record === null || typeof record !== 'object' || isProxy(record)
+      || Object.getPrototypeOf(record) !== Neo4jRecord.prototype) return stableQueryInvalid();
+    const recordKeys = Reflect.ownKeys(record);
+    if (recordKeys.length !== 4 || !['keys', 'length', '_fields', '_fieldLookup'].every((key) => recordKeys.includes(key))) {
+      return stableQueryInvalid();
+    }
+    if (stableDataValue(record, 'length') !== fields.length) return stableQueryInvalid();
+    const keys = snapshotStableDenseArray(stableDataValue(record, 'keys'), fields.length);
+    const values = snapshotStableDenseArray(stableDataValue(record, '_fields'), fields.length);
+    if (keys.length !== fields.length || fields.some((field, index) => keys[index] !== field)) {
+      return stableQueryInvalid();
+    }
+    const lookup = stableDataValue(record, '_fieldLookup');
+    if (lookup === null || typeof lookup !== 'object' || isProxy(lookup)) return stableQueryInvalid();
+    const lookupProto = Object.getPrototypeOf(lookup);
+    if (lookupProto !== Object.prototype && lookupProto !== null) return stableQueryInvalid();
+    const lookupKeys = Reflect.ownKeys(lookup);
+    if (lookupKeys.length !== fields.length || fields.some((field) => !lookupKeys.includes(field))) {
+      return stableQueryInvalid();
+    }
+    for (let index = 0; index < fields.length; index += 1) {
+      if (stableDataValue(lookup, fields[index]!) !== index) return stableQueryInvalid();
+    }
+    for (const value of values) consumeStableQueryValue(budget, value);
+    return values;
+  });
+}
+
+function hasExactStableKeys(props: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Reflect.ownKeys(props);
+  return keys.length === expected.length && expected.every((key) => keys.includes(key));
+}
+
+function validateStableTenantProject(
+  props: Record<string, unknown>, tenant: string, projectScope: string | undefined,
+): void {
+  const nodeTenant = props.tenant_id;
+  if (tenant === DEFAULT_TENANT
+    ? nodeTenant !== undefined && nodeTenant !== null && nodeTenant !== DEFAULT_TENANT
+    : nodeTenant !== tenant) return stableQueryInvalid();
+  if (!projectScope) return;
+  const normalizedProject = projectScope.toLowerCase();
+  if (typeof props.scope === 'string' && props.scope.length > 0) {
+    if (props.scope.toLowerCase() !== normalizedProject) return stableQueryInvalid();
+    return;
+  }
+  if (!Array.isArray(props.tags)
+    || !(props.tags as unknown[]).some((tag) => typeof tag === 'string' && tag.toLowerCase() === normalizedProject)) {
+    return stableQueryInvalid();
+  }
+}
+
+function validateStableSemanticProjection(
+  props: Record<string, unknown>, tenant: string, projectScope: string | undefined,
+): void {
+  if (!hasExactStableKeys(props, STABLE_SEMANTIC_KEYS)
+    || typeof props.id !== 'string' || !SAFE_ENTITY_ID.test(props.id)
+    || typeof props.content !== 'string'
+    || typeof props.confidence !== 'number' || !Number.isFinite(props.confidence)
+    || typeof props.signal_count !== 'number' || !Number.isSafeInteger(props.signal_count) || props.signal_count < 0
+    || typeof props.created_at !== 'string' || typeof props.updated_at !== 'string'
+    || typeof props.decay_class !== 'string'
+    || (props.memory_type !== null && props.memory_type !== undefined && typeof props.memory_type !== 'string')
+    || !Array.isArray(props.tags) || !(props.tags as unknown[]).every((tag) => typeof tag === 'string')
+    || (props.scope !== null && props.scope !== undefined && typeof props.scope !== 'string')
+    || props.embedding !== null) return stableQueryInvalid();
+  validateStableTenantProject(props, tenant, projectScope);
+}
+
+function stableScopedOrderFollows(previous: SemanticNode, current: SemanticNode): boolean {
+  if (current.confidence > previous.confidence) return false;
+  if (current.confidence < previous.confidence) return true;
+  const updated = compareStableCodeUnits(current.updated_at, previous.updated_at);
+  if (updated > 0) return false;
+  if (updated < 0) return true;
+  return compareStableCodeUnits(current.id, previous.id) > 0;
+}
+
+function parseStableScopedSemanticResult(
+  result: unknown,
+  entityIds: readonly string[],
+  limit: number,
+  tenant: string,
+  projectScope: string | undefined,
+): SemanticNode[] {
+  const budget = createStableQueryBudget();
+  const allowed = new Set(entityIds);
+  const seen = new Set<string>();
+  let previous: SemanticNode | undefined;
+  return snapshotStableRecords(result, ['entityId', 's'], limit, budget).map(([entityId, raw]) => {
+    if (typeof entityId !== 'string' || !allowed.has(entityId)) return stableQueryInvalid();
+    const props = snapshotStableProjection(raw, budget);
+    validateStableSemanticProjection(props, tenant, projectScope);
+    if (seen.has(props.id as string)) {
+      return stableQueryInvalid();
+    }
+    seen.add(props.id as string);
+    const node = mapSemanticNode(props);
+    if (previous && !stableScopedOrderFollows(previous, node)) return stableQueryInvalid();
+    previous = node;
+    return node;
+  });
+}
+
+function compareStableCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function nodeProps(v: unknown): Record<string, unknown> {
   const o = v as { properties?: Record<string, unknown> } | null;
   return o && o.properties ? o.properties : (v as Record<string, unknown>);

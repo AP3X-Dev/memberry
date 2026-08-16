@@ -1,5 +1,6 @@
 // packages/core/src/__tests__/service.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { AMPService } from '../service.js';
 import type { RedisLayer, Neo4jLayer, FactLayer, BlocksLayer } from '../service.js';
 import type { AMPConfig, LoadScope, EpisodeInput, SemanticNode, FactNode, MemoryBlock } from '../types.js';
@@ -347,6 +348,188 @@ describe('AMPService.load', () => {
 
     expect(getActive).toHaveBeenCalledWith('auth', undefined, undefined);
     expect(result.markdown).toContain('FALLBACKMARK');
+  });
+
+  it.each(['ordinary', 'observed'] as const)('RET-002C: preserves exact legacy vector calls in %s mode when stable IDs are absent', async (mode) => {
+    const byScope = vi.fn().mockResolvedValue([]);
+    const byVector = vi.fn().mockResolvedValue([]);
+    const byVectorEpisodic = vi.fn().mockResolvedValue([]);
+    const service = new AMPService(makeRedis(), makeNeo4j({
+      query: { byScope, byVector, byVectorEpisodic },
+    }), makeEmbedding(), makeConfig());
+    const scope = { task: 'legacy lane', queryVector: [0.1, 0.2] } as LoadScope;
+
+    if (mode === 'observed') await service.loadFreshObserved(scope);
+    else await service.load(scope);
+
+    expect(byScope.mock.calls[0]![0]).not.toHaveProperty('entityIds');
+    expect(byVector).toHaveBeenCalledWith([0.1, 0.2], 20, undefined, undefined);
+    expect(byVector.mock.calls[0]).toHaveLength(4);
+    expect(byVectorEpisodic).toHaveBeenCalledWith([0.1, 0.2], 20, undefined, undefined);
+    expect(byVectorEpisodic.mock.calls[0]).toHaveLength(4);
+  });
+
+  it('RET-002C: stable IDs disable global vector channels before embedding or query work', async () => {
+    const ids = ['entity-b', 'entity-a'];
+    const byScope = vi.fn().mockResolvedValue([]);
+    const byVector = vi.fn().mockResolvedValue([makeSemanticNode({ id: 'foreign-semantic' })]);
+    const byVectorEpisodic = vi.fn().mockResolvedValue([{ id: 'foreign-episode' }]);
+    const expandByGraph = vi.fn().mockResolvedValue([makeSemanticNode({ id: 'foreign-graph' })]);
+    const byVectorByEntityIds = vi.fn().mockResolvedValue([]);
+    const byVectorEpisodicByEntityIds = vi.fn().mockResolvedValue([]);
+    const getActive = vi.fn(() => { throw new Error('name fallback reached'); });
+    const getActiveBatch = vi.fn(() => { throw new Error('name batch reached'); });
+    const getActiveByEntityIdsBatch = vi.fn().mockResolvedValue([[], []]);
+    const fact = {
+      getActive, getActiveBatch, getActiveByEntityIdsBatch,
+      create: vi.fn(), findBySubjectPredicate: vi.fn(), invalidate: vi.fn(),
+    } as unknown as FactLayer;
+    const embedding = makeEmbedding();
+    const service = new AMPService(makeRedis(), makeNeo4j({
+      query: {
+        byScope, byVector, byVectorEpisodic, expandByGraph,
+        byVectorByEntityIds, byVectorEpisodicByEntityIds,
+      },
+      fact,
+    } as unknown as Neo4jLayer), embedding, makeConfig());
+
+    const observed = await service.loadFreshObserved({
+      task: 'stable lane', entities: ['DuplicateName'],
+      resolvedEntityIds: ['entity-b', 'entity-a', 'entity-b'],
+      temporal: { as_of: '2024-01-01T00:00:00.000Z' },
+    } as LoadScope);
+
+    const passedIds = (byScope.mock.calls[0]![0] as { entityIds: string[] }).entityIds;
+    expect(passedIds).toEqual(ids);
+    expect(Object.isFrozen(passedIds)).toBe(true);
+    expect(byVectorByEntityIds).not.toHaveBeenCalled();
+    expect(byVectorEpisodicByEntityIds).not.toHaveBeenCalled();
+    expect(embedding.embed).not.toHaveBeenCalled();
+    expect(getActiveByEntityIdsBatch).toHaveBeenCalledWith(passedIds, { as_of: '2024-01-01T00:00:00.000Z' }, undefined);
+    expect(byVector).not.toHaveBeenCalled();
+    expect(byVectorEpisodic).not.toHaveBeenCalled();
+    expect(expandByGraph).not.toHaveBeenCalled();
+    expect(getActive).not.toHaveBeenCalled();
+    expect(getActiveBatch).not.toHaveBeenCalled();
+    expect(observed.value.sources).not.toContain('foreign-semantic');
+    expect(observed.value.sources).not.toContain('foreign-episode');
+    expect(observed.value.sources).not.toContain('foreign-graph');
+    expect(observed.observation.channels).toEqual(expect.arrayContaining([
+      { channel: 'memory.semantic-vector', outcome: 'safe-failure', code: 'unavailable' },
+      { channel: 'memory.episodic-vector', outcome: 'safe-failure', code: 'unavailable' },
+    ]));
+  });
+
+  it('RET-002C: stable IDs disable connected graph expansion until a project-root receipt exists', async () => {
+    const scoped = makeSemanticNode({ id: 'safe-semantic' });
+    const byScope = vi.fn().mockResolvedValue([scoped]);
+    const expandByGraph = vi.fn().mockResolvedValue([makeSemanticNode({ id: 'foreign-graph' })]);
+    const service = new AMPService(makeRedis(), makeNeo4j({
+      query: {
+        byScope, byVector: vi.fn(), expandByGraph,
+        byVectorByEntityIds: vi.fn().mockResolvedValue([]),
+        byVectorEpisodicByEntityIds: vi.fn().mockResolvedValue([]),
+      },
+    } as unknown as Neo4jLayer), makeEmbedding(), makeConfig());
+
+    const result = await service.load({ task: 'stable graph', resolvedEntityIds: ['entity-a'] } as LoadScope);
+
+    expect(expandByGraph).not.toHaveBeenCalled();
+    expect(result.sources).not.toContain('foreign-graph');
+  });
+
+  it('RET-002C: missing stable-ID capabilities do zero work and settle unavailable when observed', async () => {
+    const byScope = vi.fn().mockResolvedValue([]);
+    const byVector = vi.fn().mockResolvedValue([makeSemanticNode({ id: 'foreign' })]);
+    const getActive = vi.fn().mockResolvedValue([]);
+    const getActiveBatch = vi.fn().mockResolvedValue([]);
+    const fact = {
+      getActive, getActiveBatch, create: vi.fn(), findBySubjectPredicate: vi.fn(), invalidate: vi.fn(),
+    } as unknown as FactLayer;
+    const embedding = makeEmbedding();
+    const service = new AMPService(makeRedis(), makeNeo4j({ query: { byScope, byVector }, fact }), embedding, makeConfig());
+    const observed = await service.loadFreshObserved({ task: 'stable unavailable', resolvedEntityIds: ['entity-a'] });
+    expect(embedding.embed).not.toHaveBeenCalled();
+    expect(byVector).not.toHaveBeenCalled();
+    expect(getActive).not.toHaveBeenCalled();
+    expect(getActiveBatch).not.toHaveBeenCalled();
+    expect(observed.observation.channels).toEqual(expect.arrayContaining([
+      { channel: 'memory.semantic-vector', outcome: 'safe-failure', code: 'unavailable' },
+      { channel: 'memory.episodic-vector', outcome: 'safe-failure', code: 'unavailable' },
+      { channel: 'memory.fact', outcome: 'safe-failure', code: 'unavailable' },
+    ]));
+  });
+
+  it('RET-002C: registers normalized stable IDs as cache invalidation keys', async () => {
+    const redis = makeRedis();
+    const service = new AMPService(redis, makeNeo4j(), makeEmbedding(), makeConfig());
+    await service.load({ task: 'stable cache keys', resolvedEntityIds: ['entity-b', 'entity-a', 'entity-b'] });
+    expect(vi.mocked(redis.cache.set).mock.calls[0]![4]).toEqual(['entity-b', 'entity-a']);
+  });
+
+  it('RET-002C: stable-ID order participates in cache identity while absent scope hashing is byte-exact', async () => {
+    const redis = makeRedis();
+    const service = new AMPService(redis, makeNeo4j(), makeEmbedding(), makeConfig());
+    await service.load({ task: 'legacy-cache' });
+    const expectedLegacy = createHash('sha256').update(JSON.stringify({
+      tenant: 'default', task: 'legacy-cache', entities: [], tags: [], max_tokens: 4096, temporal: null,
+    })).digest('hex').slice(0, 16);
+    expect(vi.mocked(redis.cache.get).mock.calls[0]![0]).toBe(expectedLegacy);
+
+    await service.load({ task: 'stable-cache', resolvedEntityIds: ['entity-a', 'entity-b', 'entity-a'] } as LoadScope);
+    await service.load({ task: 'stable-cache', resolvedEntityIds: ['entity-a', 'entity-b'] } as LoadScope);
+    await service.load({ task: 'stable-cache', resolvedEntityIds: ['entity-b', 'entity-a'] } as LoadScope);
+    const hashes = vi.mocked(redis.cache.get).mock.calls.slice(1).map((call) => call[0]);
+    expect(hashes[0]).toBe(hashes[1]);
+    expect(hashes[2]).not.toBe(hashes[0]);
+  });
+
+  it('RET-002C: rejects hostile stable-ID containers before cache or dependency hooks', async () => {
+    const hooks = vi.fn();
+    const proxy = new Proxy(['entity-a'], {
+      get: (target, key, receiver) => { hooks(); return Reflect.get(target, key, receiver); },
+      ownKeys: (target) => { hooks(); return Reflect.ownKeys(target); },
+      getOwnPropertyDescriptor: (target, key) => { hooks(); return Reflect.getOwnPropertyDescriptor(target, key); },
+    });
+    const accessor: unknown[] = [];
+    Object.defineProperty(accessor, '0', { enumerable: true, get: () => { hooks(); return 'entity-a'; } });
+    accessor.length = 1;
+    const sparse: unknown[] = []; sparse.length = 1;
+    const extra = Object.assign(['entity-a'], { extra: true });
+
+    for (const value of [proxy, accessor, sparse, extra, ['bad id'], new Array(33).fill('entity-a'), ['x'.repeat(201)]]) {
+      const redis = makeRedis();
+      const service = new AMPService(redis, makeNeo4j(), makeEmbedding(), makeConfig());
+      await expect(service.load({ task: 'hostile', resolvedEntityIds: value } as LoadScope))
+        .rejects.toThrow('resolved_entity_ids_invalid');
+      expect(redis.cache.get).not.toHaveBeenCalled();
+    }
+    expect(hooks).not.toHaveBeenCalled();
+  });
+
+  it.each(['ordinary', 'observed'] as const)('RET-002C: rejects hostile %s LoadScope roots before hooks or dependencies', async (mode) => {
+    const hooks = vi.fn();
+    const proxy = new Proxy({ task: 'hostile', resolvedEntityIds: ['entity-a'] }, {
+      get: (target, key, receiver) => { hooks(); return Reflect.get(target, key, receiver); },
+      ownKeys: (target) => { hooks(); return Reflect.ownKeys(target); },
+    });
+    const revoked = Proxy.revocable({ task: 'hostile', resolvedEntityIds: ['entity-a'] }, {}); revoked.revoke();
+    const accessor = { task: 'hostile' } as Record<string, unknown>;
+    Object.defineProperty(accessor, 'resolvedEntityIds', { get: () => { hooks(); return ['entity-a']; } });
+    const customProto = Object.assign(Object.create({ inherited: true }), { task: 'hostile', resolvedEntityIds: ['entity-a'] });
+    const extra = { task: 'hostile', resolvedEntityIds: ['entity-a'], secret: 'blocked' };
+    for (const scope of [proxy, revoked.proxy, accessor, customProto, extra]) {
+      const redis = makeRedis();
+      const neo4j = makeNeo4j();
+      const service = new AMPService(redis, neo4j, makeEmbedding(), makeConfig());
+      const operation = mode === 'ordinary'
+        ? service.load(scope as never)
+        : service.loadFreshObserved(scope as never);
+      await expect(operation).rejects.toThrow('load_scope_invalid');
+      expect(redis.cache.get).not.toHaveBeenCalled();
+      expect(neo4j.query.byScope).not.toHaveBeenCalled();
+    }
+    expect(hooks).not.toHaveBeenCalled();
   });
 });
 

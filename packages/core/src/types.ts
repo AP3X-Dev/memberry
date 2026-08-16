@@ -94,6 +94,8 @@ export interface StreamSignal extends Signal {
 export interface LoadScope {
   task: string;
   entities?: string[];
+  /** @internal RET-002C authoritative stable Entity.id lane; not tool-wired. */
+  resolvedEntityIds?: unknown;
   tags?: string[];
   max_tokens?: number;
   temporal?: TemporalOptions;
