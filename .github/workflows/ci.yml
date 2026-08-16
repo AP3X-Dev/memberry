@@ -1,8 +1,11 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, feat/memberry-phase2-integration]
   pull_request:
     branches: [main, master]
 
@@ -20,6 +23,7 @@ jobs:
           # The deterministic lab verifies immutable Git blobs from the protected
           # pre-lab commit, so a depth-1 PR checkout is insufficient.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -93,6 +97,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize phase-2 hosted evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            "${RUNNER_TEMP}/memberry-admission-candidate-live" \
+            "${RUNNER_TEMP}/memberry-retrieval-scope-live"
+          chmod 0700 \
+            "${RUNNER_TEMP}/memberry-admission-candidate-live" \
+            "${RUNNER_TEMP}/memberry-retrieval-scope-live"
+          printf '{"repository":"%s","sha":"%s","run_id":"%s","run_attempt":"%s"}\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            >"${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json"
+          cp "${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json" \
+            "${RUNNER_TEMP}/memberry-retrieval-scope-live/workflow.json"
 
       - name: Use Node.js 22
         uses: actions/setup-node@v4
@@ -106,6 +128,42 @@ jobs:
       - name: Build all packages
         run: npm run build
 
+      - name: Pre-pull exact approved admission candidate base image
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/memberry-admission-candidate-live"
+          approved_base='node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9'
+          docker pull --platform linux/amd64 "$approved_base" 2>&1 | tee "$evidence_dir/base-image-pull.log"
+          repo_digests="$(docker image inspect --format='{{json .RepoDigests}}' "$approved_base")"
+          local_image_sha256="$(docker image inspect --format='{{.Id}}' "$approved_base")"
+          [[ "$local_image_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          node -e '
+            const digests = JSON.parse(process.argv[1]);
+            if (!Array.isArray(digests) || !digests.includes(process.argv[2])) process.exit(1);
+          ' "$repo_digests" "$approved_base"
+          printf '{"approvedBaseImage":"%s","localImageSha256":"%s","repoDigests":%s}\n' \
+            "$approved_base" "$local_image_sha256" "$repo_digests" \
+            >"$evidence_dir/base-image.json"
+
+      - name: Admission candidate live Docker evidence
+        shell: bash
+        env:
+          MEMBERRY_ADMISSION_CANDIDATE_LIVE_EVIDENCE_PATH: ${{ runner.temp }}/memberry-admission-candidate-live/evidence.json
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/memberry-admission-candidate-live"
+          npm run bench:lab:admission:candidate:live 2>&1 | tee "$evidence_dir/run.log"
+
+      - name: Upload admission candidate live Docker evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memberry-admission-candidate-live-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memberry-admission-candidate-live
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Run all tests (unit + integration)
         run: npm test
         env:
@@ -116,6 +174,37 @@ jobs:
           # Enables the fail-closed, disposable AdmissionObservation concurrency,
           # rollback, corruption, isolation, and cleanup evidence suite.
           MEMBERRY_NEO4J_INTEGRATION: "1"
+
+      - name: Scoped retrieval resolver required live evidence
+        if: always()
+        shell: bash
+        env:
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: testpassword
+          MEMBERRY_RET002B_LIVE_MODE: required
+          MEMBERRY_RET002B_DISPOSABLE_OPT_IN: "1"
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/memberry-retrieval-scope-live"
+          neo4j_container_id="${{ job.services.neo4j.id }}"
+          neo4j_image_sha256="$(docker inspect --format='{{.Image}}' "$neo4j_container_id")"
+          [[ "$neo4j_container_id" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$neo4j_image_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '{"neo4jContainerId":"%s","neo4jImageSha256":"%s","mode":"required","disposable":true}\n' \
+            "$neo4j_container_id" "$neo4j_image_sha256" >"$evidence_dir/service.json"
+          npm run bench:lab:retrieval:scope:live 2>&1 | sed -E \
+            -e 's/testpassword/[REDACTED]/g' \
+            | tee "$evidence_dir/run.log"
+
+      - name: Upload scoped retrieval resolver live evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memberry-retrieval-scope-live-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memberry-retrieval-scope-live
+          if-no-files-found: error
+          retention-days: 14
 
       # Production-path proof for the lab adapter. This starts the real MCP
       # composition root against disposable service containers and writes then
