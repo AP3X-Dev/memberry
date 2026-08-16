@@ -12,6 +12,8 @@ import {
   compositionRootCommand,
   parseSeedReadback,
   parseResidualCounts,
+  parseRedisScanPage,
+  parseRedisSingleton,
   rankedFixtureMarkers,
   rankedTraceMcpErrorDiagnostic,
   rankedTraceMcpErrorDiagnosticAfterCapture,
@@ -20,7 +22,9 @@ import {
   resolveTraceConformanceConfig,
   runAbortableOperation,
   safeDiagnosticCode,
+  scanRedisKeys,
   seededMissingDiagnosticCode,
+  setRedisOwnershipMarker,
   tenantIsolationForbiddenValues,
   traceFixtureForbiddenValues,
   traceFixtureQueries,
@@ -1111,26 +1115,403 @@ describe('RET-001D live composition harness', () => {
     });
   });
 
-  it('deletes only exact declared Redis ownership keys and reports concurrent foreign keys', async () => {
-    const ownedKey = 'memberry:lab:ret001d:test-run:ownership';
-    const keys = new Set(['baseline', ownedKey, 'concurrent:foreign']);
+  const redisRun = 'a-000000000000';
+  const redisToken = 'a'.repeat(32);
+  const redisOwned = {
+    marker: `memberry:lab:ret001d:${redisRun}:ownership`,
+    defaultContext: 'amp:ctx:1111111111111111',
+    defaultNode: `amp:deps:ret001d-ds-${redisRun}`,
+    defaultScope: `amp:scope-deps:project:ret001d-default-project-${redisRun}`,
+    namedContext: 'amp:ctx:ret001d-named:2222222222222222',
+    namedNode: `amp:deps:ret001d-named:ret001d-ns-${redisRun}`,
+    namedScope: `amp:scope-deps:ret001d-named:project:ret001d-named-project-${redisRun}`,
+  } as const;
+
+  function cacheJson(source: string): string {
+    return JSON.stringify({ markdown: '# Memory Context', tokens: 1, sources: [source], assembled_at: '2026-08-16T00:00:00.000Z' });
+  }
+
+  it('claims an unguessable marker token only with exact SET token EX 900 NX OK semantics', async () => {
+    const set = vi.fn().mockResolvedValue('OK');
+    await expect(setRedisOwnershipMarker(
+      { set } as never, new Set(['baseline']), redisRun, redisToken,
+    )).resolves.toBe(redisOwned.marker);
+    expect(set).toHaveBeenCalledWith(redisOwned.marker, redisToken, 'EX', 900, 'NX');
+  });
+
+  it('rejects marker collisions before SET and snapshot-to-NX races without deleting anything', async () => {
+    const collisionSet = vi.fn();
+    await expect(setRedisOwnershipMarker(
+      { set: collisionSet } as never, new Set([redisOwned.marker]), redisRun, redisToken,
+    )).rejects.toThrow('RET001D_REDIS_OWNERSHIP_INVALID');
+    expect(collisionSet).not.toHaveBeenCalled();
+
+    const racedSet = vi.fn().mockResolvedValue(null);
+    await expect(setRedisOwnershipMarker(
+      { set: racedSet } as never, new Set(['baseline']), redisRun, redisToken,
+    )).rejects.toThrow('RET001D_REDIS_OWNERSHIP_INVALID');
+  });
+
+  it('maps SET errors to a fixed diagnostic without reflecting the marker token', async () => {
+    const set = vi.fn().mockRejectedValue(new Error(redisToken));
+    await expect(setRedisOwnershipMarker(
+      { set } as never, new Set(['baseline']), redisRun, redisToken,
+    )).rejects.toThrow('RET001D_REDIS_OWNERSHIP_FAILED');
+    expect(safeDiagnosticCode(new Error(redisToken))).toBe('RET001D_INTERNAL_FAILURE');
+  });
+
+  it.each([
+    undefined, null, 1, {}, 'ok', ['-1', []], ['x', []], ['00', []],
+    ['18446744073709551616', []], ['1'.repeat(21), []],
+  ])('rejects malformed SCAN outer/cursor evidence %#', (value) => {
+    expect(() => parseRedisScanPage(value)).toThrow('RET001D_REDIS_SCAN_FAILED');
+  });
+
+  it('traverses legitimate multi-page SCAN evidence exactly once per cursor', async () => {
+    const scan = vi.fn()
+      .mockResolvedValueOnce(['17', ['alpha', 'beta']])
+      .mockResolvedValueOnce(['0', ['gamma']]);
+    await expect(scanRedisKeys({ scan } as never, 1_000)).resolves.toEqual(new Set(['alpha', 'beta', 'gamma']));
+    expect(scan.mock.calls.map(([cursor]) => cursor)).toEqual(['0', '17']);
+  });
+
+  it('rejects repeated nonterminal SCAN cursors', async () => {
+    const scan = vi.fn().mockResolvedValueOnce(['1', []]).mockResolvedValueOnce(['1', []]);
+    await expect(scanRedisKeys({ scan } as never, 1_000)).rejects.toThrow('RET001D_REDIS_SCAN_FAILED');
+  });
+
+  it('bounds SCAN page count even when pages contain no keys', async () => {
+    let cursor = 0;
+    const scan = vi.fn(async () => [String(++cursor), []]);
+    await expect(scanRedisKeys({ scan } as never, 1_000)).rejects.toThrow('RET001D_REDIS_KEY_BOUND');
+    expect(scan).toHaveBeenCalledTimes(4_096);
+  });
+
+  it('bounds duplicate-page pressure independently of unique-key count', async () => {
+    let cursor = 0;
+    const scan = vi.fn(async () => [String(++cursor), ['same-key']]);
+    await expect(scanRedisKeys({ scan } as never, 1_000)).rejects.toThrow('RET001D_REDIS_KEY_BOUND');
+    expect(scan).toHaveBeenCalledTimes(4_096);
+  });
+
+  it.each([
+    [['0', new Array(4_097).fill('key')], 'RET001D_REDIS_SCAN_FAILED'],
+    [['0', ['x'.repeat(1_025)]], 'RET001D_REDIS_SCAN_FAILED'],
+  ])('rejects raw SCAN entry bounds %#', async (page, code) => {
+    await expect(scanRedisKeys({ scan: vi.fn().mockResolvedValue(page) } as never, 1_000))
+      .rejects.toThrow(code as string);
+  });
+
+  it('bounds the aggregate number of distinct SCAN keys', async () => {
+    const scan = vi.fn()
+      .mockResolvedValueOnce(['1', new Array(4_096).fill(0).map((_, index) => `key-${index}`)])
+      .mockResolvedValueOnce(['0', ['overflow']]);
+    await expect(scanRedisKeys({ scan } as never, 1_000)).rejects.toThrow('RET001D_REDIS_KEY_BOUND');
+  });
+
+  it('rejects proxy, revoked, accessor, sparse, extra-key, and oversized SCAN outer and inner arrays without hooks', () => {
+    let traps = 0;
+    const proxy = new Proxy(['0', []], { get() { traps++; throw new Error('outer secret'); } });
+    const revoked = Proxy.revocable(['0', []], {}); revoked.revoke();
+    const accessor = ['0', []];
+    Object.defineProperty(accessor, '0', { enumerable: true, get() { traps++; throw new Error('outer accessor'); } });
+    const sparse = new Array(2); Object.defineProperty(sparse, '0', { enumerable: true, value: '0' });
+    const extra = ['0', []]; Object.defineProperty(extra, Symbol('secret'), { value: true });
+    const oversized = ['0', [], 'extra'];
+
+    const innerProxy = new Proxy([] as string[], { get() { traps++; throw new Error('inner secret'); } });
+    const innerRevoked = Proxy.revocable([] as string[], {}); innerRevoked.revoke();
+    const innerAccessor = ['key'];
+    Object.defineProperty(innerAccessor, '0', { enumerable: true, get() { traps++; throw new Error('inner accessor'); } });
+    const innerSparse = new Array(1);
+    const innerExtra = ['key']; Object.defineProperty(innerExtra, 'extra', { value: true });
+    const innerOversized = new Array(4_097).fill('key');
+
+    for (const value of [proxy, revoked.proxy, accessor, sparse, extra, oversized,
+      ['0', innerProxy], ['0', innerRevoked.proxy], ['0', innerAccessor], ['0', innerSparse],
+      ['0', innerExtra], ['0', innerOversized]]) {
+      expect(() => parseRedisScanPage(value)).toThrow('RET001D_REDIS_SCAN_FAILED');
+    }
+    expect(traps).toBe(0);
+  });
+
+  it('applies equivalent descriptor-safe singleton validation to hostile SMEMBERS arrays', () => {
+    let traps = 0;
+    const proxy = new Proxy(['key'], { get() { traps++; throw new Error('secret'); } });
+    const revoked = Proxy.revocable(['key'], {}); revoked.revoke();
+    const accessor = ['key'];
+    Object.defineProperty(accessor, '0', { enumerable: true, get() { traps++; throw new Error('accessor'); } });
+    const sparse = new Array(1);
+    const extra = ['key']; Object.defineProperty(extra, 'extra', { value: true });
+    for (const value of [proxy, revoked.proxy, accessor, sparse, extra, ['one', 'two']]) {
+      expect(parseRedisSingleton(value)).toBeUndefined();
+    }
+    expect(parseRedisSingleton(['key'])).toBe('key');
+    expect(traps).toBe(0);
+  });
+
+  function redisCleanupFixture() {
+    const keys = new Set<string>(['baseline', ...Object.values(redisOwned)]);
+    const sets = new Map<string, unknown>([
+      [redisOwned.defaultNode, [redisOwned.defaultContext]],
+      [redisOwned.defaultScope, [redisOwned.defaultContext]],
+      [redisOwned.namedNode, [redisOwned.namedContext]],
+      [redisOwned.namedScope, [redisOwned.namedContext]],
+    ]);
+    const values = new Map<string, string>([
+      [redisOwned.marker, redisToken],
+      [redisOwned.defaultContext, cacheJson(`ret001d-ds-${redisRun}`)],
+      [redisOwned.namedContext, cacheJson(`ret001d-ns-${redisRun}`)],
+    ]);
     const deleted: string[] = [];
+    let beforeEval: (() => void) | undefined;
+    const remove = (removed: readonly string[]) => {
+      deleted.push(...removed);
+      for (const key of removed) { keys.delete(key); sets.delete(key); values.delete(key); }
+    };
     const redis = {
       scan: vi.fn(async () => ['0', [...keys]]),
-      del: vi.fn(async (...values: string[]) => {
-        deleted.push(...values);
-        for (const value of values) keys.delete(value);
-        return values.length;
+      smembers: vi.fn(async (key: string) => sets.get(key) ?? []),
+      get: vi.fn(async (key: string) => values.get(key) ?? null),
+      eval: vi.fn(async (_script: string, keyCount: number, ...parts: string[]) => {
+        beforeEval?.();
+        const casKeys = parts.slice(0, keyCount);
+        const argv = parts.slice(keyCount);
+        if (keyCount < 1 || (keyCount - 1) % 3 !== 0 || argv.length !== 1 + ((keyCount - 1) / 3)) return -1;
+        if (_script.includes('KEYS[left] == KEYS[right]') && new Set(casKeys).size !== casKeys.length) return -13;
+        if (!values.has(casKeys[0]!) || sets.has(casKeys[0]!) || values.get(casKeys[0]!) !== argv[0]) return -1;
+        for (let index = 1, proof = 0; index < casKeys.length; index += 3, proof++) {
+          const [contextKey, nodeKey, scopeKey] = casKeys.slice(index, index + 3);
+          if (!contextKey || !nodeKey || !scopeKey || sets.has(contextKey) || !values.has(contextKey)
+            || !sets.has(nodeKey) || !sets.has(scopeKey)) return -1;
+          const nodeMembers = sets.get(nodeKey);
+          const scopeMembers = sets.get(scopeKey);
+          if (!Array.isArray(nodeMembers) || nodeMembers.length !== 1 || nodeMembers[0] !== contextKey
+            || !Array.isArray(scopeMembers) || scopeMembers.length !== 1 || scopeMembers[0] !== contextKey
+            || values.get(contextKey) !== argv[1 + proof]) return -1;
+        }
+        const uniqueKeys = [...new Set(casKeys)];
+        remove(uniqueKeys);
+        return uniqueKeys.length;
       }),
     };
+    return { redis, keys, sets, values, deleted, setBeforeEval(hook: () => void) { beforeEval = hook; } };
+  }
+
+  it('proves and removes the exact seven run-owned Redis artifacts', async () => {
+    const fixture = redisCleanupFixture();
+    const result = await cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    );
+    expect(result).toEqual({ ownedCreated: 7, ownedRemaining: 0, unexpectedNewKeys: 0 });
+    expect(new Set(fixture.deleted)).toEqual(new Set(Object.values(redisOwned)));
+    expect(fixture.keys).toEqual(new Set(['baseline']));
+    expect(fixture.redis.eval).toHaveBeenCalledTimes(1);
+    const [script, keyCount, ...parts] = fixture.redis.eval.mock.calls[0]!;
+    const explicitKeys = parts.slice(0, keyCount as number);
+    const argv = parts.slice(keyCount as number);
+    expect(keyCount).toBe(7);
+    expect(explicitKeys).toEqual([
+      redisOwned.marker,
+      redisOwned.defaultContext, redisOwned.defaultNode, redisOwned.defaultScope,
+      redisOwned.namedContext, redisOwned.namedNode, redisOwned.namedScope,
+    ]);
+    expect(new Set(explicitKeys).size).toBe(7);
+    expect(argv).toEqual([
+      redisToken, cacheJson(`ret001d-ds-${redisRun}`), cacheJson(`ret001d-ns-${redisRun}`),
+    ]);
+    expect(script).toEqual(expect.stringContaining("redis.call('TYPE'"));
+    expect(script).toEqual(expect.stringContaining("redis.call('SCARD'"));
+    expect(script).toEqual(expect.stringContaining("redis.call('SMEMBERS'"));
+    expect(script).toEqual(expect.stringContaining("redis.call('DEL'"));
+    expect(script).not.toContain(redisToken);
+    expect(JSON.stringify(result)).not.toContain(redisToken);
+  });
+
+  it.each([
+    ['marker', redisOwned.marker],
+    ['dependency', redisOwned.defaultNode],
+    ['context', redisOwned.defaultContext],
+  ])('never deletes a preexisting %s key', async (_label, preexisting) => {
+    const fixture = redisCleanupFixture();
     await expect(cleanupOwnedRedisKeys(
-      redis as never,
-      new Set(['baseline']),
-      [ownedKey],
-      1_000,
-    )).resolves.toEqual({ ownedRemaining: 0, unexpectedNewKeys: 1 });
-    expect(deleted).toEqual([ownedKey]);
-    expect(keys.has('concurrent:foreign')).toBe(true);
+      fixture.redis as never, new Set(['baseline', preexisting]), redisRun, redisToken, 1_000,
+    )).rejects.toThrow('RET001D_REDIS_OWNERSHIP_INVALID');
+    expect(fixture.deleted).not.toContain(preexisting);
+    expect(fixture.keys.has(preexisting)).toBe(true);
+    if (preexisting !== redisOwned.marker) expect(fixture.deleted).toContain(redisOwned.marker);
+  });
+
+  it('preserves and reports foreign keys including an unreferenced context-shaped key', async () => {
+    const fixture = redisCleanupFixture();
+    fixture.keys.add('concurrent:foreign');
+    fixture.keys.add('amp:ctx:3333333333333333');
+    await expect(cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    )).resolves.toEqual({ ownedCreated: 7, ownedRemaining: 0, unexpectedNewKeys: 2 });
+    expect(fixture.keys.has('concurrent:foreign')).toBe(true);
+    expect(fixture.keys.has('amp:ctx:3333333333333333')).toBe(true);
+  });
+
+  it.each([
+    ['missing peer', () => redisCleanupFixture(), (f: ReturnType<typeof redisCleanupFixture>) => f.keys.delete(redisOwned.defaultScope)],
+    ['multiple members', () => redisCleanupFixture(), (f: ReturnType<typeof redisCleanupFixture>) => f.sets.set(redisOwned.defaultNode, [redisOwned.defaultContext, 'amp:ctx:4444444444444444'])],
+    ['mismatched members', () => redisCleanupFixture(), (f: ReturnType<typeof redisCleanupFixture>) => f.sets.set(redisOwned.defaultScope, ['amp:ctx:4444444444444444'])],
+    ['duplicate cross-channel context', () => redisCleanupFixture(), (f: ReturnType<typeof redisCleanupFixture>) => {
+      f.sets.set(redisOwned.namedNode, [redisOwned.defaultContext]); f.sets.set(redisOwned.namedScope, [redisOwned.defaultContext]);
+    }],
+    ['wrong tenant namespace', () => redisCleanupFixture(), (f: ReturnType<typeof redisCleanupFixture>) => {
+      f.sets.set(redisOwned.defaultNode, [redisOwned.namedContext]); f.sets.set(redisOwned.defaultScope, [redisOwned.namedContext]);
+    }],
+    ['malformed context namespace', () => redisCleanupFixture(), (f: ReturnType<typeof redisCleanupFixture>) => {
+      const malformed = 'amp:ctx:333333333333333';
+      f.keys.add(malformed); f.values.set(malformed, cacheJson(`ret001d-ds-${redisRun}`));
+      f.sets.set(redisOwned.defaultNode, [malformed]); f.sets.set(redisOwned.defaultScope, [malformed]);
+    }],
+    ['malformed cache', () => redisCleanupFixture(), (f: ReturnType<typeof redisCleanupFixture>) => f.values.set(redisOwned.defaultContext, '{')],
+    ['oversized cache', () => redisCleanupFixture(), (f: ReturnType<typeof redisCleanupFixture>) => f.values.set(redisOwned.defaultContext, 'x'.repeat(1_048_577))],
+    ['wrong source', () => redisCleanupFixture(), (f: ReturnType<typeof redisCleanupFixture>) => f.values.set(redisOwned.defaultContext, cacheJson('foreign-source'))],
+  ])('rejects %s ownership proof without deleting the questionable artifacts', async (_label, create, mutate) => {
+    const fixture = create();
+    mutate(fixture);
+    await expect(cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    )).rejects.toThrow('RET001D_REDIS_OWNERSHIP_INVALID');
+    expect(fixture.keys.has(redisOwned.defaultNode)).toBe(true);
+    expect(fixture.keys.has(redisOwned.defaultContext)).toBe(true);
+    expect(fixture.deleted).toContain(redisOwned.marker);
+  });
+
+  it('rejects hostile dependency arrays without invoking their traps', async () => {
+    const fixture = redisCleanupFixture();
+    let traps = 0;
+    fixture.sets.set(redisOwned.defaultNode, new Proxy([redisOwned.defaultContext], {
+      get(target, property, receiver) {
+        if (property === 'then') return undefined;
+        traps++;
+        throw new Error('secret trap');
+      },
+    }));
+    await expect(cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    )).rejects.toThrow('RET001D_REDIS_OWNERSHIP_INVALID');
+    expect(traps).toBe(0);
+    expect(fixture.deleted).toContain(redisOwned.marker);
+  });
+
+  it('returns incomplete cardinality while deleting only independently proven partial execution keys', async () => {
+    const fixture = redisCleanupFixture();
+    for (const key of [redisOwned.namedContext, redisOwned.namedNode, redisOwned.namedScope]) fixture.keys.delete(key);
+    await expect(cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    )).resolves.toEqual({ ownedCreated: 4, ownedRemaining: 0, unexpectedNewKeys: 0 });
+    expect(new Set(fixture.deleted)).toEqual(new Set([
+      redisOwned.marker, redisOwned.defaultContext, redisOwned.defaultNode, redisOwned.defaultScope,
+    ]));
+    const source = await readFile(fileURLToPath(new URL('../live-conformance.ts', import.meta.url)), 'utf8');
+    expect(source).toContain('redisResidual.ownedCreated !== 7');
+  });
+
+  it('atomically deletes exactly one key for a marker-only partial execution', async () => {
+    const fixture = redisCleanupFixture();
+    for (const key of [
+      redisOwned.defaultContext, redisOwned.defaultNode, redisOwned.defaultScope,
+      redisOwned.namedContext, redisOwned.namedNode, redisOwned.namedScope,
+    ]) fixture.keys.delete(key);
+    await expect(cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    )).resolves.toEqual({ ownedCreated: 1, ownedRemaining: 0, unexpectedNewKeys: 0 });
+    expect(fixture.deleted).toEqual([redisOwned.marker]);
+    expect(fixture.redis.eval.mock.calls[0]![1]).toBe(1);
+  });
+
+  it('keeps both ambiguous triples out of Lua arguments', async () => {
+    const fixture = redisCleanupFixture();
+    fixture.sets.set(redisOwned.namedNode, [redisOwned.defaultContext]);
+    fixture.sets.set(redisOwned.namedScope, [redisOwned.defaultContext]);
+    await expect(cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    )).rejects.toThrow('RET001D_REDIS_OWNERSHIP_INVALID');
+    expect(fixture.redis.eval.mock.calls[0]![1]).toBe(1);
+    expect(fixture.deleted).toEqual([redisOwned.marker]);
+    for (const key of [
+      redisOwned.defaultContext, redisOwned.defaultNode, redisOwned.defaultScope,
+      redisOwned.namedContext, redisOwned.namedNode, redisOwned.namedScope,
+    ]) expect(fixture.keys.has(key)).toBe(true);
+  });
+
+  it.each([
+    ['marker replacement', (f: ReturnType<typeof redisCleanupFixture>) => f.values.set(redisOwned.marker, 'b'.repeat(32))],
+    ['node set replacement', (f: ReturnType<typeof redisCleanupFixture>) => f.sets.set(redisOwned.defaultNode, ['amp:ctx:4444444444444444'])],
+    ['scope set replacement', (f: ReturnType<typeof redisCleanupFixture>) => f.sets.set(redisOwned.defaultScope, ['amp:ctx:4444444444444444'])],
+    ['context replacement', (f: ReturnType<typeof redisCleanupFixture>) => f.values.set(redisOwned.defaultContext, cacheJson('replacement'))],
+    ['node type replacement', (f: ReturnType<typeof redisCleanupFixture>) => {
+      f.sets.delete(redisOwned.defaultNode); f.values.set(redisOwned.defaultNode, 'replacement');
+    }],
+    ['context type replacement', (f: ReturnType<typeof redisCleanupFixture>) => {
+      f.values.delete(redisOwned.defaultContext); f.sets.set(redisOwned.defaultContext, ['replacement']);
+    }],
+  ])('atomically deletes zero keys on %s before EVAL', async (_label, replace) => {
+    const fixture = redisCleanupFixture();
+    fixture.setBeforeEval(() => replace(fixture));
+    await expect(cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    )).rejects.toThrow('RET001D_REDIS_OWNERSHIP_INVALID');
+    expect(fixture.deleted).toEqual([]);
+    expect(fixture.keys).toEqual(new Set(['baseline', ...Object.values(redisOwned)]));
+  });
+
+  it('rejects duplicate KEYS inside the Lua boundary with a dedicated code and zero deletion', async () => {
+    const capture = redisCleanupFixture();
+    await cleanupOwnedRedisKeys(
+      capture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    );
+    const script = capture.redis.eval.mock.calls[0]![0];
+
+    const fixture = redisCleanupFixture();
+    fixture.sets.set(redisOwned.namedNode, [redisOwned.defaultContext]);
+    fixture.sets.set(redisOwned.namedScope, [redisOwned.defaultContext]);
+    const before = new Set(fixture.keys);
+    const result = await fixture.redis.eval(
+      script,
+      7,
+      redisOwned.marker,
+      redisOwned.defaultContext, redisOwned.defaultNode, redisOwned.defaultScope,
+      redisOwned.defaultContext, redisOwned.namedNode, redisOwned.namedScope,
+      redisToken,
+      cacheJson(`ret001d-ds-${redisRun}`), cacheJson(`ret001d-ds-${redisRun}`),
+    );
+    expect(result).toBe(-13);
+    expect(fixture.deleted).toEqual([]);
+    expect(fixture.keys).toEqual(before);
+  });
+
+  it('fails closed with zero deletion on EVAL error', async () => {
+    const fixture = redisCleanupFixture();
+    fixture.redis.eval.mockRejectedValueOnce(new Error('eval failed'));
+    await expect(cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    )).rejects.toThrow('RET001D_REDIS_CLEANUP_FAILED');
+    expect(fixture.deleted).toEqual([]);
+  });
+
+  it.each([-1, 0, 6, 8, '7', null, {}, []])(
+    'rejects malformed or inexact EVAL result %# with zero deletion', async (result) => {
+      const fixture = redisCleanupFixture();
+      fixture.redis.eval.mockResolvedValueOnce(result);
+      await expect(cleanupOwnedRedisKeys(
+        fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+      )).rejects.toThrow('RET001D_REDIS_OWNERSHIP_INVALID');
+      expect(fixture.deleted).toEqual([]);
+    },
+  );
+
+  it('requires exact EVAL count even when a fake reports success without deleting', async () => {
+    const fixture = redisCleanupFixture();
+    fixture.redis.eval.mockResolvedValueOnce(7);
+    await expect(cleanupOwnedRedisKeys(
+      fixture.redis as never, new Set(['baseline']), redisRun, redisToken, 1_000,
+    )).resolves.toEqual({ ownedCreated: 7, ownedRemaining: 7, unexpectedNewKeys: 0 });
   });
 
   it('reduces arbitrary fixture/query failures to closed content-free diagnostics', () => {

@@ -1291,15 +1291,21 @@ async function cleanupFixtures(
   }
 }
 
-async function scanKeys(redis: Redis, timeoutMs: number): Promise<Set<string>> {
+export async function scanRedisKeys(redis: Redis, timeoutMs: number): Promise<Set<string>> {
   void timeoutMs; // ioredis enforces the configured native commandTimeout.
   const keys = new Set<string>();
   let cursor = '0';
+  let pages = 0;
+  const seenNonterminalCursors = new Set<string>();
   do {
-    let scan: [string, string[]];
+    pages++;
+    if (pages > 4_096) throw new Error('RET001D_REDIS_KEY_BOUND');
+    let scan: unknown;
     try { scan = await redis.scan(cursor, 'COUNT', 200); }
     catch { throw new Error('RET001D_REDIS_SCAN_FAILED'); }
-    const [next, page] = scan;
+    const { cursor: next, page } = parseRedisScanPage(scan);
+    if (next !== '0' && seenNonterminalCursors.has(next)) throw new Error('RET001D_REDIS_SCAN_FAILED');
+    if (next !== '0') seenNonterminalCursors.add(next);
     cursor = next;
     for (const key of page) {
       keys.add(key);
@@ -1309,24 +1315,267 @@ async function scanKeys(redis: Redis, timeoutMs: number): Promise<Set<string>> {
   return keys;
 }
 
+function exactDenseDataArray(value: unknown, maximumLength: number): unknown[] | undefined {
+  try {
+    if (!Array.isArray(value) || isProxy(value)) return undefined;
+    const length = Object.getOwnPropertyDescriptor(value, 'length');
+    if (!length || !('value' in length) || !Number.isSafeInteger(length.value)
+      || length.value < 0 || length.value > maximumLength || length.enumerable) return undefined;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== length.value + 1 || !keys.includes('length')) return undefined;
+    const items: unknown[] = [];
+    for (let index = 0; index < length.value; index++) {
+      const key = String(index);
+      if (!keys.includes(key)) return undefined;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !('value' in descriptor) || descriptor.get !== undefined
+        || descriptor.set !== undefined || !descriptor.enumerable) return undefined;
+      items.push(descriptor.value);
+    }
+    return items;
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseRedisScanPage(value: unknown): { cursor: string; page: string[] } {
+  const tuple = exactDenseDataArray(value, 2);
+  if (!tuple || tuple.length !== 2 || typeof tuple[0] !== 'string'
+    || !/^(?:0|[1-9]\d{0,19})$/.test(tuple[0])
+    || BigInt(tuple[0]) > 18_446_744_073_709_551_615n) throw new Error('RET001D_REDIS_SCAN_FAILED');
+  const rawPage = exactDenseDataArray(tuple[1], 4_096);
+  if (!rawPage) throw new Error('RET001D_REDIS_SCAN_FAILED');
+  const page: string[] = [];
+  for (const key of rawPage) {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 1_024) {
+      throw new Error('RET001D_REDIS_SCAN_FAILED');
+    }
+    page.push(key);
+  }
+  return { cursor: tuple[0], page };
+}
+
+export function parseRedisSingleton(value: unknown): string | undefined {
+  const items = exactDenseDataArray(value, 1);
+  if (!items || items.length !== 1 || typeof items[0] !== 'string'
+    || items[0].length === 0 || items[0].length > 1_024) return undefined;
+  return items[0];
+}
+
+interface RedisOwnedChannel {
+  readonly contextPattern: RegExp;
+  readonly expectedSource: string;
+  readonly nodeKey: string;
+  readonly scopeKey: string;
+}
+
+interface RedisOwnedProof {
+  readonly contextKey: string;
+  readonly nodeKey: string;
+  readonly rawContext: string;
+  readonly scopeKey: string;
+}
+
+interface RedisOwnedProofResult {
+  readonly candidateContext?: string;
+  readonly invalid: boolean;
+  readonly proof?: RedisOwnedProof;
+}
+
+function redisOwnedChannels(run: string): readonly RedisOwnedChannel[] {
+  return [
+    {
+      contextPattern: /^amp:ctx:[0-9a-f]{16}$/,
+      expectedSource: `ret001d-ds-${run}`,
+      nodeKey: `amp:deps:ret001d-ds-${run}`,
+      scopeKey: `amp:scope-deps:project:ret001d-default-project-${run}`,
+    },
+    {
+      contextPattern: /^amp:ctx:ret001d-named:[0-9a-f]{16}$/,
+      expectedSource: `ret001d-ns-${run}`,
+      nodeKey: `amp:deps:ret001d-named:ret001d-ns-${run}`,
+      scopeKey: `amp:scope-deps:ret001d-named:project:ret001d-named-project-${run}`,
+    },
+  ];
+}
+
+function validRedisOwnershipToken(token: unknown): token is string {
+  return typeof token === 'string' && /^[0-9a-f]{32}$/.test(token);
+}
+
+export async function setRedisOwnershipMarker(
+  redis: Redis,
+  before: ReadonlySet<string>,
+  run: string,
+  token: string,
+): Promise<string> {
+  if (typeof run !== 'string' || !CANONICAL_LIVE_RUN_PATTERN.test(run) || !validRedisOwnershipToken(token)) {
+    throw new Error('RET001D_REDIS_OWNERSHIP_INVALID');
+  }
+  const marker = `memberry:lab:ret001d:${run}:ownership`;
+  if (before.has(marker)
+    || redisOwnedChannels(run).some(({ nodeKey, scopeKey }) => before.has(nodeKey) || before.has(scopeKey))) {
+    throw new Error('RET001D_REDIS_OWNERSHIP_INVALID');
+  }
+  let result: unknown;
+  try { result = await redis.set(marker, token, 'EX', 900, 'NX'); }
+  catch { throw new Error('RET001D_REDIS_OWNERSHIP_FAILED'); }
+  if (result !== 'OK') throw new Error('RET001D_REDIS_OWNERSHIP_INVALID');
+  return marker;
+}
+
+function exactOwnedCache(raw: unknown, expectedSource: string): boolean {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 1_048_576) return false;
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); }
+  catch { return false; }
+  const root = exactPlainDataRecord(parsed, ['markdown', 'tokens', 'sources', 'assembled_at']);
+  if (!root) return false;
+  const markdown = Object.getOwnPropertyDescriptor(root, 'markdown')!.value;
+  const tokens = Object.getOwnPropertyDescriptor(root, 'tokens')!.value;
+  const sources = Object.getOwnPropertyDescriptor(root, 'sources')!.value;
+  const assembledAt = Object.getOwnPropertyDescriptor(root, 'assembled_at')!.value;
+  const sourceItems = exactDenseDataArray(sources, 1);
+  return typeof markdown === 'string' && markdown.length <= 1_048_576
+    && Number.isSafeInteger(tokens) && tokens >= 0
+    && typeof assembledAt === 'string' && assembledAt.length > 0 && assembledAt.length <= 128
+    && sourceItems?.length === 1 && sourceItems[0] === expectedSource;
+}
+
+async function proveRedisChannel(
+  redis: Redis,
+  before: ReadonlySet<string>,
+  created: ReadonlySet<string>,
+  channel: RedisOwnedChannel,
+): Promise<RedisOwnedProofResult> {
+  const nodeCreated = created.has(channel.nodeKey);
+  const scopeCreated = created.has(channel.scopeKey);
+  if (before.has(channel.nodeKey) || before.has(channel.scopeKey)) return { invalid: true };
+  if (!nodeCreated && !scopeCreated) return { invalid: false };
+  if (!nodeCreated || !scopeCreated) return { invalid: true };
+
+  let nodeMembers: unknown;
+  let scopeMembers: unknown;
+  try {
+    nodeMembers = await redis.smembers(channel.nodeKey);
+    scopeMembers = await redis.smembers(channel.scopeKey);
+  } catch {
+    return { invalid: true };
+  }
+  const nodeContext = parseRedisSingleton(nodeMembers);
+  const scopeContext = parseRedisSingleton(scopeMembers);
+  if (!nodeContext || nodeContext !== scopeContext) return { invalid: true };
+  const contextKey = nodeContext;
+  if (!channel.contextPattern.test(contextKey) || before.has(contextKey) || !created.has(contextKey)) {
+    return { candidateContext: contextKey, invalid: true };
+  }
+  let cached: unknown;
+  try { cached = await redis.get(contextKey); }
+  catch { return { candidateContext: contextKey, invalid: true }; }
+  if (typeof cached !== 'string' || !exactOwnedCache(cached, channel.expectedSource)) {
+    return { candidateContext: contextKey, invalid: true };
+  }
+  return {
+    candidateContext: contextKey,
+    invalid: false,
+    proof: { contextKey, nodeKey: channel.nodeKey, rawContext: cached, scopeKey: channel.scopeKey },
+  };
+}
+
+const REDIS_OWNERSHIP_CAS = `
+local key_count = #KEYS
+if key_count < 1 or ((key_count - 1) % 3) ~= 0 then return -1 end
+local proof_count = (key_count - 1) / 3
+if #ARGV ~= 1 + proof_count then return -2 end
+if key_count > 7 then return -14 end
+for left = 1, key_count - 1 do
+  for right = left + 1, key_count do
+    if KEYS[left] == KEYS[right] then return -13 end
+  end
+end
+if redis.call('TYPE', KEYS[1]).ok ~= 'string' then return -3 end
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return -4 end
+for proof = 0, proof_count - 1 do
+  local context_index = 2 + (proof * 3)
+  local node_index = context_index + 1
+  local scope_index = context_index + 2
+  local context_key = KEYS[context_index]
+  if redis.call('TYPE', context_key).ok ~= 'string' then return -5 end
+  if redis.call('TYPE', KEYS[node_index]).ok ~= 'set' then return -6 end
+  if redis.call('TYPE', KEYS[scope_index]).ok ~= 'set' then return -7 end
+  if redis.call('SCARD', KEYS[node_index]) ~= 1 then return -8 end
+  if redis.call('SCARD', KEYS[scope_index]) ~= 1 then return -9 end
+  local node_members = redis.call('SMEMBERS', KEYS[node_index])
+  local scope_members = redis.call('SMEMBERS', KEYS[scope_index])
+  if #node_members ~= 1 or node_members[1] ~= context_key then return -10 end
+  if #scope_members ~= 1 or scope_members[1] ~= context_key then return -11 end
+  if redis.call('GET', context_key) ~= ARGV[2 + proof] then return -12 end
+end
+return redis.call('DEL', unpack(KEYS))
+`;
+
 export async function cleanupOwnedRedisKeys(
   redis: Redis,
   before: ReadonlySet<string>,
-  ownedKeys: readonly string[],
+  run: string,
+  token: string,
   timeoutMs: number,
-): Promise<{ ownedRemaining: number; unexpectedNewKeys: number }> {
-  if (ownedKeys.length === 0 || new Set(ownedKeys).size !== ownedKeys.length
-    || ownedKeys.some((key) => !/^memberry:lab:ret001d:[a-z0-9-]+:ownership$/.test(key))) {
+): Promise<{ ownedCreated: number; ownedRemaining: number; unexpectedNewKeys: number }> {
+  if (typeof run !== 'string' || !CANONICAL_LIVE_RUN_PATTERN.test(run) || !validRedisOwnershipToken(token)) {
     throw new Error('RET001D_REDIS_OWNERSHIP_INVALID');
   }
-  try { await redis.del(...ownedKeys); }
-  catch { throw new Error('RET001D_REDIS_CLEANUP_FAILED'); }
-  const residual = await scanKeys(redis, timeoutMs);
-  const owned = new Set(ownedKeys);
-  return {
+  const residualBeforeCleanup = await scanRedisKeys(redis, timeoutMs);
+  const created = new Set([...residualBeforeCleanup].filter((key) => !before.has(key)));
+  const marker = `memberry:lab:ret001d:${run}:ownership`;
+  if (before.has(marker)) throw new Error('RET001D_REDIS_OWNERSHIP_INVALID');
+  let invalid = false;
+  if (!created.has(marker)) invalid = true;
+
+  const proofResults: RedisOwnedProofResult[] = [];
+  for (const channel of redisOwnedChannels(run)) {
+    const result = await proveRedisChannel(redis, before, created, channel);
+    proofResults.push(result);
+    if (result.invalid) invalid = true;
+  }
+  const candidates = proofResults.flatMap(({ candidateContext }) => candidateContext ? [candidateContext] : []);
+  const duplicatedContexts = new Set(candidates.filter((value, index) => candidates.indexOf(value) !== index));
+  if (duplicatedContexts.size > 0) {
+    invalid = true;
+  }
+  const proofs = proofResults.flatMap(({ proof }) => (
+    proof && !duplicatedContexts.has(proof.contextKey) ? [proof] : []
+  ));
+  const explicitKeys = [marker, ...proofs.flatMap(({ contextKey, nodeKey, scopeKey }) => (
+    [contextKey, nodeKey, scopeKey]
+  ))];
+  if (explicitKeys.length > 7 || new Set(explicitKeys).size !== explicitKeys.length) {
+    throw new Error('RET001D_REDIS_OWNERSHIP_INVALID');
+  }
+
+  let deleted: unknown;
+  try {
+    deleted = await redis.eval(
+      REDIS_OWNERSHIP_CAS,
+      explicitKeys.length,
+      ...explicitKeys,
+      token,
+      ...proofs.map(({ rawContext }) => rawContext),
+    );
+  } catch {
+    throw new Error('RET001D_REDIS_CLEANUP_FAILED');
+  }
+  if (typeof deleted !== 'number' || deleted !== explicitKeys.length) {
+    throw new Error('RET001D_REDIS_OWNERSHIP_INVALID');
+  }
+  const residual = await scanRedisKeys(redis, timeoutMs);
+  const owned = new Set(explicitKeys);
+  const result = {
+    ownedCreated: explicitKeys.length,
     ownedRemaining: [...owned].filter((key) => residual.has(key)).length,
     unexpectedNewKeys: [...residual].filter((key) => !before.has(key) && !owned.has(key)).length,
   };
+  if (invalid) throw new Error('RET001D_REDIS_OWNERSHIP_INVALID');
+  return result;
 }
 
 interface LiveCase {
@@ -1752,8 +2001,8 @@ async function observeNeo4jVersion(driver: Driver, timeoutMs: number): Promise<s
 
 export async function runTraceLiveConformanceEvidence(config: TraceConformanceConfig): Promise<JsonRecord> {
   const run = `${Date.now().toString(36)}-${randomUUID().replaceAll('-', '').slice(0, 12)}`.toLowerCase();
+  const redisOwnershipToken = randomUUID().replaceAll('-', '').toLowerCase();
   const rankedMarkers = rankedFixtureMarkers(run);
-  const ownedRedisKeys = [`memberry:lab:ret001d:${run}:ownership`];
   const fixture: FixtureIdentity = {
     run,
     defaultProject: `ret001d-default-project-${run}`,
@@ -1775,11 +2024,12 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
   let tempPath: string | undefined;
   let redisBefore = new Set<string>();
   let redisSnapshotEstablished = false;
+  let redisMarkerClaimed = false;
   let active: CompositionRoot | undefined;
   let childProcessesStopped = false;
   let tempRemoved = false;
   let graphResidual = { nodes: -1, relationships: -1 };
-  let redisResidual = { ownedRemaining: -1, unexpectedNewKeys: -1 };
+  let redisResidual = { ownedCreated: -1, ownedRemaining: -1, unexpectedNewKeys: -1 };
   let executionError: Error | undefined;
   let observedServices: JsonRecord | undefined;
   const cases: JsonRecord[] = [];
@@ -1799,7 +2049,7 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     // The shared wrapper logs only when it is the sole error listener. This second,
     // content-free listener keeps infrastructure errors out of evidence artifacts.
     redis.on('error', () => undefined);
-    redisBefore = await scanKeys(redis, config.requestTimeoutMs);
+    redisBefore = await scanRedisKeys(redis, config.requestTimeoutMs);
     redisSnapshotEstablished = true;
     try { await driver.getServerInfo(); }
     catch { throw new Error('RET001D_NEO4J_PREFLIGHT_FAILED'); }
@@ -1817,8 +2067,8 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
         version: await observeNeo4jVersion(driver, config.requestTimeoutMs),
       },
     };
-    try { await redis.set(ownedRedisKeys[0]!, 'owned', 'EX', 900); }
-    catch { throw new Error('RET001D_REDIS_OWNERSHIP_FAILED'); }
+    await setRedisOwnershipMarker(redis, redisBefore, run, redisOwnershipToken);
+    redisMarkerClaimed = true;
     await seedFixtures(driver, fixture, config.requestTimeoutMs);
     const seedReadback = await readBackSeedFixtures(driver, fixture, config.requestTimeoutMs);
     active = new CompositionRoot(config, 'single-default', exportPath);
@@ -1867,10 +2117,10 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
       if (driver) graphResidual = await cleanupFixtures(driver, run, config.requestTimeoutMs);
     } catch (error) { cleanupErrors.push(new Error(safeDiagnosticCode(error))); }
     try {
-      if (redis && redisSnapshotEstablished) {
-        redisResidual = await cleanupOwnedRedisKeys(redis, redisBefore, ownedRedisKeys, config.requestTimeoutMs);
-      } else if (redis) {
-        await redis.del(...ownedRedisKeys).catch(() => { throw new Error('RET001D_REDIS_CLEANUP_FAILED'); });
+      if (redis && redisSnapshotEstablished && redisMarkerClaimed) {
+        redisResidual = await cleanupOwnedRedisKeys(
+          redis, redisBefore, run, redisOwnershipToken, config.requestTimeoutMs,
+        );
       }
     } catch (error) { cleanupErrors.push(new Error(safeDiagnosticCode(error))); }
     try {
@@ -1893,7 +2143,8 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
 
   if (executionError) throw executionError;
   if (cases.length !== 4 || graphResidual.nodes !== 0 || graphResidual.relationships !== 0
-    || redisResidual.ownedRemaining !== 0 || redisResidual.unexpectedNewKeys !== 0) {
+    || redisResidual.ownedCreated !== 7 || redisResidual.ownedRemaining !== 0
+    || redisResidual.unexpectedNewKeys !== 0) {
     throw new Error('RET001D_CLEANUP_OR_CASE_COUNT_INVALID');
   }
   if (!observedServices) throw new Error('RET001D_SERVICE_IDENTITY_MISSING');
