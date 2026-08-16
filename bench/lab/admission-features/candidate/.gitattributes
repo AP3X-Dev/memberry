@@ -1,0 +1,6 @@
+.gitattributes text eol=lf
+.dockerignore text eol=lf
+*.ts text eol=lf
+container/Dockerfile text eol=lf
+container/manifest.json text eol=lf
+container/worker.mjs text eol=lf

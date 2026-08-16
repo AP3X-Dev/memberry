@@ -1,0 +1,119 @@
+{
+  "manifestVersion": "1.0.0",
+  "candidateId": "memberry.precomputed-feature-signals",
+  "candidateVersion": "1.0.0",
+  "build": {
+    "context": "bench/lab/admission-features/candidate",
+    "dockerfile": "container/Dockerfile",
+    "platform": "linux/amd64",
+    "immutableContextPolicy": "canonical-content-addressed-tar-stdin",
+    "baseImage": "node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9",
+    "baseImagePolicy": "exact-digest",
+    "runtimeImagePolicy": "private-build-receipt-required",
+    "includedPaths": [
+      "container/Dockerfile",
+      "container/worker.mjs",
+      "container/manifest.json",
+      "container/attestation.json (generated from the immutable snapshot)"
+    ],
+    "attestationLabels": [
+      "org.memberry.candidate.sha256",
+      "org.memberry.source.sha256",
+      "org.memberry.base.image"
+    ],
+    "contentProof": [
+      "candidate source and build assets match exact stored Git blob object IDs and SHA256 digests",
+      "Git object bytes are authoritative for hashes and build context after exact worktree equality",
+      "Git pointer gitdir commondir config and object paths are pinned before and after every command",
+      "trusted absolute Git uses explicit gitdir with closed config alternate replacement and prompt controls",
+      "candidate-local attributes pin every manifested text asset to LF",
+      "host orchestration treats candidate source and worker bundle as bytes and never imports them",
+      "approved base RepoDigest and rootfs layer prefix",
+      "/app/worker.mjs exact bytes",
+      "/app/attestation.json canonical base candidate source and node hashes",
+      "/usr/local/bin/node exact bytes equal in approved base and candidate"
+    ]
+  },
+  "runtime": {
+    "platform": "linux/amd64",
+    "network": "none",
+    "pull": "never",
+    "user": "65532:65532",
+    "rootFilesystem": "read-only",
+    "capabilities": [],
+    "noNewPrivileges": true,
+    "pids": 32,
+    "cpus": "0.5",
+    "memory": "128m",
+    "memorySwap": "128m",
+    "timeoutMs": 5000,
+    "inputBytes": 32768,
+    "outputBytes": 32768,
+    "stderrBytes": 1024,
+    "inputDelivery": {
+      "transport": "stopped-container-tar-copy",
+      "path": "/run/input.json",
+      "uid": 65532,
+      "gid": 65532,
+      "mode": "0400",
+      "runtimeRoot": "read-only",
+      "mounts": 0
+    },
+    "environment": {
+      "LANG": "C.UTF-8",
+      "LC_ALL": "C.UTF-8",
+      "TZ": "UTC"
+    },
+    "executable": "node",
+    "entrypoint": "/usr/local/bin/node",
+    "arguments": [
+      "--permission",
+      "--allow-fs-read=/run/input.json",
+      "--allow-fs-write=/tmp/memberry-sandbox-write-probe",
+      "--disable-proto=throw",
+      "/app/worker.mjs",
+      "/run/input.json"
+    ],
+    "inspectionAssertions": [
+      "image labels equal current candidate and source hashes as supplemental metadata",
+      "approved base RepoDigest and rootfs layer prefix are inspected independently",
+      "worker node binary and canonical attestation bytes are copied from stopped proof containers and rehashed",
+      "full image RootFS layers and effective Config are bound into a private build receipt",
+      "container image equals attested local image ID",
+      "network mode is none",
+      "mount list is empty",
+      "root filesystem is read-only",
+      "user is 65532:65532",
+      "capabilities are dropped",
+      "no-new-privileges is enabled",
+      "PID CPU and memory bounds are exact",
+      "entrypoint and arguments are exact",
+      "stdout artifact is validated by independent closed host protocol with exact input hash identity and order bindings"
+    ],
+    "runtimeAssertions": [
+      "environment is reduced to LANG LC_ALL TZ",
+      "write to world-writable tmp fails with EROFS",
+      "Node permission model denies child processes with ERR_ACCESS_DENIED",
+      "Node permission model denies worker threads with ERR_ACCESS_DENIED",
+      "external socket is denied by the permission model or Docker network none"
+    ],
+    "cleanup": {
+      "identity": "bounded nofollow owned cidfile is sole deletion authority; label is residue proof only",
+      "runningAction": "docker container kill by inspected ID",
+      "removalAction": "docker container rm -fv by inspected ID",
+      "absenceProof": "empty label-scoped docker container ls",
+      "hostResidueProof": "pinned sentinel exact nonrecursive unlink and run directory ENOENT; disposable host contains residual path race"
+    }
+  },
+  "forbidden": [
+    "network",
+    "repository mount",
+    ".git mount",
+    "scorer mount",
+    "oracle mount",
+    "Docker socket",
+    "shell",
+    "additional environment",
+    "additional command arguments"
+  ]
+}

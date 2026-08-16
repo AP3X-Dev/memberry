@@ -1,0 +1,6 @@
+**
+!container/
+!container/Dockerfile
+!container/worker.mjs
+!container/manifest.json
+!container/attestation.json
