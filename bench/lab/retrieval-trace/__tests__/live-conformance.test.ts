@@ -7,13 +7,17 @@ import {
   childEnvironment,
   classifyTraceReadiness,
   cleanupOwnedRedisKeys,
+  caseStageDiagnosticCode,
+  classifySeededPresentation,
   compositionRootCommand,
+  parseSeedReadback,
   parseResidualCounts,
   readBoundedResponseText,
   requiredPresentationIdForCase,
   resolveTraceConformanceConfig,
   runAbortableOperation,
   safeDiagnosticCode,
+  seededMissingDiagnosticCode,
   tenantIsolationForbiddenValues,
   TraceMcpTransport,
   waitForTraceReadiness,
@@ -38,8 +42,48 @@ const validEnv = {
 
 const mappingFixture = {
   run: 'run-1',
-  defaultTarget: 'ret001d-default-target-run-1',
+  default: {
+    projectId: 'ret001d-dp-run-1',
+    projectName: 'ret001d-default-project-run-1',
+    projectTenant: 'default',
+    targetId: 'ret001d-dt-run-1',
+    targetName: 'ret001d-default-target-run-1',
+    targetTenant: 'default',
+  },
+  named: {
+    projectId: 'ret001d-np-run-1',
+    projectName: 'ret001d-named-project-run-1',
+    projectTenant: 'ret001d-named',
+    targetId: 'ret001d-nt-run-1',
+    targetName: 'ret001d-named-target-run-1',
+    targetTenant: 'ret001d-named',
+  },
 } as const;
+
+const seedFixture = {
+  run: 'run-1',
+  defaultProject: 'ret001d-default-project-run-1',
+  defaultTarget: 'ret001d-default-target-run-1',
+  namedProject: 'ret001d-named-project-run-1',
+  namedTarget: 'ret001d-named-target-run-1',
+} as const;
+
+function seedRecord(values: Record<string, unknown>): { get(key: string): unknown } {
+  return { get: (key: string) => values[key] };
+}
+
+function validSeedRecords(): Array<{ get(key: string): unknown }> {
+  return [
+    seedRecord({
+      projectId: 'ret001d-dp-run-1', projectName: seedFixture.defaultProject, projectTenant: 'default',
+      targetId: 'ret001d-dt-run-1', targetName: seedFixture.defaultTarget, targetTenant: 'default',
+    }),
+    seedRecord({
+      projectId: 'ret001d-np-run-1', projectName: seedFixture.namedProject, projectTenant: 'ret001d-named',
+      targetId: 'ret001d-nt-run-1', targetName: seedFixture.namedTarget, targetTenant: 'ret001d-named',
+    }),
+  ];
+}
 
 function presentationResult(id: string): unknown {
   return { content: [{ type: 'text', text: [
@@ -62,6 +106,177 @@ describe('RET-001D live composition harness', () => {
     ['named-tenant-forced-ranked', 'ret001d-nt-run-1'],
   ] as const)('maps %s to its exact seeded presentation ID', (id, expected) => {
     expect(requiredPresentationIdForCase(id, mappingFixture)).toBe(expected);
+  });
+
+  it('accepts only the exact two truth-bound seeded containment rows', () => {
+    expect(parseSeedReadback(validSeedRecords(), seedFixture)).toEqual(mappingFixture);
+    expect(() => parseSeedReadback(validSeedRecords().slice(0, 1), seedFixture))
+      .toThrow('RET001D_NEO4J_SEED_READBACK_CARDINALITY');
+    expect(() => parseSeedReadback([...validSeedRecords(), validSeedRecords()[0]!], seedFixture))
+      .toThrow('RET001D_NEO4J_SEED_READBACK_CARDINALITY');
+  });
+
+  it.each([
+    ['get accessor', () => Object.defineProperty({}, 'get', {
+      enumerable: true,
+      get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+    ['proxied record', () => new Proxy(seedRecord({}), {
+      get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+      getOwnPropertyDescriptor() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+    ['throwing get invocation', () => ({
+      get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+  ] as const)('maps a hostile seed read-back %s to one fixed content-free code', (_label, createRecord) => {
+    let error: unknown;
+    try { parseSeedReadback([createRecord() as never, validSeedRecords()[1]!], seedFixture); }
+    catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('RET001D_NEO4J_SEED_READBACK_INVALID');
+    expect((error as Error).message).not.toContain('SECRET_FIXTURE');
+    expect(safeDiagnosticCode(error)).toBe('RET001D_NEO4J_SEED_READBACK_INVALID');
+  });
+
+  it.each([
+    ['targetId', 'ret001d-unexpected-target'],
+    ['targetName', 'ret001d-unexpected-name'],
+    ['projectId', 'ret001d-unexpected-project'],
+    ['projectName', 'ret001d-unexpected-project-name'],
+    ['targetTenant', 'ret001d-unexpected-tenant'],
+    ['projectTenant', 'ret001d-unexpected-tenant'],
+  ] as const)('rejects a seeded read-back %s mismatch', (field, value) => {
+    const records = validSeedRecords();
+    const first = {
+      projectId: 'ret001d-dp-run-1', projectName: seedFixture.defaultProject, projectTenant: 'default',
+      targetId: 'ret001d-dt-run-1', targetName: seedFixture.defaultTarget, targetTenant: 'default',
+      [field]: value,
+    };
+    records[0] = seedRecord(first);
+    expect(() => parseSeedReadback(records, seedFixture)).toThrow('RET001D_NEO4J_SEED_READBACK_MISMATCH');
+  });
+
+  it.each([
+    [['target-ret001d-default-target-run-1'], 'expected', 1, 0, 0, 0],
+    [['ret001d-dt-run-1'], 'alternate', 0, 1, 0, 0],
+    [['ret001d-dp-run-1', 'target-ret001d-default-project-run-1'], 'project-only', 0, 0, 2, 0],
+    [['unrelated-result'], 'none', 0, 0, 0, 1],
+  ] as const)('classifies seeded presentation evidence without returning identifiers: %j', (
+    resultIds, classification, expectedCount, alternateCount, projectCount, otherCount,
+  ) => {
+    expect(classifySeededPresentation('deterministic', mappingFixture, resultIds)).toEqual({
+      classification, expectedCount, alternateCount, projectCount, otherCount, totalCount: resultIds.length,
+    });
+  });
+
+  it('bounds seeded-missing diagnostic counts', () => {
+    expect(() => classifySeededPresentation(
+      'deterministic', mappingFixture, Array.from({ length: 513 }, (_, index) => `id-${index}`),
+    )).toThrow('RET001D_SEEDED_DIAGNOSTIC_BOUND');
+  });
+
+  it('reports alternate seeded presentation evidence using only bounded counts', () => {
+    const secret = 'RET001D-secret-result-id';
+    const observed = classifySeededPresentation('deterministic', mappingFixture, [
+      mappingFixture.default.targetId,
+      secret,
+    ]);
+    const code = seededMissingDiagnosticCode('deterministic', observed);
+    expect(code).toBe(
+      'RET001D_CASE_DETERMINISTIC_STAGE_ORDINARY_PRESENTATION_SEEDED_ALTERNATE_E0_A1_P0_O1_T2',
+    );
+    expect(code).not.toContain(secret);
+    expect(code).not.toContain(mappingFixture.default.targetId);
+    expect(safeDiagnosticCode(new Error(code))).toBe(code);
+  });
+
+  it.each([
+    ['missing key', {
+      classification: 'none', expectedCount: 0, alternateCount: 0, projectCount: 0, totalCount: 0,
+    }],
+    ['extra key', {
+      classification: 'none', expectedCount: 0, alternateCount: 0, projectCount: 0, otherCount: 0, totalCount: 0,
+      secret: 'RET001D_SECRET_FIXTURE',
+    }],
+    ['invalid classification', {
+      classification: 'RET001D_SECRET_FIXTURE', expectedCount: 0, alternateCount: 0,
+      projectCount: 0, otherCount: 0, totalCount: 0,
+    }],
+    ['non-integer count', {
+      classification: 'none', expectedCount: 0.5, alternateCount: 0, projectCount: 0, otherCount: 0, totalCount: 0.5,
+    }],
+    ['negative count', {
+      classification: 'none', expectedCount: 0, alternateCount: 0, projectCount: 0, otherCount: -1, totalCount: -1,
+    }],
+    ['oversized count', {
+      classification: 'none', expectedCount: 0, alternateCount: 0, projectCount: 0, otherCount: 513, totalCount: 513,
+    }],
+    ['inconsistent sum', {
+      classification: 'none', expectedCount: 0, alternateCount: 0, projectCount: 0, otherCount: 1, totalCount: 0,
+    }],
+    ['inconsistent expected class', {
+      classification: 'alternate', expectedCount: 1, alternateCount: 1, projectCount: 0, otherCount: 0, totalCount: 2,
+    }],
+    ['inconsistent alternate class', {
+      classification: 'project-only', expectedCount: 0, alternateCount: 1, projectCount: 1, otherCount: 0, totalCount: 2,
+    }],
+    ['inconsistent project class', {
+      classification: 'none', expectedCount: 0, alternateCount: 0, projectCount: 1, otherCount: 0, totalCount: 1,
+    }],
+  ] as const)('rejects forged seeded diagnostic evidence: %s', (_label, forged) => {
+    let error: unknown;
+    try { seededMissingDiagnosticCode('deterministic', forged as never); }
+    catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('RET001D_SEEDED_DIAGNOSTIC_INVALID');
+    expect((error as Error).message).not.toContain('SECRET_FIXTURE');
+    expect(safeDiagnosticCode(error)).toBe('RET001D_SEEDED_DIAGNOSTIC_INVALID');
+  });
+
+  it('rejects proxied seeded diagnostic evidence without invoking its traps', () => {
+    const forged = new Proxy({
+      classification: 'none', expectedCount: 0, alternateCount: 0,
+      projectCount: 0, otherCount: 0, totalCount: 0,
+    }, {
+      ownKeys() { throw new Error('RET001D_SECRET_FIXTURE'); },
+      get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    });
+    expect(() => seededMissingDiagnosticCode('deterministic', forged as never))
+      .toThrow('RET001D_SEEDED_DIAGNOSTIC_INVALID');
+  });
+
+  it.each([
+    ['case', 'RET001D_SECRET_FIXTURE', 'ordinary-call'],
+    ['stage', 'deterministic', 'RET001D_SECRET_FIXTURE'],
+  ] as const)('rejects an invalid diagnostic %s using one fixed code', (_label, id, stage) => {
+    let error: unknown;
+    try { caseStageDiagnosticCode(id as never, stage as never, new Error('RET001D_SECRET_FIXTURE')); }
+    catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('RET001D_CASE_STAGE_DIAGNOSTIC_INVALID');
+    expect((error as Error).message).not.toContain('SECRET_FIXTURE');
+    expect(safeDiagnosticCode(error)).toBe('RET001D_CASE_STAGE_DIAGNOSTIC_INVALID');
+  });
+
+  it.each([
+    'ordinary-call',
+    'ordinary-presentation',
+    'ordinary-inspection',
+    'false-call',
+    'false-inspection',
+    'traced-call',
+    'traced-inspection',
+    'false-parity',
+    'traced-parity',
+    'tenant-isolation',
+  ] as const)('emits a closed content-free diagnostic for every case at stage %s', (stage) => {
+    const secret = 'RET001D secret fixture/query body';
+    for (const id of ['deterministic', 'ranked', 'auto', 'named-tenant-forced-ranked'] as const) {
+      const code = caseStageDiagnosticCode(id, stage, new Error(secret));
+      expect(code).toMatch(/^RET001D_CASE_[A-Z0-9_]+_STAGE_[A-Z0-9_]+$/);
+      expect(code).not.toContain(secret);
+      expect(safeDiagnosticCode(new Error(code))).toBe(code);
+    }
   });
 
   it('rejects cross-algorithm presentation-ID substitution', () => {
@@ -282,6 +497,122 @@ describe('RET-001D live composition harness', () => {
     expect(safeDiagnosticCode(new Error(fixture))).toBe('RET001D_INTERNAL_FAILURE');
     expect(safeDiagnosticCode(new Error('RET001D_MCP_TIMEOUT'))).toBe('RET001D_MCP_TIMEOUT');
     expect(safeDiagnosticCode(new AggregateError([new Error(fixture)], fixture))).not.toContain(fixture);
+  });
+
+  it.each([
+    ['message accessor', () => Object.defineProperty(Object.create(Error.prototype), 'message', {
+      get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+    ['error proxy', () => new Proxy(new Error('RET001D_MCP_TIMEOUT'), {
+      get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+      getOwnPropertyDescriptor() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+    ['revoked error proxy', () => {
+      const pair = Proxy.revocable(new Error('RET001D_MCP_TIMEOUT'), {});
+      pair.revoke();
+      return pair.proxy;
+    }],
+  ] as const)('never throws or reflects a hostile diagnostic %s', (_label, createError) => {
+    let code: string | undefined;
+    expect(() => { code = safeDiagnosticCode(createError()); }).not.toThrow();
+    expect(code).toBe('RET001D_INTERNAL_FAILURE');
+    expect(code).not.toContain('SECRET_FIXTURE');
+  });
+
+  it.each([
+    'RET001D_SECRET_FIXTURE',
+    `RET001D_${'A'.repeat(300)}`,
+    'RET001D_MCP_HTTP_99',
+    'RET001D_MCP_HTTP_600',
+    'RET001D_MCP_HTTP_4O4',
+    'RET001D_CASE_UNKNOWN_STAGE_ORDINARY_CALL',
+    'RET001D_CASE_DETERMINISTIC_STAGE_UNKNOWN',
+    'RET001D_CASE_DETERMINISTIC_STAGE_ORDINARY_CALL_SEEDED_NONE_E0_A0_P0_O0_T0',
+    'RET001D_CASE_DETERMINISTIC_STAGE_ORDINARY_PRESENTATION_SEEDED_UNKNOWN_E0_A0_P0_O0_T0',
+    'RET001D_CASE_DETERMINISTIC_STAGE_ORDINARY_PRESENTATION_SEEDED_NONE_E0_A0_P0_O513_T513',
+    'RET001D_CASE_DETERMINISTIC_STAGE_ORDINARY_PRESENTATION_SEEDED_NONE_E0_A0_P0_O1_T0',
+    'RET001D_READINESS_TIMEOUT__RET001D_SECRET_FIXTURE',
+  ])('rejects unknown or malformed diagnostic code %s', (code) => {
+    expect(safeDiagnosticCode(new Error(code))).toBe('RET001D_INTERNAL_FAILURE');
+  });
+
+  it.each([
+    'RET001D_CASE_STAGE_DIAGNOSTIC_INVALID',
+    'RET001D_CLEANUP_OR_CASE_COUNT_INVALID',
+    'RET001D_COMPOSITION_ROOT_EXITED',
+    'RET001D_COMPOSITION_ROOT_STOP_TIMEOUT',
+    'RET001D_EVIDENCE_FAILED',
+    'RET001D_EVIDENCE_WRITE_FAILED',
+    'RET001D_EVIDENCE_WRITE_TIMEOUT',
+    'RET001D_FALSE_PARITY_MISMATCH',
+    'RET001D_GIT_DIRTY',
+    'RET001D_GIT_STATE_FAILED',
+    'RET001D_HTTP_BODY_ABORTED',
+    'RET001D_HTTP_BODY_READ_FAILED',
+    'RET001D_HTTP_BODY_TOO_LARGE',
+    'RET001D_INTERNAL_FAILURE',
+    'RET001D_MANIFEST_FORBIDDEN_VALUE',
+    'RET001D_MCP_CORRELATION_INVALID',
+    'RET001D_MCP_ENVELOPE_INVALID',
+    'RET001D_MCP_INITIALIZE_INVALID',
+    'RET001D_MCP_NETWORK',
+    'RET001D_MCP_RPC_ERROR',
+    'RET001D_MCP_TIMEOUT',
+    'RET001D_MCP_TOOL_RESPONSE_INVALID',
+    'RET001D_NEO4J_CLEANUP_FAILED',
+    'RET001D_NEO4J_CLOSE_FAILED',
+    'RET001D_NEO4J_PREFLIGHT_FAILED',
+    'RET001D_NEO4J_RESIDUAL_INVALID',
+    'RET001D_NEO4J_RESIDUAL_QUERY_FAILED',
+    'RET001D_NEO4J_SEED_FAILED',
+    'RET001D_NEO4J_SEED_READBACK_CARDINALITY',
+    'RET001D_NEO4J_SEED_READBACK_FAILED',
+    'RET001D_NEO4J_SEED_READBACK_INVALID',
+    'RET001D_NEO4J_SEED_READBACK_MISMATCH',
+    'RET001D_NEO4J_SESSION_CLOSE_FAILED',
+    'RET001D_NEO4J_VERSION_FAILED',
+    'RET001D_NEO4J_VERSION_INVALID',
+    'RET001D_READINESS_INVALID',
+    'RET001D_READINESS_NETWORK',
+    'RET001D_READINESS_TIMEOUT__RET001D_READINESS_NETWORK',
+    'RET001D_READINESS_UNKNOWN',
+    'RET001D_REDIS_CLEANUP_FAILED',
+    'RET001D_REDIS_KEY_BOUND',
+    'RET001D_REDIS_OWNERSHIP_FAILED',
+    'RET001D_REDIS_OWNERSHIP_INVALID',
+    'RET001D_REDIS_PREFLIGHT_FAILED',
+    'RET001D_REDIS_SCAN_FAILED',
+    'RET001D_REDIS_VERSION_FAILED',
+    'RET001D_REDIS_VERSION_INVALID',
+    'RET001D_SEEDED_DIAGNOSTIC_BOUND',
+    'RET001D_SEEDED_DIAGNOSTIC_INVALID',
+    'RET001D_SEEDED_RESULT_MISSING',
+    'RET001D_SERVICE_IDENTITY_MISSING',
+    'RET001D_TEMP_CREATE_FAILED',
+    'RET001D_TENANT_ISOLATION_FAILURE',
+    'RET001D_TRACE_BLOCK_COUNT',
+    'RET001D_TRACED_PARITY_MISMATCH',
+  ])('accepts legitimate static runner diagnostic %s', (code) => {
+    expect(safeDiagnosticCode(new Error(code))).toBe(code);
+  });
+
+  it.each(['100', '200', '404', '599'])('accepts bounded MCP HTTP diagnostic %s', (status) => {
+    const code = `RET001D_MCP_HTTP_${status}`;
+    expect(safeDiagnosticCode(new Error(code))).toBe(code);
+  });
+
+  it.each([
+    ['expected', 1, 0, 0, 511, 512],
+    ['alternate', 0, 1, 0, 511, 512],
+    ['project-only', 0, 0, 1, 511, 512],
+    ['none', 0, 0, 0, 512, 512],
+  ] as const)('accepts legitimate seeded dynamic family %s', (
+    classification, expectedCount, alternateCount, projectCount, otherCount, totalCount,
+  ) => {
+    const code = seededMissingDiagnosticCode('named-tenant-forced-ranked', {
+      classification, expectedCount, alternateCount, projectCount, otherCount, totalCount,
+    });
+    expect(safeDiagnosticCode(new Error(code))).toBe(code);
   });
 
   it('times out readiness deterministically and never retries structural failures', async () => {

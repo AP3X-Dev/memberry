@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { isNativeError, isProxy } from 'node:util/types';
 
 import type { Driver, QueryResult, Session } from 'neo4j-driver';
 import type Redis from 'ioredis';
@@ -316,10 +317,110 @@ const READINESS_DEPS: ReadinessDependencies = {
   sleep: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
 };
 
+const INTERNAL_DIAGNOSTIC = 'RET001D_INTERNAL_FAILURE';
+const MAX_DIAGNOSTIC_CODE_LENGTH = 192;
+const STATIC_DIAGNOSTIC_CODES = new Set([
+  'RET001D_CASE_STAGE_DIAGNOSTIC_INVALID',
+  'RET001D_CLEANUP_OR_CASE_COUNT_INVALID',
+  'RET001D_COMPOSITION_ROOT_EXITED',
+  'RET001D_COMPOSITION_ROOT_STOP_TIMEOUT',
+  'RET001D_EVIDENCE_FAILED',
+  'RET001D_EVIDENCE_WRITE_FAILED',
+  'RET001D_EVIDENCE_WRITE_TIMEOUT',
+  'RET001D_FALSE_PARITY_MISMATCH',
+  'RET001D_GIT_DIRTY',
+  'RET001D_GIT_STATE_FAILED',
+  'RET001D_HTTP_BODY_ABORTED',
+  'RET001D_HTTP_BODY_READ_FAILED',
+  'RET001D_HTTP_BODY_TOO_LARGE',
+  INTERNAL_DIAGNOSTIC,
+  'RET001D_MANIFEST_FORBIDDEN_VALUE',
+  'RET001D_MCP_CORRELATION_INVALID',
+  'RET001D_MCP_ENVELOPE_INVALID',
+  'RET001D_MCP_INITIALIZE_INVALID',
+  'RET001D_MCP_NETWORK',
+  'RET001D_MCP_RPC_ERROR',
+  'RET001D_MCP_TIMEOUT',
+  'RET001D_MCP_TOOL_RESPONSE_INVALID',
+  'RET001D_NEO4J_CLEANUP_FAILED',
+  'RET001D_NEO4J_CLOSE_FAILED',
+  'RET001D_NEO4J_PREFLIGHT_FAILED',
+  'RET001D_NEO4J_RESIDUAL_INVALID',
+  'RET001D_NEO4J_RESIDUAL_QUERY_FAILED',
+  'RET001D_NEO4J_SEED_FAILED',
+  'RET001D_NEO4J_SEED_READBACK_CARDINALITY',
+  'RET001D_NEO4J_SEED_READBACK_FAILED',
+  'RET001D_NEO4J_SEED_READBACK_INVALID',
+  'RET001D_NEO4J_SEED_READBACK_MISMATCH',
+  'RET001D_NEO4J_SESSION_CLOSE_FAILED',
+  'RET001D_NEO4J_VERSION_FAILED',
+  'RET001D_NEO4J_VERSION_INVALID',
+  'RET001D_READINESS_INVALID',
+  'RET001D_READINESS_NETWORK',
+  'RET001D_READINESS_TIMEOUT__RET001D_READINESS_NETWORK',
+  'RET001D_READINESS_UNKNOWN',
+  'RET001D_REDIS_CLEANUP_FAILED',
+  'RET001D_REDIS_KEY_BOUND',
+  'RET001D_REDIS_OWNERSHIP_FAILED',
+  'RET001D_REDIS_OWNERSHIP_INVALID',
+  'RET001D_REDIS_PREFLIGHT_FAILED',
+  'RET001D_REDIS_SCAN_FAILED',
+  'RET001D_REDIS_VERSION_FAILED',
+  'RET001D_REDIS_VERSION_INVALID',
+  'RET001D_SEEDED_DIAGNOSTIC_BOUND',
+  'RET001D_SEEDED_DIAGNOSTIC_INVALID',
+  'RET001D_SEEDED_RESULT_MISSING',
+  'RET001D_SERVICE_IDENTITY_MISSING',
+  'RET001D_TEMP_CREATE_FAILED',
+  'RET001D_TENANT_ISOLATION_FAILURE',
+  'RET001D_TRACE_BLOCK_COUNT',
+  'RET001D_TRACED_PARITY_MISMATCH',
+]);
+
+function validSeededCaseDiagnostic(match: RegExpMatchArray): boolean {
+  const stage = match[2];
+  const classification = match[3];
+  if (classification === undefined) return true;
+  if (stage !== 'ORDINARY_PRESENTATION') return false;
+  const counts = match.slice(4, 9).map(Number);
+  if (counts.length !== 5 || counts.some((count) => !Number.isSafeInteger(count) || count < 0 || count > 512)) {
+    return false;
+  }
+  const [expectedCount, alternateCount, projectCount, otherCount, totalCount] = counts as [number, number, number, number, number];
+  if (expectedCount + alternateCount + projectCount + otherCount !== totalCount) return false;
+  const expectedClassification = expectedCount > 0
+    ? 'EXPECTED'
+    : alternateCount > 0
+      ? 'ALTERNATE'
+      : projectCount > 0
+        ? 'PROJECT_ONLY'
+        : 'NONE';
+  return classification === expectedClassification;
+}
+
+function validDynamicDiagnostic(code: string): boolean {
+  if (/^RET001D_MCP_HTTP_[1-5][0-9]{2}$/.test(code)) return true;
+  const match = code.match(
+    /^RET001D_CASE_(DETERMINISTIC|RANKED|AUTO|NAMED_TENANT_FORCED_RANKED)_STAGE_(ORDINARY_CALL|ORDINARY_PRESENTATION|ORDINARY_INSPECTION|FALSE_CALL|FALSE_INSPECTION|TRACED_CALL|TRACED_INSPECTION|FALSE_PARITY|TRACED_PARITY|TENANT_ISOLATION)(?:_SEEDED_(EXPECTED|ALTERNATE|PROJECT_ONLY|NONE)_E(0|[1-9][0-9]{0,2})_A(0|[1-9][0-9]{0,2})_P(0|[1-9][0-9]{0,2})_O(0|[1-9][0-9]{0,2})_T(0|[1-9][0-9]{0,2}))?$/,
+  );
+  return match !== null && validSeededCaseDiagnostic(match);
+}
+
 export function safeDiagnosticCode(error: unknown): string {
-  return error instanceof Error && /^RET001D_[A-Z0-9_]+(?:_[0-9]{3})?$/.test(error.message)
-    ? error.message
-    : 'RET001D_INTERNAL_FAILURE';
+  try {
+    if (typeof error !== 'object' || error === null || Array.isArray(error)
+      || isProxy(error) || !isNativeError(error)) return INTERNAL_DIAGNOSTIC;
+    const descriptor = Object.getOwnPropertyDescriptor(error, 'message');
+    if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'string'
+      || descriptor.get !== undefined || descriptor.set !== undefined
+      || descriptor.value.length === 0 || descriptor.value.length > MAX_DIAGNOSTIC_CODE_LENGTH) {
+      return INTERNAL_DIAGNOSTIC;
+    }
+    const code = descriptor.value;
+    return STATIC_DIAGNOSTIC_CODES.has(code) || validDynamicDiagnostic(code) ? code : INTERNAL_DIAGNOSTIC;
+  } catch {
+    return INTERNAL_DIAGNOSTIC;
+  }
 }
 
 export async function runAbortableOperation<T>(
@@ -546,6 +647,29 @@ interface FixtureIdentity {
   readonly decoyContent: string;
 }
 
+interface SeedReadbackFixture {
+  readonly run: string;
+  readonly defaultProject: string;
+  readonly defaultTarget: string;
+  readonly namedProject: string;
+  readonly namedTarget: string;
+}
+
+export interface VerifiedSeedTarget {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectTenant: 'default' | typeof NAMED_TENANT;
+  readonly targetId: string;
+  readonly targetName: string;
+  readonly targetTenant: 'default' | typeof NAMED_TENANT;
+}
+
+export interface VerifiedSeedReadback {
+  readonly run: string;
+  readonly default: VerifiedSeedTarget;
+  readonly named: VerifiedSeedTarget;
+}
+
 export function tenantIsolationForbiddenValues(
   scope: 'default' | 'named-tenant',
   fixture: Pick<FixtureIdentity, 'run' | 'defaultContent' | 'namedContent' | 'decoyContent'>,
@@ -610,6 +734,156 @@ async function seedFixtures(driver: Driver, fixture: FixtureIdentity, timeoutMs:
         namedProject: fixture.namedProject, namedTarget: fixture.namedTarget, namedScope: `project:${fixture.namedProject}`,
         defaultContent: fixture.defaultContent, namedContent: fixture.namedContent, decoyContent: fixture.decoyContent,
       }, timeoutMs, 'RET001D_NEO4J_SEED_FAILED');
+  } finally {
+    await session.close().catch(() => { throw new Error('RET001D_NEO4J_SESSION_CLOSE_FAILED'); });
+  }
+}
+
+interface SeedReadbackRecord { get(key: string): unknown }
+
+function seedReadbackInvalid(): never {
+  throw new Error('RET001D_NEO4J_SEED_READBACK_INVALID');
+}
+
+function seedReadbackMethod(record: unknown): (key: string) => unknown {
+  try {
+    if (typeof record !== 'object' || record === null || Array.isArray(record) || isProxy(record)) {
+      return seedReadbackInvalid();
+    }
+    const own = Object.getOwnPropertyDescriptor(record, 'get');
+    const prototype = own ? undefined : Object.getPrototypeOf(record);
+    if (!own && (typeof prototype !== 'object' || prototype === null || isProxy(prototype))) {
+      return seedReadbackInvalid();
+    }
+    const descriptor = own ?? Object.getOwnPropertyDescriptor(prototype!, 'get');
+    if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'function'
+      || descriptor.get !== undefined || descriptor.set !== undefined) return seedReadbackInvalid();
+    return descriptor.value as (key: string) => unknown;
+  } catch {
+    return seedReadbackInvalid();
+  }
+}
+
+function seedReadbackString(
+  record: SeedReadbackRecord,
+  method: (key: string) => unknown,
+  key: string,
+): string {
+  let value: unknown;
+  try { value = method.call(record, key); }
+  catch { return seedReadbackInvalid(); }
+  if (typeof value !== 'string' || value.length === 0 || value.length > 512) {
+    throw new Error('RET001D_NEO4J_SEED_READBACK_MISMATCH');
+  }
+  return value;
+}
+
+function seedReadbackFixture(fixture: SeedReadbackFixture): SeedReadbackFixture {
+  const keys = ['run', 'defaultProject', 'defaultTarget', 'namedProject', 'namedTarget'] as const;
+  try {
+    if (typeof fixture !== 'object' || fixture === null || Array.isArray(fixture) || isProxy(fixture)) {
+      return seedReadbackInvalid();
+    }
+    const values = Object.fromEntries(keys.map((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(fixture, key);
+      if (!descriptor || !('value' in descriptor) || typeof descriptor.value !== 'string'
+        || descriptor.value.length === 0 || descriptor.value.length > 512) return seedReadbackInvalid();
+      return [key, descriptor.value];
+    })) as unknown as SeedReadbackFixture;
+    return Object.freeze(values);
+  } catch {
+    return seedReadbackInvalid();
+  }
+}
+
+export function parseSeedReadback(
+  records: readonly SeedReadbackRecord[],
+  fixture: SeedReadbackFixture,
+): VerifiedSeedReadback {
+  let safeRecords: readonly SeedReadbackRecord[];
+  try {
+    if (!Array.isArray(records) || isProxy(records)) return seedReadbackInvalid();
+    if (records.length !== 2) {
+      throw new Error('RET001D_NEO4J_SEED_READBACK_CARDINALITY');
+    }
+    safeRecords = [0, 1].map((index) => {
+      const descriptor = Object.getOwnPropertyDescriptor(records, String(index));
+      if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) return seedReadbackInvalid();
+      return descriptor.value as SeedReadbackRecord;
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'RET001D_NEO4J_SEED_READBACK_CARDINALITY') throw error;
+    return seedReadbackInvalid();
+  }
+  const truthFixture = seedReadbackFixture(fixture);
+  if (safeRecords.length !== 2) {
+    throw new Error('RET001D_NEO4J_SEED_READBACK_CARDINALITY');
+  }
+  const parsed = safeRecords.map((record) => {
+    const method = seedReadbackMethod(record);
+    return Object.freeze({
+      projectId: seedReadbackString(record, method, 'projectId'),
+      projectName: seedReadbackString(record, method, 'projectName'),
+      projectTenant: seedReadbackString(record, method, 'projectTenant'),
+      targetId: seedReadbackString(record, method, 'targetId'),
+      targetName: seedReadbackString(record, method, 'targetName'),
+      targetTenant: seedReadbackString(record, method, 'targetTenant'),
+    });
+  });
+  const expected = [
+    Object.freeze({
+      projectId: `ret001d-dp-${truthFixture.run}`,
+      projectName: truthFixture.defaultProject,
+      projectTenant: 'default',
+      targetId: `ret001d-dt-${truthFixture.run}`,
+      targetName: truthFixture.defaultTarget,
+      targetTenant: 'default',
+    }),
+    Object.freeze({
+      projectId: `ret001d-np-${truthFixture.run}`,
+      projectName: truthFixture.namedProject,
+      projectTenant: NAMED_TENANT,
+      targetId: `ret001d-nt-${truthFixture.run}`,
+      targetName: truthFixture.namedTarget,
+      targetTenant: NAMED_TENANT,
+    }),
+  ] as const;
+  for (let index = 0; index < expected.length; index++) {
+    const actual = parsed[index];
+    const truth = expected[index];
+    if (!actual || Object.keys(truth).some((key) => actual[key as keyof typeof actual] !== truth[key as keyof typeof truth])) {
+      throw new Error('RET001D_NEO4J_SEED_READBACK_MISMATCH');
+    }
+  }
+  return Object.freeze({
+    run: truthFixture.run,
+    default: parsed[0] as VerifiedSeedTarget,
+    named: parsed[1] as VerifiedSeedTarget,
+  });
+}
+
+async function readBackSeedFixtures(
+  driver: Driver,
+  fixture: SeedReadbackFixture,
+  timeoutMs: number,
+): Promise<VerifiedSeedReadback> {
+  const session = driver.session();
+  try {
+    const result = await neo4jRun(session,
+      `MATCH (project:Entity)-[contains:CONTAINS]->(target:Entity)
+       WHERE project.ret001d_run = $run
+         AND target.ret001d_run = $run
+         AND contains.ret001d_run = $run
+       RETURN project.id AS projectId,
+              project.name AS projectName,
+              project.tenant_id AS projectTenant,
+              target.id AS targetId,
+              target.name AS targetName,
+              target.tenant_id AS targetTenant
+       ORDER BY target.id
+       LIMIT 3`,
+      { run: fixture.run }, timeoutMs, 'RET001D_NEO4J_SEED_READBACK_FAILED');
+    return parseSeedReadback(result.records, fixture);
   } finally {
     await session.close().catch(() => { throw new Error('RET001D_NEO4J_SESSION_CLOSE_FAILED'); });
   }
@@ -713,24 +987,199 @@ interface LiveCase {
   readonly requiredPresentationId: string;
 }
 
+export type LiveCaseStage =
+  | 'ordinary-call'
+  | 'ordinary-presentation'
+  | 'ordinary-inspection'
+  | 'false-call'
+  | 'false-inspection'
+  | 'traced-call'
+  | 'traced-inspection'
+  | 'false-parity'
+  | 'traced-parity'
+  | 'tenant-isolation';
+
+const LIVE_CASE_DIAGNOSTIC = Object.freeze({
+  deterministic: 'DETERMINISTIC',
+  ranked: 'RANKED',
+  auto: 'AUTO',
+  'named-tenant-forced-ranked': 'NAMED_TENANT_FORCED_RANKED',
+} satisfies Record<LiveCase['id'], string>);
+
+const LIVE_STAGE_DIAGNOSTIC = Object.freeze({
+  'ordinary-call': 'ORDINARY_CALL',
+  'ordinary-presentation': 'ORDINARY_PRESENTATION',
+  'ordinary-inspection': 'ORDINARY_INSPECTION',
+  'false-call': 'FALSE_CALL',
+  'false-inspection': 'FALSE_INSPECTION',
+  'traced-call': 'TRACED_CALL',
+  'traced-inspection': 'TRACED_INSPECTION',
+  'false-parity': 'FALSE_PARITY',
+  'traced-parity': 'TRACED_PARITY',
+  'tenant-isolation': 'TENANT_ISOLATION',
+} satisfies Record<LiveCaseStage, string>);
+
+export function caseStageDiagnosticCode(
+  id: LiveCase['id'],
+  stage: LiveCaseStage,
+  cause?: unknown,
+): string {
+  void cause;
+  if (typeof id !== 'string' || typeof stage !== 'string'
+    || !Object.prototype.hasOwnProperty.call(LIVE_CASE_DIAGNOSTIC, id)
+    || !Object.prototype.hasOwnProperty.call(LIVE_STAGE_DIAGNOSTIC, stage)) {
+    throw new Error('RET001D_CASE_STAGE_DIAGNOSTIC_INVALID');
+  }
+  return `RET001D_CASE_${LIVE_CASE_DIAGNOSTIC[id]}_STAGE_${LIVE_STAGE_DIAGNOSTIC[stage]}`;
+}
+
+async function atCaseStage<T>(
+  id: LiveCase['id'],
+  stage: LiveCaseStage,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw new Error(caseStageDiagnosticCode(id, stage, error)); }
+}
+
+export interface SeededPresentationClassification {
+  readonly classification: 'expected' | 'alternate' | 'project-only' | 'none';
+  readonly expectedCount: number;
+  readonly alternateCount: number;
+  readonly projectCount: number;
+  readonly otherCount: number;
+  readonly totalCount: number;
+}
+
+function presentationIdentityTruth(
+  id: LiveCase['id'],
+  readback: VerifiedSeedReadback,
+): { expected: string; alternate: string; projects: readonly string[] } {
+  const target = id === 'named-tenant-forced-ranked' ? readback.named : readback.default;
+  const rankedPresentation = target.targetId;
+  const deterministicPresentation = `target-${target.targetName}`;
+  const expected = id === 'deterministic' || id === 'auto' ? deterministicPresentation : rankedPresentation;
+  return Object.freeze({
+    expected,
+    alternate: expected === rankedPresentation ? deterministicPresentation : rankedPresentation,
+    projects: Object.freeze([target.projectId, `target-${target.projectName}`]),
+  });
+}
+
+export function classifySeededPresentation(
+  id: LiveCase['id'],
+  readback: VerifiedSeedReadback,
+  resultIds: readonly string[],
+): SeededPresentationClassification {
+  if (resultIds.length > 512 || resultIds.some((value) => typeof value !== 'string' || value.length === 0 || value.length > 512)) {
+    throw new Error('RET001D_SEEDED_DIAGNOSTIC_BOUND');
+  }
+  const truth = presentationIdentityTruth(id, readback);
+  const expectedCount = resultIds.filter((value) => value === truth.expected).length;
+  const alternateCount = resultIds.filter((value) => value === truth.alternate).length;
+  const projectCount = resultIds.filter((value) => truth.projects.includes(value)).length;
+  const otherCount = resultIds.length - expectedCount - alternateCount - projectCount;
+  const classification = expectedCount > 0
+    ? 'expected'
+    : alternateCount > 0
+      ? 'alternate'
+      : projectCount > 0
+        ? 'project-only'
+        : 'none';
+  return Object.freeze({
+    classification, expectedCount, alternateCount, projectCount, otherCount, totalCount: resultIds.length,
+  });
+}
+
+function diagnosticResultIds(result: unknown): readonly string[] {
+  if (typeof result !== 'object' || result === null || Array.isArray(result)) {
+    throw new Error('RET001D_SEEDED_DIAGNOSTIC_BOUND');
+  }
+  const content = (result as JsonRecord).content;
+  if (!Array.isArray(content) || content.length !== 1) throw new Error('RET001D_SEEDED_DIAGNOSTIC_BOUND');
+  const part = content[0];
+  if (typeof part !== 'object' || part === null || Array.isArray(part)
+    || typeof (part as JsonRecord).text !== 'string') throw new Error('RET001D_SEEDED_DIAGNOSTIC_BOUND');
+  const resultIds = [...((part as JsonRecord).text as string).matchAll(/^<!-- ([^<>\r\n]+?)(?: — .*)? -->$/gm)]
+    .map((match) => match[1]!.trim());
+  if (resultIds.length > 512 || resultIds.some((value) => value.length === 0 || value.length > 512)) {
+    throw new Error('RET001D_SEEDED_DIAGNOSTIC_BOUND');
+  }
+  return Object.freeze(resultIds);
+}
+
+export function seededMissingDiagnosticCode(
+  id: LiveCase['id'],
+  observed: SeededPresentationClassification,
+): string {
+  const prefix = caseStageDiagnosticCode(id, 'ordinary-presentation');
+  const expectedKeys = [
+    'classification', 'expectedCount', 'alternateCount', 'projectCount', 'otherCount', 'totalCount',
+  ] as const;
+  let values: Record<(typeof expectedKeys)[number], unknown>;
+  try {
+    if (typeof observed !== 'object' || observed === null || Array.isArray(observed) || isProxy(observed)) {
+      throw new Error('invalid');
+    }
+    const prototype = Object.getPrototypeOf(observed);
+    if (prototype !== Object.prototype && prototype !== null) throw new Error('invalid');
+    const keys = Reflect.ownKeys(observed);
+    if (keys.length !== expectedKeys.length
+      || keys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key as typeof expectedKeys[number]))) {
+      throw new Error('invalid');
+    }
+    values = Object.fromEntries(expectedKeys.map((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(observed, key);
+      if (!descriptor || !('value' in descriptor) || !descriptor.enumerable
+        || descriptor.get !== undefined || descriptor.set !== undefined) throw new Error('invalid');
+      return [key, descriptor.value];
+    })) as Record<(typeof expectedKeys)[number], unknown>;
+  } catch {
+    throw new Error('RET001D_SEEDED_DIAGNOSTIC_INVALID');
+  }
+  const classifications = ['expected', 'alternate', 'project-only', 'none'] as const;
+  if (!classifications.includes(values.classification as typeof classifications[number])) {
+    throw new Error('RET001D_SEEDED_DIAGNOSTIC_INVALID');
+  }
+  const counts = expectedKeys.slice(1).map((key) => values[key]);
+  if (counts.some((count) => !Number.isSafeInteger(count) || Number(count) < 0 || Number(count) > 512)) {
+    throw new Error('RET001D_SEEDED_DIAGNOSTIC_INVALID');
+  }
+  const expectedCount = Number(values.expectedCount);
+  const alternateCount = Number(values.alternateCount);
+  const projectCount = Number(values.projectCount);
+  const otherCount = Number(values.otherCount);
+  const totalCount = Number(values.totalCount);
+  if (expectedCount + alternateCount + projectCount + otherCount !== totalCount) {
+    throw new Error('RET001D_SEEDED_DIAGNOSTIC_INVALID');
+  }
+  const consistentClassification = expectedCount > 0
+    ? 'expected'
+    : alternateCount > 0
+      ? 'alternate'
+      : projectCount > 0
+        ? 'project-only'
+        : 'none';
+  if (values.classification !== consistentClassification) {
+    throw new Error('RET001D_SEEDED_DIAGNOSTIC_INVALID');
+  }
+  const classification = consistentClassification.replace('-', '_').toUpperCase();
+  return `${prefix}_SEEDED_${classification}`
+    + `_E${expectedCount}_A${alternateCount}_P${projectCount}`
+    + `_O${otherCount}_T${totalCount}`;
+}
+
 export function requiredPresentationIdForCase(
   id: LiveCase['id'],
-  fixture: Pick<FixtureIdentity, 'run' | 'defaultTarget'>,
+  readback: VerifiedSeedReadback,
 ): string {
-  switch (id) {
-    case 'deterministic':
-    case 'auto':
-      return `target-${fixture.defaultTarget}`;
-    case 'ranked':
-      return `ret001d-dt-${fixture.run}`;
-    case 'named-tenant-forced-ranked':
-      return `ret001d-nt-${fixture.run}`;
-  }
+  return presentationIdentityTruth(id, readback).expected;
 }
 
 async function executeCase(
   transport: TraceMcpTransport,
   liveCase: LiveCase,
+  readback: VerifiedSeedReadback,
   forbidden: readonly string[],
   isolationForbidden: readonly string[],
 ): Promise<JsonRecord> {
@@ -743,32 +1192,55 @@ async function executeCase(
     max_tokens: 4_000,
     project_name: liveCase.projectName,
   };
-  const ordinaryResult = await transport.call('berry_context', baseArgs);
-  const expectedResultIds = observeOrderedMarkdownResultIds(ordinaryResult, {
-    expectedTask: liveCase.task,
-    expectedStrategy: liveCase.expectedStrategy,
-    requiredResultIds: [liveCase.requiredPresentationId],
-  });
+  const ordinaryResult = await atCaseStage(liveCase.id, 'ordinary-call',
+    () => transport.call('berry_context', baseArgs));
+  let expectedResultIds: readonly string[];
+  try {
+    expectedResultIds = observeOrderedMarkdownResultIds(ordinaryResult, {
+      expectedTask: liveCase.task,
+      expectedStrategy: liveCase.expectedStrategy,
+      requiredResultIds: [liveCase.requiredPresentationId],
+    });
+  } catch (error) {
+    if (safeDiagnosticCode(error) === 'RET001D_SEEDED_RESULT_MISSING') {
+      const observed = classifySeededPresentation(liveCase.id, readback, diagnosticResultIds(ordinaryResult));
+      throw new Error(seededMissingDiagnosticCode(liveCase.id, observed));
+    }
+    throw new Error(caseStageDiagnosticCode(liveCase.id, 'ordinary-presentation', error));
+  }
   const responseExpectation = {
     expectedTask: liveCase.task,
     expectedStrategy: liveCase.expectedStrategy,
     expectedResultIds,
   } as const;
-  const omitted = inspectTraceToolResult(ordinaryResult, {
+  const omitted = await atCaseStage(liveCase.id, 'ordinary-inspection', () => inspectTraceToolResult(ordinaryResult, {
     mode: 'omitted', ...responseExpectation,
-  });
-  const explicitFalse = inspectTraceToolResult(await transport.call('berry_context', { ...baseArgs, include_trace: false }), {
+  }));
+  const explicitFalseResult = await atCaseStage(liveCase.id, 'false-call',
+    () => transport.call('berry_context', { ...baseArgs, include_trace: false }));
+  const explicitFalse = await atCaseStage(liveCase.id, 'false-inspection', () => inspectTraceToolResult(explicitFalseResult, {
     mode: 'false', ...responseExpectation,
+  }));
+  const tracedResult = await atCaseStage(liveCase.id, 'traced-call',
+    () => transport.call('berry_context', { ...baseArgs, include_trace: true }));
+  const traced = await atCaseStage(liveCase.id, 'traced-inspection', () => {
+    const inspected = inspectTraceToolResult(tracedResult, {
+      mode: 'true', expectedAlgorithm: liveCase.expectedAlgorithm, forbiddenValues: forbidden, ...responseExpectation,
+    });
+    if (!('trace' in inspected)) throw new Error('RET001D_TRACE_BLOCK_COUNT');
+    return inspected;
   });
-  const traced = inspectTraceToolResult(await transport.call('berry_context', { ...baseArgs, include_trace: true }), {
-    mode: 'true', expectedAlgorithm: liveCase.expectedAlgorithm, forbiddenValues: forbidden, ...responseExpectation,
+  await atCaseStage(liveCase.id, 'false-parity', () => {
+    if (omitted.markdown !== explicitFalse.markdown) throw new Error('RET001D_FALSE_PARITY_MISMATCH');
   });
-  if (!('trace' in traced)) throw new Error('RET001D_TRACE_BLOCK_COUNT');
-  if (omitted.markdown !== explicitFalse.markdown) throw new Error('RET001D_FALSE_PARITY_MISMATCH');
-  if (omitted.markdown !== traced.markdown) throw new Error('RET001D_TRACED_PARITY_MISMATCH');
-  if (isolationForbidden.some((value) => traced.markdown.includes(value))) {
-    throw new Error('RET001D_TENANT_ISOLATION_FAILURE');
-  }
+  await atCaseStage(liveCase.id, 'traced-parity', () => {
+    if (omitted.markdown !== traced.markdown) throw new Error('RET001D_TRACED_PARITY_MISMATCH');
+  });
+  await atCaseStage(liveCase.id, 'tenant-isolation', () => {
+    if (isolationForbidden.some((value) => traced.markdown.includes(value))) {
+      throw new Error('RET001D_TENANT_ISOLATION_FAILURE');
+    }
+  });
   const summary: TraceInspectionSummary = traced.trace;
   return {
     id: liveCase.id,
@@ -893,6 +1365,7 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     try { await redis.set(ownedRedisKeys[0]!, 'owned', 'EX', 900); }
     catch { throw new Error('RET001D_REDIS_OWNERSHIP_FAILED'); }
     await seedFixtures(driver, fixture, config.requestTimeoutMs);
+    const seedReadback = await readBackSeedFixtures(driver, fixture, config.requestTimeoutMs);
     active = new CompositionRoot(config, 'single-default', exportPath);
     readinessEvidence.push({ mode: 'single-default', ...await active.waitUntilReady() });
     const defaultTransport = new TraceMcpTransport(config, config.defaultToken);
@@ -901,18 +1374,18 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
       id: 'deterministic', requestedStrategy: 'deterministic', expectedAlgorithm: 'deterministic-v2',
       authScope: 'default', task: queries.deterministic, projectName: fixture.defaultProject,
       expectedStrategy: 'deterministic',
-      requiredPresentationId: requiredPresentationIdForCase('deterministic', fixture),
-    }, [...forbidden, ...defaultIsolation], defaultIsolation));
+      requiredPresentationId: requiredPresentationIdForCase('deterministic', seedReadback),
+    }, seedReadback, [...forbidden, ...defaultIsolation], defaultIsolation));
     cases.push(await executeCase(defaultTransport, {
       id: 'ranked', requestedStrategy: 'ranked', expectedAlgorithm: 'ranked-v1',
       authScope: 'default', task: queries.ranked, projectName: fixture.defaultProject,
-      expectedStrategy: 'ranked', requiredPresentationId: requiredPresentationIdForCase('ranked', fixture),
-    }, [...forbidden, ...defaultIsolation], defaultIsolation));
+      expectedStrategy: 'ranked', requiredPresentationId: requiredPresentationIdForCase('ranked', seedReadback),
+    }, seedReadback, [...forbidden, ...defaultIsolation], defaultIsolation));
     cases.push(await executeCase(defaultTransport, {
       id: 'auto', requestedStrategy: 'auto', expectedAlgorithm: 'deterministic-v2',
       authScope: 'default', task: queries.auto, projectName: fixture.defaultProject,
-      expectedStrategy: 'deterministic', requiredPresentationId: requiredPresentationIdForCase('auto', fixture),
-    }, [...forbidden, ...defaultIsolation], defaultIsolation));
+      expectedStrategy: 'deterministic', requiredPresentationId: requiredPresentationIdForCase('auto', seedReadback),
+    }, seedReadback, [...forbidden, ...defaultIsolation], defaultIsolation));
     await active.stop();
     active = undefined;
 
@@ -924,8 +1397,8 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
       id: 'named-tenant-forced-ranked', requestedStrategy: 'deterministic', expectedAlgorithm: 'ranked-v1',
       authScope: 'named-tenant', task: queries.named, projectName: fixture.namedProject,
       expectedStrategy: 'ranked',
-      requiredPresentationId: requiredPresentationIdForCase('named-tenant-forced-ranked', fixture),
-    }, [...forbidden, ...namedIsolation], namedIsolation));
+      requiredPresentationId: requiredPresentationIdForCase('named-tenant-forced-ranked', seedReadback),
+    }, seedReadback, [...forbidden, ...namedIsolation], namedIsolation));
     await active.stop();
     active = undefined;
     childProcessesStopped = true;
