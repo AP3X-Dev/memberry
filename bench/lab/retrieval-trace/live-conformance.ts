@@ -355,9 +355,13 @@ type RankedTracedInspectionByCause = {
     : never;
 };
 type RankedTracedInspectionDiagnostic = RankedTracedInspectionByCause[TraceInspectionFixedCode]
-  | 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN';
+  | 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN'
+  | 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED';
 
 const RANKED_TRACED_INSPECTION_UNKNOWN = 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN';
+const RANKED_TRACED_INSPECTION_TRACE_VALIDATION_FAILED =
+  'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED';
+const TRACE_VALIDATION_PUBLIC_MESSAGE = 'Retrieval trace validation failed';
 const RANKED_TRACED_INSPECTION_BY_CAUSE = Object.freeze({
   RET001D_MCP_RESULT_INVALID: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MCP_RESULT_INVALID',
   RET001D_MCP_TOOL_FAILURE: 'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_MCP_TOOL_FAILURE',
@@ -387,6 +391,7 @@ const RANKED_TRACED_INSPECTION_BY_CAUSE = Object.freeze({
 } as const satisfies RankedTracedInspectionByCause);
 const RANKED_TRACED_INSPECTION_DIAGNOSTICS = new Set<string>([
   RANKED_TRACED_INSPECTION_UNKNOWN,
+  RANKED_TRACED_INSPECTION_TRACE_VALIDATION_FAILED,
   ...Object.values(RANKED_TRACED_INSPECTION_BY_CAUSE),
 ]);
 
@@ -1205,6 +1210,57 @@ function rankedTracedInspectionDiagnosticCode(cause: unknown): RankedTracedInspe
   return RANKED_TRACED_INSPECTION_BY_CAUSE[innerCode as TraceInspectionFixedCode];
 }
 
+function exactPlainDataRecord(value: unknown, expectedKeys: readonly string[]): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || isProxy(value)) return undefined;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== expectedKeys.length || keys.some((key) => typeof key !== 'string')
+    || expectedKeys.some((key) => !keys.includes(key))) return undefined;
+  for (const key of expectedKeys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !('value' in descriptor) || descriptor.get !== undefined
+      || descriptor.set !== undefined || !descriptor.enumerable) return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function exactSingleDenseItem(value: unknown): unknown | undefined {
+  if (!Array.isArray(value) || isProxy(value)) return undefined;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 2 || !keys.includes('0') || !keys.includes('length')) return undefined;
+  const item = Object.getOwnPropertyDescriptor(value, '0');
+  const length = Object.getOwnPropertyDescriptor(value, 'length');
+  if (!item || !('value' in item) || item.get !== undefined || item.set !== undefined || !item.enumerable
+    || !length || !('value' in length) || length.value !== 1 || length.enumerable) return undefined;
+  return item.value;
+}
+
+export function rankedTraceMcpErrorDiagnostic(result: unknown): RankedTracedInspectionDiagnostic | undefined {
+  try {
+    const nonErrorRoot = exactPlainDataRecord(result, ['content']);
+    if (nonErrorRoot) return undefined;
+    const root = exactPlainDataRecord(result, ['content', 'isError']);
+    if (!root) return RANKED_TRACED_INSPECTION_UNKNOWN;
+    const isError = Object.getOwnPropertyDescriptor(root, 'isError')!.value;
+    if (isError === false) return undefined;
+    if (isError !== true) return RANKED_TRACED_INSPECTION_UNKNOWN;
+    const content = Object.getOwnPropertyDescriptor(root, 'content')!.value;
+    const rawItem = exactSingleDenseItem(content);
+    if (rawItem === undefined) return RANKED_TRACED_INSPECTION_UNKNOWN;
+    const item = exactPlainDataRecord(rawItem, ['type', 'text']);
+    if (!item) return RANKED_TRACED_INSPECTION_UNKNOWN;
+    const type = Object.getOwnPropertyDescriptor(item, 'type')!.value;
+    const text = Object.getOwnPropertyDescriptor(item, 'text')!.value;
+    if (type !== 'text' || text !== TRACE_VALIDATION_PUBLIC_MESSAGE) {
+      return RANKED_TRACED_INSPECTION_UNKNOWN;
+    }
+    return RANKED_TRACED_INSPECTION_TRACE_VALIDATION_FAILED;
+  } catch {
+    return RANKED_TRACED_INSPECTION_UNKNOWN;
+  }
+}
+
 export function caseStageDiagnosticCode(
   id: LiveCase['id'],
   stage: LiveCaseStage,
@@ -1412,6 +1468,10 @@ async function executeCase(
   }));
   const tracedResult = await atCaseStage(liveCase.id, 'traced-call',
     () => transport.call('berry_context', { ...baseArgs, include_trace: true }));
+  if (liveCase.id === 'ranked') {
+    const mcpErrorDiagnostic = rankedTraceMcpErrorDiagnostic(tracedResult);
+    if (mcpErrorDiagnostic !== undefined) throw new Error(mcpErrorDiagnostic);
+  }
   const traced = await atCaseStage(liveCase.id, 'traced-inspection', () => {
     const inspected = inspectTraceToolResult(tracedResult, {
       mode: 'true', expectedAlgorithm: liveCase.expectedAlgorithm, forbiddenValues: forbidden, ...responseExpectation,

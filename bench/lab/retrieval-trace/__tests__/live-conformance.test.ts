@@ -13,6 +13,7 @@ import {
   parseSeedReadback,
   parseResidualCounts,
   rankedFixtureMarkers,
+  rankedTraceMcpErrorDiagnostic,
   readBoundedResponseText,
   requiredPresentationIdForCase,
   resolveTraceConformanceConfig,
@@ -157,6 +158,10 @@ function presentationResult(
     `<!-- ${id} -->`,
     'seeded presentation',
   ].join('\n') }] };
+}
+
+function traceValidationErrorResult(text: unknown = 'Retrieval trace validation failed'): unknown {
+  return { isError: true, content: [{ type: 'text', text }] };
 }
 
 describe('RET-001D live composition harness', () => {
@@ -476,6 +481,99 @@ describe('RET-001D live composition harness', () => {
       .toEqual(rankedTracedInspectionDiagnostics.map(([innerCode]) => innerCode));
   });
 
+  it('classifies only the exact public retrieval-trace validation error envelope', () => {
+    const code = rankedTraceMcpErrorDiagnostic(traceValidationErrorResult());
+    expect(code).toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED');
+    expect(safeDiagnosticCode(new Error(code))).toBe(code);
+  });
+
+  it.each([
+    ['extra root key', () => ({ ...traceValidationErrorResult() as object, extra: true })],
+    ['missing content', () => ({ isError: true })],
+    ['root array', () => [traceValidationErrorResult()]],
+    ['root proxy', () => new Proxy(traceValidationErrorResult() as object, {
+      ownKeys() { throw new Error('RET001D_SECRET_FIXTURE'); },
+      getOwnPropertyDescriptor() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+    ['revoked root proxy', () => {
+      const pair = Proxy.revocable(traceValidationErrorResult() as object, {});
+      pair.revoke();
+      return pair.proxy;
+    }],
+    ['isError accessor', () => Object.defineProperty({ content: [] }, 'isError', {
+      enumerable: true, get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+    ['isError non-boolean', () => ({ isError: 'true', content: [{
+      type: 'text', text: 'Retrieval trace validation failed',
+    }] })],
+    ['content accessor', () => Object.defineProperty({ isError: true }, 'content', {
+      enumerable: true, get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })],
+    ['content object', () => ({ isError: true, content: { 0: { type: 'text', text: 'secret' }, length: 1 } })],
+    ['content proxy', () => ({ isError: true, content: new Proxy([{
+      type: 'text', text: 'Retrieval trace validation failed',
+    }], { getOwnPropertyDescriptor() { throw new Error('RET001D_SECRET_FIXTURE'); } }) })],
+    ['empty content', () => ({ isError: true, content: [] })],
+    ['two content items', () => ({ isError: true, content: [
+      { type: 'text', text: 'Retrieval trace validation failed' },
+      { type: 'text', text: 'RET001D_SECRET_FIXTURE' },
+    ] })],
+    ['sparse content', () => ({ isError: true, content: new Array(1) })],
+    ['content extra key', () => {
+      const content = [{ type: 'text', text: 'Retrieval trace validation failed' }];
+      Object.defineProperty(content, 'extra', { enumerable: true, value: 'RET001D_SECRET_FIXTURE' });
+      return { isError: true, content };
+    }],
+    ['item array', () => ({ isError: true, content: [['text', 'Retrieval trace validation failed']] })],
+    ['item proxy', () => ({ isError: true, content: [new Proxy({
+      type: 'text', text: 'Retrieval trace validation failed',
+    }, { ownKeys() { throw new Error('RET001D_SECRET_FIXTURE'); } })] })],
+    ['item extra key', () => ({ isError: true, content: [{
+      type: 'text', text: 'Retrieval trace validation failed', extra: 'RET001D_SECRET_FIXTURE',
+    }] })],
+    ['missing type', () => ({ isError: true, content: [{ text: 'Retrieval trace validation failed' }] })],
+    ['missing text', () => ({ isError: true, content: [{ type: 'text' }] })],
+    ['type accessor', () => ({ isError: true, content: [Object.defineProperty({
+      text: 'Retrieval trace validation failed',
+    }, 'type', { enumerable: true, get() { throw new Error('RET001D_SECRET_FIXTURE'); } })] })],
+    ['text accessor', () => ({ isError: true, content: [Object.defineProperty({ type: 'text' }, 'text', {
+      enumerable: true, get() { throw new Error('RET001D_SECRET_FIXTURE'); },
+    })] })],
+    ['wrong type', () => ({ isError: true, content: [{ type: 'image', text: 'Retrieval trace validation failed' }] })],
+    ['non-string text', () => traceValidationErrorResult({ secret: 'RET001D_SECRET_FIXTURE' })],
+    ['text prefix', () => traceValidationErrorResult('prefix Retrieval trace validation failed')],
+    ['text suffix', () => traceValidationErrorResult('Retrieval trace validation failed suffix')],
+    ['arbitrary text', () => traceValidationErrorResult('RET001D_SECRET_FIXTURE')],
+    ['oversize text', () => traceValidationErrorResult('x'.repeat(513))],
+  ] as const)('maps malformed or hostile MCP error envelope %s to exact UNKNOWN', (_label, createResult) => {
+    let code: string | undefined;
+    expect(() => { code = rankedTraceMcpErrorDiagnostic(createResult()); }).not.toThrow();
+    expect(code).toBe('RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN');
+    expect(code).not.toContain('SECRET_FIXTURE');
+  });
+
+  it('does not classify an exact non-error result envelope as an MCP error', () => {
+    expect(rankedTraceMcpErrorDiagnostic({
+      isError: false,
+      content: [{ type: 'text', text: 'ordinary result remains inspected by trace gates' }],
+    })).toBeUndefined();
+    expect(rankedTraceMcpErrorDiagnostic({
+      content: [{ type: 'text', text: 'ordinary result remains inspected by trace gates' }],
+    })).toBeUndefined();
+  });
+
+  it('ties the exact classifier string to the production trace serializer source', async () => {
+    const tools = await readFile(
+      fileURLToPath(new URL('../../../../packages/retrieval/src/tools.ts', import.meta.url)), 'utf8',
+    );
+    const serializer = tools.match(
+      /function serializeApprovedRetrievalTrace\(trace: unknown\): string \{[\s\S]+?\n\}/,
+    )?.[0];
+    expect(serializer).toBeDefined();
+    expect(serializer).toContain("throw new Error('Retrieval trace validation failed')");
+    expect(serializer?.match(/Retrieval trace validation failed/g)).toHaveLength(1);
+  });
+
   it.each([
     ['unknown Error', (): unknown => new Error('RET001D_UNKNOWN_TRACE_REASON')],
     ['non-Error string', (): unknown => 'RET001D_TRACE_JSON_INVALID'],
@@ -515,6 +613,7 @@ describe('RET-001D live composition harness', () => {
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION',
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_RET001D_TRACE_JSON_INVALID',
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_JSON_INVALID_SECRET',
+    'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_TRACE_VALIDATION_FAILED_SECRET',
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_',
     'RET001D_CASE_RANKED_STAGE_TRACED_INSPECTION_UNKNOWN_SECRET',
   ])('rejects malformed or value-bearing ranked traced-inspection diagnostic %s', (code) => {
