@@ -6,7 +6,14 @@ import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { DEFAULT_TENANT } from '@memberry/core';
 import type { UnifiedContext, RetrievalStrategy } from './types.js';
+import { types as nodeUtilTypes } from 'node:util';
 import type { RetrievalTraceV1 } from './trace.js';
+import type { QueryPlanV1 } from './query-plan.js';
+import type {
+  ScopedEntityResolutionResultV1,
+  ScopedEntityTrustedAuthorityV1,
+} from './scoped-entity-resolver.js';
+import { buildRuntimeQueryPlannerReceiptV1, RuntimeQueryPlannerError } from './runtime-query-planner.js';
 import {
   assertRetrievalTraceConformant,
   canonicalTraceJson,
@@ -27,6 +34,7 @@ export interface IUnifiedAssembler {
     project_name?: string;
     as_of?: string;
     tenantId?: string;
+    resolvedEntityIds?: unknown;
   }): Promise<UnifiedContext>;
   assembleTraced(task: string, options?: {
     strategy?: RetrievalStrategy;
@@ -39,6 +47,7 @@ export interface IUnifiedAssembler {
     project_name?: string;
     as_of?: string;
     tenantId?: string;
+    resolvedEntityIds?: unknown;
   }): Promise<{ context: UnifiedContext; trace: RetrievalTraceV1 }>;
   renderMarkdown(ctx: UnifiedContext): string;
   ask(question: string, options?: {
@@ -48,6 +57,7 @@ export interface IUnifiedAssembler {
     project_name?: string;
     as_of?: string;
     tenantId?: string;
+    resolvedEntityIds?: unknown;
   }): Promise<{
     answer: string;
     cited_ids: string[];
@@ -81,7 +91,20 @@ export interface RetrievalServiceContainer {
   feedbackTracker: IFeedbackTracker | null;
   /** Tenant this container's tools are bound to. Threaded into every assemble/ask. */
   tenantId: string;
+  /** Explicit request authentication eligibility. Never inferred from tenantId. */
+  authenticated: boolean;
+  /** Process-captured, exact default-off RET-002C2 feature switch. */
+  queryPlannerEnabled: boolean;
+  resolverFactory: RuntimeScopedEntityResolverFactory | null;
 }
+
+export interface RuntimeScopedEntityResolver {
+  resolve(plan: QueryPlanV1): Promise<ScopedEntityResolutionResultV1>;
+}
+
+export type RuntimeScopedEntityResolverFactory = (
+  authority: ScopedEntityTrustedAuthorityV1,
+) => RuntimeScopedEntityResolver;
 
 /** Build a container, defaulting any service not supplied to null. */
 export function createRetrievalContainer(partial: Partial<RetrievalServiceContainer> = {}): RetrievalServiceContainer {
@@ -89,6 +112,9 @@ export function createRetrievalContainer(partial: Partial<RetrievalServiceContai
     assembler: partial.assembler ?? null,
     feedbackTracker: partial.feedbackTracker ?? null,
     tenantId: partial.tenantId ?? DEFAULT_TENANT,
+    authenticated: partial.authenticated ?? false,
+    queryPlannerEnabled: partial.queryPlannerEnabled ?? false,
+    resolverFactory: partial.resolverFactory ?? null,
   };
 }
 
@@ -96,18 +122,22 @@ export function createRetrievalContainer(partial: Partial<RetrievalServiceContai
 const defaultContainer: RetrievalServiceContainer = createRetrievalContainer();
 
 /** A retrieval container bound to a tenant, reusing the shared assembler. */
-export function retrievalContainerForTenant(tenantId: string): RetrievalServiceContainer {
-  return { ...defaultContainer, tenantId };
+export function retrievalContainerForTenant(tenantId: string, authenticated = false): RetrievalServiceContainer {
+  return { ...defaultContainer, tenantId, authenticated };
 }
 
 export function setRetrievalServiceInstances(services: {
   assembler: IUnifiedAssembler;
   feedbackTracker: IFeedbackTracker;
+  queryPlannerEnabled?: boolean;
+  resolverFactory?: RuntimeScopedEntityResolverFactory;
 }): void {
   // Full reset of the default container (a service omitted from `services` is
   // cleared), mirroring packages/mcp/src/tools.ts setServiceInstances().
   defaultContainer.assembler = services.assembler ?? null;
   defaultContainer.feedbackTracker = services.feedbackTracker ?? null;
+  defaultContainer.queryPlannerEnabled = services.queryPlannerEnabled ?? false;
+  defaultContainer.resolverFactory = services.resolverFactory ?? null;
 }
 
 // ─── Tool names ──────────────────────────────────────────────────────────────
@@ -116,6 +146,91 @@ export const RETRIEVAL_TOOL_NAMES = ['berry_context', 'berry_ask', 'berry_feedba
 
 function textContent(text: string): { content: Array<{ type: 'text'; text: string }> } {
   return { content: [{ type: 'text' as const, text }] };
+}
+
+function fixedPlannerFailure(code: RuntimeQueryPlannerError['code']): RuntimeQueryPlannerError {
+  return new RuntimeQueryPlannerError(code);
+}
+
+function ownDataValue(input: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(input, key);
+  if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    || descriptor.enumerable !== true) throw fixedPlannerFailure('resolution_failed');
+  return descriptor.value;
+}
+
+function oneResolvedEntityId(input: unknown): readonly [string] {
+  try {
+    if (typeof input !== 'object' || input === null || nodeUtilTypes.isProxy(input)
+      || Array.isArray(input) || Object.getPrototypeOf(input) !== Object.prototype
+      || Reflect.ownKeys(input).length !== 2) throw fixedPlannerFailure('resolution_failed');
+    const resolution = ownDataValue(input, 'resolution');
+    const diagnostics = ownDataValue(input, 'diagnostics');
+    if (typeof diagnostics !== 'object' || diagnostics === null || nodeUtilTypes.isProxy(diagnostics)
+      || !Array.isArray(diagnostics) || Object.getPrototypeOf(diagnostics) !== Array.prototype
+      || Reflect.ownKeys(diagnostics).length !== 1) {
+      throw fixedPlannerFailure('resolution_failed');
+    }
+    const diagnosticsLength = Object.getOwnPropertyDescriptor(diagnostics, 'length');
+    if (!diagnosticsLength || !Object.prototype.hasOwnProperty.call(diagnosticsLength, 'value')
+      || diagnosticsLength.value !== 0) throw fixedPlannerFailure('resolution_failed');
+    if (typeof resolution !== 'object' || resolution === null || nodeUtilTypes.isProxy(resolution)
+      || Array.isArray(resolution) || Object.getPrototypeOf(resolution) !== Object.prototype
+      || Reflect.ownKeys(resolution).length !== 2
+      || ownDataValue(resolution, 'state') !== 'resolved') {
+      throw fixedPlannerFailure('resolution_failed');
+    }
+    const ids = ownDataValue(resolution, 'canonicalEntityIds');
+    if (typeof ids !== 'object' || ids === null || nodeUtilTypes.isProxy(ids)
+      || !Array.isArray(ids) || Object.getPrototypeOf(ids) !== Array.prototype) {
+      throw fixedPlannerFailure('resolution_failed');
+    }
+    const length = Object.getOwnPropertyDescriptor(ids, 'length');
+    const id = Object.getOwnPropertyDescriptor(ids, '0');
+    if (!length || length.value !== 1 || Reflect.ownKeys(ids).length !== 2
+      || !id || !Object.prototype.hasOwnProperty.call(id, 'value') || id.enumerable !== true
+      || typeof id.value !== 'string' || id.value.length < 1 || id.value.length > 200
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(id.value)) {
+      throw fixedPlannerFailure('resolution_failed');
+    }
+    return Object.freeze([id.value]) as readonly [string];
+  } catch (error) {
+    if (error instanceof RuntimeQueryPlannerError) throw error;
+    throw fixedPlannerFailure('resolution_failed');
+  }
+}
+
+async function resolveRuntimeEntityIds(
+  authenticated: boolean,
+  resolverFactory: RuntimeScopedEntityResolverFactory | null,
+  tenantId: string,
+  projectName: unknown,
+  entityScope: unknown,
+  asOf: unknown,
+): Promise<readonly [string]> {
+  if (!authenticated) throw fixedPlannerFailure('authentication_required');
+  if (!resolverFactory) throw fixedPlannerFailure('unavailable');
+  const receipt = buildRuntimeQueryPlannerReceiptV1({
+    tenantId,
+    projectName,
+    entityScope,
+    ...(asOf !== undefined ? { asOf } : {}),
+  });
+  try {
+    const resolver = resolverFactory(Object.freeze({
+      tenantId, projectScopes: receipt.trustedProjectScopes,
+    }));
+    if (typeof resolver !== 'object' || resolver === null || nodeUtilTypes.isProxy(resolver)) {
+      throw fixedPlannerFailure('resolution_failed');
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(resolver, 'resolve');
+    if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      || typeof descriptor.value !== 'function') throw fixedPlannerFailure('resolution_failed');
+    return oneResolvedEntityId(await descriptor.value.call(resolver, receipt.plan));
+  } catch (error) {
+    if (error instanceof RuntimeQueryPlannerError) throw error;
+    throw fixedPlannerFailure('resolution_failed');
+  }
 }
 
 function tracedTextContent(markdown: string, traceJson: string): {
@@ -208,7 +323,9 @@ export function registerRetrievalTools(
   // Destructure once into closure-captured locals. Handlers reference these by
   // the same names they used as module globals, so their bodies are unchanged —
   // but each call to registerRetrievalTools can now be bound to a different container.
-  const { assembler, feedbackTracker, tenantId } = container;
+  const {
+    assembler, feedbackTracker, tenantId, authenticated, queryPlannerEnabled, resolverFactory,
+  } = container;
   const tier1: RegisteredTool[] = [];
   const tier2: RegisteredTool[] = [];
 
@@ -251,15 +368,23 @@ export function registerRetrievalTools(
         as_of: args.as_of,
         tenantId,
       };
+      const resolvedEntityIds = queryPlannerEnabled
+        ? await resolveRuntimeEntityIds(
+          authenticated, resolverFactory, tenantId, args.project_name, args.entity_scope, args.as_of,
+        )
+        : undefined;
+      const runtimeOptions = resolvedEntityIds === undefined
+        ? options
+        : { ...options, resolvedEntityIds };
       // Keep the historical path byte/call/allocation-identical unless the
       // caller explicitly opts in. In particular, omitted and false do not
       // allocate trace collectors or invoke trace validation.
       if (args.include_trace !== true) {
-        const ctx = await assembler.assemble(args.task, options);
+        const ctx = await assembler.assemble(args.task, runtimeOptions);
         const md = assembler.renderMarkdown(ctx);
         return textContent(md);
       }
-      const traced = await assembler.assembleTraced(args.task, options);
+      const traced = await assembler.assembleTraced(args.task, runtimeOptions);
       const md = assembler.renderMarkdown(traced.context);
       const traceJson = serializeApprovedRetrievalTrace(traced.trace);
       return tracedTextContent(md, traceJson);
@@ -282,6 +407,11 @@ export function registerRetrievalTools(
     { readOnlyHint: true, idempotentHint: true } satisfies ToolAnnotations,
     async (args) => {
       if (!assembler) throw new Error('Retrieval services not initialised');
+      const resolvedEntityIds = queryPlannerEnabled
+        ? await resolveRuntimeEntityIds(
+          authenticated, resolverFactory, tenantId, args.project_name, args.entity_scope, args.as_of,
+        )
+        : undefined;
       const r = await assembler.ask(args.question, {
         level: args.reasoning_level,
         entity_scope: args.entity_scope,
@@ -289,6 +419,7 @@ export function registerRetrievalTools(
         project_name: args.project_name,
         as_of: args.as_of,
         tenantId,
+        ...(resolvedEntityIds !== undefined ? { resolvedEntityIds } : {}),
       });
       const lines = [
         `# Answer`,

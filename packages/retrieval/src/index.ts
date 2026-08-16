@@ -36,6 +36,11 @@ export {
   parseQueryPlanV1,
   canonicalQueryPlanV1,
 } from './query-plan.js';
+
+export {
+  buildRuntimeQueryPlanV1,
+  RuntimeQueryPlannerError,
+} from './runtime-query-planner.js';
 export type {
   QueryPlanIntentV1,
   QueryPlanEvidenceNeedV1,
@@ -141,4 +146,11 @@ export type {
 
 // MCP tools
 export { registerRetrievalTools, setRetrievalServiceInstances, createRetrievalContainer, retrievalContainerForTenant, RETRIEVAL_TOOL_NAMES } from './tools.js';
-export type { IUnifiedAssembler, IFeedbackTracker, RetrievalRegisteredTools, RetrievalServiceContainer } from './tools.js';
+export type {
+  IUnifiedAssembler,
+  IFeedbackTracker,
+  RetrievalRegisteredTools,
+  RetrievalServiceContainer,
+  RuntimeScopedEntityResolver,
+  RuntimeScopedEntityResolverFactory,
+} from './tools.js';

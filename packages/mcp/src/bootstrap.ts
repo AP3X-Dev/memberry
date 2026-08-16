@@ -41,6 +41,7 @@ import {
 import {
   UnifiedAssembler,
   FeedbackTracker,
+  ScopedEntityResolver,
   setRetrievalServiceInstances,
 } from '@memberry/retrieval';
 import {
@@ -525,6 +526,11 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   setRetrievalServiceInstances({
     assembler: unifiedAssembler,
     feedbackTracker: feedbackTrackerService,
+    queryPlannerEnabled: process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1',
+    resolverFactory: (authority) => {
+      const resolver = new ScopedEntityResolver(driver, authority);
+      return { resolve: (plan) => resolver.resolve(plan) };
+    },
   });
 
   console.error('[memberry-mcp] Retrieval services initialized');

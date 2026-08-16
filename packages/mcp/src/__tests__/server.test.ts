@@ -1,5 +1,6 @@
 // packages/mcp/src/__tests__/server.test.ts
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import {
   closeSSEHandle,
@@ -40,6 +41,13 @@ async function withSseServer(run: (baseUrl: string) => Promise<void>): Promise<v
 }
 
 describe('createAMPServer', () => {
+  it('RET-002C2 derives planner eligibility only from configured HTTP auth and leaves the stdio root ineligible', () => {
+    const source = readFileSync(new URL('../server.ts', import.meta.url), 'utf8');
+    expect(source).toContain('authenticated: effectiveToken !== null');
+    expect(source.match(/authenticated: effectiveToken !== null/g)).toHaveLength(2);
+    expect(source).toContain('registerAllTools(server);');
+    expect(source).not.toMatch(/authenticated:\s*(?:Boolean\()?opts\.(?:tenantId|actor|multiTenant)/);
+  });
   it('returns an AMPMCPServer object', () => {
     const amp = createAMPServer();
     expect(amp).toBeDefined();

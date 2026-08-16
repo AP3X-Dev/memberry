@@ -9,6 +9,10 @@ const BOOTSTRAP_SOURCE = fs.readFileSync(
 );
 
 describe('bootstrap.ts regression', () => {
+  it('RET-002C2 keeps runtime planning exact-value default-off and injects a driver-backed resolver', () => {
+    expect(BOOTSTRAP_SOURCE).toContain("queryPlannerEnabled: process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1'");
+    expect(BOOTSTRAP_SOURCE).toContain('new ScopedEntityResolver(driver, authority)');
+  });
   it('BUG-0007: apply adapter wraps reviewProposal in try/catch and returns failure on error', () => {
     // Before the fix, the apply adapter always returned { applied: true }
     // even when reviewProposal threw. The fix wraps it in try/catch

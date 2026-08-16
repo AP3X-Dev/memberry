@@ -239,6 +239,7 @@ export class UnifiedAssembler {
       project_name?: string;
       as_of?: string;
       tenantId?: string;
+      resolvedEntityIds?: unknown;
     } = {},
   ): Promise<AskResult> {
     if (!this.llm || !this.llm.available) {
@@ -246,6 +247,7 @@ export class UnifiedAssembler {
     }
     const level: AskLevel = opts.level ?? 'medium';
     const cfg = ASK_LEVELS[level];
+    const resolvedEntityIds = normalizeResolvedEntityIds(opts.resolvedEntityIds);
 
     const ctx = await this.assemble(question, {
       strategy: 'ranked',
@@ -255,6 +257,7 @@ export class UnifiedAssembler {
       project_name: opts.project_name,
       as_of: opts.as_of,
       tenantId: opts.tenantId,
+      ...(resolvedEntityIds !== undefined ? { resolvedEntityIds } : {}),
     });
     const evidence = ctx.sections.flatMap((s) => s.items);
     if (evidence.length === 0) {
@@ -331,6 +334,13 @@ export class UnifiedAssembler {
     // its existing skip/short-circuit behaviour.
     const getQueryVector = this.makeSharedQueryVector(task);
 
+    // Authenticated stable-ID requests have already crossed project-qualified
+    // resolution. Keep auto mode on direct bounded consumers without embedding
+    // the task for global intent discovery.
+    if (resolvedEntityIds !== undefined && opts.strategy === 'auto') {
+      return this.assembleRanked(task, opts, 'HYBRID');
+    }
+
     // Auto strategy: classify intent and route accordingly
     if (opts.strategy === 'auto') {
       let intentResult: { intent: QueryIntent; confidence: number; method: string };
@@ -405,6 +415,11 @@ export class UnifiedAssembler {
       };
     };
     if (strategy === 'deterministic') return assembleDeterministicTraced();
+
+    if (resolvedEntityIds !== undefined && strategy === 'auto') {
+      const result = await this.assembleRankedInternal(task, opts, 'HYBRID', undefined, true, []);
+      return { context: result.context, trace: result.trace! };
+    }
 
     const stageFailures: Array<{ stage: RetrievalTraceFailureStage; code: RetrievalTraceFailureCode }> = [];
     const getQueryVector = this.makeSharedQueryVector(task, (code) => stageFailures.push({ stage: 'embedding', code }));
@@ -516,6 +531,7 @@ export class UnifiedAssembler {
     const settledObservations: Partial<Record<'arch' | 'code' | 'memory', RuntimeStructuralObservation>> | undefined = traced ? {} : undefined;
     const traceIncompleteReasons = traced ? new Set<RetrievalTraceIncompleteReason>() : undefined;
     const tenant = resolveTenant(opts.tenantId);
+    const stableIdLane = opts.resolvedEntityIds !== undefined;
 
     // Intent-aware query expansion
     const expansion = expandQuery(task, intent);
@@ -525,13 +541,15 @@ export class UnifiedAssembler {
     // Feedback boosts and collection size don't depend on the layer results —
     // kick them off now so they overlap the (slower) layer fetches instead of
     // running as a sequential tail afterward.
-    const boostsPromise: Promise<BoostFactors | undefined> = this.feedback
-      .getBoosts(tenant)
-      .catch(() => {
-        if (traced) stageFailures?.push({ stage: 'feedback', code: 'query-failed' });
-        return undefined;
-      });
-    const collectionSizePromise = this.getCollectionSize();
+    const boostsPromise: Promise<BoostFactors | undefined> = stableIdLane
+      ? Promise.resolve(undefined)
+      : this.feedback.getBoosts(tenant).catch(() => {
+          if (traced) stageFailures?.push({ stage: 'feedback', code: 'query-failed' });
+          return undefined;
+        });
+    const collectionSizePromise = stableIdLane
+      ? Promise.resolve(undefined)
+      : this.getCollectionSize();
 
     // Gather results from each layer in parallel (individual failures don't crash assembly)
     const promises: Promise<void>[] = [];
@@ -575,9 +593,10 @@ export class UnifiedAssembler {
     // only if a dense channel will actually use it — so a code/memory-disabled
     // ranked call still embeds nothing. arch + boosts + collectionSize are already
     // in flight above, so this embed overlaps them rather than adding a tail.
-    const willUseSharedVector =
+    const willUseSharedVector = !stableIdLane && (
       (opts.include_code && this.codeLayer != null && isDefaultTenant(tenant)) ||
-      (opts.include_memory && this.memoryLayer != null);
+      (opts.include_memory && this.memoryLayer != null)
+    );
     const queryVector = willUseSharedVector && getQueryVec ? await getQueryVec() : undefined;
 
     // Tenant safety: the code-search channel queries Symbol nodes, which are NOT
@@ -586,7 +605,7 @@ export class UnifiedAssembler {
     // Force the channel OFF for non-default tenants — mirrors the deterministic
     // strategy's tenant guard in tools.ts. Default tenant owns the shared/legacy
     // graph, so it keeps the channel.
-    if (opts.include_code && this.codeLayer && isDefaultTenant(tenant)) {
+    if (!stableIdLane && opts.include_code && this.codeLayer && isDefaultTenant(tenant)) {
       const codeOptions = {
         limit: 20,
         include_semantics: false,
@@ -745,7 +764,7 @@ export class UnifiedAssembler {
 
     // Fuse all lists via RRF (dynamic k, normalization, text boost, then MMR diversity)
     const traceAdapter = traced ? new RankedRuntimeTraceAdapter(observations!, lists, {
-      includeCode: opts.include_code && this.codeLayer != null && isDefaultTenant(tenant),
+      includeCode: !stableIdLane && opts.include_code && this.codeLayer != null && isDefaultTenant(tenant),
       includeArchitecture: opts.include_arch,
       includeMemory: opts.include_memory && this.memoryLayer != null,
       projectScopeApplied: Boolean(opts.project_name || memoryTagScope?.some((tag) => /^project:/i.test(tag))),

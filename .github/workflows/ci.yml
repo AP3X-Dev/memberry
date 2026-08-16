@@ -107,11 +107,13 @@ jobs:
           mkdir -p \
             "${RUNNER_TEMP}/memberry-admission-candidate-live" \
             "${RUNNER_TEMP}/memberry-retrieval-scope-live" \
+            "${RUNNER_TEMP}/memberry-retrieval-planner-live" \
             "${RUNNER_TEMP}/memberry-admission-live-composition" \
             "${RUNNER_TEMP}/memberry-retrieval-trace-live-conformance"
           chmod 0700 \
             "${RUNNER_TEMP}/memberry-admission-candidate-live" \
             "${RUNNER_TEMP}/memberry-retrieval-scope-live" \
+            "${RUNNER_TEMP}/memberry-retrieval-planner-live" \
             "${RUNNER_TEMP}/memberry-admission-live-composition" \
             "${RUNNER_TEMP}/memberry-retrieval-trace-live-conformance"
           printf '{"repository":"%s","sha":"%s","run_id":"%s","run_attempt":"%s"}\n' \
@@ -119,6 +121,8 @@ jobs:
             >"${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json"
           cp "${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json" \
             "${RUNNER_TEMP}/memberry-retrieval-scope-live/workflow.json"
+          cp "${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json" \
+            "${RUNNER_TEMP}/memberry-retrieval-planner-live/workflow.json"
           cp "${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json" \
             "${RUNNER_TEMP}/memberry-admission-live-composition/workflow.json"
           cp "${RUNNER_TEMP}/memberry-admission-candidate-live/workflow.json" \
@@ -211,6 +215,38 @@ jobs:
         with:
           name: memberry-retrieval-scope-live-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/memberry-retrieval-scope-live
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Authenticated retrieval planner required live evidence
+        if: always()
+        shell: bash
+        env:
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: testpassword
+          MEMBERRY_RET002C2_LIVE_MODE: required
+          MEMBERRY_RET002C2_DISPOSABLE_OPT_IN: "1"
+          MEMBERRY_RET002C2_EVIDENCE_PATH: ${{ runner.temp }}/memberry-retrieval-planner-live/evidence.json
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/memberry-retrieval-planner-live"
+          neo4j_container_id="${{ job.services.neo4j.id }}"
+          neo4j_image_sha256="$(docker inspect --format='{{.Image}}' "$neo4j_container_id")"
+          [[ "$neo4j_container_id" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$neo4j_image_sha256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '{"neo4jContainerId":"%s","neo4jImageSha256":"%s","mode":"required","disposable":true}\n' \
+            "$neo4j_container_id" "$neo4j_image_sha256" >"$evidence_dir/service.json"
+          npm run bench:lab:retrieval:planner:live 2>&1 | sed -E \
+            -e 's/testpassword/[REDACTED]/g' \
+            | tee "$evidence_dir/run.log"
+
+      - name: Upload authenticated retrieval planner live evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memberry-retrieval-planner-live-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memberry-retrieval-planner-live
           if-no-files-found: error
           retention-days: 14
 

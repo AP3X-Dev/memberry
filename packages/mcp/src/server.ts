@@ -258,7 +258,7 @@ async function settleWithin<T>(
  */
 function registerAllTools(
   server: McpServer,
-  opts: { tenantId?: string; actor?: string; multiTenant?: boolean } = {},
+  opts: { tenantId?: string; actor?: string; multiTenant?: boolean; authenticated?: boolean } = {},
 ): ToolRegistry {
   const toolRegistry: ToolRegistry = new Map();
 
@@ -274,8 +274,10 @@ function registerAllTools(
   // for tenant sessions too — bound to the session's tenant. (berry_feedback is
   // Tier 2 and stays disabled by default.)
   const retrievalContainer = opts.multiTenant
-    ? retrievalContainerForTenant(opts.tenantId ?? DEFAULT_TENANT)
-    : undefined;
+    ? retrievalContainerForTenant(opts.tenantId ?? DEFAULT_TENANT, opts.authenticated === true)
+    : opts.authenticated === true
+      ? retrievalContainerForTenant(opts.tenantId ?? DEFAULT_TENANT, true)
+      : undefined;
   const retrievalResult = registerRetrievalTools(server, retrievalContainer);
   const existingRetrieval = toolRegistry.get('retrieval') ?? [];
   existingRetrieval.push(...retrievalResult.tier2);
@@ -694,7 +696,12 @@ export function createAMPServer(): AMPMCPServer {
               const tenant = tenantFor(req);
               const actor = actorFor(req) ?? 'mcp';
               const perSessionServer = new McpServer({ name: 'memberry-mcp', version: '0.1.0' });
-              registerAllTools(perSessionServer, { tenantId: tenant, actor, multiTenant: multiTenantMode });
+              registerAllTools(perSessionServer, {
+                tenantId: tenant,
+                actor,
+                multiTenant: multiTenantMode,
+                authenticated: effectiveToken !== null,
+              });
 
               let nextTransport: StreamableHTTPServerTransport | undefined;
               nextTransport = new StreamableHTTPServerTransport({
@@ -737,7 +744,12 @@ export function createAMPServer(): AMPMCPServer {
             const tenant = tenantFor(req);
             const actor = actorFor(req) ?? 'mcp';
             const perSessionServer = new McpServer({ name: 'memberry-mcp', version: '0.1.0' });
-            registerAllTools(perSessionServer, { tenantId: tenant, actor, multiTenant: multiTenantMode });
+            registerAllTools(perSessionServer, {
+              tenantId: tenant,
+              actor,
+              multiTenant: multiTenantMode,
+              authenticated: effectiveToken !== null,
+            });
 
             const transport = new SSEServerTransport('/messages', res);
             transports.set(transport.sessionId, transport);

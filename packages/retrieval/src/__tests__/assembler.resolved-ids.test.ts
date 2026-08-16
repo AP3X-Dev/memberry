@@ -32,6 +32,81 @@ describe('RET-002C UnifiedAssembler stable-ID routing', () => {
     expect(Object.isFrozen(scope.resolvedEntityIds)).toBe(true);
   });
 
+  it('stable auto assembly does no task embedding, symbol search, collection count, or feedback lookup', async () => {
+    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [] }));
+    const codeSearch = vi.fn(async () => []);
+    const run = vi.fn(async (cypher: string, params?: Record<string, unknown>) => ({
+      records: cypher.includes('OPTIONAL MATCH (e:Entity)')
+        ? ((params?.entityIds ?? []) as string[]).map((targetId, ordinal) => new Neo4jRecord(
+            ['ordinal', 'targetId', 'e', 'score', 'projectName'],
+            [String(ordinal), targetId, null, 1, null],
+          ))
+        : [],
+    }));
+    const driver = { session: vi.fn(() => ({ run, close: vi.fn(async () => undefined) })) };
+    const redis = {
+      zincrby: vi.fn(async () => 0), zrevrangeWithScores: vi.fn(async () => []),
+      lpush: vi.fn(async () => 0), ltrim: vi.fn(async () => undefined),
+    };
+    const embedding = { embed: vi.fn(async () => [0]), embedBatch: vi.fn(async () => []) };
+    const assembler = new UnifiedAssembler(
+      driver as never, redis, { search: codeSearch }, { load }, embedding,
+    );
+    await assembler.assemble('GLOBAL-DISCOVERY-CANARY', {
+      strategy: 'auto', resolvedEntityIds: ['entity-a'], project_name: 'project:memberry',
+    });
+    expect(embedding.embed).not.toHaveBeenCalled();
+    expect(codeSearch).not.toHaveBeenCalled();
+    expect(redis.zrevrangeWithScores).not.toHaveBeenCalled();
+    expect(run.mock.calls.some(([cypher]) => String(cypher).includes('MATCH (s:Symbol)'))).toBe(false);
+    expect(load).toHaveBeenCalledWith(expect.objectContaining({ resolvedEntityIds: ['entity-a'] }));
+  });
+
+  it('keeps every stable-ID entry mode direct-only, including traced ranked/auto, deterministic, and real ask', async () => {
+    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [] }));
+    const codeSearch = vi.fn(async () => []);
+    const run = vi.fn(async (cypher: string, params?: Record<string, unknown>) => ({
+      records: cypher.includes('OPTIONAL MATCH (e:Entity)')
+        ? ((params?.entityIds ?? []) as string[]).map((targetId, ordinal) => new Neo4jRecord(
+            ['ordinal', 'targetId', 'e', 'score', 'projectName'],
+            [String(ordinal), targetId, null, 1, null],
+          ))
+        : [],
+    }));
+    const driver = { session: vi.fn(() => ({ run, close: vi.fn(async () => undefined) })) };
+    const redis = {
+      zincrby: vi.fn(async () => 0), zrevrangeWithScores: vi.fn(async () => []),
+      lpush: vi.fn(async () => 0), ltrim: vi.fn(async () => undefined),
+    };
+    const embedding = { embed: vi.fn(async () => [0]), embedBatch: vi.fn(async () => []) };
+    const llm = { available: true, chat: vi.fn(), modelFor: vi.fn(() => 'test') };
+    const assembler = new UnifiedAssembler(
+      driver as never, redis, { search: codeSearch }, { load }, embedding, llm as never,
+    );
+    const deterministicAssemble = vi.fn(async () => []);
+    const deterministicTraced = vi.fn(async () => ({ sections: [], trace: {} }));
+    (assembler as unknown as { deterministic: {
+      assemble: typeof deterministicAssemble; assembleTraced: typeof deterministicTraced;
+    } }).deterministic = { assemble: deterministicAssemble, assembleTraced: deterministicTraced };
+
+    const stable = { resolvedEntityIds: ['entity-a'], project_name: 'project:memberry' };
+    await assembler.assemble('ranked', { ...stable, strategy: 'ranked' });
+    await assembler.assembleTraced('traced-ranked', { ...stable, strategy: 'ranked' });
+    await assembler.assembleTraced('traced-auto', { ...stable, strategy: 'auto' });
+    await assembler.assemble('deterministic', { ...stable, strategy: 'deterministic' });
+    await assembler.assembleTraced('traced-deterministic', { ...stable, strategy: 'deterministic' });
+    await assembler.ask('ask', stable);
+
+    expect(embedding.embed).not.toHaveBeenCalled();
+    expect(codeSearch).not.toHaveBeenCalled();
+    expect(redis.zrevrangeWithScores).not.toHaveBeenCalled();
+    expect(run.mock.calls.some(([cypher]) => String(cypher).includes('MATCH (s:Symbol)'))).toBe(false);
+    expect(llm.chat).not.toHaveBeenCalled();
+    expect(deterministicAssemble).toHaveBeenCalledWith('deterministic', expect.objectContaining(stable));
+    expect(deterministicTraced).toHaveBeenCalledWith('traced-deterministic', expect.objectContaining(stable));
+    expect(load).toHaveBeenCalledWith(expect.objectContaining({ resolvedEntityIds: ['entity-a'] }));
+  });
+
   it('passes the same ordered stable IDs to deterministic assembly', async () => {
     const { assembler } = dependencies(null);
     const assemble = vi.fn(async () => []);
