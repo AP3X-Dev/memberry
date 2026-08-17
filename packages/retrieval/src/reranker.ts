@@ -335,7 +335,9 @@ function validUnicode(input: string): boolean {
 }
 
 function stringBytes(input: unknown, maxBytes: number): number {
-  if (typeof input !== 'string' || !validUnicode(input)) throw new Error('invalid-string');
+  if (typeof input !== 'string') throw new Error('invalid-string');
+  if (input.length > maxBytes) throw new RerankerContractError('request-too-large');
+  if (!validUnicode(input)) throw new Error('invalid-string');
   const bytes = BUFFER_BYTE_LENGTH(input, 'utf8');
   if (bytes > maxBytes) throw new RerankerContractError('request-too-large');
   return bytes;
@@ -565,7 +567,8 @@ function canonicalRequest<T>(
 export function parseSerializedRerankerProviderRequestV1(
   serialized: SerializedRerankerProviderRequestV1 | string,
 ): RerankerProviderRequestV1 {
-  if (typeof serialized !== 'string' || !validUnicode(serialized)
+  if (typeof serialized !== 'string' || serialized.length > MAX_SERIALIZED_PROVIDER_REQUEST_BYTES
+    || !validUnicode(serialized)
     || BUFFER_BYTE_LENGTH(serialized, 'utf8') > MAX_SERIALIZED_PROVIDER_REQUEST_BYTES) {
     throw new Error('invalid-reranker-request');
   }
@@ -701,7 +704,8 @@ function parseResponse(
   request: RerankerProviderRequestV1,
   identity: RerankerProviderIdentityV1,
 ): ParsedResponse {
-  if (typeof raw !== 'string' || !validUnicode(raw)
+  if (typeof raw !== 'string' || raw.length > RERANKER_MAX_RESPONSE_BYTES
+    || !validUnicode(raw)
     || BUFFER_BYTE_LENGTH(raw, 'utf8') > RERANKER_MAX_RESPONSE_BYTES) throw new Error();
   let decoded: unknown;
   try {

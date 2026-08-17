@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { CandidateChannelRequestV1 } from '../candidate-channel.js';
 import {
@@ -524,6 +524,75 @@ describe('applyEvidencePostFilterV1', () => {
     expectFailure(() => applyEvidencePostFilterV1({
       request: request(), candidates: [candidate('no', { evidenceId: '\ud800' })],
     }), 'invalid-receipt');
+  });
+
+  it('rejects every oversized malformed receipt field without scanning its Unicode code units', async () => {
+    const originalCharCodeAt = String.prototype.charCodeAt;
+    let target = '';
+    let targetScans = 0;
+    String.prototype.charCodeAt = function countedCharCodeAt(this: string, index: number): number {
+      if (this === target) targetScans += 1;
+      return originalCharCodeAt.call(this, index);
+    };
+    vi.resetModules();
+    let dynamicContract: typeof import('../evidence-post-filter.js');
+    try {
+      dynamicContract = await import('../evidence-post-filter.js');
+    } finally {
+      String.prototype.charCodeAt = originalCharCodeAt;
+    }
+
+    const oversizedMalformed = (maxBytes: number): string => `${'a'.repeat(maxBytes + 1)}\ud800`;
+    const cases: Array<{ maxBytes: number; overrides: Partial<EvidenceEligibilityReceiptV1> }> = [
+      { maxBytes: 64, overrides: { sourceType: '' as never } },
+      { maxBytes: 32, overrides: { temporalFrame: { mode: 'as-of', asOf: '' } } },
+      { maxBytes: MAX_TENANT_ID_BYTES, overrides: { tenantId: '' } },
+      { maxBytes: MAX_PROJECT_SCOPE_BYTES, overrides: { projectScope: '' } },
+      { maxBytes: MAX_ENTITY_ID_BYTES, overrides: { resolvedEntityId: '' } },
+      { maxBytes: MAX_EVIDENCE_ID_BYTES, overrides: { evidenceId: '' } },
+    ];
+
+    try {
+      target = `a\ud800`;
+      targetScans = 0;
+      let malformedThrown: unknown;
+      try {
+        dynamicContract.applyEvidencePostFilterV1({
+          request: request(),
+          candidates: [candidate('no', { evidenceId: target })],
+        });
+      } catch (error) {
+        malformedThrown = error;
+      }
+      expect(malformedThrown).toMatchObject({ code: 'invalid-receipt' });
+      expect(targetScans).toBeGreaterThan(0);
+
+      for (const entry of cases) {
+        target = oversizedMalformed(entry.maxBytes);
+        targetScans = 0;
+        const overrides = { ...entry.overrides } as Record<string, unknown>;
+        if ('sourceType' in overrides) overrides.sourceType = target;
+        if ('temporalFrame' in overrides) overrides.temporalFrame = { mode: 'as-of', asOf: target };
+        if ('tenantId' in overrides) overrides.tenantId = target;
+        if ('projectScope' in overrides) overrides.projectScope = target;
+        if ('resolvedEntityId' in overrides) overrides.resolvedEntityId = target;
+        if ('evidenceId' in overrides) overrides.evidenceId = target;
+
+        let thrown: unknown;
+        try {
+          dynamicContract.applyEvidencePostFilterV1({
+            request: request(),
+            candidates: [candidate('no', overrides as Partial<EvidenceEligibilityReceiptV1>)],
+          });
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toMatchObject({ code: 'budget-exceeded' });
+        expect(targetScans).toBe(0);
+      }
+    } finally {
+      vi.resetModules();
+    }
   });
 
   it('accepts ordinary or null-prototype closed records and candidate arrays', () => {
