@@ -70,9 +70,11 @@ jobs:
           [[ "$one_shot_key" =~ ^[0-9a-f]{64}$ ]]
           burn_artifact_name="memberry-mem002c3-burn-${one_shot_key}"
           result_artifact_name="memberry-mem002c3-result-${one_shot_key}-${GITHUB_RUN_ID}"
-          prior="$(ARTIFACT_NAME="$burn_artifact_name" gh api --method GET --paginate --slurp \
-            "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
-            --jq '[.[].artifacts[] | select(.name == env.ARTIFACT_NAME)] | length')"
+          prior="$(
+            gh api --method GET --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+              | ARTIFACT_NAME="$burn_artifact_name" node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); for (const artifact of page.artifacts) { if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact) || typeof artifact.name !== "string") process.exit(2); if (artifact.name === process.env.ARTIFACT_NAME) count += 1; } } process.stdout.write(String(count));'
+          )"
           [[ "$prior" =~ ^[0-9]+$ ]]
           if [[ "$prior" != '0' ]]; then
             printf '%s\n' 'mem002c3_protocol:duplicate_attempt' >&2

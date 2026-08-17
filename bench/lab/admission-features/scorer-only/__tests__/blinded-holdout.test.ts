@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -412,7 +413,10 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     expect(workflow).toContain("-le 32768");
     expect(workflow).toContain("-le 1024");
     expect(workflow).not.toContain('run.log');
-    expect(workflow).toContain('select(.name == env.ARTIFACT_NAME)');
+    expect(workflow).not.toMatch(/gh api[\s\S]{0,240}--slurp[\s\S]{0,240}--(?:jq|template)/);
+    expect(workflow).toContain("node -e 'const pages = JSON.parse");
+    expect(workflow).toContain('typeof artifact.name !== "string"');
+    expect(workflow).toContain('artifact.name === process.env.ARTIFACT_NAME');
     expect(workflow).not.toContain('expired == false');
     expect(workflow).toContain('Upload only aggregate receipt evidence');
     expect(workflow).toContain('path: ${{ env.MEMBERRY_C3_PUBLIC_DIR }}/start.json');
@@ -422,5 +426,32 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     expect(workflow).toContain('tags/memberry-mem002c3-burn/${MEMBERRY_ONE_SHOT_KEY}');
     expect(workflow).toContain('--request POST');
     expect(workflow).not.toMatch(/--request DELETE|git push[^\n]*(?:--delete|:refs\/tags\/memberry-mem002c3-burn)/);
+  });
+
+  it('fails closed when artifact pagination returns an empty or malformed schema', async () => {
+    const workflow = await readFile(`${REPO_ROOT}/.github/workflows/mem002c3-holdout.yml`, 'utf8');
+    const parser = workflow.match(/node -e '([^'\n]+)'/)?.[1];
+    expect(parser).toBeTruthy();
+
+    const run = (pages: unknown) =>
+      spawnSync(process.execPath, ['-e', parser!], {
+        input: JSON.stringify(pages),
+        encoding: 'utf8',
+        env: { ...process.env, ARTIFACT_NAME: 'target' },
+      });
+
+    const valid = run([{ artifacts: [{ name: 'other' }, { name: 'target' }] }]);
+    expect(valid.status).toBe(0);
+    expect(valid.stdout).toBe('1');
+
+    for (const malformed of [
+      [],
+      [{}],
+      [{ artifacts: null }],
+      [{ artifacts: [{}] }],
+      [{ artifacts: [{ name: 7 }] }],
+    ]) {
+      expect(run(malformed).status).not.toBe(0);
+    }
   });
 });
