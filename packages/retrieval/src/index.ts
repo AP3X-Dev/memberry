@@ -89,6 +89,50 @@ export type {
   CandidateChannelContractErrorCodeV1,
 } from './candidate-channel.js';
 
+// Closed, privacy-preserving calibrated reranker boundary (RET-004A)
+export {
+  RERANKER_CONTRACT_ID,
+  RERANKER_CONTRACT_VERSION,
+  RERANKER_MAX_CANDIDATES,
+  RERANKER_MAX_QUERY_BYTES,
+  RERANKER_MAX_STRING_BYTES,
+  RERANKER_MAX_AGGREGATE_STRING_BYTES,
+  RERANKER_MAX_RESPONSE_BYTES,
+  RERANKER_DEFAULT_TIMEOUT_MS,
+  RERANKER_MAX_TIMEOUT_MS,
+  RERANKER_BASELINE_REASON,
+  RerankerContractError,
+  createRerankerProviderV1,
+  executeCalibratedRerankV1,
+} from './reranker.js';
+export type {
+  SerializedRerankerProviderRequestV1,
+  RerankerCancellationV1,
+  RerankCandidateInputV1,
+  RerankInputV1,
+  RerankerProviderIdentityV1,
+  RerankerProviderCandidateV1,
+  RerankerProviderRequestV1,
+  RerankerProviderRunV1,
+  RerankerProviderV1,
+  RerankerOptionsV1,
+  RerankedCandidateV1,
+  RerankerResultV1,
+  RerankerContractErrorCodeV1,
+} from './reranker.js';
+export {
+  baselineIdentityRerankerScoreV1,
+  createLocalRerankerProviderV1,
+  createHttpsRerankerProviderV1,
+} from './reranker-providers.js';
+export type {
+  LocalRerankerScorerV1,
+  RerankerHttpsTransportRequestV1,
+  RerankerHttpsTransportResponseV1,
+  RerankerHttpsTransportV1,
+  HttpsRerankerProviderConfigV1,
+} from './reranker-providers.js';
+
 // Read-only project/tenant-qualified stable Entity-ID resolution (RET-002B)
 export {
   SCOPED_ENTITY_RESOLVER_MAX_RESULTS,
