@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import { parseAdmissionC2RuntimePolicyReceiptV1 } from '../c2-runtime-policy-receipt.js';
 import { parseAdmissionC2RuntimePolicyReceiptV2 } from '../c2-runtime-policy-receipt-v2.js';
