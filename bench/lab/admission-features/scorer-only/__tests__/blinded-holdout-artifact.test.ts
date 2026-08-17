@@ -1,20 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
+  BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
   BLINDED_HOLDOUT_ORACLE_SHA256,
-  blindedHoldoutOneShotKeyV1,
-  buildBlindedHoldoutReceiptV1,
-  canonicalBlindedHoldoutReceiptV1,
-  createBlindedHoldoutRuntimeEvidenceV1,
-  parseBlindedHoldoutReceiptV1,
-  type BlindedHoldoutAggregateV1,
+  BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
+  blindedHoldoutOneShotKeyV2,
+  buildBlindedHoldoutReceiptV2,
+  canonicalBlindedHoldoutReceiptV2,
+  createBlindedHoldoutRuntimeEvidenceV2,
+  parseBlindedHoldoutReceiptV2,
+  type BlindedHoldoutAggregateV2,
 } from '../blinded-holdout-artifact.js';
 
 const SHA_A = `sha256:${'a'.repeat(64)}` as const;
 const SHA_B = `sha256:${'b'.repeat(64)}` as const;
 const SHA_C = `sha256:${'c'.repeat(64)}` as const;
 
-function aggregate(overrides: Partial<BlindedHoldoutAggregateV1> = {}): BlindedHoldoutAggregateV1 {
+function aggregate(overrides: Partial<BlindedHoldoutAggregateV2> = {}): BlindedHoldoutAggregateV2 {
   return {
     scenarioCount: 3,
     dimensionCount: 18,
@@ -28,7 +31,7 @@ function aggregate(overrides: Partial<BlindedHoldoutAggregateV1> = {}): BlindedH
 }
 
 function runtime(nodeMajor: 20 | 22, value = aggregate()) {
-  return createBlindedHoldoutRuntimeEvidenceV1({
+  return createBlindedHoldoutRuntimeEvidenceV2({
     nodeMajor,
     evidenceMode: 'sealed-candidate-prediction',
     candidateRunCount: 1,
@@ -45,7 +48,7 @@ function receiptOptions() {
     predictionSha256: SHA_A,
     startReceiptSha256: SHA_C,
     tombstone: {
-      ref: `refs/tags/memberry-mem002c3-burn/${blindedHoldoutOneShotKeyV1().slice(7)}` as const,
+      ref: `refs/tags/memberry-mem002c3-burn/${blindedHoldoutOneShotKeyV2().slice(7)}` as const,
       targetSha: 'd'.repeat(40),
       preexisting: false as const,
       creationStatus: 201 as const,
@@ -69,12 +72,16 @@ function receiptOptions() {
 
 describe('MEM-002C3 blinded holdout aggregate-only receipt', () => {
   it('builds one canonical aggregate-only receipt with exact identities and matching runtimes', () => {
-    const receipt = buildBlindedHoldoutReceiptV1(receiptOptions());
-    const canonical = canonicalBlindedHoldoutReceiptV1(receipt);
+    const receipt = buildBlindedHoldoutReceiptV2(receiptOptions());
+    const canonical = canonicalBlindedHoldoutReceiptV2(receipt);
     const decoded = JSON.parse(canonical) as Record<string, unknown>;
 
     expect(receipt.packetId).toBe('MEM-002C3');
+    expect(receipt.schemaVersion).toBe('memberry.admission-feature-blinded-holdout-receipt.v2');
     expect(receipt.evidenceMode).toBe('blinded-holdout');
+    expect(receipt.repositoryRootTreeOid).toBe(BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID);
+    expect(receipt.historicalCandidateSubtreeOid).toBe(BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID);
+    expect(receipt.currentCheckoutCandidateSubtreeOid).toBe(BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID);
     expect(receipt.oracleSha256).toBe(BLINDED_HOLDOUT_ORACLE_SHA256);
     expect(receipt.tombstone).toEqual(receiptOptions().tombstone);
     expect(receipt.outcome).toBe('passed');
@@ -82,6 +89,7 @@ describe('MEM-002C3 blinded holdout aggregate-only receipt', () => {
     expect(receipt.runtimes.map(({ nodeMajor }) => nodeMajor)).toEqual([20, 22]);
     expect(canonical.endsWith('\n')).toBe(true);
     expect(decoded).not.toHaveProperty('predictions');
+    expect(decoded).not.toHaveProperty(`candidate${'Tree'}Oid`);
     expect(canonical).not.toMatch(/"scenarioId"|"features"|"dimensions"|"valuePermille"|"fixtureCode"|"stdout"|"stderr"|"raw/i);
   });
 
@@ -93,44 +101,58 @@ describe('MEM-002C3 blinded holdout aggregate-only receipt', () => {
       passed: false,
     });
     const options = receiptOptions();
-    const receipt = buildBlindedHoldoutReceiptV1({
+    const receipt = buildBlindedHoldoutReceiptV2({
       ...options,
       runtimes: [runtime(20, mismatch), runtime(22, mismatch)],
     });
 
     expect(receipt.outcome).toBe('failed');
     expect(receipt.aggregate).toEqual(mismatch);
-    expect(canonicalBlindedHoldoutReceiptV1(receipt)).not.toMatch(/af-(?:dev|holdout)-|case-[0-9]/);
+    expect(canonicalBlindedHoldoutReceiptV2(receipt)).not.toMatch(/af-(?:dev|holdout)-|case-[0-9]/);
   });
 
   it.each([
-    ['runtime divergence', [runtime(20), runtime(22, aggregate({ agreementCount: 17, agreementPermille: 944, valueMismatchCount: 1, passed: false }))]],
+    [
+      'runtime divergence',
+      [
+        runtime(20),
+        runtime(
+          22,
+          aggregate({
+            agreementCount: 17,
+            agreementPermille: 944,
+            valueMismatchCount: 1,
+            passed: false,
+          }),
+        ),
+      ],
+    ],
     ['duplicate runtime', [runtime(20), runtime(20)]],
-    ['self-proof evidence', [
-      { ...runtime(20), evidenceMode: 'scorer-conformance' },
-      runtime(22),
-    ]],
-    ['candidate rerun', [
-      { ...runtime(20), candidateRunCount: 2 },
-      runtime(22),
-    ]],
+    ['self-proof evidence', [{ ...runtime(20), evidenceMode: 'scorer-conformance' }, runtime(22)]],
+    ['candidate rerun', [{ ...runtime(20), candidateRunCount: 2 }, runtime(22)]],
   ])('rejects %s', (_name: string, runtimes: unknown) => {
-    expect(() => buildBlindedHoldoutReceiptV1({
-      ...receiptOptions(),
-      runtimes: runtimes as never,
-    })).toThrow(/^mem002c3_artifact:/);
+    expect(() =>
+      buildBlindedHoldoutReceiptV2({
+        ...receiptOptions(),
+        runtimes: runtimes as never,
+      }),
+    ).toThrow(/^mem002c3_artifact:/);
   });
 
   it('rejects incomplete cleanup and duplicate-attempt evidence', () => {
     const options = receiptOptions();
-    expect(() => buildBlindedHoldoutReceiptV1({
-      ...options,
-      cleanup: { ...options.cleanup, predictionRemoved: false } as never,
-    })).toThrow('mem002c3_artifact:cleanup');
-    expect(() => buildBlindedHoldoutReceiptV1({
-      ...options,
-      priorAuthoritativeReceiptCount: 1 as never,
-    })).toThrow('mem002c3_artifact:duplicate_attempt');
+    expect(() =>
+      buildBlindedHoldoutReceiptV2({
+        ...options,
+        cleanup: { ...options.cleanup, predictionRemoved: false } as never,
+      }),
+    ).toThrow('mem002c3_artifact:cleanup');
+    expect(() =>
+      buildBlindedHoldoutReceiptV2({
+        ...options,
+        priorAuthoritativeReceiptCount: 1 as never,
+      }),
+    ).toThrow('mem002c3_artifact:duplicate_attempt');
   });
 
   it('rejects missing, foreign, mutable, or wrong-target tombstone claims', () => {
@@ -142,25 +164,21 @@ describe('MEM-002C3 blinded holdout aggregate-only receipt', () => {
       { ...options.tombstone, creationStatus: 200 },
       { ...options.tombstone, verificationStatus: 404 },
     ]) {
-      expect(() => buildBlindedHoldoutReceiptV1({ ...options, tombstone } as never))
-        .toThrow('mem002c3_artifact:tombstone');
+      expect(() => buildBlindedHoldoutReceiptV2({ ...options, tombstone } as never)).toThrow('mem002c3_artifact:tombstone');
     }
   });
 
   it('fails closed on forged, mutated, or noncanonical receipt bytes', () => {
-    const receipt = buildBlindedHoldoutReceiptV1(receiptOptions());
-    expect(() => canonicalBlindedHoldoutReceiptV1(structuredClone(receipt)))
-      .toThrow('mem002c3_artifact:unregistered');
+    const receipt = buildBlindedHoldoutReceiptV2(receiptOptions());
+    expect(() => canonicalBlindedHoldoutReceiptV2(structuredClone(receipt))).toThrow('mem002c3_artifact:unregistered');
 
-    const canonical = canonicalBlindedHoldoutReceiptV1(receipt);
-    const parsed = parseBlindedHoldoutReceiptV1(new TextEncoder().encode(canonical));
-    expect(canonicalBlindedHoldoutReceiptV1(parsed)).toBe(canonical);
+    const canonical = canonicalBlindedHoldoutReceiptV2(receipt);
+    const parsed = parseBlindedHoldoutReceiptV2(new TextEncoder().encode(canonical));
+    expect(canonicalBlindedHoldoutReceiptV2(parsed)).toBe(canonical);
 
     const forged = JSON.parse(canonical) as Record<string, unknown>;
     forged.extra = true;
-    expect(() => parseBlindedHoldoutReceiptV1(new TextEncoder().encode(`${JSON.stringify(forged)}\n`)))
-      .toThrow(/^mem002c3_artifact:/);
-    expect(() => parseBlindedHoldoutReceiptV1(new TextEncoder().encode(canonical.trimEnd())))
-      .toThrow(/^mem002c3_artifact:/);
+    expect(() => parseBlindedHoldoutReceiptV2(new TextEncoder().encode(`${JSON.stringify(forged)}\n`))).toThrow(/^mem002c3_artifact:/);
+    expect(() => parseBlindedHoldoutReceiptV2(new TextEncoder().encode(canonical.trimEnd()))).toThrow(/^mem002c3_artifact:/);
   });
 });

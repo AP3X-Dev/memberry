@@ -6,29 +6,44 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import { parseAdmissionC2RuntimePolicyReceiptV1 } from '../../contracts/c2-runtime-policy-receipt.js';
-import type {
-  AdmissionFeatureAgreementReportV1,
-  AdmissionFeatureAgreementMetricsV1,
-} from '../../scorer.js';
+import type { AdmissionFeatureAgreementReportV1, AdmissionFeatureAgreementMetricsV1 } from '../../scorer.js';
 import {
-  assertBlindedHoldoutPromotionV1,
+  assertBlindedHoldoutPromotionV2,
   BlindedHoldoutProtocolError,
   buildBlindedHoldoutDockerCreateArgs,
-  buildBlindedHoldoutStartReceiptV1,
-  buildBlindedHoldoutTombstoneSpecV1,
-  removeBlindedHoldoutPrivateEvidenceV1,
-  scoreSealedBlindedHoldoutV1,
-  validateBlindedHoldoutTombstoneAbsenceV1,
-  validateBlindedHoldoutPreflightV1,
-  verifyBlindedHoldoutTombstoneCreationV1,
+  buildBlindedHoldoutStartReceiptV2,
+  buildBlindedHoldoutTombstoneSpecV2,
+  removeBlindedHoldoutPrivateEvidenceV2,
+  scoreSealedBlindedHoldoutV2,
+  validateBlindedHoldoutTombstoneAbsenceV2,
+  validateBlindedHoldoutPreflightV2,
+  verifyBlindedHoldoutTombstoneCreationV2,
 } from '../blinded-holdout.js';
+import {
+  BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA,
+  BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
+  BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
+  BLINDED_HOLDOUT_INPUT_SHA256,
+  BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
+  BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
+} from '../blinded-holdout-artifact.js';
 
 const REPO_ROOT = process.cwd();
 const POLICY_PATH = `${REPO_ROOT}/bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v1.json`;
 const SHA_A = `sha256:${'a'.repeat(64)}` as const;
 
 async function policyReceipt() {
-  return parseAdmissionC2RuntimePolicyReceiptV1(new Uint8Array(await readFile(POLICY_PATH)));
+  const legacy = parseAdmissionC2RuntimePolicyReceiptV1(new Uint8Array(await readFile(POLICY_PATH)));
+  return {
+    receiptSha256: BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
+    binding: {
+      candidateCommitSha: BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA,
+      repositoryRootTreeOid: BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
+      candidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
+      inputSha256: BLINDED_HOLDOUT_INPUT_SHA256,
+    },
+    policy: legacy.policy,
+  } as const;
 }
 
 function preflightOptions(receipt: Awaited<ReturnType<typeof policyReceipt>>) {
@@ -40,13 +55,16 @@ function preflightOptions(receipt: Awaited<ReturnType<typeof policyReceipt>>) {
     workflowRunAttempt: 1,
     priorAuthoritativeReceiptCount: 0,
     evaluatedCommitSha: 'd'.repeat(40),
+    observedCheckoutCommitSha: 'd'.repeat(40),
     integratedBaseIsAncestor: true,
     candidateSubtreeClean: true,
     candidateContextOnly: true,
     observedPlatform: 'linux/amd64',
     observedBaseImage: receipt.policy.baseImage,
     observedCandidateCommitSha: receipt.binding.candidateCommitSha,
-    observedCandidateTreeOid: receipt.binding.candidateTreeOid,
+    observedRepositoryRootTreeOid: BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
+    observedHistoricalCandidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
+    observedCheckoutCandidateSubtreeOid: BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
     observedInputSha256: receipt.binding.inputSha256,
   };
 }
@@ -92,33 +110,46 @@ function report(holdout = counts()): AdmissionFeatureAgreementReportV1 {
 describe('MEM-002C3 scorer-owned one-shot protocol', () => {
   it('never treats missing or deleted artifacts as authority to reopen a durable burned key', () => {
     const targetSha = 'e'.repeat(40);
-    const spec = buildBlindedHoldoutTombstoneSpecV1(targetSha);
+    const spec = buildBlindedHoldoutTombstoneSpecV2(targetSha);
 
-    expect(() => validateBlindedHoldoutTombstoneAbsenceV1({
-      spec,
-      lookupStatus: 200,
-      priorEvidenceArtifactCount: 0,
-    })).toThrow('mem002c3_protocol:tombstone_preexisting');
-    expect(() => validateBlindedHoldoutTombstoneAbsenceV1({
-      spec,
-      lookupStatus: 500,
-      priorEvidenceArtifactCount: 0,
-    })).toThrow('mem002c3_protocol:tombstone_lookup');
-    expect(validateBlindedHoldoutTombstoneAbsenceV1({
-      spec,
-      lookupStatus: 404,
-      priorEvidenceArtifactCount: 0,
-    })).toEqual(spec);
+    expect(() =>
+      validateBlindedHoldoutTombstoneAbsenceV2({
+        spec,
+        lookupStatus: 200,
+        priorEvidenceArtifactCount: 0,
+      }),
+    ).toThrow('mem002c3_protocol:tombstone_preexisting');
+    expect(() =>
+      validateBlindedHoldoutTombstoneAbsenceV2({
+        spec,
+        lookupStatus: 500,
+        priorEvidenceArtifactCount: 0,
+      }),
+    ).toThrow('mem002c3_protocol:tombstone_lookup');
+    expect(() =>
+      validateBlindedHoldoutTombstoneAbsenceV2({
+        spec,
+        lookupStatus: 404,
+        priorEvidenceArtifactCount: 1,
+      }),
+    ).toThrow('mem002c3_protocol:tombstone_evidence');
+    expect(
+      validateBlindedHoldoutTombstoneAbsenceV2({
+        spec,
+        lookupStatus: 404,
+        priorEvidenceArtifactCount: 0,
+      }),
+    ).toEqual(spec);
   });
 
   it('accepts only an atomic exact-ref/exact-target tombstone create and verification pair', () => {
     const targetSha = 'e'.repeat(40);
-    const spec = buildBlindedHoldoutTombstoneSpecV1(targetSha);
+    const spec = buildBlindedHoldoutTombstoneSpecV2(targetSha);
     const exactResponse = {
       ref: spec.ref,
       object: { type: 'commit', sha: targetSha },
     };
-    const evidence = verifyBlindedHoldoutTombstoneCreationV1({
+    const evidence = verifyBlindedHoldoutTombstoneCreationV2({
       spec,
       createStatus: 201,
       createResponse: exactResponse,
@@ -127,43 +158,57 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     });
 
     expect(spec.ref).toMatch(/^refs\/tags\/memberry-mem002c3-burn\/[0-9a-f]{64}$/);
-    expect(evidence).toMatchObject({ creationStatus: 201, verificationStatus: 200, targetSha });
-    expect(() => verifyBlindedHoldoutTombstoneCreationV1({
-      spec,
-      createStatus: 422,
-      createResponse: exactResponse,
+    expect(evidence).toMatchObject({
+      creationStatus: 201,
       verificationStatus: 200,
-      verificationResponse: exactResponse,
-    })).toThrow('mem002c3_protocol:tombstone_race');
+      targetSha,
+    });
+    expect(() =>
+      verifyBlindedHoldoutTombstoneCreationV2({
+        spec,
+        createStatus: 422,
+        createResponse: exactResponse,
+        verificationStatus: 200,
+        verificationResponse: exactResponse,
+      }),
+    ).toThrow('mem002c3_protocol:tombstone_race');
     for (const response of [
-      { ref: 'refs/tags/memberry-mem002c3-burn/foreign', object: exactResponse.object },
+      {
+        ref: 'refs/tags/memberry-mem002c3-burn/foreign',
+        object: exactResponse.object,
+      },
       { ref: spec.ref, object: { type: 'commit', sha: 'f'.repeat(40) } },
       { ref: spec.ref, object: { type: 'tag', sha: targetSha } },
       { ref: spec.ref },
     ]) {
-      expect(() => verifyBlindedHoldoutTombstoneCreationV1({
-        spec,
-        createStatus: 201,
-        createResponse: response,
-        verificationStatus: 200,
-        verificationResponse: exactResponse,
-      })).toThrow('mem002c3_protocol:tombstone_response');
+      expect(() =>
+        verifyBlindedHoldoutTombstoneCreationV2({
+          spec,
+          createStatus: 201,
+          createResponse: response,
+          verificationStatus: 200,
+          verificationResponse: exactResponse,
+        }),
+      ).toThrow('mem002c3_protocol:tombstone_response');
     }
   });
 
   it('accepts only the exact neutral C2 authority and creates a burned start receipt', async () => {
     const receipt = await policyReceipt();
-    const preflight = validateBlindedHoldoutPreflightV1(preflightOptions(receipt));
-    const spec = buildBlindedHoldoutTombstoneSpecV1(preflight.evaluatedCommitSha);
-    const response = { ref: spec.ref, object: { type: 'commit', sha: spec.targetSha } };
-    const tombstone = verifyBlindedHoldoutTombstoneCreationV1({
+    const preflight = validateBlindedHoldoutPreflightV2(preflightOptions(receipt));
+    const spec = buildBlindedHoldoutTombstoneSpecV2(preflight.evaluatedCommitSha);
+    const response = {
+      ref: spec.ref,
+      object: { type: 'commit', sha: spec.targetSha },
+    };
+    const tombstone = verifyBlindedHoldoutTombstoneCreationV2({
       spec,
       createStatus: 201,
       createResponse: response,
       verificationStatus: 200,
       verificationResponse: response,
     });
-    const start = buildBlindedHoldoutStartReceiptV1(preflight, tombstone);
+    const start = buildBlindedHoldoutStartReceiptV2(preflight, tombstone);
 
     expect(preflight.oneShotKey).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(preflight.policy).toEqual(receipt.policy);
@@ -172,10 +217,31 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     expect(start.workflowRunAttempt).toBe(1);
     expect(start.tombstoneTargetSha).toBe(preflight.evaluatedCommitSha);
     expect(start.tombstoneCreationStatus).toBe(201);
+    expect(start.historicalCandidateSubtreeOid).toBe(BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID);
+    expect(start.currentCheckoutCandidateSubtreeOid).toBe(BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID);
   });
 
   it.each([
-    ['identity', { observedCandidateTreeOid: '0'.repeat(40) }],
+    ['root identity', { observedRepositoryRootTreeOid: '0'.repeat(40) }],
+    ['historical subtree identity', { observedHistoricalCandidateSubtreeOid: '0'.repeat(40) }],
+    ['checkout subtree identity', { observedCheckoutCandidateSubtreeOid: '0'.repeat(40) }],
+    ['missing root identity', { observedRepositoryRootTreeOid: undefined }],
+    ['missing historical identity', { observedHistoricalCandidateSubtreeOid: undefined }],
+    ['missing checkout identity', { observedCheckoutCandidateSubtreeOid: undefined }],
+    [
+      'equal historical and checkout',
+      {
+        observedCheckoutCandidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
+      },
+    ],
+    [
+      'swapped historical and checkout',
+      {
+        observedHistoricalCandidateSubtreeOid: BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
+        observedCheckoutCandidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
+      },
+    ],
+    ['checkout commit mismatch', { observedCheckoutCommitSha: 'e'.repeat(40) }],
     ['dirty', { candidateSubtreeClean: false }],
     ['base ancestry', { integratedBaseIsAncestor: false }],
     ['context escape', { candidateContextOnly: false }],
@@ -187,8 +253,12 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     ['duplicate receipt', { priorAuthoritativeReceiptCount: 1 }],
   ])('fails closed on %s mismatch', async (_name: string, mutation: Record<string, unknown>) => {
     const receipt = await policyReceipt();
-    expect(() => validateBlindedHoldoutPreflightV1({ ...preflightOptions(receipt), ...mutation }))
-      .toThrow(BlindedHoldoutProtocolError);
+    expect(() =>
+      validateBlindedHoldoutPreflightV2({
+        ...preflightOptions(receipt),
+        ...mutation,
+      }),
+    ).toThrow(BlindedHoldoutProtocolError);
   });
 
   it('materializes the exact inherited network, mount, user, privilege, resource, stdin, and process policy', async () => {
@@ -196,13 +266,40 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     const args = buildBlindedHoldoutDockerCreateArgs(receipt, 'memberry-mem002c3@sha256:sealed');
 
     expect(args).toEqual([
-      'container', 'create', '--interactive', '--network', 'none', '--user', '65532:65532',
-      '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-      '--cpus', '0.5', '--memory', '128m', '--memory-swap', '128m', '--pids-limit', '32',
-      '--env', 'LANG=C.UTF-8', '--env', 'LC_ALL=C.UTF-8', '--env', 'TZ=UTC',
-      '--entrypoint', '/usr/local/bin/node', 'memberry-mem002c3@sha256:sealed',
-      '--permission', '--allow-fs-write=/tmp/memberry-sandbox-write-probe',
-      '--disable-proto=throw', '/app/worker.mjs', '-',
+      'container',
+      'create',
+      '--interactive',
+      '--network',
+      'none',
+      '--user',
+      '65532:65532',
+      '--read-only',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges',
+      '--cpus',
+      '0.5',
+      '--memory',
+      '128m',
+      '--memory-swap',
+      '128m',
+      '--pids-limit',
+      '32',
+      '--env',
+      'LANG=C.UTF-8',
+      '--env',
+      'LC_ALL=C.UTF-8',
+      '--env',
+      'TZ=UTC',
+      '--entrypoint',
+      '/usr/local/bin/node',
+      'memberry-mem002c3@sha256:sealed',
+      '--permission',
+      '--allow-fs-write=/tmp/memberry-sandbox-write-probe',
+      '--disable-proto=throw',
+      '/app/worker.mjs',
+      '-',
     ]);
     expect(args).not.toContain('--mount');
     expect(args).not.toContain('--volume');
@@ -213,13 +310,18 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     const receipt = await policyReceipt();
     for (const drifted of [
       { ...receipt, policy: { ...receipt.policy, network: 'bridge' } },
-      { ...receipt, policy: { ...receipt.policy, mounts: { count: 1, tmpfs: [] } } },
+      {
+        ...receipt,
+        policy: { ...receipt.policy, mounts: { count: 1, tmpfs: [] } },
+      },
       { ...receipt, policy: { ...receipt.policy, noNewPrivileges: false } },
     ]) {
-      expect(() => validateBlindedHoldoutPreflightV1({
-        ...preflightOptions(receipt),
-        receipt: drifted as never,
-      })).toThrow('mem002c3_protocol:policy_authority');
+      expect(() =>
+        validateBlindedHoldoutPreflightV2({
+          ...preflightOptions(receipt),
+          receipt: drifted as never,
+        }),
+      ).toThrow('mem002c3_protocol:policy_authority');
     }
   });
 
@@ -229,7 +331,7 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
       events.push('oracle');
       return Object.freeze([]);
     });
-    const evidence = await scoreSealedBlindedHoldoutV1({
+    const evidence = await scoreSealedBlindedHoldoutV2({
       nodeMajor: 20,
       candidateRunCount: 1,
       candidateStopped: true,
@@ -270,62 +372,67 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     ['self proof substitution', { evidenceMode: 'scorer-conformance' }],
   ])('rejects %s before synthetic oracle access', async (_name: string, mutation: Record<string, unknown>) => {
     const loadOracles = vi.fn(async () => Object.freeze([]));
-    await expect(scoreSealedBlindedHoldoutV1({
-      nodeMajor: 22,
-      candidateRunCount: 1,
-      candidateStopped: true,
-      evidenceMode: 'sealed-candidate-prediction',
-      predictionBytes: new TextEncoder().encode('{}'),
-      loadInputs: async () => Object.freeze([]),
-      parsePrediction: () => Object.freeze({ predictions: Object.freeze([]) }),
-      loadOracles,
-      score: () => report(),
-      ...mutation,
-    } as never)).rejects.toThrow(/^mem002c3_protocol:/);
-    expect(loadOracles).not.toHaveBeenCalled();
-  });
-
-  it('keeps oracle access at zero for bounded-output, schema, corpus, order, and substitution failures', async () => {
-    for (const code of ['output', 'schema', 'corpus', 'order', 'substitution']) {
-      const loadOracles = vi.fn(async () => Object.freeze([]));
-      await expect(scoreSealedBlindedHoldoutV1({
+    await expect(
+      scoreSealedBlindedHoldoutV2({
         nodeMajor: 22,
         candidateRunCount: 1,
         candidateStopped: true,
         evidenceMode: 'sealed-candidate-prediction',
         predictionBytes: new TextEncoder().encode('{}'),
         loadInputs: async () => Object.freeze([]),
-        parsePrediction: () => { throw new Error(`sensitive-${code}`); },
+        parsePrediction: () => Object.freeze({ predictions: Object.freeze([]) }),
         loadOracles,
         score: () => report(),
-      })).rejects.toThrow('mem002c3_protocol:prediction_validation');
+        ...mutation,
+      } as never),
+    ).rejects.toThrow(/^mem002c3_protocol:/);
+    expect(loadOracles).not.toHaveBeenCalled();
+  });
+
+  it('keeps oracle access at zero for bounded-output, schema, corpus, order, and substitution failures', async () => {
+    for (const code of ['output', 'schema', 'corpus', 'order', 'substitution']) {
+      const loadOracles = vi.fn(async () => Object.freeze([]));
+      await expect(
+        scoreSealedBlindedHoldoutV2({
+          nodeMajor: 22,
+          candidateRunCount: 1,
+          candidateStopped: true,
+          evidenceMode: 'sealed-candidate-prediction',
+          predictionBytes: new TextEncoder().encode('{}'),
+          loadInputs: async () => Object.freeze([]),
+          parsePrediction: () => {
+            throw new Error(`sensitive-${code}`);
+          },
+          loadOracles,
+          score: () => report(),
+        }),
+      ).rejects.toThrow('mem002c3_protocol:prediction_validation');
       expect(loadOracles).not.toHaveBeenCalled();
     }
   });
 
   it('keeps the scorer custody module behind the post-validation oracle callback', async () => {
-    const source = await readFile(
-      `${REPO_ROOT}/bench/lab/admission-features/scorer-only/blinded-holdout.ts`,
-      'utf8',
-    );
+    const source = await readFile(`${REPO_ROOT}/bench/lab/admission-features/scorer-only/blinded-holdout.ts`, 'utf8');
     expect(source).not.toMatch(/^import .*['"]\.\/load\.js['"];?$/m);
-    expect(source.indexOf("loadOracles: async () => {")).toBeGreaterThan(source.indexOf('parsePrediction:'));
-    expect(source.indexOf("await import('./load.js')")).toBeGreaterThan(source.indexOf("loadOracles: async () => {"));
+    expect(source.indexOf('loadOracles: async () => {')).toBeGreaterThan(source.indexOf('parsePrediction:'));
+    expect(source.indexOf("await import('./load.js')")).toBeGreaterThan(source.indexOf('loadOracles: async () => {'));
   });
 
   it('rejects oversized candidate output before synthetic oracle access', async () => {
     const loadOracles = vi.fn(async () => Object.freeze([]));
-    await expect(scoreSealedBlindedHoldoutV1({
-      nodeMajor: 22,
-      candidateRunCount: 1,
-      candidateStopped: true,
-      evidenceMode: 'sealed-candidate-prediction',
-      predictionBytes: new Uint8Array(32_769),
-      loadInputs: async () => Object.freeze([]),
-      parsePrediction: () => Object.freeze({ predictions: Object.freeze([]) }),
-      loadOracles,
-      score: () => report(),
-    })).rejects.toThrow('mem002c3_protocol:prediction_validation');
+    await expect(
+      scoreSealedBlindedHoldoutV2({
+        nodeMajor: 22,
+        candidateRunCount: 1,
+        candidateStopped: true,
+        evidenceMode: 'sealed-candidate-prediction',
+        predictionBytes: new Uint8Array(32_769),
+        loadInputs: async () => Object.freeze([]),
+        parsePrediction: () => Object.freeze({ predictions: Object.freeze([]) }),
+        loadOracles,
+        score: () => report(),
+      }),
+    ).rejects.toThrow('mem002c3_protocol:prediction_validation');
     expect(loadOracles).not.toHaveBeenCalled();
   });
 
@@ -336,7 +443,7 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
       availableAgreementCount: 11,
       valueMismatchCount: 1,
     });
-    const evidence = await scoreSealedBlindedHoldoutV1({
+    const evidence = await scoreSealedBlindedHoldoutV2({
       nodeMajor: 22,
       candidateRunCount: 1,
       candidateStopped: true,
@@ -357,8 +464,7 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
       passed: false,
     });
     expect(JSON.stringify(evidence)).not.toMatch(/scenarioId|features|dimensions|valuePermille|availableLabelCount|unavailableLabelCount/);
-    expect(() => assertBlindedHoldoutPromotionV1({ outcome: 'failed' }))
-      .toThrow('mem002c3_protocol:agreement');
+    expect(() => assertBlindedHoldoutPromotionV2({ outcome: 'failed' })).toThrow('mem002c3_protocol:agreement');
   });
 
   it('prevalidates exact custody paths and proves private evidence cleanup before receipt creation', async () => {
@@ -370,14 +476,19 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     };
     try {
       await Promise.all(Object.values(paths).map((path) => writeFile(path, '{}\n')));
-      await expect(removeBlindedHoldoutPrivateEvidenceV1({
-        custodyDirectory: custody,
-        ...paths,
-        node22Path: join(custody, 'not-node22.json'),
-      })).rejects.toThrow('mem002c3_protocol:cleanup');
+      await expect(
+        removeBlindedHoldoutPrivateEvidenceV2({
+          custodyDirectory: custody,
+          ...paths,
+          node22Path: join(custody, 'not-node22.json'),
+        }),
+      ).rejects.toThrow('mem002c3_protocol:cleanup');
       await access(paths.node20Path);
 
-      await removeBlindedHoldoutPrivateEvidenceV1({ custodyDirectory: custody, ...paths });
+      await removeBlindedHoldoutPrivateEvidenceV2({
+        custodyDirectory: custody,
+        ...paths,
+      });
       expect(await readdir(custody)).toEqual([]);
     } finally {
       await rm(custody, { recursive: true, force: true });
@@ -408,15 +519,17 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     expect(workflow).toContain('--memory-swap 128m --pids-limit 32');
     expect(workflow).not.toMatch(/--mount|--volume|--tmpfs/);
     expect(workflow).toContain('timeout --signal=KILL 5s');
+    expect(workflow).toContain('[[ "$observed_checkout_commit_sha" == "$GITHUB_SHA" ]]');
     expect(workflow).toContain('head -c 32769');
     expect(workflow).toContain('head -c 1025');
-    expect(workflow).toContain("-le 32768");
-    expect(workflow).toContain("-le 1024");
+    expect(workflow).toContain('-le 32768');
+    expect(workflow).toContain('-le 1024');
     expect(workflow).not.toContain('run.log');
     expect(workflow).not.toMatch(/gh api[\s\S]{0,240}--slurp[\s\S]{0,240}--(?:jq|template)/);
     expect(workflow).toContain("node -e 'const pages = JSON.parse");
     expect(workflow).toContain('typeof artifact.name !== "string"');
-    expect(workflow).toContain('artifact.name === process.env.ARTIFACT_NAME');
+    expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED_KEY}`');
+    expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.V2_KEY}`');
     expect(workflow).not.toContain('expired == false');
     expect(workflow).toContain('Upload only aggregate receipt evidence');
     expect(workflow).toContain('path: ${{ env.MEMBERRY_C3_PUBLIC_DIR }}/start.json');
@@ -437,20 +550,18 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
       spawnSync(process.execPath, ['-e', parser!], {
         input: JSON.stringify(pages),
         encoding: 'utf8',
-        env: { ...process.env, ARTIFACT_NAME: 'target' },
+        env: { ...process.env, RETIRED_KEY: 'retired', V2_KEY: 'current' },
       });
 
-    const valid = run([{ artifacts: [{ name: 'other' }, { name: 'target' }] }]);
+    const valid = run([
+      {
+        artifacts: [{ name: 'other' }, { name: 'memberry-mem002c3-burn-retired' }, { name: 'memberry-mem002c3-result-current-123' }],
+      },
+    ]);
     expect(valid.status).toBe(0);
-    expect(valid.stdout).toBe('1');
+    expect(valid.stdout).toBe('1 1');
 
-    for (const malformed of [
-      [],
-      [{}],
-      [{ artifacts: null }],
-      [{ artifacts: [{}] }],
-      [{ artifacts: [{ name: 7 }] }],
-    ]) {
+    for (const malformed of [[], [{}], [{ artifacts: null }], [{ artifacts: [{}] }], [{ artifacts: [{ name: 7 }] }]]) {
       expect(run(malformed).status).not.toBe(0);
     }
   });

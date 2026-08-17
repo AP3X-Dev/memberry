@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: memberry-mem002c3-blinded-holdout-v1
+  group: memberry-mem002c3-blinded-holdout-v2
   cancel-in-progress: false
 
 jobs:
@@ -17,10 +17,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      POLICY_RECEIPT: bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v1.json
+      POLICY_RECEIPT: bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v2.json
       SCORER_ENTRY: bench/lab/admission-features/scorer-only/blinded-holdout.ts
       CANDIDATE_COMMIT_SHA: 5a111761668d9370d5163f64e195f0dda44b55af
-      CANDIDATE_TREE_OID: 94c75dd3a36a708ce6add1f10eaf606fa4ffea8d
+      REPOSITORY_ROOT_TREE_OID: 94c75dd3a36a708ce6add1f10eaf606fa4ffea8d
+      HISTORICAL_CANDIDATE_SUBTREE_OID: 03d7c50515f6ab767fd41b7d41bd231531a4ab58
+      CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID: 9e578491f2e38bf1c9df21ee13261a4d5d64e2ec
+      RETIRED_V1_ONE_SHOT_KEY: 334f7e05460d405878a758a6172057fbc1fdac5d3696fc5a8dbe17b8ab070935
+      KNOWN_FAILED_V1_RUN_ID: "32001044115"
       INPUT_SHA256: sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24
       OUTPUT_SHA256: sha256:5b43576a3b7b2f19c8dc8280b4259783c53643a2f620aa35abea7dfaa8586a83
       IMAGE_SHA256: sha256:a1cd73a3036419932ff777d0418690831495059a09d3ffbf9ae68b668d695843
@@ -60,32 +64,43 @@ jobs:
             printf 'MEMBERRY_C3_IMAGE_REF=%s\n' "$image_ref"
           } >>"$GITHUB_ENV"
 
-      - name: Derive one-shot key and collect non-authoritative artifact evidence
+      - name: Derive v2 one-shot key and reject retired or current authority
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          one_shot_key="$(npx tsx -e "import { blindedHoldoutOneShotKeyV1 } from './bench/lab/admission-features/scorer-only/blinded-holdout-artifact.ts'; process.stdout.write(blindedHoldoutOneShotKeyV1().slice(7));")"
+          one_shot_key="$(npx tsx -e "import { blindedHoldoutOneShotKeyV2 } from './bench/lab/admission-features/scorer-only/blinded-holdout-artifact.ts'; process.stdout.write(blindedHoldoutOneShotKeyV2().slice(7));")"
           [[ "$one_shot_key" =~ ^[0-9a-f]{64}$ ]]
           burn_artifact_name="memberry-mem002c3-burn-${one_shot_key}"
           result_artifact_name="memberry-mem002c3-result-${one_shot_key}-${GITHUB_RUN_ID}"
-          prior="$(
+          authority_counts="$(
             gh api --method GET --paginate --slurp \
               "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
-              | ARTIFACT_NAME="$burn_artifact_name" node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); for (const artifact of page.artifacts) { if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact) || typeof artifact.name !== "string") process.exit(2); if (artifact.name === process.env.ARTIFACT_NAME) count += 1; } } process.stdout.write(String(count));'
+              | RETIRED_KEY="$RETIRED_V1_ONE_SHOT_KEY" V2_KEY="$one_shot_key" node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let retired = 0; let v2 = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); for (const artifact of page.artifacts) { if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact) || typeof artifact.name !== "string") process.exit(2); if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED_KEY}-`)) retired += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.V2_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.V2_KEY}-`)) v2 += 1; } } process.stdout.write(`${retired} ${v2}`);'
           )"
-          [[ "$prior" =~ ^[0-9]+$ ]]
-          if [[ "$prior" != '0' ]]; then
-            printf '%s\n' 'mem002c3_protocol:duplicate_attempt' >&2
-            exit 1
-          fi
+          read -r retired_artifacts v2_artifacts <<<"$authority_counts"
+          [[ "$retired_artifacts" =~ ^[0-9]+$ && "$v2_artifacts" =~ ^[0-9]+$ ]]
+          failed_run_artifacts="$(
+            gh api --method GET --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${KNOWN_FAILED_V1_RUN_ID}/artifacts?per_page=100" \
+              | node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); count += page.artifacts.length; } process.stdout.write(String(count));'
+          )"
+          [[ "$failed_run_artifacts" =~ ^[0-9]+$ ]]
+          api_root="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          retired_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V1_ONE_SHOT_KEY}")"
+          v2_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${one_shot_key}")"
+          npx tsx "$SCORER_ENTRY" burn-authority-authorize \
+            "$retired_lookup_status" "$v2_lookup_status" "$retired_artifacts" \
+            "$v2_artifacts" "$failed_run_artifacts"
           {
             printf 'MEMBERRY_ONE_SHOT_KEY=%s\n' "$one_shot_key"
             printf 'MEMBERRY_BURN_ARTIFACT_NAME=%s\n' "$burn_artifact_name"
             printf 'MEMBERRY_RESULT_ARTIFACT_NAME=%s\n' "$result_artifact_name"
             printf 'MEMBERRY_PRIOR_AUTHORITATIVE_RECEIPTS=0\n'
-            printf 'MEMBERRY_PRIOR_EVIDENCE_ARTIFACT_COUNT=%s\n' "$prior"
+            printf 'MEMBERRY_RETIRED_V1_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_artifacts"
+            printf 'MEMBERRY_PRIOR_EVIDENCE_ARTIFACT_COUNT=%s\n' "$v2_artifacts"
+            printf 'MEMBERRY_KNOWN_FAILED_V1_RUN_ARTIFACT_COUNT=%s\n' "$failed_run_artifacts"
           } >>"$GITHUB_ENV"
 
       - name: Export exact candidate-only build context
@@ -93,9 +108,17 @@ jobs:
         run: |
           set -euo pipefail
           git cat-file -e "${CANDIDATE_COMMIT_SHA}^{commit}"
-          observed_tree_oid="$(git rev-parse \
+          observed_checkout_commit_sha="$(git rev-parse HEAD)"
+          [[ "$observed_checkout_commit_sha" == "$GITHUB_SHA" ]]
+          observed_repository_root_tree_oid="$(git rev-parse "${CANDIDATE_COMMIT_SHA}^{tree}")"
+          [[ "$observed_repository_root_tree_oid" == "$REPOSITORY_ROOT_TREE_OID" ]]
+          observed_historical_candidate_subtree_oid="$(git rev-parse \
             "${CANDIDATE_COMMIT_SHA}:bench/lab/admission-features/candidate")"
-          [[ "$observed_tree_oid" == "$CANDIDATE_TREE_OID" ]]
+          [[ "$observed_historical_candidate_subtree_oid" == "$HISTORICAL_CANDIDATE_SUBTREE_OID" ]]
+          observed_checkout_candidate_subtree_oid="$(git rev-parse \
+            "HEAD:bench/lab/admission-features/candidate")"
+          [[ "$observed_checkout_candidate_subtree_oid" == "$CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID" ]]
+          [[ "$observed_checkout_candidate_subtree_oid" != "$observed_historical_candidate_subtree_oid" ]]
           git archive --format=tar \
             "${CANDIDATE_COMMIT_SHA}:bench/lab/admission-features/candidate" \
             | tar -xf - -C "$MEMBERRY_C3_CONTEXT_DIR"
@@ -107,7 +130,9 @@ jobs:
           resolved_secret="$(realpath "$MEMBERRY_C3_SECRET_DIR")"
           [[ "$resolved_context" == "$resolved_secret"/* ]]
           printf 'MEMBERRY_CANDIDATE_CONTEXT_ONLY=true\n' >>"$GITHUB_ENV"
-          printf 'MEMBERRY_OBSERVED_CANDIDATE_TREE_OID=%s\n' "$observed_tree_oid" >>"$GITHUB_ENV"
+          printf 'MEMBERRY_OBSERVED_REPOSITORY_ROOT_TREE_OID=%s\n' "$observed_repository_root_tree_oid" >>"$GITHUB_ENV"
+          printf 'MEMBERRY_OBSERVED_HISTORICAL_CANDIDATE_SUBTREE_OID=%s\n' "$observed_historical_candidate_subtree_oid" >>"$GITHUB_ENV"
+          printf 'MEMBERRY_OBSERVED_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID=%s\n' "$observed_checkout_candidate_subtree_oid" >>"$GITHUB_ENV"
 
       - name: Prepare and bind public input before oracle custody
         shell: bash
