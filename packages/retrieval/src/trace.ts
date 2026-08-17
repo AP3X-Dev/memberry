@@ -91,11 +91,11 @@ export type RetrievalTraceIncompleteReason =
 
 const ALGORITHMS = ['ranked-v1', 'deterministic-v1', 'deterministic-v2'] as const;
 const SOURCE_TYPES = ['semantic', 'episodic', 'symbol', 'arch_entity', 'aspect', 'fact', 'block'] as const;
-const CHANNELS = [
+export const RETRIEVAL_TRACE_CHANNEL_ORDER = Object.freeze([
   'memory.scope', 'memory.semantic-vector', 'memory.episodic-vector', 'memory.fact', 'memory.block', 'memory.graph',
   'code.fulltext', 'code.lexical-vector', 'code.dense-vector', 'code.semantic-vector',
   'arch.fulltext', 'arch.hierarchy', 'arch.dependency', 'arch.aspect', 'arch.entity',
-] as const;
+] as const);
 const FILTERS = [
   'source-enabled', 'tenant', 'project', 'entity', 'tag', 'temporal', 'language', 'kind',
   'dedup', 'candidate-window', 'mmr', 'limit', 'token-budget',
@@ -139,11 +139,11 @@ const FILTER_EXCLUSION_REASON: Readonly<Record<RetrievalTraceFilterName, Retriev
   'token-budget': 'token-budget',
 });
 
-const channelOrder = new Map(CHANNELS.map((channel, index) => [channel, index]));
+const channelOrder = new Map(RETRIEVAL_TRACE_CHANNEL_ORDER.map((channel, index) => [channel, index]));
 const deterministicV2ChannelOrderValues: readonly RetrievalTraceChannel[] = Object.freeze([
   'arch.fulltext',
   ...RETRIEVAL_TRACE_DETERMINISTIC_OUTPUT_CHANNEL_ORDER_V2,
-  ...CHANNELS.filter((channel) => channel !== 'arch.fulltext'
+  ...RETRIEVAL_TRACE_CHANNEL_ORDER.filter((channel) => channel !== 'arch.fulltext'
     && !RETRIEVAL_TRACE_DETERMINISTIC_OUTPUT_CHANNEL_ORDER_V2.includes(
       channel as RetrievalTraceDeterministicOutputChannelV2,
     )),
@@ -568,7 +568,7 @@ function validateRequestShape(
   }
   const planned = denseArray(request.plannedChannels, HARD_LIMITS.plannedChannels, 'trace.requestShape.plannedChannels', errors);
   if (planned) {
-    if (planned.some((channel) => !enumHas(CHANNELS, channel))) errors.push('trace.requestShape.plannedChannels has invalid channels');
+    if (planned.some((channel) => !enumHas(RETRIEVAL_TRACE_CHANNEL_ORDER, channel))) errors.push('trace.requestShape.plannedChannels has invalid channels');
     if (new Set(planned).size !== planned.length) errors.push('trace.requestShape.plannedChannels has duplicates');
     const order = orderForAlgorithm(algorithmVersion);
     const sorted = [...planned].sort((a, b) => (order.get(a as RetrievalTraceChannel) ?? 99) - (order.get(b as RetrievalTraceChannel) ?? 99));
@@ -607,7 +607,7 @@ function validateCandidate(
     if (!channel) return;
     exactKeys(channel, ['channel', 'rank', 'score'], channelLabel, errors);
     requireKeys(channel, ['channel', 'rank'], channelLabel, errors);
-    if (!enumHas(CHANNELS, channel.channel)) errors.push(`${channelLabel}.channel is invalid`);
+    if (!enumHas(RETRIEVAL_TRACE_CHANNEL_ORDER, channel.channel)) errors.push(`${channelLabel}.channel is invalid`);
     if (!validInteger(channel.rank, 1, HARD_LIMITS.candidates)) errors.push(`${channelLabel}.rank is outside semantic bounds`);
     if (channel.score !== undefined) validateRoundedNumber(channel.score, `${channelLabel}.score`, errors, -1, 1);
   });
@@ -699,13 +699,13 @@ function validateEvent(value: unknown, index: number, errors: string[]): void {
     case 'channel-attempt':
       exactKeys(event, ['sequence', 'kind', 'channel'], label, errors);
       requireKeys(event, ['sequence', 'kind', 'channel'], label, errors);
-      if (!enumHas(CHANNELS, event.channel)) errors.push(`${label}.channel is invalid`);
+      if (!enumHas(RETRIEVAL_TRACE_CHANNEL_ORDER, event.channel)) errors.push(`${label}.channel is invalid`);
       break;
     case 'channel-terminal': {
       const success = event.outcome === 'success';
       exactKeys(event, success ? ['sequence', 'kind', 'channel', 'outcome'] : ['sequence', 'kind', 'channel', 'outcome', 'code'], label, errors);
       requireKeys(event, success ? ['sequence', 'kind', 'channel', 'outcome'] : ['sequence', 'kind', 'channel', 'outcome', 'code'], label, errors);
-      if (!enumHas(CHANNELS, event.channel)) errors.push(`${label}.channel is invalid`);
+      if (!enumHas(RETRIEVAL_TRACE_CHANNEL_ORDER, event.channel)) errors.push(`${label}.channel is invalid`);
       if (event.outcome !== 'success' && event.outcome !== 'safe-failure') errors.push(`${label}.outcome is invalid`);
       if (event.outcome === 'safe-failure' && !enumHas(FAILURE_CODES, event.code)) errors.push(`${label}.code is invalid`);
       break;
@@ -1643,7 +1643,7 @@ export class RetrievalTraceCollector {
   }
 
   private assertPlannedChannel(channel: RetrievalTraceChannel): void {
-    if (!enumHas(CHANNELS, channel) || !this.requestShape.plannedChannels.includes(channel)) {
+    if (!enumHas(RETRIEVAL_TRACE_CHANNEL_ORDER, channel) || !this.requestShape.plannedChannels.includes(channel)) {
       throw new RetrievalTraceValidationError('channel is not planned');
     }
   }

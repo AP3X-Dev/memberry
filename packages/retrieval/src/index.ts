@@ -54,6 +54,41 @@ export type {
   QueryPlanContractErrorCode,
 } from './query-plan.js';
 
+// Closed deterministic candidate-channel boundary (RET-003A)
+export {
+  CANDIDATE_CHANNEL_CONTRACT_ID,
+  CANDIDATE_CHANNEL_CONTRACT_VERSION,
+  CANDIDATE_CHANNEL_MAX_PLANNED,
+  CANDIDATE_CHANNEL_MAX_PER_CHANNEL,
+  CANDIDATE_CHANNEL_DEFAULT_AGGREGATE,
+  CANDIDATE_CHANNEL_MAX_AGGREGATE,
+  CANDIDATE_CHANNEL_MAX_STRING_BYTES,
+  CANDIDATE_CHANNEL_MAX_AGGREGATE_STRING_BYTES,
+  CANDIDATE_CHANNEL_MAX_SERIALIZED_BYTES,
+  CandidateChannelContractError,
+  parseCandidateChannelRequestV1,
+  canonicalCandidateChannelRequestV1,
+  canonicalCandidateChannelRunnerResultV1,
+  executeCandidateChannelsV1,
+} from './candidate-channel.js';
+export type {
+  CandidateChannelFailureCodeV1,
+  CandidateChannelExplicitFailureCodeV1,
+  CandidateChannelTemporalFrameV1,
+  CandidateChannelLimitsV1,
+  CandidateChannelRequestV1,
+  CandidateChannelProvenanceV1,
+  CandidateChannelCandidateV1,
+  CandidateChannelRunnerResultV1,
+  CandidateChannelSerializedResultV1,
+  CandidateChannelRunnerV1,
+  CandidateChannelRunnerRegistrationV1,
+  CandidateChannelRunnerRosterV1,
+  CandidateChannelSettlementV1,
+  CandidateChannelExecutionResultV1,
+  CandidateChannelContractErrorCodeV1,
+} from './candidate-channel.js';
+
 // Read-only project/tenant-qualified stable Entity-ID resolution (RET-002B)
 export {
   SCOPED_ENTITY_RESOLVER_MAX_RESULTS,
@@ -99,6 +134,7 @@ export type { AssemblerCodeLayer, AssemblerMemoryLayer, TracedUnifiedContext } f
 export {
   RETRIEVAL_TRACE_VERSION,
   RETRIEVAL_TRACE_NUMBER_DECIMALS,
+  RETRIEVAL_TRACE_CHANNEL_ORDER,
   RETRIEVAL_TRACE_DETERMINISTIC_OUTPUT_CHANNEL_ORDER_V2,
   RetrievalTraceCollector,
   RetrievalTraceValidationError,
