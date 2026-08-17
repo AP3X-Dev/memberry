@@ -13,6 +13,8 @@ import {
   buildBlindedHoldoutDockerCreateArgs,
   buildBlindedHoldoutStartReceiptV2,
   buildBlindedHoldoutTombstoneSpecV2,
+  canonicalBlindedHoldoutStartReceiptV2,
+  parseBlindedHoldoutStartReceiptV2,
   removeBlindedHoldoutPrivateEvidenceV2,
   scoreSealedBlindedHoldoutV2,
   validateBlindedHoldoutTombstoneAbsenceV2,
@@ -24,6 +26,7 @@ import {
   BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
   BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
   BLINDED_HOLDOUT_INPUT_SHA256,
+  BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
   BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
   BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
 } from '../blinded-holdout-artifact.js';
@@ -36,6 +39,7 @@ async function policyReceipt() {
   const legacy = parseAdmissionC2RuntimePolicyReceiptV1(new Uint8Array(await readFile(POLICY_PATH)));
   return {
     receiptSha256: BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
+    canonicalBytesSha256: BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
     binding: {
       candidateCommitSha: BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA,
       repositoryRootTreeOid: BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
@@ -212,6 +216,10 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
 
     expect(preflight.oneShotKey).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(preflight.policy).toEqual(receipt.policy);
+    expect(preflight.policyReceiptSha256).toBe(BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256);
+    expect(preflight.policyReceiptCanonicalBytesSha256).toBe(
+      BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
+    );
     expect(start.state).toBe('burned-before-candidate-start');
     expect(start.candidateRunCount).toBe(0);
     expect(start.workflowRunAttempt).toBe(1);
@@ -219,6 +227,55 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     expect(start.tombstoneCreationStatus).toBe(201);
     expect(start.historicalCandidateSubtreeOid).toBe(BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID);
     expect(start.currentCheckoutCandidateSubtreeOid).toBe(BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID);
+    expect(start.policyReceiptSha256).toBe(BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256);
+    expect(start.policyReceiptCanonicalBytesSha256).toBe(BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256);
+
+    const canonicalStart = canonicalBlindedHoldoutStartReceiptV2(start);
+    const policyHashMutations = [
+      (value: Record<string, unknown>) => delete value.policyReceiptSha256,
+      (value: Record<string, unknown>) => delete value.policyReceiptCanonicalBytesSha256,
+      (value: Record<string, unknown>) => {
+        [value.policyReceiptSha256, value.policyReceiptCanonicalBytesSha256] = [
+          value.policyReceiptCanonicalBytesSha256,
+          value.policyReceiptSha256,
+        ];
+      },
+      (value: Record<string, unknown>) => {
+        value.policyReceiptSha256 = SHA_A;
+      },
+      (value: Record<string, unknown>) => {
+        value.policyReceiptCanonicalBytesSha256 = SHA_A;
+      },
+    ];
+    for (const mutate of policyHashMutations) {
+      const value = JSON.parse(canonicalStart) as Record<string, unknown>;
+      mutate(value);
+      expect(() =>
+        parseBlindedHoldoutStartReceiptV2(new TextEncoder().encode(`${JSON.stringify(value)}\n`)),
+      ).toThrow('mem002c3_protocol:start_receipt');
+    }
+  });
+
+  it('rejects missing, swapped, or substituted neutral policy hashes', async () => {
+    const receipt = await policyReceipt();
+    for (const mutation of [
+      { ...receipt, receiptSha256: undefined },
+      { ...receipt, canonicalBytesSha256: undefined },
+      {
+        ...receipt,
+        receiptSha256: receipt.canonicalBytesSha256,
+        canonicalBytesSha256: receipt.receiptSha256,
+      },
+      { ...receipt, receiptSha256: SHA_A },
+      { ...receipt, canonicalBytesSha256: SHA_A },
+    ]) {
+      expect(() =>
+        validateBlindedHoldoutPreflightV2({
+          ...preflightOptions(receipt),
+          receipt: mutation as never,
+        }),
+      ).toThrow('mem002c3_protocol:policy_authority');
+    }
   });
 
   it.each([

@@ -1,14 +1,20 @@
-import { readFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { describe, expect, it } from "vitest";
 
 import {
   BLINDED_HOLDOUT_CANDIDATE_SHA256,
+  BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA,
   BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
   BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
   BLINDED_HOLDOUT_INPUT_SHA256,
   BLINDED_HOLDOUT_ORACLE_SHA256,
+  BLINDED_HOLDOUT_BASE_IMAGE,
+  BLINDED_HOLDOUT_PLATFORM,
+  BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
   BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
   BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
   BLINDED_HOLDOUT_RETIRED_V1_ONE_SHOT_KEY,
@@ -21,8 +27,117 @@ import {
 } from "../blinded-holdout.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..", "..", "..");
+const SCORER_ENTRY = join(
+  REPO_ROOT,
+  "bench/lab/admission-features/scorer-only/blinded-holdout.ts",
+);
+const POLICY_V2_PATH = join(
+  REPO_ROOT,
+  "bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v2.json",
+);
+const POLICY_V1_PATH = join(
+  REPO_ROOT,
+  "bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v1.json",
+);
+const TSX_CLI = join(REPO_ROOT, "node_modules/tsx/dist/cli.mjs");
+
+function runPreflight(
+  receiptPath: string,
+  outputPath: string,
+  extraPaths: readonly string[] = [],
+) {
+  const head = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  }).trim();
+  return spawnSync(
+    process.execPath,
+    [
+      TSX_CLI,
+      SCORER_ENTRY,
+      "preflight",
+      receiptPath,
+      outputPath,
+      ...extraPaths,
+    ],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_EVENT_NAME: "workflow_dispatch",
+        GITHUB_REPOSITORY: "AP3X-Dev/memberry",
+        GITHUB_RUN_ID: "1",
+        GITHUB_RUN_ATTEMPT: "1",
+        GITHUB_SHA: head,
+        MEMBERRY_PRIOR_AUTHORITATIVE_RECEIPTS: "0",
+        MEMBERRY_CANDIDATE_CONTEXT_ONLY: "true",
+        MEMBERRY_OBSERVED_PLATFORM: BLINDED_HOLDOUT_PLATFORM,
+        MEMBERRY_OBSERVED_BASE_IMAGE: BLINDED_HOLDOUT_BASE_IMAGE,
+        MEMBERRY_OBSERVED_CANDIDATE_COMMIT_SHA:
+          BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA,
+        MEMBERRY_OBSERVED_REPOSITORY_ROOT_TREE_OID:
+          BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
+        MEMBERRY_OBSERVED_HISTORICAL_CANDIDATE_SUBTREE_OID:
+          BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
+        MEMBERRY_OBSERVED_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID:
+          BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
+        MEMBERRY_OBSERVED_INPUT_SHA256: BLINDED_HOLDOUT_INPUT_SHA256,
+      },
+    },
+  );
+}
 
 describe("MEM-002C3 Decision 51 v2 identity repair", () => {
+  it("loads the assembled v2 policy through the real preflight CLI", async () => {
+    const temporary = await mkdtemp(
+      join(tmpdir(), "memberry-mem002c3-assembly-"),
+    );
+    const outputPath = join(temporary, "preflight.json");
+    try {
+      const result = runPreflight(POLICY_V2_PATH, outputPath);
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(JSON.parse(await readFile(outputPath, "utf8"))).toMatchObject({
+        schemaVersion:
+          "memberry.admission-feature-blinded-holdout-preflight.v2",
+        policyReceiptSha256: BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
+        policyReceiptCanonicalBytesSha256:
+          BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
+      });
+
+      const missing = runPreflight(
+        join(temporary, "missing-v2.json"),
+        join(temporary, "missing-preflight.json"),
+      );
+      expect(missing.status).not.toBe(0);
+      expect(missing.stderr).toBe("mem002c3_protocol:policy_authority\n");
+
+      const modifiedV2Path = join(temporary, "modified-v2.json");
+      await writeFile(
+        modifiedV2Path,
+        `${await readFile(POLICY_V2_PATH, "utf8")} `,
+        "utf8",
+      );
+      const modified = runPreflight(
+        modifiedV2Path,
+        join(temporary, "modified-preflight.json"),
+      );
+      expect(modified.status).not.toBe(0);
+      expect(modified.stderr).toBe("mem002c3_protocol:policy_authority\n");
+
+      const callerSelectedLegacy = runPreflight(
+        POLICY_V2_PATH,
+        join(temporary, "arbitrary-legacy-preflight.json"),
+        [POLICY_V1_PATH],
+      );
+      expect(callerSelectedLegacy.status).not.toBe(0);
+      expect(callerSelectedLegacy.stderr).toBe("mem002c3_protocol:command\n");
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+
   it("splits the repository root and candidate subtree identities without an ambiguous tree field", () => {
     expect(BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID).toBe(
       "94c75dd3a36a708ce6add1f10eaf606fa4ffea8d",
@@ -42,6 +157,7 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
     expect(keySource).not.toContain("repositoryRootTreeOid");
     expect(keySource).not.toContain("candidateCommitSha");
     expect(keySource).not.toContain("policyReceiptSha256");
+    expect(keySource).not.toContain("policyReceiptCanonicalBytesSha256");
   });
 
   it("binds the stable pair only and cannot be reopened by infrastructure identity changes", () => {
@@ -61,6 +177,7 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
       currentCheckoutCandidateSubtreeOid: "5".repeat(40),
       candidateCommitSha: "1".repeat(40),
       policyReceiptSha256: `sha256:${"4".repeat(64)}`,
+      policyReceiptCanonicalBytesSha256: `sha256:${"8".repeat(64)}`,
       infrastructureCommitSha: "2".repeat(40),
     };
     infrastructure.repositoryRootTreeOid = "6".repeat(40);
@@ -250,10 +367,17 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
       "'../contracts/c2-runtime-policy-receipt-v2.js'",
     );
     expect(protocol).toContain("'parseAdmissionC2RuntimePolicyReceiptV2'");
+    expect(
+      protocol.match(/await loadPolicyReceipt\(receiptPath\)/g),
+    ).toHaveLength(3);
     expect(workflow).toContain(
       "POLICY_RECEIPT: bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v2.json",
     );
+    expect(workflow).toMatch(/finalize \\\s+"\$POLICY_RECEIPT"/);
     expect(BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256).toBe(
+      "sha256:ff9d0df0e9e5e47da0e34e56294b713ba8a8ce9b216b6bec590b8826f5818f01",
+    );
+    expect(BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256).toBe(
       "sha256:ebad2b9da6dd555c033ff2e7936f0eeeaa0a6552f61d5016125b0b526e133bcb",
     );
   });

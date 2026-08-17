@@ -19,6 +19,7 @@ import {
   BLINDED_HOLDOUT_INPUT_SHA256,
   BLINDED_HOLDOUT_INTEGRATED_BASE_SHA,
   BLINDED_HOLDOUT_PLATFORM,
+  BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
   BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
   BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
   buildBlindedHoldoutReceiptV2,
@@ -41,9 +42,11 @@ const REGISTERED_TOMBSTONE_SPECS = new WeakSet<object>();
 const REGISTERED_TOMBSTONE_EVIDENCE = new WeakSet<object>();
 const NEUTRAL_POLICY_V2_MODULE = '../contracts/c2-runtime-policy-receipt-v2.js';
 const NEUTRAL_POLICY_V2_PARSER_EXPORT = 'parseAdmissionC2RuntimePolicyReceiptV2';
+const NEUTRAL_POLICY_V1_RECEIPT = new URL('../contracts/c2-runtime-policy-receipt.v1.json', import.meta.url);
 
 type AdmissionC2RuntimePolicyReceiptV2 = Readonly<{
   receiptSha256: typeof BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256;
+  canonicalBytesSha256: typeof BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256;
   binding: Readonly<{
     candidateCommitSha: typeof BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA;
     repositoryRootTreeOid: typeof BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID;
@@ -236,6 +239,7 @@ export function parseBlindedHoldoutTombstoneEvidenceV2(bytes: unknown): BlindedH
 function validatePolicyReceipt(receipt: AdmissionC2RuntimePolicyReceiptV2): void {
   if (
     receipt.receiptSha256 !== BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256 ||
+    receipt.canonicalBytesSha256 !== BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256 ||
     receipt.binding.candidateCommitSha !== BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA ||
     receipt.binding.repositoryRootTreeOid !== BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID ||
     receipt.binding.candidateSubtreeOid !== BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID ||
@@ -278,6 +282,7 @@ export interface BlindedHoldoutPreflightV2 {
   readonly historicalCandidateSubtreeOid: typeof BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID;
   readonly currentCheckoutCandidateSubtreeOid: typeof BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID;
   readonly policyReceiptSha256: typeof BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256;
+  readonly policyReceiptCanonicalBytesSha256: typeof BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256;
   readonly policy: AdmissionC2RuntimePolicyReceiptV2['policy'];
 }
 
@@ -335,6 +340,7 @@ export function validateBlindedHoldoutPreflightV2(options: {
     historicalCandidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
     currentCheckoutCandidateSubtreeOid: BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
     policyReceiptSha256: BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
+    policyReceiptCanonicalBytesSha256: BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
     policy: options.receipt.policy,
   });
   REGISTERED_PREFLIGHTS.add(preflight);
@@ -358,6 +364,7 @@ export interface BlindedHoldoutStartReceiptV2 {
   readonly historicalCandidateSubtreeOid: typeof BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID;
   readonly currentCheckoutCandidateSubtreeOid: typeof BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID;
   readonly policyReceiptSha256: typeof BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256;
+  readonly policyReceiptCanonicalBytesSha256: typeof BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256;
   readonly receiptSha256: `sha256:${string}`;
 }
 
@@ -389,6 +396,7 @@ export function buildBlindedHoldoutStartReceiptV2(
     historicalCandidateSubtreeOid: preflight.historicalCandidateSubtreeOid,
     currentCheckoutCandidateSubtreeOid: preflight.currentCheckoutCandidateSubtreeOid,
     policyReceiptSha256: preflight.policyReceiptSha256,
+    policyReceiptCanonicalBytesSha256: preflight.policyReceiptCanonicalBytesSha256,
   });
   const receipt = Object.freeze({
     ...payload,
@@ -437,6 +445,7 @@ export function parseBlindedHoldoutStartReceiptV2(bytes: unknown): BlindedHoldou
       'historicalCandidateSubtreeOid',
       'currentCheckoutCandidateSubtreeOid',
       'policyReceiptSha256',
+      'policyReceiptCanonicalBytesSha256',
       'receiptSha256',
     ];
     if (Reflect.ownKeys(raw).length !== keys.length || Reflect.ownKeys(raw).some((key) => typeof key !== 'string' || !keys.includes(key)))
@@ -463,7 +472,8 @@ export function parseBlindedHoldoutStartReceiptV2(bytes: unknown): BlindedHoldou
     raw.repositoryRootTreeOid !== BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID ||
     raw.historicalCandidateSubtreeOid !== BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID ||
     raw.currentCheckoutCandidateSubtreeOid !== BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID ||
-    raw.policyReceiptSha256 !== BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256
+    raw.policyReceiptSha256 !== BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256 ||
+    raw.policyReceiptCanonicalBytesSha256 !== BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256
   ) {
     fail('start_receipt');
   }
@@ -484,6 +494,7 @@ export function parseBlindedHoldoutStartReceiptV2(bytes: unknown): BlindedHoldou
     historicalCandidateSubtreeOid: raw.historicalCandidateSubtreeOid,
     currentCheckoutCandidateSubtreeOid: raw.currentCheckoutCandidateSubtreeOid,
     policyReceiptSha256: raw.policyReceiptSha256,
+    policyReceiptCanonicalBytesSha256: raw.policyReceiptCanonicalBytesSha256,
   };
   if (raw.receiptSha256 !== sha256(JSON.stringify(payload))) fail('start_receipt');
   const receipt = Object.freeze({
@@ -672,7 +683,22 @@ async function loadPolicyReceipt(path: string): Promise<AdmissionC2RuntimePolicy
     const neutralModule = (await import(NEUTRAL_POLICY_V2_MODULE)) as Record<string, unknown>;
     const parser = neutralModule[NEUTRAL_POLICY_V2_PARSER_EXPORT];
     if (typeof parser !== 'function') fail('policy_authority');
-    const receipt = parser(new Uint8Array(await readFile(path))) as AdmissionC2RuntimePolicyReceiptV2;
+    const [receiptBytes, legacyReceiptBytes] = await Promise.all([readFile(path), readFile(NEUTRAL_POLICY_V1_RECEIPT)]);
+    const parsedReceipt = parser(
+      new Uint8Array(receiptBytes),
+      new Uint8Array(legacyReceiptBytes),
+    ) as Omit<AdmissionC2RuntimePolicyReceiptV2, 'canonicalBytesSha256'>;
+    if (
+      parsedReceipt.receiptSha256 !== BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256 ||
+      sha256(new Uint8Array(receiptBytes)) !== BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256
+    )
+      fail('policy_authority');
+    const receipt = Object.freeze({
+      receiptSha256: parsedReceipt.receiptSha256,
+      canonicalBytesSha256: BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
+      binding: parsedReceipt.binding,
+      policy: parsedReceipt.policy,
+    });
     validatePolicyReceipt(receipt);
     return receipt;
   } catch {
@@ -714,6 +740,7 @@ async function commandPreflight(receiptPath: string, outputPath: string): Promis
     schemaVersion: 'memberry.admission-feature-blinded-holdout-preflight.v2',
     oneShotKey: preflight.oneShotKey,
     policyReceiptSha256: preflight.policyReceiptSha256,
+    policyReceiptCanonicalBytesSha256: preflight.policyReceiptCanonicalBytesSha256,
     integratedBaseSha: preflight.integratedBaseSha,
     evaluatedCommitSha: preflight.evaluatedCommitSha,
     candidateCommitSha: preflight.candidateCommitSha,
@@ -878,6 +905,7 @@ async function commandScore(predictionPath: string, outputPath: string): Promise
 }
 
 async function commandFinalize(
+  receiptPath: string,
   node20Path: string,
   node22Path: string,
   startPath: string,
@@ -885,7 +913,13 @@ async function commandFinalize(
   custodyDirectory: string,
   outputPath: string,
 ): Promise<void> {
+  const policyReceipt = await loadPolicyReceipt(receiptPath);
   const start = parseBlindedHoldoutStartReceiptV2(new Uint8Array(await readFile(startPath)));
+  if (
+    start.policyReceiptSha256 !== policyReceipt.receiptSha256 ||
+    start.policyReceiptCanonicalBytesSha256 !== policyReceipt.canonicalBytesSha256
+  )
+    fail('policy_authority');
   if (start.workflowRunId !== exactEnvironment('GITHUB_RUN_ID', start.workflowRunId)) fail('start_receipt');
   const node20 = parseBlindedHoldoutRuntimeEvidenceV2(new Uint8Array(await readFile(node20Path)));
   const node22 = parseBlindedHoldoutRuntimeEvidenceV2(new Uint8Array(await readFile(node22Path)));
@@ -980,8 +1014,8 @@ async function main(args: readonly string[]): Promise<void> {
   }
   if (command === 'input' && paths.length === 1) return commandInput(paths[0]!);
   if (command === 'score' && paths.length === 2) return commandScore(paths[0]!, paths[1]!);
-  if (command === 'finalize' && paths.length === 6) {
-    return commandFinalize(paths[0]!, paths[1]!, paths[2]!, paths[3]!, paths[4]!, paths[5]!);
+  if (command === 'finalize' && paths.length === 7) {
+    return commandFinalize(paths[0]!, paths[1]!, paths[2]!, paths[3]!, paths[4]!, paths[5]!, paths[6]!);
   }
   if (command === 'verify' && paths.length === 1) return commandVerify(paths[0]!);
   fail('command');

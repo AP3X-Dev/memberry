@@ -79,6 +79,8 @@ test('v2 rejects substituted, missing, equal, malformed, coerced, and ambiguous 
 
 test('v1 and v2 parsers cannot be crossed or used as fallbacks', async () => {
   const { v1, v2 } = await canonicalBytes();
+  assert.throws(() => parseAdmissionC2RuntimePolicyReceiptV2(undefined, v1));
+  assert.throws(() => parseAdmissionC2RuntimePolicyReceiptV2(v2, undefined));
   assert.throws(() => parseAdmissionC2RuntimePolicyReceiptV1(v2));
   assert.throws(() => parseAdmissionC2RuntimePolicyReceiptV2(v1, v1));
   assert.throws(() => parseAdmissionC2RuntimePolicyReceiptV2(v2, v2));

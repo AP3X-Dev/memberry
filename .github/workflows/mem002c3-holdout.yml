@@ -377,6 +377,7 @@ jobs:
         run: |
           set -euo pipefail
           npx tsx "$SCORER_ENTRY" finalize \
+            "$POLICY_RECEIPT" \
             "$MEMBERRY_C3_SECRET_DIR/node20.json" \
             "$MEMBERRY_C3_SECRET_DIR/node22.json" \
             "$MEMBERRY_C3_PUBLIC_DIR/start.json" \

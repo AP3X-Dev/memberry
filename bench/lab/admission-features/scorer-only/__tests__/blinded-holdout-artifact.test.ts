@@ -4,6 +4,8 @@ import {
   BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
   BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
   BLINDED_HOLDOUT_ORACLE_SHA256,
+  BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
+  BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
   BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
   blindedHoldoutOneShotKeyV2,
   buildBlindedHoldoutReceiptV2,
@@ -83,6 +85,10 @@ describe('MEM-002C3 blinded holdout aggregate-only receipt', () => {
     expect(receipt.historicalCandidateSubtreeOid).toBe(BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID);
     expect(receipt.currentCheckoutCandidateSubtreeOid).toBe(BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID);
     expect(receipt.oracleSha256).toBe(BLINDED_HOLDOUT_ORACLE_SHA256);
+    expect(decoded.policyReceiptSha256).toBe(BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256);
+    expect(decoded.policyReceiptCanonicalBytesSha256).toBe(
+      BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
+    );
     expect(receipt.tombstone).toEqual(receiptOptions().tombstone);
     expect(receipt.outcome).toBe('passed');
     expect(receipt.aggregate).toEqual(aggregate());
@@ -179,6 +185,29 @@ describe('MEM-002C3 blinded holdout aggregate-only receipt', () => {
     const forged = JSON.parse(canonical) as Record<string, unknown>;
     forged.extra = true;
     expect(() => parseBlindedHoldoutReceiptV2(new TextEncoder().encode(`${JSON.stringify(forged)}\n`))).toThrow(/^mem002c3_artifact:/);
+    const policyHashMutations = [
+      (value: Record<string, unknown>) => delete value.policyReceiptSha256,
+      (value: Record<string, unknown>) => delete value.policyReceiptCanonicalBytesSha256,
+      (value: Record<string, unknown>) => {
+        [value.policyReceiptSha256, value.policyReceiptCanonicalBytesSha256] = [
+          value.policyReceiptCanonicalBytesSha256,
+          value.policyReceiptSha256,
+        ];
+      },
+      (value: Record<string, unknown>) => {
+        value.policyReceiptSha256 = SHA_A;
+      },
+      (value: Record<string, unknown>) => {
+        value.policyReceiptCanonicalBytesSha256 = SHA_A;
+      },
+    ];
+    for (const mutate of policyHashMutations) {
+      const value = JSON.parse(canonical) as Record<string, unknown>;
+      mutate(value);
+      expect(() => parseBlindedHoldoutReceiptV2(new TextEncoder().encode(`${JSON.stringify(value)}\n`))).toThrow(
+        /^mem002c3_artifact:/,
+      );
+    }
     expect(() => parseBlindedHoldoutReceiptV2(new TextEncoder().encode(canonical.trimEnd()))).toThrow(/^mem002c3_artifact:/);
   });
 });

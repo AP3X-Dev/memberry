@@ -16,7 +16,9 @@ export const BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID = '03d7c50515f6ab7
 export const BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID = '9e578491f2e38bf1c9df21ee13261a4d5d64e2ec' as const;
 export const BLINDED_HOLDOUT_INPUT_SHA256 = 'sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24' as const;
 export const BLINDED_HOLDOUT_ORACLE_SHA256 = 'sha256:3a50b28cba28aa451967b3fbf3bcddfcc8c8f13f11c806cada1096d1f2807574' as const;
-export const BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256 = 'sha256:ebad2b9da6dd555c033ff2e7936f0eeeaa0a6552f61d5016125b0b526e133bcb' as const;
+export const BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256 = 'sha256:ff9d0df0e9e5e47da0e34e56294b713ba8a8ce9b216b6bec590b8826f5818f01' as const;
+export const BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256 =
+  'sha256:ebad2b9da6dd555c033ff2e7936f0eeeaa0a6552f61d5016125b0b526e133bcb' as const;
 export const BLINDED_HOLDOUT_BASE_IMAGE = 'node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9' as const;
 export const BLINDED_HOLDOUT_PLATFORM = 'linux/amd64' as const;
 
@@ -79,6 +81,7 @@ export interface BlindedHoldoutReceiptV2 {
   readonly evidenceMode: 'blinded-holdout';
   readonly oneShotKey: `sha256:${string}`;
   readonly policyReceiptSha256: typeof BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256;
+  readonly policyReceiptCanonicalBytesSha256: typeof BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256;
   readonly integratedBaseSha: typeof BLINDED_HOLDOUT_INTEGRATED_BASE_SHA;
   readonly evaluatedCommitSha: string;
   readonly candidateCommitSha: typeof BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA;
@@ -424,6 +427,7 @@ export function buildBlindedHoldoutReceiptV2(options: {
     evidenceMode: 'blinded-holdout' as const,
     oneShotKey: blindedHoldoutOneShotKeyV2(),
     policyReceiptSha256: BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
+    policyReceiptCanonicalBytesSha256: BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256,
     integratedBaseSha: BLINDED_HOLDOUT_INTEGRATED_BASE_SHA,
     evaluatedCommitSha,
     candidateCommitSha: BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA,
@@ -500,6 +504,7 @@ export function parseBlindedHoldoutReceiptV2(bytes: unknown): BlindedHoldoutRece
       'evidenceMode',
       'oneShotKey',
       'policyReceiptSha256',
+      'policyReceiptCanonicalBytesSha256',
       'integratedBaseSha',
       'evaluatedCommitSha',
       'candidateCommitSha',
@@ -539,6 +544,7 @@ export function parseBlindedHoldoutReceiptV2(bytes: unknown): BlindedHoldoutRece
     raw.evidenceMode !== 'blinded-holdout' ||
     raw.oneShotKey !== blindedHoldoutOneShotKeyV2() ||
     raw.policyReceiptSha256 !== BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256 ||
+    raw.policyReceiptCanonicalBytesSha256 !== BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256 ||
     raw.integratedBaseSha !== BLINDED_HOLDOUT_INTEGRATED_BASE_SHA ||
     raw.candidateCommitSha !== BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA ||
     raw.repositoryRootTreeOid !== BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID ||
