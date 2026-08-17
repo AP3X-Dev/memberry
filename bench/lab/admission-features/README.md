@@ -21,6 +21,23 @@ MEM-002A feature envelopes per scenario. Scorer-only labels remain unopened
 until the artifact passes byte, schema, corpus, canonical, deep-freeze, and
 SHA checks.
 
+## MEM-002C2 neutral runtime-policy receipts
+
+The canonical v1 receipt remains immutable legacy evidence. Its historical
+`candidateTreeOid` field names the repository root tree, so it must not be
+reinterpreted or rewritten. The canonical v2 receipt replaces that ambiguous
+field with distinct `repositoryRootTreeOid` and `candidateSubtreeOid` fields.
+It also binds the exact v1 receipt and canonical v1 byte hashes.
+
+The v2 parser is a closed, separate schema with no v1 fallback. It accepts v2
+only when supplied with the exact canonical v1 bytes and proves that the policy,
+candidate commit and content hashes, runtime image identities, input/output
+hashes, and hosted-evidence binding are unchanged from v1. Unknown fields,
+coercion, cross-version inputs, equal tree identities, and unrelated binding
+drift are rejected. Before either receipt is parsed, v2 also requires pristine
+JSON parse/stringify intrinsics and absent Object/Array prototype `toJSON`
+descriptors so canonical checks cannot invoke ambient serialization hooks.
+
 ## MEM-002C3 blinded holdout agreement
 
 The scorer-owned `blinded-holdout.ts` command and the dedicated
