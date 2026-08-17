@@ -631,9 +631,253 @@ describe('memberry.reranker v1 exact boundaries', () => {
       expect(transport).toHaveBeenCalledTimes(1);
     }
   });
+
+  it('rejects oversized malformed strings before Unicode scanning at every reranker boundary', async () => {
+    const originalCharCodeAt = String.prototype.charCodeAt;
+    let target = '';
+    let targetScans = 0;
+    String.prototype.charCodeAt = function countedCharCodeAt(this: string, index: number): number {
+      if (this === target) targetScans += 1;
+      return originalCharCodeAt.call(this, index);
+    };
+    vi.resetModules();
+    let dynamicContract: typeof import('../reranker.js');
+    try {
+      dynamicContract = await import('../reranker.js');
+    } finally {
+      String.prototype.charCodeAt = originalCharCodeAt;
+    }
+
+    const oversizedMalformed = (maxBytes: number): string => `${'a'.repeat(maxBytes + 1)}\ud800`;
+    const expectRequestBudgetWithoutScan = (run: () => unknown): void => {
+      targetScans = 0;
+      expect(run).toThrow(/request-too-large/);
+      expect(targetScans).toBe(0);
+    };
+
+    try {
+      for (const field of ['providerId', 'modelId', 'calibrationId'] as const) {
+        target = oversizedMalformed(128);
+        targetScans = 0;
+        expect(() => dynamicContract.createRerankerProviderV1({
+          providerId: field === 'providerId' ? target : 'provider-a',
+          modelId: field === 'modelId' ? target : 'model-a',
+          calibrationId: field === 'calibrationId' ? target : 'calibration-a',
+          locality: 'local',
+        }, () => Promise.reject(new Error('must not run')))).toThrow(/invalid-provider/);
+        expect(targetScans).toBe(0);
+      }
+
+      const provider = dynamicContract.createRerankerProviderV1(IDENTITY, () => (
+        Promise.reject(new Error('must not run'))
+      ));
+      target = `a\ud800`;
+      targetScans = 0;
+      expect(() => dynamicContract.executeCalibratedRerankV1(
+        { query: target, candidates: [candidate('x')] },
+        provider,
+      )).toThrow(/invalid-request/);
+      expect(targetScans).toBeGreaterThan(0);
+
+      const requestCases: Array<{ maxBytes: number; input: (value: string) => unknown }> = [
+        {
+          maxBytes: dynamicContract.RERANKER_MAX_QUERY_BYTES,
+          input: (value) => ({ query: value, candidates: [candidate('x')] }),
+        },
+        {
+          maxBytes: dynamicContract.RERANKER_MAX_STRING_BYTES,
+          input: (value) => ({ query: 'q', candidates: [candidate('x', { title: value })] }),
+        },
+        {
+          maxBytes: dynamicContract.RERANKER_MAX_STRING_BYTES,
+          input: (value) => ({ query: 'q', candidates: [candidate('x', { content: value })] }),
+        },
+      ];
+      for (const entry of requestCases) {
+        target = oversizedMalformed(entry.maxBytes);
+        expectRequestBudgetWithoutScan(() => dynamicContract.executeCalibratedRerankV1(
+          entry.input(target) as never,
+          provider,
+        ));
+      }
+
+      const maxSerializedBytes = (dynamicContract.RERANKER_MAX_AGGREGATE_STRING_BYTES * 6)
+        + (dynamicContract.RERANKER_MAX_CANDIDATES * 256);
+      target = oversizedMalformed(maxSerializedBytes);
+      targetScans = 0;
+      expect(() => dynamicContract.parseSerializedRerankerProviderRequestV1(target)).toThrow(
+        /invalid-reranker-request/,
+      );
+      expect(targetScans).toBe(0);
+
+      target = oversizedMalformed(dynamicContract.RERANKER_MAX_RESPONSE_BYTES);
+      targetScans = 0;
+      const responseProvider = dynamicContract.createRerankerProviderV1(
+        IDENTITY,
+        () => Promise.resolve(target as SerializedRerankerProviderRequestV1),
+      );
+      await expect(dynamicContract.executeCalibratedRerankV1(
+        { query: 'q', candidates: [candidate('x')] },
+        responseProvider,
+      )).resolves.toMatchObject({ outcome: 'baseline' });
+      expect(targetScans).toBe(0);
+    } finally {
+      vi.resetModules();
+    }
+  });
 });
 
 describe('memberry.reranker v1 providers', () => {
+  it('rejects oversized provider strings before UTF-8 byte scanning', async () => {
+    const originalByteLength = Buffer.byteLength;
+    let target = '';
+    let targetScans = 0;
+    Buffer.byteLength = ((
+      input: Parameters<typeof Buffer.byteLength>[0],
+      encoding?: BufferEncoding,
+    ): number => {
+      if (input === target) targetScans += 1;
+      return originalByteLength(input, encoding);
+    }) as typeof Buffer.byteLength;
+    vi.resetModules();
+    let dynamicContract: typeof import('../reranker.js');
+    let dynamicProviders: typeof import('../reranker-providers.js');
+    try {
+      dynamicContract = await import('../reranker.js');
+      dynamicProviders = await import('../reranker-providers.js');
+    } finally {
+      Buffer.byteLength = originalByteLength;
+    }
+
+    const transport: RerankerHttpsTransportV1 = () => Promise.reject(new Error('must not run'));
+    const oversizedMalformed = (maxBytes: number): string => `${'a'.repeat(maxBytes + 1)}\ud800`;
+
+    try {
+      target = 'https://reranker.example/v1/score';
+      targetScans = 0;
+      dynamicProviders.createHttpsRerankerProviderV1({
+        identity: REMOTE_IDENTITY,
+        endpoint: target,
+        transport,
+      });
+      expect(targetScans).toBeGreaterThan(0);
+
+      target = `https://reranker.example/${oversizedMalformed(65_536)}`;
+      targetScans = 0;
+      expect(() => dynamicProviders.createHttpsRerankerProviderV1({
+        identity: REMOTE_IDENTITY,
+        endpoint: target,
+        transport,
+      })).toThrow(/invalid-reranker-endpoint/);
+      expect(targetScans).toBe(0);
+
+      target = 'Bearer explicit-only';
+      targetScans = 0;
+      dynamicProviders.createHttpsRerankerProviderV1({
+        identity: REMOTE_IDENTITY,
+        endpoint: 'https://reranker.example/v1/score',
+        authorizationHeader: target,
+        transport,
+      });
+      expect(targetScans).toBeGreaterThan(0);
+
+      target = oversizedMalformed(8_192);
+      targetScans = 0;
+      expect(() => dynamicProviders.createHttpsRerankerProviderV1({
+        identity: REMOTE_IDENTITY,
+        endpoint: 'https://reranker.example/v1/score',
+        authorizationHeader: target,
+        transport,
+      })).toThrow(/invalid-reranker-authorization/);
+      expect(targetScans).toBe(0);
+
+      const directTransport: RerankerHttpsTransportV1 = vi.fn(() => (
+        Promise.reject(new Error('expected direct-run failure'))
+      ));
+      const directProvider = dynamicProviders.createHttpsRerankerProviderV1({
+        identity: REMOTE_IDENTITY,
+        endpoint: 'https://reranker.example/v1/score',
+        transport: directTransport,
+      });
+      const cancellation: RerankerCancellationV1 = { isCancelled: () => false };
+      let canonicalBody: SerializedRerankerProviderRequestV1 | undefined;
+      const captureProvider = dynamicContract.createRerankerProviderV1(IDENTITY, (body) => {
+        canonicalBody = body;
+        return Promise.reject(new Error('capture only'));
+      });
+      await expect(dynamicContract.executeCalibratedRerankV1(
+        { query: 'q', candidates: [candidate('x')] },
+        captureProvider,
+      )).resolves.toMatchObject({ outcome: 'baseline' });
+      expect(canonicalBody).toBeDefined();
+
+      target = canonicalBody!;
+      targetScans = 0;
+      await expect(directProvider.run(
+        canonicalBody!,
+        cancellation,
+      )).rejects.toThrow(/https-reranker-failed/);
+      expect(targetScans).toBeGreaterThan(0);
+      const directCalls = vi.mocked(directTransport).mock.calls.length;
+
+      const maxSerializedBytes = (dynamicContract.RERANKER_MAX_AGGREGATE_STRING_BYTES * 6)
+        + (dynamicContract.RERANKER_MAX_CANDIDATES * 256);
+      target = oversizedMalformed(maxSerializedBytes);
+      targetScans = 0;
+      await expect(directProvider.run(
+        target as SerializedRerankerProviderRequestV1,
+        cancellation,
+      )).rejects.toThrow(/https-reranker-failed/);
+      expect(targetScans).toBe(0);
+      expect(directTransport).toHaveBeenCalledTimes(directCalls);
+
+      target = canonicalBody!;
+      targetScans = 0;
+      await expect(directProvider.run(
+        canonicalBody!,
+        { isCancelled: () => true },
+      )).rejects.toThrow(/https-reranker-failed/);
+      expect(targetScans).toBe(0);
+      expect(directTransport).toHaveBeenCalledTimes(directCalls);
+
+      let responseTargetScans = 0;
+      const responseProvider = dynamicProviders.createHttpsRerankerProviderV1({
+        identity: REMOTE_IDENTITY,
+        endpoint: 'https://reranker.example/v1/score',
+        transport: (request: Parameters<RerankerHttpsTransportV1>[0]) => {
+          target = responseFor(
+            request.body as SerializedRerankerProviderRequestV1,
+            [0.5],
+            REMOTE_IDENTITY,
+          );
+          targetScans = 0;
+          return Promise.resolve({ statusCode: 200, body: target });
+        },
+      });
+      await expect(dynamicContract.executeCalibratedRerankV1(
+        { query: 'q', candidates: [candidate('x')] },
+        responseProvider,
+      )).resolves.toMatchObject({ outcome: 'reranked' });
+      responseTargetScans = targetScans;
+      expect(responseTargetScans).toBeGreaterThan(0);
+
+      target = oversizedMalformed(dynamicContract.RERANKER_MAX_RESPONSE_BYTES);
+      targetScans = 0;
+      const oversizedResponseProvider = dynamicProviders.createHttpsRerankerProviderV1({
+        identity: REMOTE_IDENTITY,
+        endpoint: 'https://reranker.example/v1/score',
+        transport: () => Promise.resolve({ statusCode: 200, body: target }),
+      });
+      await expect(dynamicContract.executeCalibratedRerankV1(
+        { query: 'q', candidates: [candidate('x')] },
+        oversizedResponseProvider,
+      )).resolves.toMatchObject({ outcome: 'baseline' });
+      expect(targetScans).toBe(0);
+    } finally {
+      vi.resetModules();
+    }
+  });
+
   it('runs the trusted local primitive scorer synchronously and canonicalizes before returning', async () => {
     const calls: Array<{ query: string; key: string }> = [];
     const provider = createLocalRerankerProviderV1(IDENTITY, (query, item) => {
@@ -738,11 +982,15 @@ describe('memberry.reranker v1 providers', () => {
     const provider = createHttpsRerankerProviderV1({
       identity: REMOTE_IDENTITY,
       endpoint: 'https://reranker.example/v1/score%23',
-      transport: (request) => {
+      transport: (request: Parameters<RerankerHttpsTransportV1>[0]) => {
         observedUrl = request.url;
         return Promise.resolve({
           statusCode: 200,
-          body: manualResponseFor(request.body, [0.5], REMOTE_IDENTITY),
+          body: manualResponseFor(
+            request.body as SerializedRerankerProviderRequestV1,
+            [0.5],
+            REMOTE_IDENTITY,
+          ),
         });
       },
     });

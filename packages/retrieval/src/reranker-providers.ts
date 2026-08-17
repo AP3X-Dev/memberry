@@ -320,6 +320,7 @@ function parseTransportResponse(input: unknown): RerankerHttpsTransportResponseV
     || typeof record.statusCode !== 'number' || !NUMBER_IS_SAFE_INTEGER(record.statusCode)
     || record.statusCode < 100 || record.statusCode > 599
     || typeof record.body !== 'string'
+    || record.body.length > RERANKER_MAX_RESPONSE_BYTES
     || BUFFER_BYTE_LENGTH(record.body, 'utf8') > RERANKER_MAX_RESPONSE_BYTES) {
     throw new Error('invalid-reranker-transport-response');
   }
@@ -336,6 +337,7 @@ export function createHttpsRerankerProviderV1(
     throw new Error('invalid-reranker-provider-config');
   }
   if (typeof config.endpoint !== 'string'
+    || config.endpoint.length > 65_536
     || BUFFER_BYTE_LENGTH(config.endpoint, 'utf8') > 65_536) {
     throw new Error('invalid-reranker-endpoint');
   }
@@ -359,6 +361,7 @@ export function createHttpsRerankerProviderV1(
   let authorizationHeader: string | undefined;
   if (OBJECT_HAS_OWN(config, 'authorizationHeader')) {
     if (typeof config.authorizationHeader !== 'string' || config.authorizationHeader.length === 0
+      || config.authorizationHeader.length > 8_192
       || BUFFER_BYTE_LENGTH(config.authorizationHeader, 'utf8') > 8_192
       || !REGEXP_TEST(/^[\x20-\x7e]+$/, config.authorizationHeader)
       || STRING_INCLUDES(config.authorizationHeader, '\r')
@@ -375,6 +378,13 @@ export function createHttpsRerankerProviderV1(
     transport = config.transport as RerankerHttpsTransportV1;
   }
   const run: RerankerProviderRunV1 = (body, cancellation) => new PROMISE((resolve, reject) => {
+    try {
+      if (cancellation.isCancelled()) throw new Error();
+      parseSerializedRerankerProviderRequestV1(body);
+    } catch {
+      reject(new Error('https-reranker-failed'));
+      return;
+    }
     const headers = OBJECT_CREATE(null) as Record<string, string>;
     headers.accept = 'application/json';
     headers['content-type'] = 'application/json';

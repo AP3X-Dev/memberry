@@ -357,10 +357,11 @@ function receiptString(
   budget: ReceiptStringBudget,
   pattern?: RegExp,
 ): string {
-  if (typeof input !== 'string' || input.length === 0 || !validUnicode(input)) {
+  if (typeof input !== 'string' || input.length === 0) {
     throw new InvalidReceipt();
   }
   if (input.length > maxBytes) throw new BudgetExceeded();
+  if (!validUnicode(input)) throw new InvalidReceipt();
   const bytes = BUFFER_BYTE_LENGTH(input, 'utf8');
   if (bytes > maxBytes) throw new BudgetExceeded();
   if (pattern !== undefined && REGEXP_EXEC(pattern, input) === null) throw new InvalidReceipt();
