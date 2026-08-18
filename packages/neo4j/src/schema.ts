@@ -22,6 +22,11 @@ const CONSTRAINTS: string[] = [
   // backs the MERGE lookup with an index.
   'CREATE CONSTRAINT semantic_dedupe_unique IF NOT EXISTS FOR (s:Semantic) REQUIRE s.dedupe_key IS UNIQUE',
   'CREATE CONSTRAINT admission_observation_id IF NOT EXISTS FOR (o:AdmissionObservation) REQUIRE o.id IS UNIQUE',
+  'CREATE CONSTRAINT evidence_authority_ledger_id IF NOT EXISTS FOR (n:EvidenceAuthorityLedger) REQUIRE n.id IS UNIQUE',
+  'CREATE CONSTRAINT evidence_authority_coverage_id IF NOT EXISTS FOR (n:EvidenceAuthorityCoverage) REQUIRE n.id IS UNIQUE',
+  'CREATE CONSTRAINT evidence_authority_case_id IF NOT EXISTS FOR (n:EvidenceAuthorityCase) REQUIRE n.id IS UNIQUE',
+  'CREATE CONSTRAINT evidence_authority_event_id IF NOT EXISTS FOR (n:EvidenceAuthorityEvent) REQUIRE n.id IS UNIQUE',
+  'CREATE CONSTRAINT evidence_authority_outbox_id IF NOT EXISTS FOR (n:EvidenceAuthorityOutbox) REQUIRE n.id IS UNIQUE',
 ];
 
 const INDEXES: string[] = [
@@ -38,6 +43,14 @@ const INDEXES: string[] = [
   'CREATE INDEX fact_inference_type IF NOT EXISTS FOR (f:Fact) ON (f.inference_type)',
   'CREATE INDEX memblock_session IF NOT EXISTS FOR (b:MemoryBlock) ON (b.session_id)',
   'CREATE INDEX admission_observation_tenant_project IF NOT EXISTS FOR (o:AdmissionObservation) ON (o.tenant_id, o.project_scope)',
+  'CREATE INDEX evidence_authority_ledger_scope IF NOT EXISTS FOR (n:EvidenceAuthorityLedger) ON (n.tenant_id, n.project_scope, n.semantic_id)',
+  'CREATE INDEX evidence_authority_coverage_scope IF NOT EXISTS FOR (n:EvidenceAuthorityCoverage) ON (n.tenant_id, n.project_scope, n.semantic_id)',
+  'CREATE INDEX evidence_authority_case_scope IF NOT EXISTS FOR (n:EvidenceAuthorityCase) ON (n.tenant_id, n.project_scope, n.semantic_id)',
+  'CREATE INDEX evidence_authority_case_identity IF NOT EXISTS FOR (n:EvidenceAuthorityCase) ON (n.coverage_id, n.case_id)',
+  'CREATE INDEX evidence_authority_event_scope IF NOT EXISTS FOR (n:EvidenceAuthorityEvent) ON (n.tenant_id, n.project_scope, n.semantic_id)',
+  'CREATE INDEX evidence_authority_event_target IF NOT EXISTS FOR (n:EvidenceAuthorityEvent) ON (n.case_id, n.sequence)',
+  'CREATE INDEX evidence_authority_outbox_scope IF NOT EXISTS FOR (n:EvidenceAuthorityOutbox) ON (n.tenant_id, n.project_scope, n.recorded_at)',
+  'CREATE INDEX evidence_authority_outbox_event IF NOT EXISTS FOR (n:EvidenceAuthorityOutbox) ON (n.event_id)',
 ];
 
 const FULLTEXT_INDEXES: string[] = [

@@ -195,6 +195,36 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    id: '0008-evidence-authority-ledger-v1',
+    description:
+      'Append-only, tenant/project-bound Semantic evidence coverage, cases, adjudication ' +
+      'events, and transactionally paired outbox. Schema only; existing rows are untouched.',
+    up: async (driver) => {
+      const session = driver.session();
+      try {
+        for (const stmt of [
+          'CREATE CONSTRAINT evidence_authority_ledger_id IF NOT EXISTS FOR (n:EvidenceAuthorityLedger) REQUIRE n.id IS UNIQUE',
+          'CREATE CONSTRAINT evidence_authority_coverage_id IF NOT EXISTS FOR (n:EvidenceAuthorityCoverage) REQUIRE n.id IS UNIQUE',
+          'CREATE CONSTRAINT evidence_authority_case_id IF NOT EXISTS FOR (n:EvidenceAuthorityCase) REQUIRE n.id IS UNIQUE',
+          'CREATE CONSTRAINT evidence_authority_event_id IF NOT EXISTS FOR (n:EvidenceAuthorityEvent) REQUIRE n.id IS UNIQUE',
+          'CREATE CONSTRAINT evidence_authority_outbox_id IF NOT EXISTS FOR (n:EvidenceAuthorityOutbox) REQUIRE n.id IS UNIQUE',
+          'CREATE INDEX evidence_authority_ledger_scope IF NOT EXISTS FOR (n:EvidenceAuthorityLedger) ON (n.tenant_id, n.project_scope, n.semantic_id)',
+          'CREATE INDEX evidence_authority_coverage_scope IF NOT EXISTS FOR (n:EvidenceAuthorityCoverage) ON (n.tenant_id, n.project_scope, n.semantic_id)',
+          'CREATE INDEX evidence_authority_case_scope IF NOT EXISTS FOR (n:EvidenceAuthorityCase) ON (n.tenant_id, n.project_scope, n.semantic_id)',
+          'CREATE INDEX evidence_authority_case_identity IF NOT EXISTS FOR (n:EvidenceAuthorityCase) ON (n.coverage_id, n.case_id)',
+          'CREATE INDEX evidence_authority_event_scope IF NOT EXISTS FOR (n:EvidenceAuthorityEvent) ON (n.tenant_id, n.project_scope, n.semantic_id)',
+          'CREATE INDEX evidence_authority_event_target IF NOT EXISTS FOR (n:EvidenceAuthorityEvent) ON (n.case_id, n.sequence)',
+          'CREATE INDEX evidence_authority_outbox_scope IF NOT EXISTS FOR (n:EvidenceAuthorityOutbox) ON (n.tenant_id, n.project_scope, n.recorded_at)',
+          'CREATE INDEX evidence_authority_outbox_event IF NOT EXISTS FOR (n:EvidenceAuthorityOutbox) ON (n.event_id)',
+        ]) {
+          await session.run(stmt);
+        }
+      } finally {
+        await session.close();
+      }
+    },
+  },
 ];
 
 export interface MigrationResult {

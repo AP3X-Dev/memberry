@@ -10,6 +10,26 @@ export {
   SCHEMA_VERSION_ID,
 } from './migrations.js';
 export type { Migration, MigrationResult, VectorIndexDimension } from './migrations.js';
+export {
+  EVIDENCE_AUTHORITY_LEDGER_VERSION,
+  EvidenceAuthorityLedgerError,
+} from './evidence-authority-ledger.js';
+export type {
+  EvidenceAuthorityScopeV1,
+  EvidenceAuthorityOperationV1,
+  EvidenceAuthorityOpenCaseOperationV1,
+  EvidenceAuthorityCoverageStateV1,
+  EvidenceAuthorityCaseStateV1,
+  EvidenceAuthorityEventKindV1,
+  EvidenceAuthorityEventActionV1,
+  EvidenceAuthorityEventReceiptV1,
+  EvidenceAuthorityCoverageFacetV1,
+  EvidenceAuthorityCaseFacetV1,
+  EvidenceAuthorityCoverageOpenResultV1,
+  EvidenceAuthorityCaseOpenResultV1,
+  EvidenceAuthorityLedgerErrorCode,
+  EvidenceAuthorityLedgerPersistenceV1,
+} from './evidence-authority-ledger.js';
 export { EpisodicStore } from './episodic.js';
 export { AdmissionObservationStore, AdmissionObservationStoreError } from './admission-observation.js';
 export type {
