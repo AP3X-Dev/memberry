@@ -64,6 +64,8 @@ const MUTATING_KEYWORDS = [
 
 const ADMINISTRATIVE_COMMAND_RE = /^\s*(SHOW|USE)\b/i;
 const MAX_RAW_CYPHER_LIMIT = 100;
+const MAX_RAW_CYPHER_INPUT_CODE_UNITS = 5000;
+const RAW_CYPHER_INPUT_TOO_LARGE = 'cypher_input_too_large';
 
 function stripTrailingSemicolons(cypher: string): string {
   return cypher.trim().replace(/;+\s*$/g, '');
@@ -85,6 +87,13 @@ function stripTrailingSemicolons(cypher: string): string {
  * Throws an error describing the violation when a mutating construct is found.
  */
 export function validateReadOnlyCypher(cypher: string): void {
+  // Keep direct package callers on the same input budget as the MCP schema.
+  // String.length is a cheap code-unit check and must precede normalization and
+  // every regex/comment/statement scan below.
+  if (cypher.length > MAX_RAW_CYPHER_INPUT_CODE_UNITS) {
+    throw new Error(RAW_CYPHER_INPUT_TOO_LARGE);
+  }
+
   // Step 0: Unicode-normalize (NFKC) so compatibility / fullwidth homoglyphs
   // (e.g. "ＤＥＬＥＴＥ") fold to ASCII and can't slip past the keyword checks.
   // (Pure-script homoglyphs like Cyrillic "Е" don't fold here, but they also

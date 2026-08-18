@@ -1,8 +1,70 @@
 // packages/neo4j/src/__tests__/validate-cypher.test.ts
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { validateReadOnlyCypher } from '../query.js';
 
 describe('validateReadOnlyCypher', () => {
+  it('rejects oversized direct input before normalization or regex-backed scans', () => {
+    const marker = 'private-cypher-content';
+    const oversized = `${marker}${'x'.repeat(5001)}`;
+    const normalizeSpy = vi.spyOn(String.prototype, 'normalize');
+    const replaceSpy = vi.spyOn(String.prototype, 'replace');
+    const matchSpy = vi.spyOn(String.prototype, 'match');
+    const regexTestSpy = vi.spyOn(RegExp.prototype, 'test');
+    let thrown: unknown;
+
+    validateReadOnlyCypher('MATCH (n) RETURN n');
+    expect(normalizeSpy).toHaveBeenCalled();
+    expect(replaceSpy).toHaveBeenCalled();
+    expect(matchSpy).toHaveBeenCalled();
+    expect(regexTestSpy).toHaveBeenCalled();
+    normalizeSpy.mockClear();
+    replaceSpy.mockClear();
+    matchSpy.mockClear();
+    regexTestSpy.mockClear();
+
+    try {
+      validateReadOnlyCypher(oversized);
+    } catch (error) {
+      thrown = error;
+    }
+
+    const scanCounts = {
+      normalize: normalizeSpy.mock.calls.length,
+      replace: replaceSpy.mock.calls.length,
+      match: matchSpy.mock.calls.length,
+      regexTest: regexTestSpy.mock.calls.length,
+    };
+    vi.restoreAllMocks();
+
+    expect(thrown).toEqual(new Error('cypher_input_too_large'));
+    expect((thrown as Error).message).not.toContain(marker);
+    expect(scanCounts).toEqual({ normalize: 0, replace: 0, match: 0, regexTest: 0 });
+  });
+
+  it('allows input at the 5000-code-unit direct-input boundary', () => {
+    const prefix = 'MATCH (n) RETURN n // ';
+    expect(() =>
+      validateReadOnlyCypher(prefix + 'x'.repeat(5000 - prefix.length)),
+    ).not.toThrow();
+  });
+
+  it('allows an astral multibyte input at exactly 5000 code units', () => {
+    const prefix = 'MATCH (n) RETURN n // ';
+    const remaining = 5000 - prefix.length;
+    const cypher = prefix + '\u{1F600}'.repeat(Math.floor(remaining / 2)) + 'x'.repeat(remaining % 2);
+
+    expect(cypher.length).toBe(5000);
+    expect(() => validateReadOnlyCypher(cypher)).not.toThrow();
+  });
+
+  it.each([
+    ['malformed surrogate', '\uD800'.repeat(5001)],
+    ['fullwidth compatibility text', '\uFF2D'.repeat(5001)],
+    ['astral text', '\u{1F600}'.repeat(2501)],
+  ])('rejects oversized %s with the fixed content-free error', (_label, cypher) => {
+    expect(() => validateReadOnlyCypher(cypher)).toThrowError('cypher_input_too_large');
+  });
+
   // ── Should PASS (read-only queries) ──────────────────────────────────────
 
   it('allows simple MATCH/RETURN queries', () => {

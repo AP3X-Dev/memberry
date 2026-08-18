@@ -4,6 +4,53 @@ import neo4j from 'neo4j-driver';
 import { ScopedQuery } from '../query.js';
 
 describe('ScopedQuery.rawCypher regression', () => {
+  it('rejects oversized direct raw input before scans or database access', async () => {
+    const marker = 'private-raw-cypher-content';
+    const oversized = `${marker}${'x'.repeat(5001)}`;
+    const normalizeSpy = vi.spyOn(String.prototype, 'normalize');
+    const replaceSpy = vi.spyOn(String.prototype, 'replace');
+    const matchSpy = vi.spyOn(String.prototype, 'match');
+    const regexTestSpy = vi.spyOn(RegExp.prototype, 'test');
+    const session = {
+      run: vi.fn().mockResolvedValue({ records: [] }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const mockDriver = { session: vi.fn().mockReturnValue(session) };
+    const query = new ScopedQuery(mockDriver as never);
+    let thrown: unknown;
+
+    await query.rawCypher('MATCH (n) RETURN n', 10);
+    expect(normalizeSpy).toHaveBeenCalled();
+    expect(replaceSpy).toHaveBeenCalled();
+    expect(matchSpy).toHaveBeenCalled();
+    expect(regexTestSpy).toHaveBeenCalled();
+    expect(mockDriver.session).toHaveBeenCalledTimes(1);
+    normalizeSpy.mockClear();
+    replaceSpy.mockClear();
+    matchSpy.mockClear();
+    regexTestSpy.mockClear();
+    mockDriver.session.mockClear();
+
+    try {
+      await query.rawCypher(oversized, 10);
+    } catch (error) {
+      thrown = error;
+    }
+
+    const scanCounts = {
+      normalize: normalizeSpy.mock.calls.length,
+      replace: replaceSpy.mock.calls.length,
+      match: matchSpy.mock.calls.length,
+      regexTest: regexTestSpy.mock.calls.length,
+    };
+    vi.restoreAllMocks();
+
+    expect(thrown).toEqual(new Error('cypher_input_too_large'));
+    expect((thrown as Error).message).not.toContain(marker);
+    expect(scanCounts).toEqual({ normalize: 0, replace: 0, match: 0, regexTest: 0 });
+    expect(mockDriver.session).not.toHaveBeenCalled();
+  });
+
   it('enforces the caller limit even when user Cypher already includes a larger LIMIT', async () => {
     const session = {
       run: vi.fn().mockResolvedValue({ records: [] }),
