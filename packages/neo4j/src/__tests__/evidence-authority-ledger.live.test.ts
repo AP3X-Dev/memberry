@@ -14,6 +14,7 @@ import { createNeo4jDriver } from '../driver.js';
 import { MIGRATIONS } from '../migrations.js';
 import { initSchema } from '../schema.js';
 import { createEvidenceAuthorityCapture } from '../evidence-authority-capture.js';
+import { createEvidenceAuthorityAdjudication } from '../evidence-authority-adjudication.js';
 
 const LIVE_ENABLED = process.env.MEMBERRY_NEO4J_INTEGRATION === '1';
 const describeLive = LIVE_ENABLED ? describe : describe.skip;
@@ -993,5 +994,286 @@ describeLive('EvidenceAuthorityLedger captureCase live Neo4j gate (RET-005B-AUTH
       outcome: 'uncaptured',
       code: 'uncaptured',
     });
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// RET-005B-AUTH-001B3A: additive adjudicateCase live gate. The B1 and B2
+// suites above are frozen; this block owns its own driver, fixtures, and full
+// cleanup, and proves the end-to-end state B2 could mint but never transition.
+// ---------------------------------------------------------------------------
+
+describeLive('EvidenceAuthorityLedger adjudicateCase live Neo4j gate (RET-005B-AUTH-001B3A)', () => {
+  const adjudicationDriver = createNeo4jDriver(uri, user, password);
+  const adjudicationSuffix = randomUUID().toLowerCase();
+  const adjudicationTenantId = `test-evidence-adjudication-${adjudicationSuffix}`;
+  const adjudicationProjectScope = `project:test-evidence-adjudication-${adjudicationSuffix}`;
+  const adjudicationSemanticIds = [
+    'semantic-adjudication-reject',
+    'semantic-adjudication-resolve',
+    'semantic-adjudication-module',
+  ].map((value) => `${value}-${adjudicationSuffix}`);
+  const adjudicationScope = (semanticId: string): EvidenceAuthorityScopeV1 => ({
+    tenantId: adjudicationTenantId,
+    projectScope: adjudicationProjectScope,
+    semanticId,
+  });
+
+  async function adjudicationScalar(
+    query: string,
+    key: string,
+    params: Record<string, unknown> = {},
+  ): Promise<number> {
+    const session = adjudicationDriver.session();
+    try {
+      const result = await session.run(query, params);
+      return Number(result.records[0]?.get(key) ?? 0);
+    } finally {
+      await session.close();
+    }
+  }
+
+  async function adjudicationLedgerCounts(semanticId: string) {
+    const params = { tenantId: adjudicationTenantId, semanticId };
+    return {
+      events: await adjudicationScalar(
+        'MATCH (n:EvidenceAuthorityEvent {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+      outboxes: await adjudicationScalar(
+        'MATCH (n:EvidenceAuthorityOutbox {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+      coverage: await adjudicationScalar(
+        'MATCH (n:EvidenceAuthorityCoverage {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+      cases: await adjudicationScalar(
+        'MATCH (n:EvidenceAuthorityCase {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+    };
+  }
+
+  beforeAll(async () => {
+    await adjudicationDriver.getServerInfo();
+    const migration = MIGRATIONS.find((item) => item.id === '0008-evidence-authority-ledger-v1');
+    expect(migration).toBeDefined();
+    await migration!.up(adjudicationDriver);
+    await initSchema(adjudicationDriver);
+    const session = adjudicationDriver.session();
+    try {
+      for (const semanticId of adjudicationSemanticIds) {
+        await session.run(
+          `CREATE (s:Semantic {
+             id: $semanticId, tenant_id: $tenantId, scope: $projectScope,
+             content: 'disposable synthetic adjudication fixture', confidence: 1.0,
+             signal_count: 0, created_at: datetime(), updated_at: datetime(),
+             decay_class: 'stable', tags: [$projectScope]
+           })`,
+          {
+            semanticId,
+            tenantId: adjudicationTenantId,
+            projectScope: adjudicationProjectScope,
+          },
+        );
+      }
+    } finally {
+      await session.close();
+    }
+  });
+
+  afterAll(async () => {
+    if (LIVE_ENABLED) {
+      const session = adjudicationDriver.session();
+      try {
+        await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $semanticIds
+           DETACH DELETE n`,
+          {
+            tenantId: adjudicationTenantId,
+            projectScope: adjudicationProjectScope,
+            semanticIds: adjudicationSemanticIds,
+          },
+        );
+        const residue = await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $semanticIds
+           RETURN count(n) AS count`,
+          {
+            tenantId: adjudicationTenantId,
+            projectScope: adjudicationProjectScope,
+            semanticIds: adjudicationSemanticIds,
+          },
+        );
+        expect(Number(residue.records[0]?.get('count') ?? -1)).toBe(0);
+      } finally {
+        await session.close();
+      }
+    }
+    await adjudicationDriver.close().catch(() => undefined);
+  });
+
+  it('adjudicates capture-created cases end to end: reject, then resolving -> resolved, with the audit passing on every subsequent operation', async () => {
+    const store = createEvidenceAuthorityLedgerPersistence(adjudicationDriver);
+
+    // Reject path: the state B2 could mint but never transition.
+    const rejectScope = adjudicationScope(adjudicationSemanticIds[0]!);
+    const rejectCapture = createEvidenceAuthorityCaptureFacet(store, rejectScope);
+    const rejectReview = createEvidenceAuthorityReviewFacet(store, rejectScope);
+    const captured = await store.captureCase(rejectCapture, rejectScope, {
+      caseId: 'adjudication-case-live-1',
+      coverageOperationId: 'adjudication-op-coverage-live-1',
+      caseOperationId: 'adjudication-op-case-live-1',
+    });
+    expect(captured.caseReceipt).toMatchObject({
+      kind: 'case', action: 'case_opened', state: 'pending', sequence: 2,
+    });
+    const rejected = await store.adjudicateCase(rejectReview, rejectScope, {
+      caseId: 'adjudication-case-live-1',
+      operationId: 'adjudication-op-reject-live-1',
+      action: 'rejected',
+    });
+    expect(rejected).toMatchObject({
+      kind: 'case', action: 'rejected', state: 'rejected', sequence: 3,
+    });
+    expect(await adjudicationLedgerCounts(rejectScope.semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+    // Every subsequent operation re-audits the full history under exact-key
+    // equality; a passing replay proves the adjudicated history is valid.
+    const rejectedReplay = await store.adjudicateCase(rejectReview, rejectScope, {
+      caseId: 'adjudication-case-live-1',
+      operationId: 'adjudication-op-reject-live-1',
+      action: 'rejected',
+    });
+    expect(rejectedReplay).toEqual(rejected);
+    expect(await adjudicationLedgerCounts(rejectScope.semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    // Resolution path: two independently idempotent steps.
+    const resolveScope = adjudicationScope(adjudicationSemanticIds[1]!);
+    const resolveCapture = createEvidenceAuthorityCaptureFacet(store, resolveScope);
+    const resolveReview = createEvidenceAuthorityReviewFacet(store, resolveScope);
+    await store.captureCase(resolveCapture, resolveScope, {
+      caseId: 'adjudication-case-live-2',
+      coverageOperationId: 'adjudication-op-coverage-live-2',
+      caseOperationId: 'adjudication-op-case-live-2',
+    });
+    const resolving = await store.adjudicateCase(resolveReview, resolveScope, {
+      caseId: 'adjudication-case-live-2',
+      operationId: 'adjudication-op-resolving-live-2',
+      action: 'resolution_started',
+    });
+    expect(resolving).toMatchObject({
+      kind: 'case', action: 'resolution_started', state: 'resolving', sequence: 3,
+    });
+    const resolved = await store.adjudicateCase(resolveReview, resolveScope, {
+      caseId: 'adjudication-case-live-2',
+      operationId: 'adjudication-op-resolved-live-2',
+      action: 'resolved',
+    });
+    expect(resolved).toMatchObject({
+      kind: 'case', action: 'resolved', state: 'resolved', sequence: 4,
+    });
+    expect(await adjudicationLedgerCounts(resolveScope.semanticId)).toEqual({
+      events: 4, outboxes: 4, coverage: 1, cases: 1,
+    });
+
+    // Wrong-state and cross-scope refusals leave zero residue.
+    await expect(store.adjudicateCase(resolveReview, resolveScope, {
+      caseId: 'adjudication-case-live-2',
+      operationId: 'adjudication-op-late-live-2',
+      action: 'rejected',
+    })).rejects.toMatchObject({ code: 'invalid_transition' });
+    await expect(store.adjudicateCase(rejectReview, resolveScope, {
+      caseId: 'adjudication-case-live-2',
+      operationId: 'adjudication-op-cross-live-2',
+      action: 'rejected',
+    })).rejects.toMatchObject({ code: 'facet_scope_mismatch' });
+    expect(await adjudicationLedgerCounts(resolveScope.semanticId)).toEqual({
+      events: 4, outboxes: 4, coverage: 1, cases: 1,
+    });
+  }, 120_000);
+
+  it('adjudicates through the unwired module with per-construction idempotency, cross-construction refusal, and zero residue', async () => {
+    const moduleSemanticId = adjudicationSemanticIds[2]!;
+    const moduleScope = adjudicationScope(moduleSemanticId);
+    const store = createEvidenceAuthorityLedgerPersistence(adjudicationDriver);
+    const captureFacet = createEvidenceAuthorityCaptureFacet(store, moduleScope);
+    await store.captureCase(captureFacet, moduleScope, {
+      caseId: 'adjudication-case-live-module',
+      coverageOperationId: 'adjudication-op-coverage-live-module',
+      caseOperationId: 'adjudication-op-case-live-module',
+    });
+
+    const alpha = createEvidenceAuthorityAdjudication(adjudicationDriver, {
+      tenantId: adjudicationTenantId,
+      projectScope: adjudicationProjectScope,
+      principalId: 'principal-live-alpha',
+    });
+    const request = {
+      semanticId: moduleSemanticId,
+      caseId: 'adjudication-case-live-module',
+      decision: 'reject' as const,
+    };
+    const first = await alpha.adjudicate(request);
+    expect(first.outcome).toBe('adjudicated');
+    expect(first.outcome === 'adjudicated' && first.receipt).toMatchObject({
+      kind: 'case', action: 'rejected', state: 'rejected', sequence: 3,
+    });
+    expect(await adjudicationLedgerCounts(moduleSemanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    const replay = await alpha.adjudicate(request);
+    expect(replay).toEqual(first);
+    expect(await adjudicationLedgerCounts(moduleSemanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    const beta = createEvidenceAuthorityAdjudication(adjudicationDriver, {
+      tenantId: adjudicationTenantId,
+      projectScope: adjudicationProjectScope,
+      principalId: 'principal-live-beta',
+    });
+    const forged = await beta.adjudicate(request);
+    expect(forged).toEqual({
+      contractVersion: 'memberry.evidence-authority-adjudication/1.0.0',
+      outcome: 'unadjudicated',
+      code: 'unadjudicated',
+    });
+    expect(await adjudicationLedgerCounts(moduleSemanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    // Durable anonymity: no stored value records or permits recovery of the
+    // construction-bound label.
+    expect(await adjudicationScalar(
+      `MATCH (n)
+       WHERE n.tenant_id = $tenantId AND n.semantic_id = $semanticId
+         AND (n.id CONTAINS $label OR n.operation_id CONTAINS $label OR n.case_id CONTAINS $label)
+       RETURN count(n) AS count`,
+      'count',
+      {
+        tenantId: adjudicationTenantId,
+        semanticId: moduleSemanticId,
+        label: 'principal-live-alpha',
+      },
+    )).toBe(0);
   }, 120_000);
 });
