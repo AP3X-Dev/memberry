@@ -695,7 +695,7 @@ describe('EvidenceAuthorityRevocation V1 (RET-005B-AUTH-001B3B1)', () => {
     const guarded = createEvidenceAuthorityRevocation(hostile.driver, { ...PRINCIPAL });
     for (const request of [
       { semanticId: `bad ${SECRET_CANARY}` },
-      { semanticId: SECRET_CANARY },
+      { semanticId: `_${SECRET_CANARY}` },
       { ...REQUEST, extra: SECRET_CANARY },
     ]) {
       const refused = await guarded.revoke(request);
