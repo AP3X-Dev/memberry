@@ -418,9 +418,15 @@ function preflightTraceStructure(root: unknown): string[] {
   while (stack.length > 0) {
     const current = stack.pop()!;
     if (current.depth > AGGREGATE_LIMITS.depth) return ['trace exceeds aggregate depth budget'];
-    if (current.value === null) { scalarBytes += 4; continue; }
+    if (current.value === null) {
+      scalarBytes += 4;
+      if (scalarBytes > AGGREGATE_LIMITS.scalarBytes) return ['trace exceeds aggregate byte budget'];
+      continue;
+    }
     if (typeof current.value === 'string') {
-      if (current.value.length > AGGREGATE_LIMITS.scalarBytes) return ['trace exceeds aggregate byte budget'];
+      if (current.value.length > AGGREGATE_LIMITS.scalarBytes - scalarBytes) {
+        return ['trace exceeds aggregate byte budget'];
+      }
       scalarBytes += Buffer.byteLength(current.value, 'utf8');
       if (scalarBytes > AGGREGATE_LIMITS.scalarBytes) return ['trace exceeds aggregate byte budget'];
       continue;
@@ -466,6 +472,9 @@ function preflightTraceStructure(root: unknown): string[] {
     for (const key of keys) {
       if (typeof key !== 'string') return ['trace contains exotic values'];
       if (DANGEROUS_KEYS.has(key)) return ['trace contains dangerous fields'];
+      if (key.length > AGGREGATE_LIMITS.scalarBytes - scalarBytes) {
+        return ['trace exceeds aggregate byte budget'];
+      }
       scalarBytes += Buffer.byteLength(key, 'utf8');
       if (scalarBytes > AGGREGATE_LIMITS.scalarBytes) return ['trace exceeds aggregate byte budget'];
       const descriptor = Object.getOwnPropertyDescriptor(current.value, key);
