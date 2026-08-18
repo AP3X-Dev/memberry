@@ -1,6 +1,7 @@
+import { Buffer as NodeBuffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   RETRIEVAL_TRACE_VERSION,
@@ -607,6 +608,74 @@ describe('RET-001A retrieval trace contract', () => {
     const oversizedBytes = structuredClone(build()) as ReturnType<typeof build> & { padding?: string };
     oversizedBytes.padding = 'x'.repeat(4_300_000);
     expect(validateRetrievalTrace(oversizedBytes)).toContain('trace exceeds aggregate byte budget');
+  });
+
+  it('rejects aggregate scalar overflows before avoidable UTF-8 measurement at every public boundary', async () => {
+    const originalByteLength = NodeBuffer.byteLength;
+    let target = '';
+    let targetScans = 0;
+    NodeBuffer.byteLength = ((
+      input: Parameters<typeof NodeBuffer.byteLength>[0],
+      encoding?: BufferEncoding,
+    ): number => {
+      if (input === target) targetScans += 1;
+      return originalByteLength(input, encoding);
+    }) as typeof NodeBuffer.byteLength;
+    vi.resetModules();
+    try {
+      const dynamicTrace = await import('../trace.js');
+
+      target = 'safe';
+      targetScans = 0;
+      expect(dynamicTrace.canonicalTraceJson({ safe: 1 })).toBe('{"safe":1}');
+      expect(targetScans).toBeGreaterThan(0);
+
+      const expectAggregateFailure = (input: unknown, expectedScans: number): void => {
+        targetScans = 0;
+        expect(dynamicTrace.validateRetrievalTrace(input)).toEqual([
+          'trace exceeds aggregate byte budget',
+        ]);
+        expect(targetScans).toBe(expectedScans);
+
+        for (const boundary of [
+          () => dynamicTrace.canonicalTraceJson(input),
+          () => dynamicTrace.replayRetrievalTrace(input),
+        ]) {
+          targetScans = 0;
+          let thrown: unknown;
+          let returned: unknown;
+          try {
+            returned = boundary();
+          } catch (error) {
+            thrown = error;
+          }
+          expect(returned).toBeUndefined();
+          expect(thrown).toMatchObject({
+            name: 'RetrievalTraceValidationError',
+            message: 'trace exceeds aggregate byte budget',
+          });
+          expect(targetScans).toBe(expectedScans);
+        }
+      };
+
+      target = 'k'.repeat(4_194_304);
+      const hostileKey = Object.create(null) as Record<string, unknown>;
+      Object.defineProperty(hostileKey, 'x', { value: null, enumerable: true });
+      Object.defineProperty(hostileKey, target, { value: null, enumerable: true });
+      expectAggregateFailure(hostileKey, 0);
+
+      target = 'v'.repeat(4_194_304);
+      expectAggregateFailure({ padding: target }, 0);
+
+      target = 'q'.repeat(4_194_304);
+      expectAggregateFailure([null, target], 1);
+
+      target = 'é'.repeat(2_097_152);
+      expectAggregateFailure({ padding: target }, 1);
+    } finally {
+      NodeBuffer.byteLength = originalByteLength;
+      vi.resetModules();
+    }
   });
 
   it('accepts the exact default 128-candidate, eight-round MMR envelope', () => {
