@@ -788,6 +788,10 @@ function consumeStableQueryValue(budget: StableQueryBudget, value: unknown): voi
   budget.values += 1;
   if (budget.values > MAX_STABLE_QUERY_TOTAL_VALUES) return stableQueryInvalid();
   if (typeof value === 'string') {
+    const remainingStringBytes = MAX_STABLE_QUERY_TOTAL_STRING_BYTES - budget.stringBytes;
+    if (value.length > MAX_STABLE_QUERY_STRING_BYTES || value.length > remainingStringBytes) {
+      return stableQueryInvalid();
+    }
     const bytes = Buffer.byteLength(value, 'utf8');
     if (bytes > MAX_STABLE_QUERY_STRING_BYTES) return stableQueryInvalid();
     budget.stringBytes += bytes;

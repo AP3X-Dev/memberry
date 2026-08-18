@@ -824,6 +824,10 @@ function consumeFactValue(budget: FactParseBudget, value: unknown): void {
   budget.values += 1;
   if (budget.values > MAX_FACT_TOTAL_VALUES) throw new Error('fact_id_batch_invalid_record');
   if (typeof value === 'string') {
+    const remainingStringBytes = MAX_FACT_TOTAL_STRING_BYTES - budget.stringBytes;
+    if (value.length > MAX_FACT_STRING_BYTES || value.length > remainingStringBytes) {
+      throw new Error('fact_id_batch_invalid_record');
+    }
     const bytes = Buffer.byteLength(value, 'utf8');
     if (bytes > MAX_FACT_STRING_BYTES) throw new Error('fact_id_batch_invalid_record');
     budget.stringBytes += bytes;
