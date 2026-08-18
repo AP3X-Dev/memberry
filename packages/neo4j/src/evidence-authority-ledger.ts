@@ -238,6 +238,11 @@ export interface EvidenceAuthorityLedgerPersistenceV1 {
     scope: unknown,
     operation: unknown,
   ): Promise<EvidenceAuthorityCaptureCaseResultV1>;
+  adjudicateCase(
+    reviewFacet: unknown,
+    scope: unknown,
+    operation: unknown,
+  ): Promise<EvidenceAuthorityEventReceiptV1>;
 }
 
 function isLedgerError(value: unknown): value is EvidenceAuthorityLedgerError {
@@ -367,6 +372,37 @@ function parseCaptureCaseOperation(value: unknown): EvidenceAuthorityCaptureCase
     caseId: input.caseId,
     coverageOperationId: input.coverageOperationId,
     caseOperationId: input.caseOperationId,
+  });
+}
+
+/**
+ * B3A frozen adjudication transition table: ledger action to
+ * (state, allowedPreviousState). The action, state, and previous-state
+ * vocabulary is exactly the frozen B1 case set; no new pair exists.
+ */
+const ADJUDICATION_TRANSITIONS = Object.freeze({
+  rejected: Object.freeze({ state: 'rejected', previous: 'pending' } as const),
+  resolution_started: Object.freeze({ state: 'resolving', previous: 'pending' } as const),
+  resolved: Object.freeze({ state: 'resolved', previous: 'resolving' } as const),
+} as const);
+
+function parseAdjudicationOperation(value: unknown): {
+  readonly caseId: string;
+  readonly operationId: string;
+  readonly action: keyof typeof ADJUDICATION_TRANSITIONS;
+} {
+  const input = strictRecord(value, 'invalid_command');
+  exactKeys(input, ['caseId', 'operationId', 'action'], 'invalid_command');
+  if (!identifier(input.caseId)
+    || !identifier(input.operationId)
+    || typeof input.action !== 'string'
+    || !Object.hasOwn(ADJUDICATION_TRANSITIONS, input.action)) {
+    throw new EvidenceAuthorityLedgerError('invalid_command');
+  }
+  return Object.freeze({
+    caseId: input.caseId,
+    operationId: input.operationId,
+    action: input.action as keyof typeof ADJUDICATION_TRANSITIONS,
   });
 }
 
@@ -1909,6 +1945,34 @@ class EvidenceAuthorityLedgerPersistence implements EvidenceAuthorityLedgerPersi
 
   resolveCase(reviewFacet: unknown, facet: unknown, scope: unknown, operation: unknown): Promise<EvidenceAuthorityEventReceiptV1> {
     return this.transitionCase(reviewFacet, facet, scope, operation, 'resolved', 'resolved', 'resolving');
+  }
+
+  /**
+   * B3A additive adjudication seam (RET-005B-AUTH-001B3A): transitions an
+   * existing case under review-facet authority alone, routing through the
+   * unchanged perform() lock/audit/replay preamble. Returns a receipt only;
+   * no facet is minted, re-derived, or returned, and no node is created
+   * (createTarget is null).
+   */
+  async adjudicateCase(
+    rawReviewFacet: unknown,
+    rawScope: unknown,
+    rawOperation: unknown,
+  ): Promise<EvidenceAuthorityEventReceiptV1> {
+    const scope = parseScope(rawScope);
+    this.requireReviewFacet(rawReviewFacet, scope);
+    const operation = parseAdjudicationOperation(rawOperation);
+    const transition = ADJUDICATION_TRANSITIONS[operation.action];
+    return (await this.perform(operationSpec(
+      scope,
+      operation.operationId,
+      'case',
+      operation.action,
+      transition.state,
+      operation.caseId,
+      null,
+      transition.previous,
+    ))).receipt;
   }
 }
 

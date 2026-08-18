@@ -1320,3 +1320,188 @@ describe('EvidenceAuthorityLedgerPersistence V1 captureCase (RET-005B-AUTH-001B2
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// RET-005B-AUTH-001B3A: additive adjudicateCase suite. B1 and B2 tests above
+// are frozen. Residue proofs live inside each failure-path test, never in
+// afterAll (Decision 106 F-3).
+// ---------------------------------------------------------------------------
+
+describe('EvidenceAuthorityLedgerPersistence V1 adjudicateCase (RET-005B-AUTH-001B3A)', () => {
+  it('drives pending -> rejected and pending -> resolving -> resolved with one paired event/outbox per call', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const writesBefore = fake.executeWrite.mock.calls.length;
+    const rejected = await store.adjudicateCase(review, SCOPE, {
+      caseId: CAPTURE_OPERATION.caseId,
+      operationId: 'adj-reject-1',
+      action: 'rejected',
+    });
+    expect(fake.executeWrite.mock.calls.length).toBe(writesBefore + 1);
+    expect(rejected).toEqual({
+      contractVersion: EVIDENCE_AUTHORITY_LEDGER_VERSION,
+      kind: 'case',
+      action: 'rejected',
+      state: 'rejected',
+      sequence: 3,
+      recordedAt: RECORDED_AT,
+    });
+    await store.captureCase(capture, SCOPE, SECOND_CAPTURE_OPERATION);
+    const resolving = await store.adjudicateCase(review, SCOPE, {
+      caseId: SECOND_CAPTURE_OPERATION.caseId,
+      operationId: 'adj-resolving-2',
+      action: 'resolution_started',
+    });
+    expect(resolving).toMatchObject({
+      kind: 'case', action: 'resolution_started', state: 'resolving', sequence: 5,
+    });
+    const resolved = await store.adjudicateCase(review, SCOPE, {
+      caseId: SECOND_CAPTURE_OPERATION.caseId,
+      operationId: 'adj-resolved-2',
+      action: 'resolved',
+    });
+    expect(resolved).toMatchObject({
+      kind: 'case', action: 'resolved', state: 'resolved', sequence: 6,
+    });
+    expect(fake.totals()).toEqual({ events: 6, coverage: 1, cases: 2 });
+    const transition = fake.queries.find((query) => query.includes('append-transition-case')) ?? '';
+    expect(transition).toContain('CREATE (event:EvidenceAuthorityEvent');
+    expect(transition).toContain('CREATE (outbox:EvidenceAuthorityOutbox');
+    expect(transition).toContain('recorded_at: event.recorded_at');
+  });
+
+  it('returns exactly a receipt and never mints or returns a facet', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const receipt = await store.adjudicateCase(review, SCOPE, {
+      caseId: CAPTURE_OPERATION.caseId,
+      operationId: 'adj-reject-1',
+      action: 'rejected',
+    });
+    expect(Object.getPrototypeOf(receipt)).toBeNull();
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(Reflect.ownKeys(receipt)).toEqual([
+      'contractVersion', 'kind', 'action', 'state', 'sequence', 'recordedAt',
+    ]);
+    expect('facet' in receipt).toBe(false);
+  });
+
+  it('replays the exact adjudication without appending and rejects divergent content as operation_conflict', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const operation = {
+      caseId: CAPTURE_OPERATION.caseId,
+      operationId: 'adj-reject-1',
+      action: 'rejected',
+    };
+    const first = await store.adjudicateCase(review, SCOPE, operation);
+    const replay = await store.adjudicateCase(review, SCOPE, operation);
+    expect(replay).toEqual(first);
+    expect(fake.queries.filter((query) => query.includes('append-transition-case'))).toHaveLength(1);
+    const before = fake.totals();
+    await expect(store.adjudicateCase(review, SCOPE, {
+      ...operation,
+      action: 'resolution_started',
+    })).rejects.toMatchObject({ code: 'operation_conflict' });
+    expect(fake.totals()).toEqual(before);
+  });
+
+  it('executes exactly one write transaction per adjudication with no version read outside it', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const writesBefore = fake.executeWrite.mock.calls.length;
+    const locksBefore = fake.queries.filter((query) => query.includes('evidence-authority:lock')).length;
+    await store.adjudicateCase(review, SCOPE, {
+      caseId: CAPTURE_OPERATION.caseId,
+      operationId: 'adj-reject-1',
+      action: 'rejected',
+    });
+    expect(fake.executeWrite.mock.calls.length).toBe(writesBefore + 1);
+    expect(fake.queries.filter((query) => query.includes('evidence-authority:lock')))
+      .toHaveLength(locksBefore + 1);
+  });
+
+  it('leaves a sibling open case pending when another case is resolved', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    await store.captureCase(capture, SCOPE, SECOND_CAPTURE_OPERATION);
+    await store.adjudicateCase(review, SCOPE, {
+      caseId: SECOND_CAPTURE_OPERATION.caseId,
+      operationId: 'adj-resolving-2',
+      action: 'resolution_started',
+    });
+    await store.adjudicateCase(review, SCOPE, {
+      caseId: SECOND_CAPTURE_OPERATION.caseId,
+      operationId: 'adj-resolved-2',
+      action: 'resolved',
+    });
+    const states = [...fake.ledgers.values()]
+      .flatMap((state) => [...state.cases.values()])
+      .map((entry) => [entry.properties.case_id, entry.state]);
+    expect(states).toContainEqual([CAPTURE_OPERATION.caseId, 'pending']);
+    expect(states).toContainEqual([SECOND_CAPTURE_OPERATION.caseId, 'resolved']);
+  });
+
+  it('refuses adjudication under revoked coverage with facet_revoked and zero writes', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    const { facet } = await store.openCoverage(capture, SCOPE, { operationId: 'coverage-open' });
+    const opened = await store.openCase(capture, facet, SCOPE, {
+      caseId: 'case-frozen-1',
+      operationId: 'case-frozen-open',
+    });
+    expect(opened.receipt.state).toBe('pending');
+    await store.revokeCoverage(review, facet, SCOPE, { operationId: 'coverage-revoke' });
+    const before = fake.totals();
+    let error: unknown;
+    try {
+      await store.adjudicateCase(review, SCOPE, {
+        caseId: 'case-frozen-1',
+        operationId: 'adj-frozen-reject',
+        action: 'rejected',
+      });
+    } catch (caught) { error = caught; }
+    expectSafeError(error, 'facet_revoked');
+    expect(fake.totals()).toEqual(before);
+  });
+
+  it('refuses cross-scope adjudication and hostile operations before any graph write', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const writesBefore = fake.executeWrite.mock.calls.length;
+    for (const scope of [OTHER_SCOPE, OTHER_TENANT_SCOPE, OTHER_PROJECT_SCOPE]) {
+      let error: unknown;
+      try {
+        await store.adjudicateCase(review, scope, {
+          caseId: CAPTURE_OPERATION.caseId,
+          operationId: 'adj-cross-scope',
+          action: 'rejected',
+        });
+      } catch (caught) { error = caught; }
+      expectSafeError(error, 'facet_scope_mismatch');
+    }
+    for (const operation of [
+      null,
+      [],
+      {},
+      { caseId: CAPTURE_OPERATION.caseId, operationId: 'adj-bad', action: 'case_opened' },
+      { caseId: CAPTURE_OPERATION.caseId, operationId: 'adj-bad', action: 'revoked' },
+      { caseId: CAPTURE_OPERATION.caseId, operationId: 'adj-bad', action: 'rejected', extra: true },
+      { caseId: '', operationId: 'adj-bad', action: 'rejected' },
+      { caseId: CAPTURE_OPERATION.caseId, operationId: `bad ${SECRET_CANARY}`, action: 'rejected' },
+      new Proxy({ caseId: CAPTURE_OPERATION.caseId, operationId: 'adj-bad', action: 'rejected' }, {}),
+    ]) {
+      let error: unknown;
+      try { await store.adjudicateCase(review, SCOPE, operation); } catch (caught) { error = caught; }
+      expectSafeError(error, 'invalid_command');
+    }
+    expect(fake.executeWrite.mock.calls.length).toBe(writesBefore);
+    expect(fake.totals()).toEqual({ events: 2, coverage: 1, cases: 1 });
+  });
+});
