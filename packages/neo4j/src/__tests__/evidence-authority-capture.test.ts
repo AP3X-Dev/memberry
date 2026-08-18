@@ -250,7 +250,12 @@ function makeDriver(options: {
 }
 
 function importSpecifiers(source: string): string[] {
-  return [...source.matchAll(/from '([^']+)'/g)].map((match) => match[1]!);
+  return [
+    ...source.matchAll(/from '([^']+)'/g),
+    ...source.matchAll(/import '([^']+)'/g),
+    ...source.matchAll(/import\('([^']+)'\)/g),
+    ...source.matchAll(/require\('([^']+)'\)/g),
+  ].map((match) => match[1]!);
 }
 
 describe('EvidenceAuthorityCapture V1', () => {
@@ -533,7 +538,7 @@ describe('EvidenceAuthorityCapture V1', () => {
     expect(fake.session).not.toHaveBeenCalled();
   });
 
-  it('propagates revoked coverage as a content-free facet_revoked error', async () => {
+  it('returns the terminal frozen uncaptured refusal for revoked coverage while the ledger boundary still throws content-free', async () => {
     const fake = makeDriver();
     const scope = {
       tenantId: REQUEST.tenantId,
@@ -546,20 +551,50 @@ describe('EvidenceAuthorityCapture V1', () => {
     const { facet } = await store.openCoverage(captureFacet, scope, { operationId: 'coverage-open' });
     await store.revokeCoverage(review, facet, scope, { operationId: 'coverage-revoke' });
 
+    // The ledger boundary keeps its exact content-free thrown refusal.
+    let ledgerError: unknown;
+    try {
+      await store.captureCase(captureFacet, scope, {
+        caseId: 'capture-case-revoked',
+        coverageOperationId: 'capture-op-coverage-revoked',
+        caseOperationId: 'capture-op-case-revoked',
+      });
+    } catch (caught) { ledgerError = caught; }
+    expect(ledgerError).toBeInstanceOf(EvidenceAuthorityLedgerError);
+    expect(ledgerError).toMatchObject({ code: 'facet_revoked' });
+    expect(String(ledgerError)).toBe('EvidenceAuthorityLedgerError: evidence_authority_ledger:facet_revoked');
+
+    // The module boundary is terminal: the frozen uncaptured value, zero residue.
+    const before = {
+      events: fake.events.size,
+      coverage: fake.coverage.size,
+      cases: fake.cases.size,
+    };
     const capture = createEvidenceAuthorityCapture(fake.driver);
-    let error: unknown;
-    try { await capture.capture({ ...REQUEST }); } catch (caught) { error = caught; }
-    expect(error).toBeInstanceOf(EvidenceAuthorityLedgerError);
-    expect(error).toMatchObject({ code: 'facet_revoked' });
-    expect(String(error)).toBe('EvidenceAuthorityLedgerError: evidence_authority_ledger:facet_revoked');
+    const result = await capture.capture({ ...REQUEST });
+    expect(result).toEqual({
+      contractVersion: EVIDENCE_AUTHORITY_CAPTURE_VERSION,
+      outcome: 'uncaptured',
+      code: 'uncaptured',
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.getPrototypeOf(result)).toBeNull();
+    expect({
+      events: fake.events.size,
+      coverage: fake.coverage.size,
+      cases: fake.cases.size,
+    }).toEqual(before);
   });
 
-  it('propagates unknown Semantic rows and storage failures content-free', async () => {
+  it('returns the terminal frozen uncaptured refusal for an unknown Semantic and propagates storage failures content-free', async () => {
     const missing = makeDriver({ semanticIds: [] });
-    let notFound: unknown;
-    try { await createEvidenceAuthorityCapture(missing.driver).capture({ ...REQUEST }); } catch (caught) { notFound = caught; }
-    expect(notFound).toBeInstanceOf(EvidenceAuthorityLedgerError);
-    expect(notFound).toMatchObject({ code: 'semantic_not_found' });
+    const notFound = await createEvidenceAuthorityCapture(missing.driver).capture({ ...REQUEST });
+    expect(notFound).toEqual({
+      contractVersion: EVIDENCE_AUTHORITY_CAPTURE_VERSION,
+      outcome: 'uncaptured',
+      code: 'uncaptured',
+    });
+    expect(Object.isFrozen(notFound)).toBe(true);
     expect(missing.events.size).toBe(0);
 
     const unavailable = makeDriver({ sessionThrows: true });
@@ -568,5 +603,28 @@ describe('EvidenceAuthorityCapture V1', () => {
     expect(storage).toBeInstanceOf(EvidenceAuthorityLedgerError);
     expect(storage).toMatchObject({ code: 'storage_unavailable' });
     expect(String(storage)).not.toContain(SECRET_CANARY);
+  });
+
+  // RET-005B-AUTH-001B3B1 additive test: the third code of the Decision 105
+  // errata triple is terminal at the capture boundary, never retried.
+  it('returns the terminal frozen uncaptured refusal for existing_state_mismatch and never retries', async () => {
+    const executeWrite = vi.fn(async () => {
+      throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+    });
+    const close = vi.fn(async () => undefined);
+    const session = vi.fn(() => ({ executeWrite, close }));
+    const capture = createEvidenceAuthorityCapture({ session } as unknown as Driver);
+    const result = await capture.capture({ ...REQUEST });
+    expect(result).toEqual({
+      contractVersion: EVIDENCE_AUTHORITY_CAPTURE_VERSION,
+      outcome: 'uncaptured',
+      code: 'uncaptured',
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.getPrototypeOf(result)).toBeNull();
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    const again = await capture.capture({ ...REQUEST });
+    expect(again).toBe(result);
+    expect(executeWrite).toHaveBeenCalledTimes(2);
   });
 });

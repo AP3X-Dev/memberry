@@ -15,6 +15,7 @@ import { MIGRATIONS } from '../migrations.js';
 import { initSchema } from '../schema.js';
 import { createEvidenceAuthorityCapture } from '../evidence-authority-capture.js';
 import { createEvidenceAuthorityAdjudication } from '../evidence-authority-adjudication.js';
+import { createEvidenceAuthorityRevocation } from '../evidence-authority-revocation.js';
 
 const LIVE_ENABLED = process.env.MEMBERRY_NEO4J_INTEGRATION === '1';
 const describeLive = LIVE_ENABLED ? describe : describe.skip;
@@ -1273,6 +1274,329 @@ describeLive('EvidenceAuthorityLedger adjudicateCase live Neo4j gate (RET-005B-A
         tenantId: adjudicationTenantId,
         semanticId: moduleSemanticId,
         label: 'principal-live-alpha',
+      },
+    )).toBe(0);
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// RET-005B-AUTH-001B3B1: additive coverage revocation live gate. The B1, B2,
+// and B3A suites above are frozen; this block owns its own driver, fixtures,
+// and full cleanup, and proves the terminal boundary the revocation verb
+// creates: once revoked, capture and adjudication refuse value-free forever.
+// ---------------------------------------------------------------------------
+
+describeLive('EvidenceAuthorityLedger coverage revocation live Neo4j gate (RET-005B-AUTH-001B3B1)', () => {
+  const revocationDriver = createNeo4jDriver(uri, user, password);
+  const revocationSuffix = randomUUID().toLowerCase();
+  const revocationTenantId = `test-evidence-revocation-${revocationSuffix}`;
+  const revocationProjectScope = `project:test-evidence-revocation-${revocationSuffix}`;
+  const revocationSemanticIds = [
+    'semantic-revocation-terminal',
+    'semantic-revocation-freeze',
+    'semantic-revocation-replay',
+  ].map((value) => `${value}-${revocationSuffix}`);
+  const revocationScope = (semanticId: string): EvidenceAuthorityScopeV1 => ({
+    tenantId: revocationTenantId,
+    projectScope: revocationProjectScope,
+    semanticId,
+  });
+
+  async function revocationScalar(
+    query: string,
+    key: string,
+    params: Record<string, unknown> = {},
+  ): Promise<number> {
+    const session = revocationDriver.session();
+    try {
+      const result = await session.run(query, params);
+      return Number(result.records[0]?.get(key) ?? 0);
+    } finally {
+      await session.close();
+    }
+  }
+
+  async function revocationLedgerCounts(semanticId: string) {
+    const params = { tenantId: revocationTenantId, semanticId };
+    return {
+      events: await revocationScalar(
+        'MATCH (n:EvidenceAuthorityEvent {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+      outboxes: await revocationScalar(
+        'MATCH (n:EvidenceAuthorityOutbox {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+      coverage: await revocationScalar(
+        'MATCH (n:EvidenceAuthorityCoverage {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+      cases: await revocationScalar(
+        'MATCH (n:EvidenceAuthorityCase {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+    };
+  }
+
+  beforeAll(async () => {
+    await revocationDriver.getServerInfo();
+    const migration = MIGRATIONS.find((item) => item.id === '0008-evidence-authority-ledger-v1');
+    expect(migration).toBeDefined();
+    await migration!.up(revocationDriver);
+    await initSchema(revocationDriver);
+    const session = revocationDriver.session();
+    try {
+      for (const semanticId of revocationSemanticIds) {
+        await session.run(
+          `CREATE (s:Semantic {
+             id: $semanticId, tenant_id: $tenantId, scope: $projectScope,
+             content: 'disposable synthetic revocation fixture', confidence: 1.0,
+             signal_count: 0, created_at: datetime(), updated_at: datetime(),
+             decay_class: 'stable', tags: [$projectScope]
+           })`,
+          {
+            semanticId,
+            tenantId: revocationTenantId,
+            projectScope: revocationProjectScope,
+          },
+        );
+      }
+    } finally {
+      await session.close();
+    }
+  });
+
+  afterAll(async () => {
+    if (LIVE_ENABLED) {
+      const session = revocationDriver.session();
+      try {
+        await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $semanticIds
+           DETACH DELETE n`,
+          {
+            tenantId: revocationTenantId,
+            projectScope: revocationProjectScope,
+            semanticIds: revocationSemanticIds,
+          },
+        );
+        const residue = await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $semanticIds
+           RETURN count(n) AS count`,
+          {
+            tenantId: revocationTenantId,
+            projectScope: revocationProjectScope,
+            semanticIds: revocationSemanticIds,
+          },
+        );
+        expect(Number(residue.records[0]?.get('count') ?? -1)).toBe(0);
+      } finally {
+        await session.close();
+      }
+    }
+    await revocationDriver.close().catch(() => undefined);
+  });
+
+  it('proves the terminal boundary end to end: capture, revoke through the unwired module, then capture and adjudication refuse value-free with zero writes and a passing audit', async () => {
+    const semanticId = revocationSemanticIds[0]!;
+    const primary = revocationScope(semanticId);
+    const store = createEvidenceAuthorityLedgerPersistence(revocationDriver);
+    const captureFacet = createEvidenceAuthorityCaptureFacet(store, primary);
+    const captured = await store.captureCase(captureFacet, primary, {
+      caseId: 'revocation-case-live-terminal',
+      coverageOperationId: 'revocation-op-coverage-live-terminal',
+      caseOperationId: 'revocation-op-case-live-terminal',
+    });
+    expect(captured.caseReceipt).toMatchObject({
+      kind: 'case', action: 'case_opened', state: 'pending', sequence: 2,
+    });
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 2, outboxes: 2, coverage: 1, cases: 1,
+    });
+
+    const revocation = createEvidenceAuthorityRevocation(revocationDriver, {
+      tenantId: revocationTenantId,
+      projectScope: revocationProjectScope,
+      principalId: 'principal-live-rev-alpha',
+    });
+    const revoked = await revocation.revoke({ semanticId });
+    expect(revoked.outcome).toBe('revoked');
+    expect(revoked.outcome === 'revoked' && revoked.receipt).toMatchObject({
+      kind: 'coverage', action: 'revoked', state: 'revoked', sequence: 3,
+    });
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    // Capture against the revoked coverage is terminal: UNCAPTURED, not thrown.
+    const capture = createEvidenceAuthorityCapture(revocationDriver);
+    const late = await capture.capture({
+      tenantId: revocationTenantId,
+      projectScope: revocationProjectScope,
+      semanticId,
+      signalKind: 'contradiction' as const,
+      sourceEpisodeId: `_ep-rev-late-${revocationSuffix}`,
+    });
+    expect(late).toEqual({
+      contractVersion: 'memberry.evidence-authority-capture/1.0.0',
+      outcome: 'uncaptured',
+      code: 'uncaptured',
+    });
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    // Adjudication of the frozen case is terminal: UNADJUDICATED, not thrown.
+    const adjudication = createEvidenceAuthorityAdjudication(revocationDriver, {
+      tenantId: revocationTenantId,
+      projectScope: revocationProjectScope,
+      principalId: 'principal-live-rev-alpha',
+    });
+    const unadjudicated = await adjudication.adjudicate({
+      semanticId,
+      caseId: 'revocation-case-live-terminal',
+      decision: 'reject' as const,
+    });
+    expect(unadjudicated).toEqual({
+      contractVersion: 'memberry.evidence-authority-adjudication/1.0.0',
+      outcome: 'unadjudicated',
+      code: 'unadjudicated',
+    });
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    // The full-history audit still passes after every refusal: an exact
+    // same-principal replay re-runs lock/audit/replay and returns the stored
+    // receipt without appending.
+    const replay = await revocation.revoke({ semanticId });
+    expect(replay).toEqual(revoked);
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+  }, 120_000);
+
+  it('accepts revocation over an open case and freezes it permanently, with later transitions refused and the audit passing', async () => {
+    const semanticId = revocationSemanticIds[1]!;
+    const primary = revocationScope(semanticId);
+    const store = createEvidenceAuthorityLedgerPersistence(revocationDriver);
+    const captureFacet = createEvidenceAuthorityCaptureFacet(store, primary);
+    const review = createEvidenceAuthorityReviewFacet(store, primary);
+    await store.captureCase(captureFacet, primary, {
+      caseId: 'revocation-case-live-frozen',
+      coverageOperationId: 'revocation-op-coverage-live-frozen',
+      caseOperationId: 'revocation-op-case-live-frozen',
+    });
+
+    const revocation = createEvidenceAuthorityRevocation(revocationDriver, {
+      tenantId: revocationTenantId,
+      projectScope: revocationProjectScope,
+      principalId: 'principal-live-rev-alpha',
+    });
+    const revoked = await revocation.revoke({ semanticId });
+    expect(revoked.outcome).toBe('revoked');
+    expect(revoked.outcome === 'revoked' && revoked.receipt).toMatchObject({
+      kind: 'coverage', action: 'revoked', state: 'revoked', sequence: 3,
+    });
+
+    // The ledger boundary refuses the frozen case content-free with zero writes.
+    await expect(store.adjudicateCase(review, primary, {
+      caseId: 'revocation-case-live-frozen',
+      operationId: 'revocation-op-late-adjudication',
+      action: 'rejected',
+    })).rejects.toMatchObject({ code: 'facet_revoked' });
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    // The case history is frozen at exactly its opening event, forever pending.
+    expect(await revocationScalar(
+      `MATCH (e:EvidenceAuthorityEvent {tenant_id: $tenantId, semantic_id: $semanticId, case_id: $caseId})
+       RETURN count(e) AS count`,
+      'count',
+      {
+        tenantId: revocationTenantId,
+        semanticId,
+        caseId: 'revocation-case-live-frozen',
+      },
+    )).toBe(1);
+
+    // A passing exact replay proves the frozen history remains audit-valid.
+    const replay = await revocation.revoke({ semanticId });
+    expect(replay).toEqual(revoked);
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+  }, 120_000);
+
+  it('replays same-principal revocation, refuses cross-principal replay-as-forgery, and stores nothing attributable', async () => {
+    const semanticId = revocationSemanticIds[2]!;
+    const primary = revocationScope(semanticId);
+    const store = createEvidenceAuthorityLedgerPersistence(revocationDriver);
+    const captureFacet = createEvidenceAuthorityCaptureFacet(store, primary);
+    await store.captureCase(captureFacet, primary, {
+      caseId: 'revocation-case-live-replay',
+      coverageOperationId: 'revocation-op-coverage-live-replay',
+      caseOperationId: 'revocation-op-case-live-replay',
+    });
+
+    const alpha = createEvidenceAuthorityRevocation(revocationDriver, {
+      tenantId: revocationTenantId,
+      projectScope: revocationProjectScope,
+      principalId: 'principal-live-rev-alpha',
+    });
+    const first = await alpha.revoke({ semanticId });
+    expect(first.outcome).toBe('revoked');
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    const replay = await alpha.revoke({ semanticId });
+    expect(replay).toEqual(first);
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    const beta = createEvidenceAuthorityRevocation(revocationDriver, {
+      tenantId: revocationTenantId,
+      projectScope: revocationProjectScope,
+      principalId: 'principal-live-rev-beta',
+    });
+    const forged = await beta.revoke({ semanticId });
+    expect(forged).toEqual({
+      contractVersion: 'memberry.evidence-authority-revocation/1.0.0',
+      outcome: 'unrevoked',
+      code: 'unrevoked',
+    });
+    expect(await revocationLedgerCounts(semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 1,
+    });
+
+    // Durable anonymity: no stored value records or permits recovery of the
+    // construction-bound label.
+    expect(await revocationScalar(
+      `MATCH (n)
+       WHERE n.tenant_id = $tenantId AND n.semantic_id = $semanticId
+         AND (n.id CONTAINS $label OR n.operation_id CONTAINS $label OR n.case_id CONTAINS $label)
+       RETURN count(n) AS count`,
+      'count',
+      {
+        tenantId: revocationTenantId,
+        semanticId,
+        label: 'principal-live-rev-alpha',
       },
     )).toBe(0);
   }, 120_000);

@@ -243,6 +243,11 @@ export interface EvidenceAuthorityLedgerPersistenceV1 {
     scope: unknown,
     operation: unknown,
   ): Promise<EvidenceAuthorityEventReceiptV1>;
+  revokeCoverageByReview(
+    reviewFacet: unknown,
+    scope: unknown,
+    operation: unknown /* exact keys { operationId } */,
+  ): Promise<EvidenceAuthorityEventReceiptV1>;
 }
 
 function isLedgerError(value: unknown): value is EvidenceAuthorityLedgerError {
@@ -1972,6 +1977,34 @@ class EvidenceAuthorityLedgerPersistence implements EvidenceAuthorityLedgerPersi
       operation.caseId,
       null,
       transition.previous,
+    ))).receipt;
+  }
+
+  /**
+   * B3B1 additive revocation seam (RET-005B-AUTH-001B3B1): revokes existing
+   * coverage under review-facet authority alone, routing through the
+   * unchanged perform() lock/audit/replay preamble with the byte-identical
+   * operation spec revokeCoverage() builds. Returns a receipt only; no
+   * coverage facet is required, minted, re-derived, or returned, and no node
+   * is created (createTarget is null).
+   */
+  async revokeCoverageByReview(
+    rawReviewFacet: unknown,
+    rawScope: unknown,
+    rawOperation: unknown,
+  ): Promise<EvidenceAuthorityEventReceiptV1> {
+    const scope = parseScope(rawScope);
+    this.requireReviewFacet(rawReviewFacet, scope);
+    const operation = parseOperation(rawOperation);
+    return (await this.perform(operationSpec(
+      scope,
+      operation.operationId,
+      'coverage',
+      'revoked',
+      'revoked',
+      '',
+      null,
+      'open',
     ))).receipt;
   }
 }

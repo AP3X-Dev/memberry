@@ -1505,3 +1505,181 @@ describe('EvidenceAuthorityLedgerPersistence V1 adjudicateCase (RET-005B-AUTH-00
     expect(fake.totals()).toEqual({ events: 2, coverage: 1, cases: 1 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// RET-005B-AUTH-001B3B1: additive revokeCoverageByReview suite. B1, B2, and
+// B3A tests above are frozen. Residue proofs live inside each failure-path
+// test, never in afterAll (Decision 106 F-3).
+// ---------------------------------------------------------------------------
+
+describe('EvidenceAuthorityLedgerPersistence V1 revokeCoverageByReview (RET-005B-AUTH-001B3B1)', () => {
+  it('revokes open coverage with one paired event/outbox at the next sequence and returns a receipt only', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const writesBefore = fake.executeWrite.mock.calls.length;
+    const receipt = await store.revokeCoverageByReview(review, SCOPE, { operationId: 'coverage-revoke-1' });
+    expect(fake.executeWrite.mock.calls.length).toBe(writesBefore + 1);
+    expect(receipt).toEqual({
+      contractVersion: EVIDENCE_AUTHORITY_LEDGER_VERSION,
+      kind: 'coverage',
+      action: 'revoked',
+      state: 'revoked',
+      sequence: 3,
+      recordedAt: RECORDED_AT,
+    });
+    expect(Object.getPrototypeOf(receipt)).toBeNull();
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(Reflect.ownKeys(receipt)).toEqual([
+      'contractVersion', 'kind', 'action', 'state', 'sequence', 'recordedAt',
+    ]);
+    expect('facet' in receipt).toBe(false);
+    expect(fake.totals()).toEqual({ events: 3, coverage: 1, cases: 1 });
+    const transition = fake.queries.find((query) => query.includes('append-transition-coverage')) ?? '';
+    expect(transition).toContain('CREATE (event:EvidenceAuthorityEvent');
+    expect(transition).toContain('CREATE (outbox:EvidenceAuthorityOutbox');
+    expect(transition).toContain('recorded_at: event.recorded_at');
+  });
+
+  it('replays the exact revocation without appending and rejects divergent content as operation_conflict', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const first = await store.revokeCoverageByReview(review, SCOPE, { operationId: 'coverage-revoke-1' });
+    const replay = await store.revokeCoverageByReview(review, SCOPE, { operationId: 'coverage-revoke-1' });
+    expect(replay).toEqual(first);
+    expect(fake.queries.filter((query) => query.includes('append-transition-coverage'))).toHaveLength(1);
+    const before = fake.totals();
+    await expect(store.revokeCoverageByReview(review, SCOPE, {
+      operationId: CAPTURE_OPERATION.caseOperationId,
+    })).rejects.toMatchObject({ code: 'operation_conflict' });
+    expect(fake.totals()).toEqual(before);
+  });
+
+  it('executes exactly one write transaction per revocation with no version read outside it', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const writesBefore = fake.executeWrite.mock.calls.length;
+    const locksBefore = fake.queries.filter((query) => query.includes('evidence-authority:lock')).length;
+    await store.revokeCoverageByReview(review, SCOPE, { operationId: 'coverage-revoke-1' });
+    expect(fake.executeWrite.mock.calls.length).toBe(writesBefore + 1);
+    expect(fake.queries.filter((query) => query.includes('evidence-authority:lock')))
+      .toHaveLength(locksBefore + 1);
+  });
+
+  it('refuses re-revocation and absent coverage terminally with zero writes', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    await store.revokeCoverageByReview(review, SCOPE, { operationId: 'coverage-revoke-1' });
+    const before = fake.totals();
+    let alreadyRevoked: unknown;
+    try {
+      await store.revokeCoverageByReview(review, SCOPE, { operationId: 'coverage-revoke-2' });
+    } catch (caught) { alreadyRevoked = caught; }
+    expectSafeError(alreadyRevoked, 'invalid_transition');
+    expect(fake.totals()).toEqual(before);
+
+    const otherReview = createEvidenceAuthorityReviewFacet(store, OTHER_SCOPE);
+    let missing: unknown;
+    try {
+      await store.revokeCoverageByReview(otherReview, OTHER_SCOPE, { operationId: 'coverage-revoke-none' });
+    } catch (caught) { missing = caught; }
+    expectSafeError(missing, 'coverage_missing');
+    expect(fake.totals()).toEqual(before);
+  });
+
+  it('refuses cross-scope revocation, forged facets, and hostile operations before any graph write', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const writesBefore = fake.executeWrite.mock.calls.length;
+    for (const scope of [OTHER_SCOPE, OTHER_TENANT_SCOPE, OTHER_PROJECT_SCOPE]) {
+      let error: unknown;
+      try {
+        await store.revokeCoverageByReview(review, scope, { operationId: 'coverage-revoke-cross' });
+      } catch (caught) { error = caught; }
+      expectSafeError(error, 'facet_scope_mismatch');
+    }
+    await expect(store.revokeCoverageByReview(Object.freeze({}), SCOPE, { operationId: 'coverage-revoke-forged' }))
+      .rejects.toMatchObject({ code: 'invalid_facet' });
+    for (const operation of [
+      null,
+      [],
+      {},
+      { operationId: '' },
+      { operationId: `bad ${SECRET_CANARY}` },
+      { operationId: `o${'x'.repeat(501)}` },
+      { operationId: 'coverage-revoke-1', extra: true },
+      { operationId: 'coverage-revoke-1', [Symbol('hostile')]: true },
+      Object.assign(Object.create({ inherited: true }), { operationId: 'coverage-revoke-1' }),
+      new Proxy({ operationId: 'coverage-revoke-1' }, {}),
+    ]) {
+      let error: unknown;
+      try { await store.revokeCoverageByReview(review, SCOPE, operation); } catch (caught) { error = caught; }
+      expectSafeError(error, 'invalid_command');
+    }
+    expect(fake.executeWrite.mock.calls.length).toBe(writesBefore);
+    expect(fake.totals()).toEqual({ events: 2, coverage: 1, cases: 1 });
+  });
+
+  it('accepts revocation over pending and resolving cases, freezing them permanently with zero later writes', async () => {
+    const fake = makeCaptureLedgerDriver();
+    const { store, capture, review } = authorities(fake.driver);
+
+    // Pending case frozen by revocation.
+    await store.captureCase(capture, SCOPE, CAPTURE_OPERATION);
+    const revokedOverPending = await store.revokeCoverageByReview(review, SCOPE, {
+      operationId: 'coverage-revoke-pending',
+    });
+    expect(revokedOverPending).toMatchObject({
+      kind: 'coverage', action: 'revoked', state: 'revoked', sequence: 3,
+    });
+    const beforePending = fake.totals();
+    let pendingError: unknown;
+    try {
+      await store.adjudicateCase(review, SCOPE, {
+        caseId: CAPTURE_OPERATION.caseId,
+        operationId: 'adj-after-freeze-1',
+        action: 'rejected',
+      });
+    } catch (caught) { pendingError = caught; }
+    expectSafeError(pendingError, 'facet_revoked');
+    expect(fake.totals()).toEqual(beforePending);
+
+    // Resolving case frozen by revocation in a second scope.
+    const otherCapture = createEvidenceAuthorityCaptureFacet(store, OTHER_SCOPE);
+    const otherReview = createEvidenceAuthorityReviewFacet(store, OTHER_SCOPE);
+    await store.captureCase(otherCapture, OTHER_SCOPE, CAPTURE_OPERATION);
+    await store.adjudicateCase(otherReview, OTHER_SCOPE, {
+      caseId: CAPTURE_OPERATION.caseId,
+      operationId: 'adj-resolving-freeze',
+      action: 'resolution_started',
+    });
+    const revokedOverResolving = await store.revokeCoverageByReview(otherReview, OTHER_SCOPE, {
+      operationId: 'coverage-revoke-resolving',
+    });
+    expect(revokedOverResolving).toMatchObject({
+      kind: 'coverage', action: 'revoked', state: 'revoked', sequence: 4,
+    });
+    const beforeResolving = fake.totals();
+    let resolvingError: unknown;
+    try {
+      await store.adjudicateCase(otherReview, OTHER_SCOPE, {
+        caseId: CAPTURE_OPERATION.caseId,
+        operationId: 'adj-resolve-freeze',
+        action: 'resolved',
+      });
+    } catch (caught) { resolvingError = caught; }
+    expectSafeError(resolvingError, 'facet_revoked');
+    expect(fake.totals()).toEqual(beforeResolving);
+
+    // The frozen cases keep their exact last states.
+    const states = [...fake.ledgers.values()]
+      .flatMap((state) => [...state.cases.values()])
+      .map((entry) => entry.state)
+      .sort();
+    expect(states).toEqual(['pending', 'resolving']);
+  });
+});
