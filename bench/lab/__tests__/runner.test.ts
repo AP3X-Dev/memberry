@@ -4,6 +4,8 @@ import { MemBerryProxyAdapter } from '../adapters/memberry-proxy.js';
 import { inRequestedScope, isCurrent, namespaceKey } from '../adapters/in-memory.js';
 import { createRunManifest, renderComparisonMarkdown } from '../artifacts.js';
 import type { AdapterCapability, IngestRequest, QueryRequest, QueryResponse } from '../contracts/adapter.js';
+import { LAB_SCENARIO_VERSION, type LabScenario } from '../contracts/scenario.js';
+import { LAB_TOKEN_ESTIMATOR_ID } from '../metrics.js';
 import { TEMPORAL_ISOLATION_SCENARIOS } from '../fixtures/temporal-isolation.js';
 import { compareAdapters, runAdapter } from '../runner.js';
 
@@ -208,5 +210,138 @@ describe('lab runner and comparison gate', () => {
     expect(comparison.failures).toEqual(expect.arrayContaining([
       expect.objectContaining({ arm: 'candidate', metric: 'scenario-coverage' }),
     ]));
+  });
+});
+
+/** Ten probes over two fixture documents with very different token weights. */
+const CONTEXT_EFFICIENCY_SCENARIO: LabScenario = {
+  input: {
+    version: LAB_SCENARIO_VERSION,
+    id: 'context-efficiency-v1',
+    split: 'dev',
+    title: 'Context efficiency fixture',
+    description: 'Hand-computable token accounting fixture.',
+    dimensions: ['recall'],
+    tenant: 'tenant',
+    project: 'project',
+    memories: [
+      { id: 'long', content: 'x'.repeat(400), recordedAt: '2026-01-01T00:00:00.000Z' },
+      { id: 'short', content: 'y'.repeat(20), recordedAt: '2026-01-01T00:00:00.000Z' },
+    ],
+    queries: Array.from({ length: 10 }, (_, index) => ({
+      id: `efficiency-probe-${index}`,
+      query: index % 2 === 0 ? 'long' : 'short',
+      limit: 1,
+    })),
+  },
+  oracle: {
+    version: LAB_SCENARIO_VERSION,
+    scenarioId: 'context-efficiency-v1',
+    probes: Array.from({ length: 10 }, (_, index) => ({
+      probeId: `efficiency-probe-${index}`,
+      relevant: [index % 2 === 0 ? 'long' : 'short'],
+    })),
+  },
+};
+
+/** Returns exactly the queried fixture id so token accounting is hand-computable. */
+class FixedAnswerControlAdapter extends MemBerryProxyAdapter {
+  override readonly id = 'fixed-answer-control-v1';
+  override readonly displayName = 'Fixed answer control';
+  override async query(request: QueryRequest): Promise<QueryResponse> {
+    return { results: [{ id: request.query, score: 1 }] };
+  }
+}
+
+class FixedAnswerCandidateAdapter extends FixedAnswerControlAdapter {
+  override readonly id = 'fixed-answer-candidate-v1';
+  override readonly displayName = 'Fixed answer candidate';
+}
+
+describe('context efficiency accounting and paired bootstrap', () => {
+  it('threads probe, scenario, and run token accounting through the report', async () => {
+    const report = await runAdapter({
+      runId: 'efficiency-run',
+      adapter: new FixedAnswerControlAdapter(),
+      scenarios: [CONTEXT_EFFICIENCY_SCENARIO],
+    });
+    const scenario = report.scenarioReports[0];
+    expect(scenario.probes.map((probe) => probe.contextTokens)).toEqual([100, 5, 100, 5, 100, 5, 100, 5, 100, 5]);
+    expect(scenario.contextAccounting).toBeDefined();
+    expect(report.contextAccounting).toBeDefined();
+    expect(report.contextAccounting?.estimatorId).toBe(LAB_TOKEN_ESTIMATOR_ID);
+    expect(report.contextAccounting?.outcome).toBe('measured');
+    expect(report.contextAccounting?.scoredProbes).toBe(10);
+    expect(report.contextAccounting?.contextTokens).toBe(525);
+    expect(report.contextAccounting?.taskSuccessTotal).toBe(10);
+    // Run-level ratio of sums: 1000 * 10 / 525, not the mean of probe ratios (105).
+    expect(report.contextAccounting?.taskSuccessPer1kTokens).toBeCloseTo(10000 / 525, 10);
+    expect(Math.abs((report.contextAccounting?.taskSuccessPer1kTokens ?? 0) - 105)).toBeGreaterThan(1e-6);
+  });
+
+  it('computes a measured paired interval end-to-end without touching deltas or gates', async () => {
+    const comparison = await compareAdapters({
+      runId: 'efficiency-comparison',
+      control: new FixedAnswerControlAdapter(),
+      candidate: new FixedAnswerCandidateAdapter(),
+      scenarios: [CONTEXT_EFFICIENCY_SCENARIO],
+    });
+    expect(comparison.efficiency).toBeDefined();
+    expect(comparison.efficiency?.metric).toBe('taskSuccessPer1kTokens');
+    expect(comparison.efficiency?.control.contextTokens).toBe(525);
+    expect(comparison.efficiency?.candidate.contextTokens).toBe(525);
+    expect(comparison.efficiency?.delta).toBe(0);
+    const interval = comparison.efficiency?.interval;
+    expect(interval?.outcome).toBe('measured');
+    expect(interval?.pairedProbes).toBe(10);
+    expect(interval?.resamples).toBe(2000);
+    expect(interval?.level).toBe(0.95);
+    expect(interval?.point).toBe(0);
+    expect(interval?.lower).toBe(0);
+    expect(interval?.upper).toBe(0);
+    expect(interval?.oneSidedLower).toBe(0);
+    // The efficiency proxy is reported, never gating, and never a ProbeMetrics delta.
+    expect(comparison.deltas.map((delta) => delta.metric)).toEqual([
+      'recallAtK', 'precisionAtK', 'reciprocalRank', 'ndcgAtK', 'answerCoverage', 'staleSafety', 'isolationSafety',
+      'staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate',
+    ]);
+    expect(comparison.failures.some((failure) => String(failure.metric) === 'taskSuccessPer1kTokens')).toBe(false);
+  });
+
+  it('marks the interval unsupported below the ten-probe pairing floor', async () => {
+    const comparison = await compareAdapters({
+      runId: 'small-lane-comparison',
+      control: new ScopeAwareBm25ControlAdapter(),
+      candidate: new MemBerryProxyAdapter(),
+      scenarios: TEMPORAL_ISOLATION_SCENARIOS,
+    });
+    expect(comparison.efficiency?.interval.outcome).toBe('unsupported');
+    expect(comparison.efficiency?.interval.unsupportedReason).toBe('insufficient-paired-probes');
+    expect(comparison.efficiency?.interval.pairedProbes).toBe(5);
+  });
+
+  it('marks the interval unsupported when an arm is not scored', async () => {
+    const comparison = await compareAdapters({
+      runId: 'arm-not-scored-comparison',
+      control: new ScopeAwareBm25ControlAdapter(),
+      candidate: new FailingCandidateAdapter(),
+      scenarios: TEMPORAL_ISOLATION_SCENARIOS.slice(0, 1),
+    });
+    expect(comparison.efficiency?.interval.outcome).toBe('unsupported');
+    expect(comparison.efficiency?.interval.unsupportedReason).toBe('arm-not-scored');
+    expect(comparison.efficiency?.delta).toBeNull();
+  });
+
+  it('contributes nothing to accounting from failed or unsupported scenarios', async () => {
+    const report = await runAdapter({
+      runId: 'failed-accounting-run',
+      adapter: new FailingCandidateAdapter(),
+      scenarios: TEMPORAL_ISOLATION_SCENARIOS.slice(0, 1),
+    });
+    expect(report.contextAccounting?.outcome).toBe('unsupported');
+    expect(report.contextAccounting?.unsupportedReason).toBe('no-scored-probes');
+    expect(report.contextAccounting?.scoredProbes).toBe(0);
+    expect(report.contextAccounting?.contextTokens).toBe(0);
+    expect(report.contextAccounting?.taskSuccessPer1kTokens).toBeNull();
   });
 });

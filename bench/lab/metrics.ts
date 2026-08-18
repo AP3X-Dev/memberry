@@ -1,6 +1,6 @@
 import type { LabProbeOracle, LabScenarioInput } from './contracts/scenario.js';
 import type { LabQueryResult } from './contracts/adapter.js';
-import type { LabGatePolicy, ProbeMetrics } from './contracts/report.js';
+import type { LabContextAccounting, LabGatePolicy, ProbeMetrics, ProbeReport } from './contracts/report.js';
 
 export const DEFAULT_GATE_POLICY: LabGatePolicy = Object.freeze({
   minRecallAtK: 0.8,
@@ -90,4 +90,64 @@ export function averageMetrics(metrics: readonly ProbeMetrics[]): ProbeMetrics {
     key,
     metrics.reduce((sum, value) => sum + value[key], 0) / divisor,
   ])) as unknown as ProbeMetrics;
+}
+
+/** Versioned token-estimator identity; changed arithmetic requires a new id, ids are never reused. */
+export const LAB_TOKEN_ESTIMATOR_ID = 'chars-div-4-ceil-v1' as const;
+
+/**
+ * Lab-local deterministic token estimate. Provenance: mirrors estimateTokens
+ * in packages/core/src/ranking.ts:38-41, deliberately copied instead of
+ * imported so the measuring stick does not depend on the system under test.
+ */
+export function estimateLabTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Context-token denominator for one probe: estimated fixture-content tokens
+ * of the deduplicated top-k result ids. Unknown ids contribute 0; duplicate
+ * ids are counted once. Caveat: this measures fixture-content tokens of
+ * returned results, not rendered markdown, prompt scaffolding, or the live
+ * trace's `**Tokens:** ~N`; it is uniform across arms on identical fixtures,
+ * which is what a comparison requires.
+ *
+ * `taskSuccessPer1kTokens` is the deterministic-lab proxy for PRP §6.5's
+ * "task success per 1,000 context tokens". Its numerator is fixture-oracle
+ * answer coverage on retrieval probes, not agent task completion; no agent
+ * executes a task in this lab. Its denominator is estimated from fixture
+ * content of returned results, not from rendered context actually consumed
+ * by a model. It is a comparative efficiency signal between two arms on
+ * identical fixtures, and is not a claim about agent-level task completion.
+ */
+export function probeContextTokens(
+  scenario: LabScenarioInput,
+  limit: number,
+  results: readonly LabQueryResult[],
+): number {
+  const contentById = new Map(scenario.memories.map((memory) => [memory.id, memory.content]));
+  return uniqueTopIds(results, limit).reduce((sum, id) => {
+    const content = contentById.get(id);
+    return sum + (content === undefined ? 0 : estimateLabTokens(content));
+  }, 0);
+}
+
+/**
+ * Run-level accounting over scored probes only, as a ratio of sums — never a
+ * mean of probe ratios, so a 20-token probe cannot weigh like a 400-token one.
+ * Unmeasurable outcomes are typed 'unsupported', never 0, NaN, or Infinity;
+ * zero success over positive tokens is a measured zero.
+ */
+export function aggregateContextAccounting(probes: readonly ProbeReport[]): LabContextAccounting {
+  const scoredProbes = probes.length;
+  const contextTokens = probes.reduce((sum, probe) => sum + (probe.contextTokens ?? 0), 0);
+  const taskSuccessTotal = probes.reduce((sum, probe) => sum + probe.metrics.answerCoverage, 0);
+  const base = { estimatorId: LAB_TOKEN_ESTIMATOR_ID, scoredProbes, contextTokens, taskSuccessTotal } as const;
+  if (scoredProbes === 0) {
+    return { ...base, outcome: 'unsupported', unsupportedReason: 'no-scored-probes', taskSuccessPer1kTokens: null };
+  }
+  if (contextTokens === 0) {
+    return { ...base, outcome: 'unsupported', unsupportedReason: 'zero-context-tokens', taskSuccessPer1kTokens: null };
+  }
+  return { ...base, outcome: 'measured', taskSuccessPer1kTokens: (1000 * taskSuccessTotal) / contextTokens };
 }

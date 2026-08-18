@@ -10,3 +10,4 @@ export {
 export * from './metrics.js';
 export * from './registered-adapters.js';
 export * from './runner.js';
+export * from './stats.js';

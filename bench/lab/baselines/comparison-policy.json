@@ -3,6 +3,7 @@
   "baseline": "memberry-7a31231",
   "requireCandidatePass": true,
   "requireSameCorpus": true,
+  "g2Thresholds": { "precisionAt5": { "minImprovement": 0.05, "armed": false, "armsWith": "RET-006" } },
   "rules": [
     { "metric": "recallAt5", "direction": "higher", "allowedRegression": 0 },
     { "metric": "recallAt10", "direction": "higher", "allowedRegression": 0 },

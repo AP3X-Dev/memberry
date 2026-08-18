@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'vitest';
 
 import { compareQualityReports } from '../compare-quality.js';
+import { loadComparisonPolicy } from '../compare-quality.js';
 import { requireGateResult } from '../ci-gate.js';
 import { loadAndVerifyBaseline, validateBaselineManifest, verifyBaselineCommands, verifyBaselineGitArtifacts } from '../verify.js';
 
@@ -94,5 +95,68 @@ test('baseline verification rejects a recorded command that never existed', asyn
   await assert.rejects(
     verifyBaselineCommands(manifest, REPO_ROOT),
     /nonexistent npm script/,
+  );
+});
+
+test('minImprovement requires a material gain, not parity or a near miss', async () => {
+  const manifest = JSON.parse(await readFile(BASELINE_PATH, 'utf8'));
+  const policy = {
+    schemaVersion: 1,
+    baseline: manifest.id,
+    requireCandidatePass: true,
+    requireSameCorpus: true,
+    rules: [{ metric: 'precisionAt5', direction: 'higher' as const, allowedRegression: 0, minImprovement: 0.05 }],
+  };
+  const candidateAt = (precisionAt5: number) => ({
+    corpusSize: manifest.results.quality.corpusSize,
+    queryCount: manifest.results.quality.queryCount,
+    passed: true,
+    metrics: { ...manifest.results.quality.metrics, precisionAt5 },
+  });
+  // Baseline precisionAt5 is 0.4000: +0.0 and +0.049 fail; +0.05 passes.
+  assert.equal(manifest.results.quality.metrics.precisionAt5, 0.39999999999999997);
+  assert.equal(compareQualityReports(manifest, candidateAt(0.4), policy).passed, false);
+  assert.equal(compareQualityReports(manifest, candidateAt(0.449), policy).passed, false);
+  assert.equal(compareQualityReports(manifest, candidateAt(0.45), policy).passed, true);
+});
+
+test('minImprovement on a lower-direction metric requires a material reduction', async () => {
+  const manifest = JSON.parse(await readFile(BASELINE_PATH, 'utf8'));
+  const synthetic = JSON.parse(JSON.stringify(manifest));
+  synthetic.results.quality.metrics.staleLeakRate = 0.2;
+  const policy = {
+    schemaVersion: 1,
+    baseline: synthetic.id,
+    requireCandidatePass: true,
+    requireSameCorpus: true,
+    rules: [{ metric: 'staleLeakRate', direction: 'lower' as const, allowedRegression: 0, minImprovement: 0.1 }],
+  };
+  const candidateAt = (staleLeakRate: number) => ({
+    corpusSize: synthetic.results.quality.corpusSize,
+    queryCount: synthetic.results.quality.queryCount,
+    passed: true,
+    metrics: { ...synthetic.results.quality.metrics, staleLeakRate },
+  });
+  assert.equal(compareQualityReports(synthetic, candidateAt(0.1), policy).passed, true);
+  assert.equal(compareQualityReports(synthetic, candidateAt(0.15), policy).passed, false);
+});
+
+test('the committed comparison policy stays inert: g2Thresholds declared, rules unarmed', async () => {
+  const manifest = JSON.parse(await readFile(BASELINE_PATH, 'utf8'));
+  const policy = await loadComparisonPolicy();
+  assert.deepEqual(policy.g2Thresholds, {
+    precisionAt5: { minImprovement: 0.05, armed: false, armsWith: 'RET-006' },
+  });
+  assert.ok(policy.rules.every((rule) => !('minImprovement' in rule)), 'no committed rule may be armed');
+  const candidate = {
+    corpusSize: manifest.results.quality.corpusSize,
+    queryCount: manifest.results.quality.queryCount,
+    passed: true,
+    metrics: { ...manifest.results.quality.metrics },
+  };
+  // Rule outcomes with the committed policy are identical to the no-policy default.
+  assert.deepEqual(
+    compareQualityReports(manifest, candidate, policy),
+    compareQualityReports(manifest, candidate),
   );
 });

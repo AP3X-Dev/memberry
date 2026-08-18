@@ -1,5 +1,7 @@
 import type { AdapterStats } from './adapter.js';
 import type { ScenarioDimension } from './scenario.js';
+import type { LAB_TOKEN_ESTIMATOR_ID } from '../metrics.js';
+import type { LabBootstrapInterval } from '../stats.js';
 
 export interface ProbeMetrics {
   recallAtK: number;
@@ -16,11 +18,46 @@ export interface ProbeMetrics {
   isolationSafety: number;
 }
 
+/**
+ * Context-token accounting for the efficiency proxy, aggregated as a
+ * run-level ratio of sums over scored probes only.
+ *
+ * `taskSuccessPer1kTokens` is the deterministic-lab proxy for PRP §6.5's
+ * "task success per 1,000 context tokens". Its numerator is fixture-oracle
+ * answer coverage on retrieval probes, not agent task completion; no agent
+ * executes a task in this lab. Its denominator is estimated from fixture
+ * content of returned results, not from rendered context actually consumed
+ * by a model. It is a comparative efficiency signal between two arms on
+ * identical fixtures, and is not a claim about agent-level task completion.
+ */
+export interface LabContextAccounting {
+  estimatorId: typeof LAB_TOKEN_ESTIMATOR_ID;
+  scoredProbes: number;
+  contextTokens: number;
+  taskSuccessTotal: number;
+  outcome: 'measured' | 'unsupported';
+  unsupportedReason?: 'no-scored-probes' | 'zero-context-tokens';
+  /** null iff outcome is 'unsupported'; never 0, NaN, or Infinity as a stand-in. */
+  taskSuccessPer1kTokens: number | null;
+}
+
+/** Reported, never gating: this is not a ProbeMetrics key and produces no GateFailure. */
+export interface ComparisonEfficiency {
+  metric: 'taskSuccessPer1kTokens';
+  control: LabContextAccounting;
+  candidate: LabContextAccounting;
+  /** Candidate minus control; null when either arm is unsupported. */
+  delta: number | null;
+  interval: LabBootstrapInterval;
+}
+
 export interface ProbeReport {
   probeId: string;
   query: string;
   resultIds: readonly string[];
   metrics: ProbeMetrics;
+  /** Estimated fixture-content tokens of the deduplicated top-k results. */
+  contextTokens?: number;
   durationMs?: number;
 }
 
@@ -33,6 +70,7 @@ export interface ScenarioReport {
   exclusionReason?: string;
   probes: readonly ProbeReport[];
   metrics: ProbeMetrics;
+  contextAccounting?: LabContextAccounting;
 }
 
 export interface LabGatePolicy {
@@ -66,6 +104,7 @@ export interface AdapterRunReport {
   excludedScenarios: readonly { scenarioId: string; split: 'dev' | 'holdout'; reason: string }[];
   scenarioReports: readonly ScenarioReport[];
   metrics: ProbeMetrics;
+  contextAccounting?: LabContextAccounting;
   stats: AdapterStats;
   gateFailures: readonly GateFailure[];
   passed: boolean;
@@ -84,6 +123,7 @@ export interface ComparisonReport {
   control: AdapterRunReport;
   candidate: AdapterRunReport;
   deltas: readonly MetricDelta[];
+  efficiency?: ComparisonEfficiency;
   failures: readonly GateFailure[];
   passed: boolean;
 }
