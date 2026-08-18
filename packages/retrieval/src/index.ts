@@ -125,6 +125,22 @@ export {
   createLocalRerankerProviderV1,
   createHttpsRerankerProviderV1,
 } from './reranker-providers.js';
+
+// Default-off authority-bound runtime shadow coordinator (RET-004B)
+export {
+  RERANKER_SHADOW_MAX_ACTIVE,
+  RERANKER_SHADOW_SHUTDOWN_DRAIN_MS,
+  RERANKER_SHADOW_PROVIDER_IDENTITY,
+  RerankerShadowCoordinatorV1,
+  resolveRerankerShadowModeV1,
+} from './reranker-shadow.js';
+export type {
+  RerankerShadowModeV1,
+  RerankerShadowWorkV1,
+  RerankerShadowObservationV1,
+  RerankerShadowSnapshotV1,
+  RerankerShadowCoordinatorPortV1,
+} from './reranker-shadow.js';
 export type {
   LocalRerankerScorerV1,
   RerankerHttpsTransportRequestV1,
@@ -172,7 +188,7 @@ export type { FeedbackRedisLayer } from './feedback.js';
 
 // Unified assembler
 export { UnifiedAssembler } from './assembler.js';
-export type { AssemblerCodeLayer, AssemblerMemoryLayer, TracedUnifiedContext } from './assembler.js';
+export type { AssemblerCodeLayer, AssemblerMemoryLayer, TracedUnifiedContext, RerankerShadowPostDedupObserverV1 } from './assembler.js';
 
 // Versioned, content-free retrieval trace contract (RET-001A)
 export {

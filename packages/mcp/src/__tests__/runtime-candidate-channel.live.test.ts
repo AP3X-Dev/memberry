@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootstrap, type BootstrapHandles } from '../bootstrap.js';
 import { closeSSEHandle, createAMPServer, type SSEHandle } from '../server.js';
 import { writeCandidateLiveEvidenceV1 } from './runtime-candidate-channel-live-evidence.js';
+import { writeRerankerShadowLiveEvidenceV1 } from './runtime-reranker-shadow-live-evidence.js';
 
 const LIVE_MODE = process.env['MEMBERRY_RET003B_LIVE_MODE'];
 if (LIVE_MODE !== undefined && LIVE_MODE !== '' && LIVE_MODE !== 'off' && LIVE_MODE !== 'required') {
@@ -44,12 +45,15 @@ let defaultClient: Client | undefined;
 let cleanupCount = -1;
 let succeeded = false;
 let unauthenticatedStatus = -1;
+let baselineParityBytes = '';
+let shadowSnapshot: Record<string, number> | undefined;
 const savedEnv = new Map<string, string | undefined>();
 const ENV_KEYS = [
   'NEO4J_URI', 'NEO4J_USER', 'NEO4J_PASSWORD', 'REDIS_URL', 'OPENAI_API_KEY', 'OPENAI_BASE_URL',
   'MEMBERRY_API_TOKEN', 'MEMBERRY_API_TOKENS', 'MEMBERRY_TENANT_TOKENS', 'MEMBERRY_ALLOW_UNAUTHENTICATED',
   'MEMBERRY_ALLOW_DEFAULT_TENANT', 'MEMBERRY_TENANT_DATASTORES', 'MEMBERRY_QUERY_PLANNER_V1',
   'MEMBERRY_CANDIDATE_CHANNEL_V1', 'MEMBERRY_READONLY', 'MEMBERRY_WIKI_AUTOREFRESH',
+  'MEMBERRY_RERANKER_V1',
 ] as const;
 
 function restoreEnv(): void {
@@ -104,6 +108,7 @@ async function stopComposition(): Promise<void> {
 }
 
 async function candidateOffBytes(value: undefined | '01', args: Record<string, unknown>): Promise<string> {
+  delete process.env['MEMBERRY_RERANKER_V1'];
   if (value === undefined) delete process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'];
   else process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] = value;
   bootstrapHandles = await bootstrap();
@@ -203,10 +208,28 @@ describe.skipIf(!ENABLED)('RET-003B required real-bootstrap HTTP candidate compo
     process.env['MEMBERRY_TENANT_DATASTORES'] = JSON.stringify({
       [TENANT]: { neo4jUri: dedicatedUri, neo4jUser: user, neo4jPassword: password, redisUrl: process.env['REDIS_URL'] },
     });
+    delete process.env['MEMBERRY_RERANKER_V1'];
     bootstrapHandles = await bootstrap();
     mcpHandle = await createAMPServer().startSSE(0);
     const port = (mcpHandle.httpServer.address() as AddressInfo).port;
-    const unauth = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    tenantClient = await connectClient(TOKEN, port, 'ret004b-disabled-parity');
+    const parityArgs = {
+      task: 'safe', strategy: 'ranked', project_name: PROJECT, entity_scope: [HINT],
+      include_code: true, include_arch: true, include_memory: true,
+    };
+    const disabledOrdinary = await tenantClient.callTool({ name: 'berry_context', arguments: { ...parityArgs, include_trace: false } });
+    const disabledTraced = await tenantClient.callTool({ name: 'berry_context', arguments: { ...parityArgs, include_trace: true } });
+    const disabledAsk = await tenantClient.callTool({ name: 'berry_ask', arguments: {
+      question: 'safe?', reasoning_level: 'low', project_name: PROJECT, entity_scope: [HINT],
+    } });
+    baselineParityBytes = JSON.stringify([disabledOrdinary, disabledTraced, disabledAsk]);
+    await stopComposition();
+
+    process.env['MEMBERRY_RERANKER_V1'] = 'shadow';
+    bootstrapHandles = await bootstrap();
+    mcpHandle = await createAMPServer().startSSE(0);
+    const shadowPort = (mcpHandle.httpServer.address() as AddressInfo).port;
+    const unauth = await fetch(`http://127.0.0.1:${shadowPort}/mcp`, {
       method: 'POST', headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
         protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'ret003b', version: '1' },
@@ -214,8 +237,8 @@ describe.skipIf(!ENABLED)('RET-003B required real-bootstrap HTTP candidate compo
     });
     unauthenticatedStatus = unauth.status;
     await unauth.body?.cancel();
-    tenantClient = await connectClient(TOKEN, port, 'ret003b-dedicated');
-    defaultClient = await connectClient(DEFAULT_TOKEN, port, 'ret003b-default');
+    tenantClient = await connectClient(TOKEN, shadowPort, 'ret003b-dedicated');
+    defaultClient = await connectClient(DEFAULT_TOKEN, shadowPort, 'ret003b-default');
   }, 90_000);
 
   afterAll(async () => {
@@ -239,7 +262,10 @@ describe.skipIf(!ENABLED)('RET-003B required real-bootstrap HTTP candidate compo
     restoreEnv();
     if (cleanupCount !== 0) failure ??= new Error('ret003b_live:cleanup_failed');
     if (failure !== undefined) throw failure;
-    if (succeeded) await writeCandidateLiveEvidenceV1();
+    if (succeeded) {
+      await writeCandidateLiveEvidenceV1();
+      await writeRerankerShadowLiveEvidenceV1();
+    }
   }, 30_000);
 
   it('proves real default and dedicated routing, temporal boundaries, isolation, and all three handlers', async () => {
@@ -281,6 +307,8 @@ describe.skipIf(!ENABLED)('RET-003B required real-bootstrap HTTP candidate compo
       question: 'safe?', reasoning_level: 'low', project_name: PROJECT, entity_scope: [HINT],
     } });
     expect(JSON.stringify(ask)).toContain('live');
+    const ordinaryParity = await tenantClient!.callTool({ name: 'berry_context', arguments: { ...args, include_trace: false } });
+    expect(JSON.stringify([ordinaryParity, first, ask])).toBe(baselineParityBytes);
 
     await fixedFailure('berry_context', { task: 'empty', project_name: EMPTY_PROJECT, entity_scope: [HINT] });
     await fixedFailure('berry_context', { task: 'ambiguous', project_name: AMBIGUOUS_PROJECT, entity_scope: [HINT] });
@@ -304,6 +332,15 @@ describe.skipIf(!ENABLED)('RET-003B required real-bootstrap HTTP candidate compo
     expect(isolatedTrace.events).toContainEqual(expect.objectContaining({
       kind: 'channel-terminal', channel: 'memory.scope', outcome: 'safe-failure', code: 'query-failed',
     }));
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const snapshot = bootstrapHandles?.rerankerShadowSnapshot?.();
+      if (snapshot && snapshot.inFlight === 0 && snapshot.completed >= 3) { shadowSnapshot = snapshot as Record<string, number>; break; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(shadowSnapshot).toMatchObject({ reranked: expect.any(Number), inFlight: 0 });
+    expect(shadowSnapshot!.reranked).toBeGreaterThanOrEqual(3);
+    const snapshotBytes = JSON.stringify(shadowSnapshot);
+    for (const secret of [RUN, TENANT, PROJECT, ENTITY_ID, HINT, 'Safe scoped memory']) expect(snapshotBytes).not.toContain(secret);
     await stopComposition();
     const unsetBytes = await candidateOffBytes(undefined, args);
     const aliasBytes = await candidateOffBytes('01', args);
