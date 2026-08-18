@@ -40,6 +40,7 @@ export { DreamEngine } from './dream.js';
 export type { DreamFactLayer, DreamGraphLayer, DreamResult, DreamEngineDeps } from './dream.js';
 export { createCoreServices, buildDreamEngine, buildExtractionConsumer } from './services-factory.js';
 export type { CoreServices, CoreServicesEnv } from './services-factory.js';
+export * from './evidence-eligibility-authority.js';
 export {
   ADMISSION_SHADOW_DEFAULT_TIMEOUT_MS,
   ADMISSION_SHADOW_MAX_TIMEOUT_MS,
