@@ -117,7 +117,7 @@ describe('bootstrap.ts regression', () => {
       owner: 'retrieval-engine',
       flag: 'MEMBERRY_RERANKER_V1',
       defaultEnabled: false,
-      control: 'candidate-composition-baseline-v1',
+      control: 'memberry-live-mcp',
       rollback: 'Unset MEMBERRY_RERANKER_V1 and restart. Shadow observations are content-free and non-persistent; returned context is always baseline-controlled.',
     });
     expect(BOOTSTRAP_SOURCE).not.toContain('MEMBERRY_RERANKER_MODE');
