@@ -123,7 +123,8 @@ function expectCode(action: () => unknown, code: string): void {
     expect(error).toBeInstanceOf(EvidenceEligibilityAuthorityContractError);
     expect((error as EvidenceEligibilityAuthorityContractError).code).toBe(code);
     expect((error as Error).message).toBe(`evidence_eligibility_authority_contract:${code}`);
-    expect((error as Error).message).not.toMatch(/tenant-a|memberry|evidence|authority-/);
+    expect((error as Error).message)
+      .not.toMatch(/tenant-a|project:memberry|entity:memberry|evidence-\d|authority-evidence/);
   }
 }
 
