@@ -104,6 +104,7 @@ const CONFIG_INJECT_TERMS = ['config', 'settings', 'env', 'yaml', 'toml', 'json'
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 import type { QueryIntent } from './intent.js';
+import { assertBoundedQueryInput } from './query-input.js';
 export type { QueryIntent };
 
 export interface ExpandedQuery {
@@ -137,6 +138,7 @@ function splitIdent(s: string): string[] {
  * Intent-aware: different expansion strategies per query type.
  */
 export function expandQuery(query: string, intent?: QueryIntent): ExpandedQuery {
+  assertBoundedQueryInput(query);
   const original = query;
 
   // No expansion for identifier lookups

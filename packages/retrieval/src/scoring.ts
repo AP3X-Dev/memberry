@@ -4,6 +4,7 @@
 // Ported from Context-Engine scripts/hybrid/ranking.py
 
 import type { RetrievalResult, QueryStats, AdaptiveWeights, SourceType } from './types.js';
+import { assertBoundedQueryInput } from './query-input.js';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -196,6 +197,7 @@ export function provenanceQualityMultiplier(result: RetrievalResult): number {
  * Adjusts based on query characteristics.
  */
 export function computeQueryStats(query: string): QueryStats {
+  assertBoundedQueryInput(query);
   const tokens = query.split(/\s+/).filter(Boolean);
   const identifierPattern = /^[A-Z][a-z]+[A-Z]|^[a-z]+[A-Z]|^[a-z]+_[a-z]+|^[a-z]+\.[a-z]+/;
   const identifierCount = tokens.filter((t) => identifierPattern.test(t)).length;
@@ -229,6 +231,7 @@ const SYMBOL_TYPE_HINTS = new Set([
  * the feedback boosts already applied in rrfFusion. Empty when no strong hint.
  */
 export function inferSourceTypeBoost(query: string): Partial<Record<SourceType, number>> {
+  assertBoundedQueryInput(query);
   const tokens = query.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   if (tokens.some((t) => SYMBOL_TYPE_HINTS.has(t))) {
     return { symbol: 0.25 };

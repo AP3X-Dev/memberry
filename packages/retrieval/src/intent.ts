@@ -4,6 +4,7 @@
 // Ported from Context-Engine scripts/intent_classifier.py
 
 import type { EmbeddingProvider } from '@memberry/core';
+import { MAX_QUERY_INPUT_CODE_UNITS, queryInputCodeUnits } from './query-input.js';
 
 // ─── Intent types ────────────────────────────────────────────────────────────
 
@@ -162,14 +163,15 @@ export async function classifyIntent(
   // actually reached (rules miss), so rules-matched / GRAPH queries never embed.
   getQueryVec?: () => Promise<number[] | undefined>,
 ): Promise<IntentResult> {
+  // Keep the historical oversized-query fallback, but select it before any
+  // trimming, regex scan, embedding provider, or caller-supplied thunk.
+  if (queryInputCodeUnits(query) > MAX_QUERY_INPUT_CODE_UNITS) {
+    return { intent: 'HYBRID', confidence: 0.4, method: 'fallback' };
+  }
+
   // Guard: empty or very short queries
   if (!query || query.trim().length < 2) {
     return { intent: 'HYBRID', confidence: 0.3, method: 'fallback' };
-  }
-
-  // Guard: very long queries — skip embedding, rules only
-  if (query.length > 5000) {
-    return classifyByRules(query) ?? { intent: 'HYBRID', confidence: 0.4, method: 'fallback' };
   }
 
   // Step 1: Rules-based classification

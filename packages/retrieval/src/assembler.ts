@@ -19,6 +19,7 @@ import { expandQuery } from './expand.js';
 import { computeQueryStats, lexicalTextScore, adaptiveWeights, inferSourceTypeBoost } from './scoring.js';
 import { classifyIntent } from './intent.js';
 import type { QueryIntent } from './intent.js';
+import { assertBoundedQueryInput } from './query-input.js';
 import type {
   EmbeddingProvider,
   LlmClient,
@@ -248,6 +249,7 @@ export class UnifiedAssembler {
       resolvedEntityIds?: unknown;
     } = {},
   ): Promise<AskResult> {
+    assertBoundedQueryInput(question);
     if (!this.llm || !this.llm.available) {
       throw new Error('berry_ask requires an LLM client — set OPENAI_API_KEY');
     }
@@ -274,6 +276,7 @@ export class UnifiedAssembler {
     ctx: UnifiedContext,
     level: AskLevel = 'medium',
   ): Promise<AskResult> {
+    assertBoundedQueryInput(question);
     const evidence = ctx.sections.flatMap((s) => s.items);
     if (evidence.length === 0) {
       return { answer: 'No relevant memory found to answer this question.', cited_ids: [], evidence: [], level };
@@ -311,6 +314,7 @@ export class UnifiedAssembler {
     includeMemory: boolean,
     traced = false,
   ): TracedUnifiedContext | { context: UnifiedContext } {
+    assertBoundedQueryInput(task);
     const listsByChannel = new Map<string, RetrievalResult[]>();
     const observations: RuntimeStructuralObservation[] = [];
     const evidenceByPrivateId = new Map<string, string>();
@@ -422,6 +426,7 @@ export class UnifiedAssembler {
    * - 'deterministic': Yggdrasil 5-step algorithm. Same graph → same output. Best for architecture queries.
    */
   async assemble(task: string, options?: Partial<TenantRetrievalOptions>): Promise<UnifiedContext> {
+    assertBoundedQueryInput(task);
     options = snapshotRetrievalOptions(options);
     const resolvedEntityIds = normalizeResolvedEntityIds(options?.resolvedEntityIds);
     const opts: TenantRetrievalOptions = {
@@ -483,6 +488,7 @@ export class UnifiedAssembler {
     task: string,
     options?: Partial<TenantRetrievalOptions>,
   ): Promise<TracedUnifiedContext> {
+    assertBoundedQueryInput(task);
     options = snapshotRetrievalOptions(options);
     const resolvedEntityIds = normalizeResolvedEntityIds(options?.resolvedEntityIds);
     const strategy = options?.strategy ?? 'ranked';
