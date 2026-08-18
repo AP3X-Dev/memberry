@@ -11,6 +11,10 @@ const COMPOSE_SOURCE = fs.readFileSync(
   path.resolve(__dirname, '../../../../docker-compose.yml'),
   'utf-8',
 );
+const EXPERIMENTS = JSON.parse(fs.readFileSync(
+  path.resolve(__dirname, '../../../../bench/lab/registry/experiments.json'),
+  'utf-8',
+)) as { experiments: Array<Record<string, unknown>> };
 
 function parseComposePlannerValue(value: string | undefined): unknown {
   const template = COMPOSE_SOURCE.split(/\r?\n/)
@@ -45,13 +49,26 @@ function parseComposeCandidateValue(value: string | undefined): unknown {
   return interpolated.trim();
 }
 
+function parseComposeRerankerMode(value: string | undefined): unknown {
+  const template = COMPOSE_SOURCE.split(/\r?\n/)
+    .find((line) => line.includes('MEMBERRY_RERANKER_V1:'))
+    ?.split('MEMBERRY_RERANKER_V1: ')[1];
+  if (template === undefined) return undefined;
+  const interpolated = template.replace(
+    '${MEMBERRY_RERANKER_V1:-}',
+    value === undefined || value.length === 0 ? '' : value,
+  );
+  if (interpolated.startsWith('"') && interpolated.endsWith('"')) return JSON.parse(interpolated) as unknown;
+  return interpolated.trim();
+}
+
 describe('bootstrap.ts regression', () => {
   it('RET-002C2 keeps runtime planning exact-value default-off and injects a driver-backed resolver', () => {
-    expect(BOOTSTRAP_SOURCE).toContain("queryPlannerEnabled: process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1'");
+    expect(BOOTSTRAP_SOURCE).toContain("const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1'");
     expect(BOOTSTRAP_SOURCE).toContain('new ScopedEntityResolver(driver, authority)');
   });
   it('RET-003B keeps candidate channels exact-value default-off and binds default plus dedicated drivers', () => {
-    expect(BOOTSTRAP_SOURCE).toContain("candidateChannelEnabled: process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1'");
+    expect(BOOTSTRAP_SOURCE).toContain("const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1'");
     expect(BOOTSTRAP_SOURCE).toContain('candidateDriver: driver');
     expect(BOOTSTRAP_SOURCE).toContain('dedicatedTenantCandidateDrivers.set(tenant, tcore.driver)');
     expect(BOOTSTRAP_SOURCE).toContain('tenantCandidateDrivers: dedicatedTenantCandidateDrivers');
@@ -67,6 +84,44 @@ describe('bootstrap.ts regression', () => {
     ['decimal', '1.0', '1.0'], ['boolean-like', 'true', 'true'], ['trailing space', '1 ', '1 '],
   ] as const)('RET-003B preserves %s candidate input as a string', (_label, value, expected) => {
     expect(parseComposeCandidateValue(value)).toBe(expected);
+  });
+  it('RET-004B wires an exact shadow-only mode, local identity provider, non-persistent sink, and shutdown drain', () => {
+    expect(BOOTSTRAP_SOURCE).toContain("resolveRerankerShadowModeV1(process.env['MEMBERRY_RERANKER_V1'])");
+    expect(BOOTSTRAP_SOURCE).toContain('RERANKER_SHADOW_PROVIDER_IDENTITY');
+    expect(BOOTSTRAP_SOURCE).toContain('baselineIdentityRerankerScoreV1');
+    expect(BOOTSTRAP_SOURCE).toContain('await rerankerShadowCoordinator.shutdown()');
+    expect(BOOTSTRAP_SOURCE).toContain('rerankerShadowSnapshot: () => rerankerShadowCoordinator.snapshot()');
+    expect(BOOTSTRAP_SOURCE).not.toContain('rerankerShadowRedis');
+    expect(BOOTSTRAP_SOURCE).not.toContain('rerankerShadowDriver');
+    expect(BOOTSTRAP_SOURCE).not.toContain('[memberry-reranker-shadow]');
+  });
+  it('RET-004B requires both authority-sealing runtime switches before shadow startup', () => {
+    expect(BOOTSTRAP_SOURCE).toContain("const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1'");
+    expect(BOOTSTRAP_SOURCE).toContain("const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1'");
+    expect(BOOTSTRAP_SOURCE).toContain("if (rerankerMode === 'shadow' && (!queryPlannerEnabled || !candidateChannelEnabled))");
+    expect(BOOTSTRAP_SOURCE).toContain("throw new Error('reranker_shadow:prerequisite_unavailable')");
+    expect(BOOTSTRAP_SOURCE.indexOf('const rerankerMode = resolveRerankerShadowModeV1')).toBeLessThan(
+      BOOTSTRAP_SOURCE.indexOf('const core = createCoreServices'),
+    );
+  });
+  it.each([
+    ['unset', undefined, ''], ['empty', '', ''], ['shadow', 'shadow', 'shadow'],
+    ['numeric alias', '1', '1'], ['boolean alias', 'true', 'true'],
+    ['leading space', ' shadow', ' shadow'], ['trailing space', 'shadow ', 'shadow '],
+  ] as const)('RET-004B preserves %s reranker input exactly for fail-closed parsing', (_label, value, expected) => {
+    expect(parseComposeRerankerMode(value)).toBe(expected);
+  });
+  it('RET-004B registers the rollback-safe default-off shadow experiment', () => {
+    expect(EXPERIMENTS.experiments).toContainEqual({
+      id: 'retrieval-reranker-shadow-v1',
+      owner: 'retrieval-engine',
+      flag: 'MEMBERRY_RERANKER_V1',
+      defaultEnabled: false,
+      control: 'candidate-composition-baseline-v1',
+      rollback: 'Unset MEMBERRY_RERANKER_V1 and restart. Shadow observations are content-free and non-persistent; returned context is always baseline-controlled.',
+    });
+    expect(BOOTSTRAP_SOURCE).not.toContain('MEMBERRY_RERANKER_MODE');
+    expect(BOOTSTRAP_SOURCE).not.toContain('MEMBERRY_RERANKER_SHADOW_V1');
   });
   it('RET-002C2 passes the default-off planner flag only into the production MCP service', () => {
     const mcpService = COMPOSE_SOURCE.split('\n  mcp:')[1]?.split('\n  wiki:')[0];

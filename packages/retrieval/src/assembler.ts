@@ -103,6 +103,9 @@ export interface TracedUnifiedContext {
   trace: RetrievalTraceV1;
 }
 
+/** @internal RET-004B candidate-only post-fusion/dedup observation seam. */
+export type RerankerShadowPostDedupObserverV1 = (candidates: readonly RetrievalResult[]) => void;
+
 // ─── Dialectic (berry_ask) ─────────────────────────────────────────────────────
 
 export type AskLevel = 'minimal' | 'low' | 'medium' | 'high' | 'max';
@@ -313,6 +316,7 @@ export class UnifiedAssembler {
     includeArchitecture: boolean,
     includeMemory: boolean,
     traced = false,
+    postDedupObserver?: RerankerShadowPostDedupObserverV1,
   ): TracedUnifiedContext | { context: UnifiedContext } {
     assertBoundedQueryInput(task);
     const listsByChannel = new Map<string, RetrievalResult[]>();
@@ -379,6 +383,9 @@ export class UnifiedAssembler {
     const fused = rrfFusion(lists, 50, 60, undefined, undefined, undefined, traceAdapter);
     const deduped = dedup(fused);
     traceAdapter?.recordDedup(fused.map((result) => result.id), deduped.map((result) => result.id));
+    if (postDedupObserver) {
+      try { postDedupObserver(deduped); } catch { /* shadow work never affects baseline assembly */ }
+    }
     const privateSections = groupAndBudget(deduped, maxTokens);
     traceAdapter?.recordBudget(privateSections.flatMap((section) => section.items.map((item) => item.id)));
     const sections: ContextSection[] = privateSections.map((section) => ({

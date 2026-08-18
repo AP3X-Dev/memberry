@@ -24,6 +24,14 @@
       "defaultEnabled": false,
       "control": "memberry-admission-baseline-fixture-v1",
       "rollback": "Set MEMBERRY_ADMISSION_SHADOW_ENABLED=false or unset it, then restart. Baseline episodic writes are unchanged; retain content-free sidecars for audit unless separately authorized tenant-scoped maintenance removes them."
+    },
+    {
+      "id": "retrieval-reranker-shadow-v1",
+      "owner": "retrieval-engine",
+      "flag": "MEMBERRY_RERANKER_V1",
+      "defaultEnabled": false,
+      "control": "candidate-composition-baseline-v1",
+      "rollback": "Unset MEMBERRY_RERANKER_V1 and restart. Shadow observations are content-free and non-persistent; returned context is always baseline-controlled."
     }
   ]
 }

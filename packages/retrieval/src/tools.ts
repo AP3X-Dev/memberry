@@ -33,6 +33,8 @@ import {
 } from './runtime-candidate-channel.js';
 import type { CandidateChannelExecutionResultV1 } from './candidate-channel.js';
 import { askRetrievalTokenBudget } from './assembler.js';
+import type { RerankerShadowCoordinatorPortV1 } from './reranker-shadow.js';
+import type { RetrievalResult } from './types.js';
 
 // ─── Service interface (injected) ────────────────────────────────────────────
 
@@ -91,6 +93,7 @@ export interface IUnifiedAssembler {
     includeArchitecture: boolean,
     includeMemory: boolean,
     traced?: boolean,
+    postDedupObserver?: (candidates: readonly RetrievalResult[]) => void,
   ): { context: UnifiedContext; trace?: RetrievalTraceV1 };
 }
 
@@ -131,6 +134,8 @@ export interface RetrievalServiceContainer {
   /** Process-captured exact-default-off RET-003B switch. */
   candidateChannelEnabled: boolean;
   candidateRuntime: IRuntimeCandidateChannelService | null;
+  /** Process-global RET-004B capacity coordinator, shared by all tenant containers. */
+  rerankerShadowCoordinator: RerankerShadowCoordinatorPortV1 | null;
 }
 
 export interface RuntimeScopedEntityResolver {
@@ -152,6 +157,7 @@ export function createRetrievalContainer(partial: Partial<RetrievalServiceContai
     resolverFactory: partial.resolverFactory ?? null,
     candidateChannelEnabled: partial.candidateChannelEnabled ?? false,
     candidateRuntime: partial.candidateRuntime ?? null,
+    rerankerShadowCoordinator: partial.rerankerShadowCoordinator ?? null,
   };
 }
 
@@ -187,6 +193,7 @@ export function setRetrievalServiceInstances(services: {
   resolverFactory?: RuntimeScopedEntityResolverFactory;
   candidateChannelEnabled?: boolean;
   candidateRuntime?: IRuntimeCandidateChannelService;
+  rerankerShadowCoordinator?: RerankerShadowCoordinatorPortV1 | null;
   candidateDriver?: RuntimeCandidateDriver;
   tenantCandidateDrivers?: ReadonlyMap<string, Driver & RuntimeCandidateDriver>;
 }): void {
@@ -199,6 +206,7 @@ export function setRetrievalServiceInstances(services: {
   defaultContainer.candidateChannelEnabled = services.candidateChannelEnabled ?? false;
   defaultContainer.candidateRuntime = services.candidateRuntime
     ?? (services.candidateDriver ? new RuntimeCandidateChannelService(services.candidateDriver) : null);
+  defaultContainer.rerankerShadowCoordinator = services.rerankerShadowCoordinator ?? null;
   tenantCandidateRuntimes.clear();
   tenantResolverFactories.clear();
   if (services.tenantCandidateDrivers) {
@@ -214,6 +222,22 @@ export const RETRIEVAL_TOOL_NAMES = ['berry_context', 'berry_ask', 'berry_feedba
 
 function textContent(text: string): { content: Array<{ type: 'text'; text: string }> } {
   return { content: [{ type: 'text' as const, text }] };
+}
+
+function candidateShadowObserver(
+  coordinator: RerankerShadowCoordinatorPortV1 | null,
+  receipt: RuntimeQueryPlannerResolvedReceiptV1,
+  execution: CandidateChannelExecutionResultV1,
+  query: string,
+): ((candidates: readonly RetrievalResult[]) => void) | undefined {
+  if (!coordinator) return undefined;
+  return (candidates) => {
+    try {
+      coordinator.trySchedule(() => ({ receipt, execution, query, candidates }));
+    } catch {
+      // Shadow scheduling never changes the baseline response or error surface.
+    }
+  };
 }
 
 function fixedPlannerFailure(code: RuntimeQueryPlannerError['code']): RuntimeQueryPlannerError {
@@ -394,6 +418,7 @@ export function registerRetrievalTools(
   const {
     assembler, feedbackTracker, tenantId, authenticated, queryPlannerEnabled, resolverFactory,
     candidateChannelEnabled, candidateRuntime,
+    rerankerShadowCoordinator,
   } = container;
   const tier1: RegisteredTool[] = [];
   const tier2: RegisteredTool[] = [];
@@ -434,9 +459,17 @@ export function registerRetrievalTools(
         const execution = await candidateRuntime.execute(receipt, {
           includeArchitecture: args.include_arch, includeMemory: args.include_memory,
         });
-        const assembled = assembler.assembleCandidateExecution(
-          args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
-        );
+        const shadowObserver = args.strategy === 'deterministic'
+          ? undefined
+          : candidateShadowObserver(rerankerShadowCoordinator, receipt, execution, args.task);
+        const assembled = shadowObserver
+          ? assembler.assembleCandidateExecution(
+            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
+            shadowObserver,
+          )
+          : assembler.assembleCandidateExecution(
+            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
+          );
         const md = assembler.renderMarkdown(assembled.context);
         if (args.include_trace !== true) return textContent(md);
         if (!assembled.trace) throw new Error('candidate_runtime:unavailable');
@@ -514,9 +547,15 @@ export function registerRetrievalTools(
         const execution = await candidateRuntime.execute(receipt, {
           includeArchitecture: true, includeMemory: true,
         });
-        const assembled = assembler.assembleCandidateExecution(
-          args.question, execution, askRetrievalTokenBudget(args.reasoning_level), true, true, false,
-        );
+        const shadowObserver = candidateShadowObserver(rerankerShadowCoordinator, receipt, execution, args.question);
+        const assembled = shadowObserver
+          ? assembler.assembleCandidateExecution(
+            args.question, execution, askRetrievalTokenBudget(args.reasoning_level), true, true, false,
+            shadowObserver,
+          )
+          : assembler.assembleCandidateExecution(
+            args.question, execution, askRetrievalTokenBudget(args.reasoning_level), true, true, false,
+          );
         const r = await assembler.askFromContext(args.question, assembled.context, args.reasoning_level);
         const lines = [
           `# Answer`, ``, r.answer, ``,

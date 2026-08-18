@@ -43,6 +43,12 @@ import {
   FeedbackTracker,
   ScopedEntityResolver,
   setRetrievalServiceInstances,
+  RERANKER_SHADOW_PROVIDER_IDENTITY,
+  RerankerShadowCoordinatorV1,
+  baselineIdentityRerankerScoreV1,
+  createLocalRerankerProviderV1,
+  resolveRerankerShadowModeV1,
+  type RerankerShadowSnapshotV1,
 } from '@memberry/retrieval';
 import {
   WikiCompiler,
@@ -79,6 +85,8 @@ import { registerAdmissionShadowStatusSources } from './admission-shadow-status.
 export interface BootstrapHandles {
   /** Call to disconnect Redis and Neo4j cleanly. */
   shutdown(): Promise<void>;
+  /** RET-004B content-free aggregate proof; absent while default-off. */
+  rerankerShadowSnapshot?(): RerankerShadowSnapshotV1;
 }
 
 /** A per-tenant dedicated-datastore config (the value side of MEMBERRY_TENANT_DATASTORES). */
@@ -168,6 +176,21 @@ export function parseTenantDatastores(
 }
 
 export async function bootstrap(): Promise<BootstrapHandles> {
+  const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1';
+  const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1';
+  const rerankerMode = resolveRerankerShadowModeV1(process.env['MEMBERRY_RERANKER_V1']);
+  if (rerankerMode === 'shadow' && (!queryPlannerEnabled || !candidateChannelEnabled)) {
+    throw new Error('reranker_shadow:prerequisite_unavailable');
+  }
+  const rerankerShadowCoordinator = rerankerMode === 'shadow'
+    ? new RerankerShadowCoordinatorV1(
+      createLocalRerankerProviderV1(
+        RERANKER_SHADOW_PROVIDER_IDENTITY,
+        baselineIdentityRerankerScoreV1,
+      ),
+      () => {},
+    )
+    : null;
   const neo4jUri = process.env['NEO4J_URI']?.trim() || 'bolt://localhost:7687';
   const neo4jUser = process.env['NEO4J_USER']?.trim() || 'neo4j';
   const neo4jPassword = process.env['NEO4J_PASSWORD'] ?? '';
@@ -649,8 +672,9 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   setRetrievalServiceInstances({
     assembler: unifiedAssembler,
     feedbackTracker: feedbackTrackerService,
-    queryPlannerEnabled: process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1',
-    candidateChannelEnabled: process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1',
+    queryPlannerEnabled,
+    candidateChannelEnabled,
+    rerankerShadowCoordinator,
     candidateDriver: driver,
     tenantCandidateDrivers: dedicatedTenantCandidateDrivers,
     resolverFactory: (authority) => {
@@ -696,7 +720,13 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   ]);
 
   return {
+    ...(rerankerShadowCoordinator
+      ? { rerankerShadowSnapshot: () => rerankerShadowCoordinator.snapshot() }
+      : {}),
     async shutdown() {
+      if (rerankerShadowCoordinator) {
+        try { await rerankerShadowCoordinator.shutdown(); } catch { /* best-effort */ }
+      }
       try { await consolidationCoordinator.stop(); } catch { /* best-effort */ }
       for (const coordinator of dedicatedTenantCoordinators) {
         try { await coordinator.stop(); } catch { /* best-effort */ }

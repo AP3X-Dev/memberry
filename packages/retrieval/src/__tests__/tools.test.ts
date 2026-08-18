@@ -10,6 +10,7 @@ import {
   RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV,
   RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES,
   registerRetrievalTools,
+  setRetrievalServiceInstances,
   serializeApprovedRetrievalTrace,
   type IUnifiedAssembler,
   type IFeedbackTracker,
@@ -440,7 +441,7 @@ describe('RET-002C2 authenticated planner wiring', () => {
 });
 
 describe('RET-003B candidate-channel runtime wiring', () => {
-  function candidateContainer(options: { candidate?: boolean; planner?: boolean; authenticated?: boolean } = {}) {
+  function candidateContainer(options: { candidate?: boolean; planner?: boolean; authenticated?: boolean; shadow?: boolean } = {}) {
     const assembler = makeAssembler();
     const resolution = Object.freeze({
       resolution: Object.freeze({ state: 'resolved', canonicalEntityIds: Object.freeze(['entity-stable']) }),
@@ -469,6 +470,11 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     const candidateRuntime: IRuntimeCandidateChannelService = {
       execute: vi.fn().mockResolvedValue(execution),
     };
+    const rerankerShadowCoordinator = options.shadow ? {
+      trySchedule: vi.fn().mockReturnValue(true),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      snapshot: vi.fn().mockReturnValue(Object.freeze({ inFlight: 0 })),
+    } : null;
     const candidateAssembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
     vi.mocked(assembler.assembleCandidateExecution!).mockImplementation((...args) => (
       candidateAssembler.assembleCandidateExecution(...args)
@@ -483,9 +489,55 @@ describe('RET-003B candidate-channel runtime wiring', () => {
         resolverFactory: () => ({ resolve }),
         candidateChannelEnabled: options.candidate ?? true,
         candidateRuntime,
+        rerankerShadowCoordinator,
       }),
+      rerankerShadowCoordinator,
     };
   }
+
+  it('shares the exact process-default coordinator pointer with every tenant container and resets it when omitted', () => {
+    const assembler = makeAssembler();
+    const feedbackTracker = makeFeedback();
+    const coordinator = {
+      trySchedule: vi.fn().mockReturnValue(true), shutdown: vi.fn(), snapshot: vi.fn(),
+    };
+    setRetrievalServiceInstances({ assembler, feedbackTracker, rerankerShadowCoordinator: coordinator });
+    expect(retrievalContainerForTenant('default').rerankerShadowCoordinator).toBe(coordinator);
+    expect(retrievalContainerForTenant('tenant-a').rerankerShadowCoordinator).toBe(coordinator);
+    setRetrievalServiceInstances({ assembler, feedbackTracker });
+    expect(retrievalContainerForTenant('tenant-a').rerankerShadowCoordinator).toBeNull();
+  });
+
+  it.each([
+    ['ordinary context', 'berry_context', { task: 'safe', project_name: 'project:memberry', entity_scope: ['Resolver'] }],
+    ['traced context', 'berry_context', { task: 'safe', project_name: 'project:memberry', entity_scope: ['Resolver'], include_trace: true, include_arch: true, include_memory: true }],
+    ['ask', 'berry_ask', { question: 'safe?', project_name: 'project:memberry', entity_scope: ['Resolver'] }],
+  ] as const)('%s closes the sealed receipt into the post-dedup shadow thunk', async (_label, tool, args) => {
+    const { container, rerankerShadowCoordinator } = candidateContainer({ shadow: true });
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+    await handlers.get(tool)!(args);
+    expect(rerankerShadowCoordinator!.trySchedule).toHaveBeenCalledTimes(1);
+    const thunk = vi.mocked(rerankerShadowCoordinator!.trySchedule).mock.calls[0]![0] as () => Record<string, unknown>;
+    const scheduled = thunk();
+    expect(readRuntimeQueryPlannerAuthorityV1(scheduled.receipt)).toMatchObject({
+      tenantId: 'tenant-a', projectScope: 'project:memberry', resolvedEntityId: 'entity-stable',
+    });
+    expect(scheduled).toMatchObject({ query: tool === 'berry_ask' ? 'safe?' : 'safe' });
+  });
+
+  it('keeps an explicit deterministic context request shadow-free', async () => {
+    const { container, rerankerShadowCoordinator } = candidateContainer({ shadow: true });
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+    await handlers.get('berry_context')!({
+      task: 'stable', strategy: 'deterministic', project_name: 'project:memberry', entity_scope: ['Resolver'],
+    });
+    expect(rerankerShadowCoordinator!.trySchedule).not.toHaveBeenCalled();
+    expect(container.assembler!.assembleCandidateExecution).toHaveBeenCalledWith(
+      'stable', expect.anything(), 8_000, true, true, false,
+    );
+  });
 
   it('candidate-off preserves all three exact legacy adapters and performs zero candidate work', async () => {
     const { assembler, candidateRuntime, container } = candidateContainer({ candidate: false, planner: false });
