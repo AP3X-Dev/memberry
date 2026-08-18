@@ -191,8 +191,12 @@ export function createEvidenceAuthorityCapture(driver: Driver): EvidenceAuthorit
       return capturedResult(result.caseReceipt);
     } catch (error) {
       const code = ledgerErrorCode(error);
-      // invalid_transition and operation_conflict are terminal policy refusals, not transient failures; the (B-i) zero-raw-edge refusal is the only module-reachable producer, and an uncaptured result is never retried.
-      if (code === 'invalid_transition' || code === 'operation_conflict') {
+      // invalid_transition, operation_conflict, facet_revoked, semantic_not_found, and existing_state_mismatch are all permanent policy refusals; an uncaptured result is terminal and never retried, and only storage_unavailable/write_incomplete remain transient.
+      if (code === 'invalid_transition'
+        || code === 'operation_conflict'
+        || code === 'facet_revoked'
+        || code === 'semantic_not_found'
+        || code === 'existing_state_mismatch') {
         return UNCAPTURED;
       }
       throw new EvidenceAuthorityLedgerError(code);

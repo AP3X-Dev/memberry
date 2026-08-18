@@ -5,12 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { Driver } from 'neo4j-driver';
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  EVIDENCE_AUTHORITY_ADJUDICATION_VERSION,
-  createEvidenceAuthorityAdjudication,
-  type EvidenceAuthorityAdjudicationPrincipalV1,
-  type EvidenceAuthorityAdjudicationRequestV1,
-} from '../evidence-authority-adjudication.js';
+import { createEvidenceAuthorityAdjudication } from '../evidence-authority-adjudication.js';
 import { createEvidenceAuthorityCapture } from '../evidence-authority-capture.js';
 import {
   EvidenceAuthorityLedgerError,
@@ -18,30 +13,34 @@ import {
   createEvidenceAuthorityLedgerPersistence,
   type EvidenceAuthorityLedgerErrorCode,
 } from '../evidence-authority-ledger.js';
+import {
+  EVIDENCE_AUTHORITY_REVOCATION_VERSION,
+  createEvidenceAuthorityRevocation,
+  type EvidenceAuthorityRevocationPrincipalV1,
+  type EvidenceAuthorityRevocationRequestV1,
+} from '../evidence-authority-revocation.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
 const RECORDED_AT = '2026-08-18T12:00:00.000Z';
-const SECRET_CANARY = ['sk', 'adjudication', 'must-not-leak-1234567890'].join('_');
+const SECRET_CANARY = ['sk', 'revocation', 'must-not-leak-1234567890'].join('_');
 const PRINCIPAL_CANARY = 'sk-principal-must-not-leak-1234567890';
-const PRINCIPAL: EvidenceAuthorityAdjudicationPrincipalV1 = Object.freeze({
+const PRINCIPAL: EvidenceAuthorityRevocationPrincipalV1 = Object.freeze({
   tenantId: 'tenant-acme',
   projectScope: 'project:memberry',
   principalId: 'principal-alpha',
 });
-const REQUEST: EvidenceAuthorityAdjudicationRequestV1 = Object.freeze({
+const REQUEST: EvidenceAuthorityRevocationRequestV1 = Object.freeze({
   semanticId: 'semantic-001',
-  caseId: 'case-adjudication-1',
-  decision: 'reject',
 });
 const SCOPE = Object.freeze({
   tenantId: PRINCIPAL.tenantId,
   projectScope: PRINCIPAL.projectScope,
   semanticId: REQUEST.semanticId,
 });
-const UNADJUDICATED_RESULT = Object.freeze({
-  contractVersion: EVIDENCE_AUTHORITY_ADJUDICATION_VERSION,
-  outcome: 'unadjudicated',
-  code: 'unadjudicated',
+const UNREVOKED_RESULT = Object.freeze({
+  contractVersion: EVIDENCE_AUTHORITY_REVOCATION_VERSION,
+  outcome: 'unrevoked',
+  code: 'unrevoked',
 });
 
 function record(values: Record<string, unknown>) {
@@ -283,7 +282,7 @@ function ledgerFailureDriver(error: unknown) {
 
 async function seedCase(
   driver: Driver,
-  caseId: string = REQUEST.caseId,
+  caseId = 'case-revocation-1',
   scope: { tenantId: string; projectScope: string; semanticId: string } = SCOPE,
 ): Promise<void> {
   const store = createEvidenceAuthorityLedgerPersistence(driver);
@@ -312,34 +311,36 @@ function errorCodeLiteral(source: string, name: string): string[] {
   return [...match![1]!.matchAll(/'([a-z_]+)'/g)].map((entry) => entry[1]!).sort();
 }
 
-describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
+describe('EvidenceAuthorityRevocation V1 (RET-005B-AUTH-001B3B1)', () => {
   it('freezes the version constant exactly', () => {
-    expect(EVIDENCE_AUTHORITY_ADJUDICATION_VERSION)
-      .toBe('memberry.evidence-authority-adjudication/1.0.0');
+    expect(EVIDENCE_AUTHORITY_REVOCATION_VERSION)
+      .toBe('memberry.evidence-authority-revocation/1.0.0');
   });
 
-  it('stays off the package root and exposes no reader, clearance, revocation, or logging surface', () => {
+  it('stays off the package root and exposes no reader, clearance, re-open, or logging surface', () => {
     const rootExports = readFileSync(resolve(REPO_ROOT, 'packages/neo4j/src/index.ts'), 'utf8');
-    expect(rootExports).not.toContain('evidence-authority-adjudication');
+    expect(rootExports).not.toContain('evidence-authority-revocation');
     const source = readFileSync(
-      resolve(REPO_ROOT, 'packages/neo4j/src/evidence-authority-adjudication.ts'),
+      resolve(REPO_ROOT, 'packages/neo4j/src/evidence-authority-revocation.ts'),
       'utf8',
     );
     expect(source).not.toMatch(
-      /isCovered|ensureCoverage|getCaseState|coverageState|readCase|adjudicationState|listCases|pendingCases/,
+      /isCovered|ensureCoverage|getCaseState|coverageState|readCase|adjudicationState|listCases|pendingCases|revocationState|isRevoked/,
     );
     expect(source).not.toMatch(/['"`]clear['"`]|['"`]withheld['"`]|['"`]approved['"`]|['"`]superseded['"`]/);
     expect(source).not.toMatch(/MATCH\s/);
     expect(source).not.toMatch(/coalesce/i);
     expect(source).not.toMatch(/console\./);
     expect(source).not.toMatch(/authenticated|non-repudiation|verified reviewer/i);
-    expect(source).not.toMatch(/revokeCoverage/);
+    expect(source).not.toMatch(/CREATE \(/);
+    expect(source).not.toMatch(/MERGE \(/);
+    expect(source).not.toMatch(/reopenCoverage|unrevokeCoverage|unrevoke\(|reEnroll|restoreCoverage/i);
     expect(source).toContain('MAX_INPUT_LENGTH = 500');
   });
 
   it('reaches no Redis, cache, queue, or stream module through its import graph', () => {
     const moduleSource = readFileSync(
-      resolve(REPO_ROOT, 'packages/neo4j/src/evidence-authority-adjudication.ts'),
+      resolve(REPO_ROOT, 'packages/neo4j/src/evidence-authority-revocation.ts'),
       'utf8',
     );
     const moduleImports = importSpecifiers(moduleSource);
@@ -361,7 +362,7 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
 
   it('pins the hand-copied ledger error-code set to the ledger source exactly', () => {
     const moduleSource = readFileSync(
-      resolve(REPO_ROOT, 'packages/neo4j/src/evidence-authority-adjudication.ts'),
+      resolve(REPO_ROOT, 'packages/neo4j/src/evidence-authority-revocation.ts'),
       'utf8',
     );
     const ledgerSource = readFileSync(
@@ -374,20 +375,20 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
     expect(moduleCodes).toHaveLength(13);
   });
 
-  it('keeps genuine adjudication, idempotent replay, terminal refusal, and thrown transient distinguishable', async () => {
-    // Arrangement 1: genuine adjudication returns adjudicated with a non-null receipt.
+  it('keeps genuine revocation, idempotent replay, terminal refusal, and thrown transient distinguishable', async () => {
+    // Arrangement 1: genuine revocation returns revoked with a non-null receipt.
     const fake = makeDriver();
     await seedCase(fake.driver);
-    const adjudication = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL });
-    const first = await adjudication.adjudicate({ ...REQUEST });
-    expect(first.outcome).toBe('adjudicated');
-    expect(first.outcome === 'adjudicated' && first.receipt !== null
+    const revocation = createEvidenceAuthorityRevocation(fake.driver, { ...PRINCIPAL });
+    const first = await revocation.revoke({ ...REQUEST });
+    expect(first.outcome).toBe('revoked');
+    expect(first.outcome === 'revoked' && first.receipt !== null
       && first.receipt !== undefined).toBe(true);
-    expect(first.outcome === 'adjudicated' && first.receipt).toEqual({
+    expect(first.outcome === 'revoked' && first.receipt).toEqual({
       contractVersion: 'memberry.evidence-authority-ledger/1.0.0',
-      kind: 'case',
-      action: 'rejected',
-      state: 'rejected',
+      kind: 'coverage',
+      action: 'revoked',
+      state: 'revoked',
       sequence: 3,
       recordedAt: RECORDED_AT,
     });
@@ -396,34 +397,37 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
 
     // Arrangement 2: same-principal replay returns the stored receipt with no second append.
     const appendsAfterFirst = fake.queries
-      .filter((query) => query.includes('append-transition-case')).length;
+      .filter((query) => query.includes('append-transition-coverage')).length;
     expect(appendsAfterFirst).toBe(1);
-    const replay = await adjudication.adjudicate({ ...REQUEST });
+    const replay = await revocation.revoke({ ...REQUEST });
     expect(replay).toEqual(first);
-    expect(fake.queries.filter((query) => query.includes('append-transition-case')))
+    expect(fake.queries.filter((query) => query.includes('append-transition-coverage')))
       .toHaveLength(appendsAfterFirst);
 
-    // Arrangement 3: invalid_transition is a terminal unadjudicated refusal with zero writes.
-    const refused = makeDriver();
-    await seedCase(refused.driver);
-    const refusedAdjudication = createEvidenceAuthorityAdjudication(refused.driver, { ...PRINCIPAL });
-    const eventsBefore = refused.events.size;
-    const refusal = await refusedAdjudication.adjudicate({ ...REQUEST, decision: 'resolve' });
-    expect(refusal).toEqual(UNADJUDICATED_RESULT);
+    // Arrangement 3: invalid_transition (already revoked, other construction) is a
+    // terminal unrevoked refusal with zero writes.
+    const eventsBefore = fake.events.size;
+    const other = createEvidenceAuthorityRevocation(fake.driver, {
+      ...PRINCIPAL,
+      principalId: 'principal-gamma',
+    });
+    const refusal = await other.revoke({ ...REQUEST });
+    expect(refusal).toEqual(UNREVOKED_RESULT);
     expect(Object.isFrozen(refusal)).toBe(true);
-    expect(refused.events.size).toBe(eventsBefore);
-    expect(refused.queries.some((query) => query.includes('append-transition-case'))).toBe(false);
+    expect(fake.events.size).toBe(eventsBefore);
+    expect(fake.queries.filter((query) => query.includes('append-transition-coverage')))
+      .toHaveLength(appendsAfterFirst);
 
     // Arrangement 4: storage unavailability throws instead of returning either outcome.
     const unavailable = makeDriver({ sessionThrows: true });
-    const failing = createEvidenceAuthorityAdjudication(unavailable.driver, { ...PRINCIPAL });
+    const failing = createEvidenceAuthorityRevocation(unavailable.driver, { ...PRINCIPAL });
     let storage: unknown;
-    try { await failing.adjudicate({ ...REQUEST }); } catch (caught) { storage = caught; }
+    try { await failing.revoke({ ...REQUEST }); } catch (caught) { storage = caught; }
     expect(storage).toBeInstanceOf(EvidenceAuthorityLedgerError);
     expect(storage).toMatchObject({ code: 'storage_unavailable' });
   });
 
-  it('classifies every terminal ledger code as the single frozen unadjudicated constant and throws only transients', async () => {
+  it('classifies every terminal ledger code as the single frozen unrevoked constant and throws only transients', async () => {
     const terminalCodes: EvidenceAuthorityLedgerErrorCode[] = [
       'invalid_scope',
       'invalid_command',
@@ -439,29 +443,29 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
     ];
     for (const code of terminalCodes) {
       const fake = ledgerFailureDriver(new EvidenceAuthorityLedgerError(code));
-      const adjudication = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL });
-      const result = await adjudication.adjudicate({ ...REQUEST });
-      expect(result).toEqual(UNADJUDICATED_RESULT);
+      const revocation = createEvidenceAuthorityRevocation(fake.driver, { ...PRINCIPAL });
+      const result = await revocation.revoke({ ...REQUEST });
+      expect(result).toEqual(UNREVOKED_RESULT);
       expect(Object.isFrozen(result)).toBe(true);
       expect(Object.getPrototypeOf(result)).toBeNull();
       expect(fake.executeWrite).toHaveBeenCalledTimes(1);
-      const again = await adjudication.adjudicate({ ...REQUEST });
+      const again = await revocation.revoke({ ...REQUEST });
       expect(again).toBe(result);
       expect(fake.executeWrite).toHaveBeenCalledTimes(2);
     }
     for (const code of ['storage_unavailable', 'write_incomplete'] as const) {
       const fake = ledgerFailureDriver(new EvidenceAuthorityLedgerError(code));
-      const adjudication = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL });
+      const revocation = createEvidenceAuthorityRevocation(fake.driver, { ...PRINCIPAL });
       let error: unknown;
-      try { await adjudication.adjudicate({ ...REQUEST }); } catch (caught) { error = caught; }
+      try { await revocation.revoke({ ...REQUEST }); } catch (caught) { error = caught; }
       expect(error).toBeInstanceOf(EvidenceAuthorityLedgerError);
       expect(error).toMatchObject({ code });
       expect(fake.executeWrite).toHaveBeenCalledTimes(1);
     }
     const unknownFailure = ledgerFailureDriver(new Error(SECRET_CANARY));
-    const adjudication = createEvidenceAuthorityAdjudication(unknownFailure.driver, { ...PRINCIPAL });
+    const revocation = createEvidenceAuthorityRevocation(unknownFailure.driver, { ...PRINCIPAL });
     let unknown: unknown;
-    try { await adjudication.adjudicate({ ...REQUEST }); } catch (caught) { unknown = caught; }
+    try { await revocation.revoke({ ...REQUEST }); } catch (caught) { unknown = caught; }
     expect(unknown).toBeInstanceOf(EvidenceAuthorityLedgerError);
     expect(unknown).toMatchObject({ code: 'storage_unavailable' });
     expect(String(unknown)).not.toContain(SECRET_CANARY);
@@ -470,18 +474,18 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
   it('refuses cross-principal replay-as-forgery with a different operation id and never success', async () => {
     const fake = makeDriver();
     await seedCase(fake.driver);
-    const alpha = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL });
-    const beta = createEvidenceAuthorityAdjudication(fake.driver, {
+    const alpha = createEvidenceAuthorityRevocation(fake.driver, { ...PRINCIPAL });
+    const beta = createEvidenceAuthorityRevocation(fake.driver, {
       ...PRINCIPAL,
       principalId: 'principal-beta',
     });
-    const adjudicated = await alpha.adjudicate({ ...REQUEST });
-    expect(adjudicated.outcome).toBe('adjudicated');
+    const revoked = await alpha.revoke({ ...REQUEST });
+    expect(revoked.outcome).toBe('revoked');
     const alphaAppend = fake.run.mock.calls
-      .find(([query]) => String(query).includes('append-transition-case'))?.[1] as Record<string, unknown>;
+      .find(([query]) => String(query).includes('append-transition-coverage'))?.[1] as Record<string, unknown>;
     const callsBefore = fake.run.mock.calls.length;
-    const forged = await beta.adjudicate({ ...REQUEST });
-    expect(forged).toEqual(UNADJUDICATED_RESULT);
+    const forged = await beta.revoke({ ...REQUEST });
+    expect(forged).toEqual(UNREVOKED_RESULT);
     const betaCalls = fake.run.mock.calls.slice(callsBefore);
     expect(betaCalls.length).toBeGreaterThan(0);
     expect(betaCalls.some(([query]) => String(query).includes('append-'))).toBe(false);
@@ -492,42 +496,44 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
     expect([...betaOperationIds][0]).not.toBe(alphaAppend.operationId);
   });
 
-  it('makes cross-tenant and cross-project adjudication unrepresentable, not merely refused', async () => {
+  it('makes cross-tenant and cross-project revocation unrepresentable, not merely refused', async () => {
     const fake = makeDriver({ sessionThrows: true });
-    const adjudication = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL });
+    const revocation = createEvidenceAuthorityRevocation(fake.driver, { ...PRINCIPAL });
     for (const request of [
       { ...REQUEST, tenantId: PRINCIPAL.tenantId },
       { ...REQUEST, projectScope: PRINCIPAL.projectScope },
       { ...REQUEST, principalId: PRINCIPAL.principalId },
       { ...REQUEST, reviewerId: 'reviewer-1' },
       { ...REQUEST, actorId: 'actor-1' },
+      { ...REQUEST, coverageId: 'coverage-1' },
+      { ...REQUEST, caseId: 'case-1' },
     ]) {
-      const result = await adjudication.adjudicate(request);
-      expect(result).toEqual(UNADJUDICATED_RESULT);
+      const result = await revocation.revoke(request);
+      expect(result).toEqual(UNREVOKED_RESULT);
     }
     expect(fake.session).not.toHaveBeenCalled();
 
     const fakeA = makeDriver();
     await seedCase(fakeA.driver);
-    const instanceA = createEvidenceAuthorityAdjudication(fakeA.driver, { ...PRINCIPAL });
-    await instanceA.adjudicate({ ...REQUEST });
+    const instanceA = createEvidenceAuthorityRevocation(fakeA.driver, { ...PRINCIPAL });
+    await instanceA.revoke({ ...REQUEST });
     const fakeB = makeDriver();
     const scopeB = Object.freeze({
       tenantId: 'tenant-other',
       projectScope: 'project:other',
       semanticId: REQUEST.semanticId,
     });
-    await seedCase(fakeB.driver, REQUEST.caseId, scopeB);
-    const instanceB = createEvidenceAuthorityAdjudication(fakeB.driver, {
+    await seedCase(fakeB.driver, 'case-revocation-1', scopeB);
+    const instanceB = createEvidenceAuthorityRevocation(fakeB.driver, {
       tenantId: scopeB.tenantId,
       projectScope: scopeB.projectScope,
       principalId: PRINCIPAL.principalId,
     });
-    await instanceB.adjudicate({ ...REQUEST });
+    await instanceB.revoke({ ...REQUEST });
     const appendA = fakeA.run.mock.calls
-      .find(([query]) => String(query).includes('append-transition-case'))?.[1] as Record<string, unknown>;
+      .find(([query]) => String(query).includes('append-transition-coverage'))?.[1] as Record<string, unknown>;
     const appendB = fakeB.run.mock.calls
-      .find(([query]) => String(query).includes('append-transition-case'))?.[1] as Record<string, unknown>;
+      .find(([query]) => String(query).includes('append-transition-coverage'))?.[1] as Record<string, unknown>;
     expect(appendA).toBeDefined();
     expect(appendB).toBeDefined();
     expect(appendB.operationId).not.toBe(appendA.operationId);
@@ -536,7 +542,7 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
     expect(appendB.tenantId).toBe(scopeB.tenantId);
   });
 
-  it('derives operation ids in a fresh domain that never collides with capture-derived identifiers', async () => {
+  it('derives operation ids in a fresh domain that never collides with capture- or adjudication-derived identifiers', async () => {
     const probe = makeDriver();
     await createEvidenceAuthorityCapture(probe.driver).capture({
       tenantId: PRINCIPAL.tenantId,
@@ -549,33 +555,50 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
       .find(([query]) => String(query).includes('append-capture-coverage-case'))?.[1] as Record<string, unknown>;
     expect(captureParams).toBeDefined();
 
-    const fake = makeDriver();
+    const adjudicationFake = makeDriver();
     const capturedCaseId = String(captureParams.caseId);
-    await seedCase(fake.driver, capturedCaseId);
-    const adjudication = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL });
-    const result = await adjudication.adjudicate({ ...REQUEST, caseId: capturedCaseId });
-    expect(result.outcome).toBe('adjudicated');
-    const adjParams = fake.run.mock.calls
+    await seedCase(adjudicationFake.driver, capturedCaseId);
+    const adjudication = createEvidenceAuthorityAdjudication(adjudicationFake.driver, { ...PRINCIPAL });
+    const adjudicated = await adjudication.adjudicate({
+      semanticId: REQUEST.semanticId,
+      caseId: capturedCaseId,
+      decision: 'reject',
+    });
+    expect(adjudicated.outcome).toBe('adjudicated');
+    const adjParams = adjudicationFake.run.mock.calls
       .find(([query]) => String(query).includes('append-transition-case'))?.[1] as Record<string, unknown>;
-    expect(String(adjParams.operationId)).toMatch(/^adj-op-[0-9a-f]{64}$/);
+    expect(adjParams).toBeDefined();
+
+    const fake = makeDriver();
+    await seedCase(fake.driver);
+    const revocation = createEvidenceAuthorityRevocation(fake.driver, { ...PRINCIPAL });
+    const result = await revocation.revoke({ ...REQUEST });
+    expect(result.outcome).toBe('revoked');
+    const revParams = fake.run.mock.calls
+      .find(([query]) => String(query).includes('append-transition-coverage'))?.[1] as Record<string, unknown>;
+    expect(String(revParams.operationId)).toMatch(/^rev-op-[0-9a-f]{64}$/);
     for (const derived of [
       captureParams.caseId,
       captureParams.coverageOperationId,
       captureParams.caseOperationId,
+      adjParams.operationId,
     ]) {
-      expect(adjParams.operationId).not.toBe(derived);
-      expect(String(derived).startsWith('adj-op-')).toBe(false);
+      expect(revParams.operationId).not.toBe(derived);
+      expect(String(derived).startsWith('rev-op-')).toBe(false);
     }
+    expect(String(revParams.operationId).startsWith('adj-op-')).toBe(false);
+    expect(String(revParams.operationId).startsWith('capture-')).toBe(false);
   });
 
-  it('returns the fixed content-free unadjudicated code with zero I/O for hostile requests and hardens the principal parser', async () => {
+  it('returns the fixed content-free unrevoked code with zero I/O for hostile requests and hardens the principal parser', async () => {
     const fake = makeDriver({ sessionThrows: true });
-    const adjudication = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL });
+    const revocation = createEvidenceAuthorityRevocation(fake.driver, { ...PRINCIPAL });
     const hostileRequests: unknown[] = [
       null,
       undefined,
       'request',
       42,
+      true,
       [],
       {},
       { ...REQUEST, extra: true },
@@ -583,41 +606,39 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
       { ...REQUEST, [Symbol('hostile')]: true },
       Object.defineProperty({ ...REQUEST }, 'semanticId', { get: () => SECRET_CANARY }),
       new Proxy({ ...REQUEST }, { getOwnPropertyDescriptor: () => { throw new Error(SECRET_CANARY); } }),
-      { semanticId: REQUEST.semanticId, caseId: REQUEST.caseId },
-      { ...REQUEST, semanticId: null },
-      { ...REQUEST, semanticId: '' },
-      { ...REQUEST, semanticId: `s${'x'.repeat(501)}` },
-      { ...REQUEST, semanticId: 'sem antic' },
-      { ...REQUEST, semanticId: '-nanoid-shaped' },
-      { ...REQUEST, semanticId: '_nanoid-shaped' },
-      { ...REQUEST, caseId: null },
-      { ...REQUEST, caseId: '' },
-      { ...REQUEST, caseId: `c${'x'.repeat(501)}` },
-      { ...REQUEST, caseId: `bad ${SECRET_CANARY}` },
-      { ...REQUEST, caseId: 'case\nnewline' },
-      { ...REQUEST, caseId: 42 },
-      { ...REQUEST, caseId: `c${'x'.repeat(1_000_000)}` },
-      { ...REQUEST, decision: null },
-      { ...REQUEST, decision: 'REJECT' },
-      { ...REQUEST, decision: 'rejected' },
-      { ...REQUEST, decision: 'approve' },
-      { ...REQUEST, decision: 'supersede' },
-      { ...REQUEST, decision: 'begin_resolution ' },
-      { ...REQUEST, decision: 'revoke-coverage' },
+      { ...REQUEST, tenantId: PRINCIPAL.tenantId },
+      { ...REQUEST, projectScope: PRINCIPAL.projectScope },
+      { ...REQUEST, principalId: PRINCIPAL.principalId },
+      { ...REQUEST, reviewerId: 'reviewer-1' },
+      { ...REQUEST, actorId: 'actor-1' },
+      { ...REQUEST, coverageId: 'coverage-1' },
+      { ...REQUEST, caseId: 'case-1' },
+      { semanticId: null },
+      { semanticId: undefined },
+      { semanticId: 42 },
+      { semanticId: {} },
+      { semanticId: '' },
+      { semanticId: `s${'x'.repeat(501)}` },
+      { semanticId: 'sem antic' },
+      { semanticId: '-nanoid-shaped' },
+      { semanticId: '_nanoid-shaped' },
+      { semanticId: 'semantic\nnewline' },
+      { semanticId: `bad ${SECRET_CANARY}` },
+      { semanticId: `s${'x'.repeat(1_000_000)}` },
     ];
     expect(hostileRequests.length).toBeGreaterThanOrEqual(30);
     for (const request of hostileRequests) {
-      const result = await adjudication.adjudicate(request);
-      expect(result).toEqual(UNADJUDICATED_RESULT);
+      const result = await revocation.revoke(request);
+      expect(result).toEqual(UNREVOKED_RESULT);
       expect(Object.isFrozen(result)).toBe(true);
       expect(JSON.stringify(result)).not.toContain(SECRET_CANARY);
     }
     expect(fake.session).not.toHaveBeenCalled();
 
     const benign = makeDriver();
-    const benignAdjudication = createEvidenceAuthorityAdjudication(benign.driver, { ...PRINCIPAL });
-    const benignProxyResult = await benignAdjudication.adjudicate(new Proxy({ ...REQUEST }, {}));
-    expect(benignProxyResult).toEqual(UNADJUDICATED_RESULT);
+    const benignRevocation = createEvidenceAuthorityRevocation(benign.driver, { ...PRINCIPAL });
+    const benignProxyResult = await benignRevocation.revoke(new Proxy({ ...REQUEST }, {}));
+    expect(benignProxyResult).toEqual(UNREVOKED_RESULT);
     expect(benign.run).not.toHaveBeenCalled();
     expect(benign.session).not.toHaveBeenCalled();
 
@@ -646,7 +667,7 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
     ];
     for (const principal of hostilePrincipals) {
       let error: unknown;
-      try { createEvidenceAuthorityAdjudication(fake.driver, principal); } catch (caught) { error = caught; }
+      try { createEvidenceAuthorityRevocation(fake.driver, principal); } catch (caught) { error = caught; }
       expect(error).toBeInstanceOf(EvidenceAuthorityLedgerError);
       expect(error).toMatchObject({ code: 'invalid_scope' });
       expect(String(error)).toBe('EvidenceAuthorityLedgerError: evidence_authority_ledger:invalid_scope');
@@ -658,12 +679,12 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
   it('never leaks the principal identifier or request canaries through any result, parameter, or error', async () => {
     const fake = makeDriver();
     await seedCase(fake.driver);
-    const adjudication = createEvidenceAuthorityAdjudication(fake.driver, {
+    const revocation = createEvidenceAuthorityRevocation(fake.driver, {
       ...PRINCIPAL,
       principalId: PRINCIPAL_CANARY,
     });
-    const result = await adjudication.adjudicate({ ...REQUEST });
-    expect(result.outcome).toBe('adjudicated');
+    const result = await revocation.revoke({ ...REQUEST });
+    expect(result.outcome).toBe('revoked');
     expect(JSON.stringify(result)).not.toContain(PRINCIPAL_CANARY);
     for (const [query, params] of fake.run.mock.calls) {
       expect(String(query)).not.toContain(PRINCIPAL_CANARY);
@@ -671,87 +692,44 @@ describe('EvidenceAuthorityAdjudication V1 (RET-005B-AUTH-001B3A)', () => {
     }
 
     const hostile = makeDriver({ sessionThrows: true });
-    const guarded = createEvidenceAuthorityAdjudication(hostile.driver, { ...PRINCIPAL });
+    const guarded = createEvidenceAuthorityRevocation(hostile.driver, { ...PRINCIPAL });
     for (const request of [
-      { ...REQUEST, semanticId: `bad ${SECRET_CANARY}` },
-      { ...REQUEST, caseId: `bad ${SECRET_CANARY}` },
-      { ...REQUEST, decision: SECRET_CANARY },
+      { semanticId: `bad ${SECRET_CANARY}` },
+      { semanticId: `_${SECRET_CANARY}` },
+      { ...REQUEST, extra: SECRET_CANARY },
     ]) {
-      const refused = await guarded.adjudicate(request);
-      expect(refused).toEqual(UNADJUDICATED_RESULT);
+      const refused = await guarded.revoke(request);
+      expect(refused).toEqual(UNREVOKED_RESULT);
       expect(JSON.stringify(refused)).not.toContain(SECRET_CANARY);
     }
     expect(hostile.session).not.toHaveBeenCalled();
 
     const unavailable = makeDriver({ sessionThrows: true });
-    const failing = createEvidenceAuthorityAdjudication(unavailable.driver, {
+    const failing = createEvidenceAuthorityRevocation(unavailable.driver, {
       ...PRINCIPAL,
       principalId: PRINCIPAL_CANARY,
     });
     let storage: unknown;
-    try { await failing.adjudicate({ ...REQUEST }); } catch (caught) { storage = caught; }
+    try { await failing.revoke({ ...REQUEST }); } catch (caught) { storage = caught; }
     expect(storage).toBeInstanceOf(EvidenceAuthorityLedgerError);
     expect(String(storage)).toBe('EvidenceAuthorityLedgerError: evidence_authority_ledger:storage_unavailable');
     expect(String(storage)).not.toContain(PRINCIPAL_CANARY);
   });
 
-  it('keeps two-step approval resumable across a crash after resolution starts', async () => {
-    const fake = makeDriver();
-    await seedCase(fake.driver);
-    const adjudication = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL });
-
-    fake.controls.failAfterCommit = true;
-    let crash: unknown;
-    try {
-      await adjudication.adjudicate({ ...REQUEST, decision: 'begin_resolution' });
-    } catch (caught) { crash = caught; }
-    expect(crash).toBeInstanceOf(EvidenceAuthorityLedgerError);
-    expect(crash).toMatchObject({ code: 'storage_unavailable' });
-    expect(String(crash)).not.toContain(SECRET_CANARY);
-
-    // Mid-crash: exactly the one valid resolving event, nothing else.
-    expect(fake.events.size).toBe(3);
-    expect([...fake.cases.values()].map((entry) => entry.state)).toEqual(['resolving']);
-
-    const resumed = await adjudication.adjudicate({ ...REQUEST, decision: 'begin_resolution' });
-    expect(resumed.outcome).toBe('adjudicated');
-    expect(resumed.outcome === 'adjudicated' && resumed.receipt).toMatchObject({
-      action: 'resolution_started',
-      state: 'resolving',
-      sequence: 3,
-    });
-    const resolved = await adjudication.adjudicate({ ...REQUEST, decision: 'resolve' });
-    expect(resolved.outcome).toBe('adjudicated');
-    expect(resolved.outcome === 'adjudicated' && resolved.receipt).toMatchObject({
-      action: 'resolved',
-      state: 'resolved',
-      sequence: 4,
-    });
-    const history = [...fake.events.values()]
-      .filter((item) => item.event.case_id === REQUEST.caseId)
-      .map((item) => [item.event.action, item.event.state]);
-    expect(history).toEqual([
-      ['case_opened', 'pending'],
-      ['resolution_started', 'resolving'],
-      ['resolved', 'resolved'],
-    ]);
-    expect(fake.events.size).toBe(4);
-  });
-
   it('hardens construction: hostile principals throw and the frozen surface exposes nothing else', async () => {
     const fake = makeDriver();
-    const adjudication = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL });
-    expect(Object.getPrototypeOf(adjudication)).toBeNull();
-    expect(Object.isFrozen(adjudication)).toBe(true);
-    expect(Reflect.ownKeys(adjudication)).toEqual(['contractVersion', 'adjudicate']);
-    expect(adjudication.contractVersion).toBe(EVIDENCE_AUTHORITY_ADJUDICATION_VERSION);
-    expect(JSON.stringify(adjudication)).not.toContain(PRINCIPAL.principalId);
-    expect(JSON.stringify(adjudication)).not.toContain(PRINCIPAL.tenantId);
+    const revocation = createEvidenceAuthorityRevocation(fake.driver, { ...PRINCIPAL });
+    expect(Object.getPrototypeOf(revocation)).toBeNull();
+    expect(Object.isFrozen(revocation)).toBe(true);
+    expect(Reflect.ownKeys(revocation)).toEqual(['contractVersion', 'revoke']);
+    expect(revocation.contractVersion).toBe(EVIDENCE_AUTHORITY_REVOCATION_VERSION);
+    expect(JSON.stringify(revocation)).not.toContain(PRINCIPAL.principalId);
+    expect(JSON.stringify(revocation)).not.toContain(PRINCIPAL.tenantId);
 
     let hostile: unknown;
     let escaped: unknown;
     try {
-      escaped = createEvidenceAuthorityAdjudication(fake.driver, { ...PRINCIPAL, principalId: '' });
+      escaped = createEvidenceAuthorityRevocation(fake.driver, { ...PRINCIPAL, principalId: '' });
     } catch (caught) { hostile = caught; }
     expect(escaped).toBeUndefined();
     expect(hostile).toBeInstanceOf(EvidenceAuthorityLedgerError);
