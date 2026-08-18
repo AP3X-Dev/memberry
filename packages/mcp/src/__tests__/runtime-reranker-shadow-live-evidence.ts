@@ -3,8 +3,9 @@ import { lstat, open, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 
 const DIRECTORY = 'memberry-candidate-channel-live';
+const AUTHORITY_FILENAME = 'evidence.json';
 const FILENAME = 'ret004b-evidence.json';
-const ENV = 'MEMBERRY_RET004B_EVIDENCE_PATH';
+const AUTHORITY_ENV = 'MEMBERRY_RET003B_EVIDENCE_PATH';
 const BYTES = '{"contract":"RET-004B","mode":"required","disposable":true,"realBootstrap":true,"centralHttpAuthentication":true,"authorityBound":true,"baselineByteParity":true,"contentFreeObservation":true,"localReferenceProvider":true,"shutdownDrained":true,"cleanupCount":0}\n';
 
 type Code = 'INPUT_INVALID' | 'PATH_INVALID' | 'PLATFORM_UNSUPPORTED' | 'PARENT_INVALID'
@@ -17,10 +18,12 @@ interface Identity { dev: bigint; ino: bigint; uid: bigint; mode: bigint; nlink:
 const fail = (code: Code) => new RerankerShadowLiveEvidenceError(code);
 
 export function rerankerShadowEvidenceAuthorityV1(): Readonly<{ parent: string; path: string }> {
-  const root = process.env['RUNNER_TEMP']; const requested = process.env[ENV];
+  const root = process.env['RUNNER_TEMP']; const requested = process.env[AUTHORITY_ENV];
   if (typeof root !== 'string' || root.length === 0 || root.includes('\0') || !isAbsolute(root) || resolve(root) !== root) throw fail('PATH_INVALID');
-  const parent = join(root, DIRECTORY); const path = join(parent, FILENAME);
-  if (requested !== path) throw fail('PATH_INVALID');
+  const parent = join(root, DIRECTORY);
+  const authorityPath = join(parent, AUTHORITY_FILENAME);
+  const path = join(parent, FILENAME);
+  if (requested !== authorityPath) throw fail('PATH_INVALID');
   return Object.freeze({ parent, path });
 }
 function uid(): bigint {

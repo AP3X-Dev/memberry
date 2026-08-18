@@ -11,7 +11,8 @@ import {
 
 const roots: string[] = [];
 const originalRoot = process.env['RUNNER_TEMP'];
-const originalPath = process.env['MEMBERRY_RET004B_EVIDENCE_PATH'];
+const originalAuthorityPath = process.env['MEMBERRY_RET003B_EVIDENCE_PATH'];
+const originalRet004bPath = process.env['MEMBERRY_RET004B_EVIDENCE_PATH'];
 const linux = process.platform === 'linux' ? it : it.skip;
 
 async function authority(): Promise<{ root: string; parent: string; path: string }> {
@@ -22,7 +23,8 @@ async function authority(): Promise<{ root: string; parent: string; path: string
   await chmod(parent, 0o700);
   const path = join(parent, 'ret004b-evidence.json');
   process.env['RUNNER_TEMP'] = root;
-  process.env['MEMBERRY_RET004B_EVIDENCE_PATH'] = path;
+  process.env['MEMBERRY_RET003B_EVIDENCE_PATH'] = join(parent, 'evidence.json');
+  delete process.env['MEMBERRY_RET004B_EVIDENCE_PATH'];
   return { root, parent, path };
 }
 
@@ -34,8 +36,10 @@ async function code(work: Promise<unknown>): Promise<string> {
 
 afterEach(async () => {
   if (originalRoot === undefined) delete process.env['RUNNER_TEMP']; else process.env['RUNNER_TEMP'] = originalRoot;
-  if (originalPath === undefined) delete process.env['MEMBERRY_RET004B_EVIDENCE_PATH'];
-  else process.env['MEMBERRY_RET004B_EVIDENCE_PATH'] = originalPath;
+  if (originalAuthorityPath === undefined) delete process.env['MEMBERRY_RET003B_EVIDENCE_PATH'];
+  else process.env['MEMBERRY_RET003B_EVIDENCE_PATH'] = originalAuthorityPath;
+  if (originalRet004bPath === undefined) delete process.env['MEMBERRY_RET004B_EVIDENCE_PATH'];
+  else process.env['MEMBERRY_RET004B_EVIDENCE_PATH'] = originalRet004bPath;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -43,7 +47,8 @@ describe('RET-004B secure fixed live-evidence writer', () => {
   it('requires the exact resolved authority path', () => {
     const root = resolve(tmpdir());
     process.env['RUNNER_TEMP'] = root;
-    process.env['MEMBERRY_RET004B_EVIDENCE_PATH'] = join(root, 'wrong', 'evidence.json');
+    process.env['MEMBERRY_RET003B_EVIDENCE_PATH'] = join(root, 'wrong', 'evidence.json');
+    delete process.env['MEMBERRY_RET004B_EVIDENCE_PATH'];
     expect(() => rerankerShadowEvidenceAuthorityV1()).toThrow('ret004b_live:path_invalid');
   });
 
