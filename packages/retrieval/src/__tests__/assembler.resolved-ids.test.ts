@@ -278,4 +278,80 @@ describe('RET-002C UnifiedAssembler stable-ID routing', () => {
     }
     expect(hooks).not.toHaveBeenCalled();
   });
+
+  it('rejects oversized stable architecture provider strings before UTF-8 scanning in ordinary and traced lanes', async () => {
+    const originalByteLength = Buffer.byteLength;
+    let target = '';
+    let targetScans = 0;
+    Buffer.byteLength = ((
+      input: Parameters<typeof Buffer.byteLength>[0],
+      encoding?: BufferEncoding,
+    ): number => {
+      if (input === target) targetScans += 1;
+      return originalByteLength(input, encoding);
+    }) as typeof Buffer.byteLength;
+    vi.resetModules();
+    try {
+      const { UnifiedAssembler: DynamicUnifiedAssembler } = await import('../assembler.js');
+      const invoke = (
+        mode: 'ordinary' | 'traced', properties: Record<string, unknown>,
+      ): Promise<unknown> => {
+        const record = new Neo4jRecord(
+          ['ordinal', 'targetId', 'e', 'score', 'projectName'],
+          ['0', 'entity-a', { properties }, 1, null],
+        );
+        const driver = { session: vi.fn(() => ({
+          run: vi.fn(async (cypher: string) => ({
+            records: cypher.includes('OPTIONAL MATCH (e:Entity)') ? [record] : [],
+          })),
+          close: vi.fn(async () => undefined),
+        })) };
+        const redis = {
+          zincrby: vi.fn(async () => 0), zrevrangeWithScores: vi.fn(async () => []),
+          lpush: vi.fn(async () => 0), ltrim: vi.fn(async () => undefined),
+        };
+        const embedding = { embed: vi.fn(async () => [0]), embedBatch: vi.fn(async () => []) };
+        const assembler = new DynamicUnifiedAssembler(driver as never, redis, null, null, embedding);
+        const options = {
+          strategy: 'ranked' as const, include_arch: true, include_code: false, include_memory: false,
+          resolvedEntityIds: ['entity-a'],
+        };
+        return mode === 'ordinary'
+          ? assembler.assemble('task', options)
+          : assembler.assembleTraced('task', options);
+      };
+
+      for (const mode of ['ordinary', 'traced'] as const) {
+        target = 'provider-safe-name';
+        targetScans = 0;
+        await expect(invoke(mode, { id: 'entity-a', name: target })).resolves.toBeDefined();
+        expect(targetScans).toBeGreaterThan(0);
+
+        target = 'x'.repeat(65_537);
+        targetScans = 0;
+        await expect(invoke(mode, { id: 'entity-a', name: target }))
+          .rejects.toThrow('stable_arch_result_invalid');
+        expect(targetScans).toBe(0);
+
+        target = 'é'.repeat(32_769);
+        targetScans = 0;
+        await expect(invoke(mode, { id: 'entity-a', name: target }))
+          .rejects.toThrow('stable_arch_result_invalid');
+        expect(targetScans).toBeGreaterThan(0);
+
+        target = 't'.repeat(65_536);
+        targetScans = 0;
+        const aggregateProperties: Record<string, unknown> = { id: 'entity-a', name: 'safe-name' };
+        for (let index = 0; index < 7; index += 1) {
+          aggregateProperties[`padding${index}`] = 'f'.repeat(65_536);
+        }
+        aggregateProperties.boundary = target;
+        await expect(invoke(mode, aggregateProperties)).rejects.toThrow('stable_arch_result_invalid');
+        expect(targetScans).toBe(0);
+      }
+    } finally {
+      Buffer.byteLength = originalByteLength;
+      vi.resetModules();
+    }
+  });
 });

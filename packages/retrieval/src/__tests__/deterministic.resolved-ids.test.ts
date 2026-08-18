@@ -283,4 +283,83 @@ describe('RET-002C deterministic stable-ID lane', () => {
       resolvedEntityIds: ['entity-a'], tenantId: 'tenant-a', project_name: 'alpha',
     })).resolves.toBeDefined();
   });
+
+  it('rejects oversized stable deterministic provider strings before UTF-8 scanning in ordinary and traced lanes', async () => {
+    const originalByteLength = Buffer.byteLength;
+    let target = '';
+    let targetScans = 0;
+    Buffer.byteLength = ((
+      input: Parameters<typeof Buffer.byteLength>[0],
+      encoding?: BufferEncoding,
+    ): number => {
+      if (input === target) targetScans += 1;
+      return originalByteLength(input, encoding);
+    }) as typeof Buffer.byteLength;
+    vi.resetModules();
+    try {
+      const { DeterministicAssembler: DynamicDeterministicAssembler } = await import('../deterministic.js');
+      const invoke = (
+        mode: 'ordinary' | 'traced', properties: Record<string, unknown>,
+      ): Promise<unknown> => {
+        const entity = new Neo4jRecord(
+          ['ordinal', 'targetId', 'e', 'projectName'],
+          ['0', 'entity-a', { properties }, null],
+        );
+        const driver = { session: vi.fn(() => ({
+          run: vi.fn(async (cypher: string) => ({
+            records: cypher.includes('OPTIONAL MATCH (e:Entity {id: targetId})') ? [entity] : [],
+          })),
+          close: vi.fn(async () => undefined),
+        })) };
+        const assembler = new DynamicDeterministicAssembler(driver as never);
+        const options = { resolvedEntityIds: ['entity-a'] };
+        return mode === 'ordinary'
+          ? assembler.assemble('task', options)
+          : assembler.assembleTraced('task', options);
+      };
+
+      for (const mode of ['ordinary', 'traced'] as const) {
+        const expectProviderFailure = async (properties: Record<string, unknown>): Promise<void> => {
+          const operation = invoke(mode, properties);
+          if (mode === 'ordinary') {
+            await expect(operation).rejects.toThrow('stable_deterministic_result_invalid');
+          } else {
+            await expect(operation).resolves.toMatchObject({
+              trace: { events: expect.arrayContaining([
+                expect.objectContaining({ channel: 'arch.entity', outcome: 'safe-failure', code: 'query-failed' }),
+              ]) },
+            });
+          }
+        };
+
+        target = 'provider-safe-name';
+        targetScans = 0;
+        await expect(invoke(mode, { id: 'entity-a', name: target })).resolves.toBeDefined();
+        expect(targetScans).toBeGreaterThan(0);
+
+        target = 'x'.repeat(65_537);
+        targetScans = 0;
+        await expectProviderFailure({ id: 'entity-a', name: target });
+        expect(targetScans).toBe(0);
+
+        target = 'é'.repeat(32_769);
+        targetScans = 0;
+        await expectProviderFailure({ id: 'entity-a', name: target });
+        expect(targetScans).toBeGreaterThan(0);
+
+        target = 't'.repeat(65_536);
+        targetScans = 0;
+        const aggregateProperties: Record<string, unknown> = { id: 'entity-a', name: 'safe-name' };
+        for (let index = 0; index < 31; index += 1) {
+          aggregateProperties[`padding${index}`] = 'f'.repeat(65_536);
+        }
+        aggregateProperties.boundary = target;
+        await expectProviderFailure(aggregateProperties);
+        expect(targetScans).toBe(0);
+      }
+    } finally {
+      Buffer.byteLength = originalByteLength;
+      vi.resetModules();
+    }
+  });
 });

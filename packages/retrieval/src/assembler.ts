@@ -1079,6 +1079,10 @@ function consumeStableArchValue(budget: StableArchBudget, value: unknown): void 
   budget.values += 1;
   if (budget.values > MAX_STABLE_ARCH_TOTAL_VALUES) stableArchInvalid();
   if (typeof value === 'string') {
+    const remainingStringBytes = MAX_STABLE_ARCH_TOTAL_STRING_BYTES - budget.stringBytes;
+    if (value.length > MAX_STABLE_ARCH_STRING_BYTES || value.length > remainingStringBytes) {
+      stableArchInvalid();
+    }
     const bytes = Buffer.byteLength(value, 'utf8');
     if (bytes > MAX_STABLE_ARCH_STRING_BYTES) stableArchInvalid();
     budget.stringBytes += bytes;
