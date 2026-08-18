@@ -99,9 +99,10 @@ function createMockCodeLayer(): AssemblerCodeLayer {
 function createMockMemoryLayer(): AssemblerMemoryLayer {
   return {
     load: vi.fn().mockResolvedValue({
-      markdown: '## Auth Decision (confidence: 0.9)\nDecided to use JWT for stateless auth.\n',
+      markdown: '## [sem-auth-1] (confidence: 0.9)\nDecided to use JWT for stateless auth.\n',
       tokens: 50,
       sources: ['sem-auth-1'],
+      assembled_at: '2026-08-18T00:00:00.000Z',
     }),
   };
 }
@@ -672,9 +673,10 @@ describe('UnifiedAssembler', () => {
     function askAssembler(chat: LlmClient['chat']): { asm: UnifiedAssembler; chatSpy: LlmClient['chat'] } {
       const llm = createMockLlm({ chat });
       (memoryLayer.load as ReturnType<typeof vi.fn>).mockResolvedValue({
-        markdown: `## Auth Decision (confidence: 0.9)\nDecided to use JWT for stateless auth.\n\n## Injection Probe (confidence: 0.8)\n${INJECTION}\n`,
+        markdown: `## [sem-auth-1] (confidence: 0.9)\nDecided to use JWT for stateless auth.\n\n## [sem-inject-2] (confidence: 0.8)\n${INJECTION}\n`,
         tokens: 80,
         sources: ['sem-auth-1', 'sem-inject-2'],
+        assembled_at: '2026-08-18T00:00:00.000Z',
       });
       const asm = new UnifiedAssembler(
         driver as never,

@@ -2,7 +2,7 @@
 // Yggdrasil-inspired 5-step deterministic context assembly.
 // Same graph state always produces the same output — no ranking heuristics.
 
-import { Record as Neo4jRecord, type Driver } from 'neo4j-driver';
+import { Integer as Neo4jInteger, Record as Neo4jRecord, type Driver } from 'neo4j-driver';
 import { isProxy } from 'node:util/types';
 import { activeRelationshipFilter, tenantWhere, resolveTenant, TENANT_PARAM } from '@memberry/neo4j';
 import type { ContextSection, ContextItem } from './types.js';
@@ -298,17 +298,22 @@ export class DeterministicAssembler {
     trace.recordSourceFinal('arch.entity', targetItems, entitySection.section.items);
 
     trace.attempt('arch.dependency');
-    let dependencyFailure = false;
+    let dependencyFailure: 'query-failed' | 'invalid-result' | undefined;
     let depsByTarget = new Map<string, Array<{ name: string; relation: string; interface_desc: string }>>();
     let dependentsByTarget = new Map<string, Array<{ name: string; relation: string }>>();
     if (!stableIdLane) {
-      try { depsByTarget = await this.getDependenciesBatch(targets); } catch { dependencyFailure = true; }
-      try { dependentsByTarget = await this.getDependentsBatch(targets); } catch { dependencyFailure = true; }
+      try { depsByTarget = await this.getDependenciesBatch(targets); } catch (error) {
+        dependencyFailure = isDeterministicProviderResultError(error) ? 'invalid-result' : 'query-failed';
+      }
+      try { dependentsByTarget = await this.getDependentsBatch(targets); } catch (error) {
+        if (isDeterministicProviderResultError(error)) dependencyFailure = 'invalid-result';
+        else dependencyFailure ??= 'query-failed';
+      }
     }
     trace.settle('arch.dependency', stableIdLane
       ? { outcome: 'safe-failure', code: 'unavailable' }
       : dependencyFailure
-      ? { outcome: 'safe-failure', code: 'query-failed' }
+      ? { outcome: 'safe-failure', code: dependencyFailure }
       : { outcome: 'success' });
     const depItems: ContextItem[] = [];
     for (const target of targets) {
@@ -413,21 +418,26 @@ export class DeterministicAssembler {
            ORDER BY score DESC LIMIT 5`,
           { query: escaped.split(/\s+/).filter((w) => w.length > 2).join(' ') || escaped, projectName },
         );
+        const names = parseDynamicDiscoveryResult(ftResult);
         onFulltextSettlement?.({ outcome: 'success' });
-        if (ftResult.records.length > 0) {
-          return ftResult.records.map((r) => r.get('name') as string);
+        if (names.length > 0) {
+          return names;
         }
       } catch (err: unknown) {
         // Fulltext index may not exist yet — fall through
-        onFulltextSettlement?.({ outcome: 'safe-failure', code: 'query-failed' });
+        onFulltextSettlement?.({
+          outcome: 'safe-failure',
+          code: isDeterministicProviderResultError(err) ? 'invalid-result' : 'query-failed',
+        });
       }
 
       // Fallback: keyword CONTAINS match
       const words = task.toLowerCase().split(/\W+/).filter((w) => w.length > 2);
       if (words.length === 0) return [];
 
-      const result = await session.run(
-        `MATCH (e:Entity)
+      try {
+        const result = await session.run(
+          `MATCH (e:Entity)
          WHERE (
            ANY(word IN $words WHERE toLower(e.name) CONTAINS word)
            OR ANY(word IN $words WHERE toLower(COALESCE(e.responsibility, '')) CONTAINS word)
@@ -443,9 +453,14 @@ export class DeterministicAssembler {
          RETURN e.name AS name
          ORDER BY size(e.name) DESC
          LIMIT 5`,
-        { words, projectName },
-      );
-      return result.records.map((r) => r.get('name') as string);
+          { words, projectName },
+        );
+        return parseDynamicDiscoveryResult(result);
+      } catch (error) {
+        if (!isDeterministicProviderResultError(error)) throw error;
+        onFulltextSettlement?.({ outcome: 'safe-failure', code: 'invalid-result' });
+        return [];
+      }
     } finally {
       await session.close();
     }
@@ -465,8 +480,8 @@ export class DeterministicAssembler {
 
   /** Group result rows by their `targetName` column, preserving Cypher row order per target. */
   private groupByTarget<T>(
-    records: Array<{ get: (key: string) => unknown }>,
-    map: (r: { get: (key: string) => unknown }) => { target: string; value: T },
+    records: unknown[][],
+    map: (record: unknown[]) => { target: string; value: T },
   ): Map<string, T[]> {
     const grouped = new Map<string, T[]>();
     for (const r of records) {
@@ -493,12 +508,16 @@ export class DeterministicAssembler {
          ORDER BY targetName ASC, depth ASC`,
         { names },
       );
-      return this.groupByTarget(result.records, (r) => ({
-        target: r.get('targetName') as string,
+      const budget = createDynamicDeterministicBudget();
+      const rows = snapshotDynamicDeterministicRecords(
+        result, ['targetName', 'name', 'depth', 'responsibility'], MAX_DYNAMIC_DETERMINISTIC_RECORDS, budget,
+      );
+      return this.groupByTarget(rows, (row) => ({
+        target: dynamicDeterministicString(row[0], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
         value: {
-          name: r.get('name') as string,
-          depth: toNum(r.get('depth')),
-          responsibility: r.get('responsibility') as string,
+          name: dynamicDeterministicString(row[1], budget),
+          depth: dynamicDeterministicNumber(row[2], true),
+          responsibility: dynamicDeterministicString(row[3], budget),
         },
       }));
     } finally {
@@ -532,17 +551,31 @@ export class DeterministicAssembler {
       const map = new Map<string, {
         name: string; category: string; responsibility: string; interface_desc: string; internals: string;
       }>();
-      for (const r of result.records) {
-        const targetName = r.get('targetName') as string;
+      const budget = createDynamicDeterministicBudget();
+      const rows = snapshotDynamicDeterministicRecords(
+        result, ['targetName', 'e'], Math.min(MAX_DYNAMIC_DETERMINISTIC_RECORDS, names.length), budget,
+      );
+      for (const [rawTargetName, entity] of rows) {
+        const targetName = dynamicDeterministicString(
+          rawTargetName, budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true,
+        );
         // Preserve original getEntity semantics: first record for a name wins.
         if (map.has(targetName)) continue;
-        const props = (r.get('e') as { properties: Record<string, unknown> }).properties;
+        const props = snapshotDynamicDeterministicNodeProperties(entity, budget);
+        if (typeof props.name !== 'string'
+          || (props.category !== undefined && props.category !== null && typeof props.category !== 'string')
+          || (props.type !== undefined && props.type !== null && typeof props.type !== 'string')
+          || (props.responsibility !== undefined && props.responsibility !== null && typeof props.responsibility !== 'string')
+          || (props.interface_desc !== undefined && props.interface_desc !== null && typeof props.interface_desc !== 'string')
+          || (props.internals !== undefined && props.internals !== null && typeof props.internals !== 'string')) {
+          deterministicProviderResultInvalid();
+        }
         map.set(targetName, {
-          name: props.name as string,
-          category: (props.category as string) ?? (props.type as string) ?? 'unknown',
-          responsibility: (props.responsibility as string) ?? '',
-          interface_desc: (props.interface_desc as string) ?? '',
-          internals: (props.internals as string) ?? '',
+          name: props.name,
+          category: (props.category as string | null | undefined) ?? (props.type as string | null | undefined) ?? 'unknown',
+          responsibility: (props.responsibility as string | null | undefined) ?? '',
+          interface_desc: (props.interface_desc as string | null | undefined) ?? '',
+          internals: (props.internals as string | null | undefined) ?? '',
         });
       }
       return map;
@@ -564,12 +597,16 @@ export class DeterministicAssembler {
          ORDER BY targetName ASC, dep.name ASC`,
         { names },
       );
-      return this.groupByTarget(result.records, (r) => ({
-        target: r.get('targetName') as string,
+      const budget = createDynamicDeterministicBudget();
+      const rows = snapshotDynamicDeterministicRecords(
+        result, ['targetName', 'name', 'relation', 'interface_desc'], MAX_DYNAMIC_DETERMINISTIC_RECORDS, budget,
+      );
+      return this.groupByTarget(rows, (row) => ({
+        target: dynamicDeterministicString(row[0], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
         value: {
-          name: r.get('name') as string,
-          relation: r.get('relation') as string,
-          interface_desc: r.get('interface_desc') as string,
+          name: dynamicDeterministicString(row[1], budget),
+          relation: dynamicDeterministicString(row[2], budget),
+          interface_desc: dynamicDeterministicString(row[3], budget),
         },
       }));
     } finally {
@@ -590,11 +627,15 @@ export class DeterministicAssembler {
          ORDER BY targetName ASC, dep.name ASC`,
         { names },
       );
-      return this.groupByTarget(result.records, (r) => ({
-        target: r.get('targetName') as string,
+      const budget = createDynamicDeterministicBudget();
+      const rows = snapshotDynamicDeterministicRecords(
+        result, ['targetName', 'name', 'relation'], MAX_DYNAMIC_DETERMINISTIC_RECORDS, budget,
+      );
+      return this.groupByTarget(rows, (row) => ({
+        target: dynamicDeterministicString(row[0], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
         value: {
-          name: r.get('name') as string,
-          relation: r.get('relation') as string,
+          name: dynamicDeterministicString(row[1], budget),
+          relation: dynamicDeterministicString(row[2], budget),
         },
       }));
     } finally {
@@ -622,12 +663,18 @@ export class DeterministicAssembler {
          RETURN targetName AS targetName, name, stability_tier, description`,
         { names },
       );
-      return this.groupByTarget(result.records, (r) => ({
-        target: r.get('targetName') as string,
+      const budget = createDynamicDeterministicBudget();
+      const rows = snapshotDynamicDeterministicRecords(
+        result, ['targetName', 'name', 'stability_tier', 'description'], MAX_DYNAMIC_DETERMINISTIC_RECORDS, budget,
+      );
+      return this.groupByTarget(rows, (row) => ({
+        target: dynamicDeterministicString(row[0], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
         value: {
-          name: r.get('name') as string,
-          stability_tier: (r.get('stability_tier') as string) ?? 'implementation',
-          description: (r.get('description') as string) ?? '',
+          name: dynamicDeterministicString(row[1], budget),
+          stability_tier: row[2] === null || row[2] === undefined
+            ? 'implementation' : dynamicDeterministicString(row[2], budget),
+          description: row[3] === null || row[3] === undefined
+            ? '' : dynamicDeterministicString(row[3], budget),
         },
       }));
     } finally {
@@ -685,13 +732,20 @@ export class DeterministicAssembler {
           : { names, [TENANT_PARAM]: tenantId, ...(asOf ? { asOf } : {}) },
       );
       if (stableIds) return parseStableSemanticRecords(result, names, tenantId, projectScope);
-      return this.groupByTarget(result.records, (r) => ({
-        target: r.get('targetName') as string,
+      const budget = createDynamicDeterministicBudget();
+      const rows = snapshotDynamicDeterministicRecords(
+        result,
+        ['targetName', 'id', 'content', 'confidence', 'tags'],
+        Math.min(MAX_DYNAMIC_DETERMINISTIC_RECORDS, names.length * 10),
+        budget,
+      );
+      return this.groupByTarget(rows, (row) => ({
+        target: dynamicDeterministicString(row[0], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
         value: {
-          id: r.get('id') as string,
-          content: r.get('content') as string,
-          confidence: r.get('confidence') as number,
-          tags: (r.get('tags') as string[]) ?? [],
+          id: dynamicDeterministicString(row[1], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
+          content: dynamicDeterministicString(row[2], budget),
+          confidence: dynamicDeterministicConfidence(row[3]),
+          tags: snapshotDynamicDeterministicStringArray(row[4] ?? [], budget),
         },
       }));
     } finally {
@@ -701,6 +755,236 @@ export class DeterministicAssembler {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const MAX_DYNAMIC_DETERMINISTIC_RECORDS = 512;
+const MAX_DYNAMIC_DETERMINISTIC_PROPERTIES = 64;
+const MAX_DYNAMIC_DETERMINISTIC_ARRAY = 256;
+const MAX_DYNAMIC_DETERMINISTIC_ID_BYTES = 512;
+const MAX_DYNAMIC_DETERMINISTIC_STRING_BYTES = 65_536;
+const MAX_DYNAMIC_DETERMINISTIC_TOTAL_STRING_BYTES = 2 * 1024 * 1024;
+const MAX_DYNAMIC_DETERMINISTIC_TOTAL_VALUES = 16_384;
+type DynamicDeterministicBudget = { values: number; stringBytes: number };
+
+class DeterministicProviderResultError extends Error {
+  constructor() { super('deterministic_provider_result_invalid'); }
+}
+
+class StableDeterministicResultError extends Error {
+  constructor() { super('stable_deterministic_result_invalid'); }
+}
+
+function deterministicProviderResultInvalid(): never {
+  throw new DeterministicProviderResultError();
+}
+
+function isDeterministicProviderResultError(
+  error: unknown,
+): error is DeterministicProviderResultError | StableDeterministicResultError {
+  return error instanceof DeterministicProviderResultError
+    || error instanceof StableDeterministicResultError;
+}
+
+function createDynamicDeterministicBudget(): DynamicDeterministicBudget {
+  return { values: 0, stringBytes: 0 };
+}
+
+function dynamicDeterministicDataValue(value: object, key: PropertyKey): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor || !('value' in descriptor)) return deterministicProviderResultInvalid();
+  return descriptor.value;
+}
+
+function consumeDynamicDeterministicValue(budget: DynamicDeterministicBudget): void {
+  budget.values += 1;
+  if (budget.values > MAX_DYNAMIC_DETERMINISTIC_TOTAL_VALUES) deterministicProviderResultInvalid();
+}
+
+function dynamicDeterministicString(
+  value: unknown,
+  budget: DynamicDeterministicBudget,
+  maxBytes = MAX_DYNAMIC_DETERMINISTIC_STRING_BYTES,
+  requireNonEmpty = false,
+): string {
+  consumeDynamicDeterministicValue(budget);
+  if (typeof value !== 'string' || (requireNonEmpty && value.length === 0)) {
+    return deterministicProviderResultInvalid();
+  }
+  const remaining = MAX_DYNAMIC_DETERMINISTIC_TOTAL_STRING_BYTES - budget.stringBytes;
+  if (value.length > maxBytes || value.length > remaining) return deterministicProviderResultInvalid();
+  const bytes = Buffer.byteLength(value, 'utf8');
+  if (bytes > maxBytes || bytes > remaining) return deterministicProviderResultInvalid();
+  budget.stringBytes += bytes;
+  return value;
+}
+
+function snapshotDynamicDeterministicArray(value: unknown, maxLength: number): unknown[] {
+  if (isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    return deterministicProviderResultInvalid();
+  }
+  const length = dynamicDeterministicDataValue(value, 'length');
+  if (!Number.isSafeInteger(length) || (length as number) < 0 || (length as number) > maxLength) {
+    return deterministicProviderResultInvalid();
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== (length as number) + 1 || keys[keys.length - 1] !== 'length') {
+    return deterministicProviderResultInvalid();
+  }
+  const snapshot: unknown[] = [];
+  for (let index = 0; index < (length as number); index += 1) {
+    if (keys[index] !== String(index)) return deterministicProviderResultInvalid();
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) {
+      return deterministicProviderResultInvalid();
+    }
+    snapshot.push(descriptor.value);
+  }
+  return snapshot;
+}
+
+function snapshotDynamicDeterministicRecords(
+  result: unknown,
+  fields: readonly string[],
+  maxRecords: number,
+  budget: DynamicDeterministicBudget,
+): unknown[][] {
+  if (result === null || typeof result !== 'object' || isProxy(result)) {
+    return deterministicProviderResultInvalid();
+  }
+  const records = snapshotDynamicDeterministicArray(
+    dynamicDeterministicDataValue(result, 'records'), Math.min(MAX_DYNAMIC_DETERMINISTIC_RECORDS, maxRecords),
+  );
+  return records.map((record) => {
+    if (record === null || typeof record !== 'object' || isProxy(record)
+      || Object.getPrototypeOf(record) !== Neo4jRecord.prototype) {
+      return deterministicProviderResultInvalid();
+    }
+    const ownKeys = Reflect.ownKeys(record);
+    if (ownKeys.length !== 4 || !['keys', 'length', '_fields', '_fieldLookup'].every((key) => ownKeys.includes(key))) {
+      return deterministicProviderResultInvalid();
+    }
+    if (dynamicDeterministicDataValue(record, 'length') !== fields.length) return deterministicProviderResultInvalid();
+    const keys = snapshotDynamicDeterministicArray(dynamicDeterministicDataValue(record, 'keys'), fields.length);
+    const values = snapshotDynamicDeterministicArray(dynamicDeterministicDataValue(record, '_fields'), fields.length);
+    if (fields.some((field, index) => keys[index] !== field)) return deterministicProviderResultInvalid();
+    const lookup = dynamicDeterministicDataValue(record, '_fieldLookup');
+    if (lookup === null || typeof lookup !== 'object' || isProxy(lookup)) return deterministicProviderResultInvalid();
+    const prototype = Object.getPrototypeOf(lookup);
+    if (prototype !== Object.prototype && prototype !== null) return deterministicProviderResultInvalid();
+    const lookupKeys = Reflect.ownKeys(lookup);
+    if (lookupKeys.length !== fields.length || fields.some((field) => !lookupKeys.includes(field))) {
+      return deterministicProviderResultInvalid();
+    }
+    fields.forEach((field, index) => {
+      if (dynamicDeterministicDataValue(lookup, field) !== index) deterministicProviderResultInvalid();
+    });
+    for (const value of values) {
+      if (value !== null && typeof value === 'object' && isProxy(value)) {
+        deterministicProviderResultInvalid();
+      }
+      if (!Array.isArray(value) && typeof value !== 'string') consumeDynamicDeterministicValue(budget);
+    }
+    return values;
+  });
+}
+
+function snapshotDynamicDeterministicProperties(
+  value: unknown,
+  budget: DynamicDeterministicBudget,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || isProxy(value)) {
+    return deterministicProviderResultInvalid();
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return deterministicProviderResultInvalid();
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > MAX_DYNAMIC_DETERMINISTIC_PROPERTIES) return deterministicProviderResultInvalid();
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const key of keys) {
+    if (typeof key !== 'string') return deterministicProviderResultInvalid();
+    const item = dynamicDeterministicDataValue(value, key);
+    if (typeof item === 'string') {
+      snapshot[key] = dynamicDeterministicString(
+        item, budget, key === 'id' ? MAX_DYNAMIC_DETERMINISTIC_ID_BYTES : MAX_DYNAMIC_DETERMINISTIC_STRING_BYTES,
+        key === 'id',
+      );
+    } else if (item !== null && typeof item === 'object' && isProxy(item)) {
+      return deterministicProviderResultInvalid();
+    } else if (Array.isArray(item)) {
+      consumeDynamicDeterministicValue(budget);
+      snapshot[key] = snapshotDynamicDeterministicArray(item, MAX_DYNAMIC_DETERMINISTIC_ARRAY).map((nested) => {
+        if (typeof nested === 'string') return dynamicDeterministicString(nested, budget);
+        consumeDynamicDeterministicValue(budget);
+        if (nested === null || ['number', 'boolean', 'undefined'].includes(typeof nested)) return nested;
+        return deterministicProviderResultInvalid();
+      });
+    } else {
+      consumeDynamicDeterministicValue(budget);
+      if (item !== null && !['number', 'boolean', 'undefined'].includes(typeof item)) {
+        return deterministicProviderResultInvalid();
+      }
+      snapshot[key] = item;
+    }
+  }
+  return snapshot;
+}
+
+function snapshotDynamicDeterministicNodeProperties(
+  value: unknown,
+  budget: DynamicDeterministicBudget,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || isProxy(value)) {
+    return deterministicProviderResultInvalid();
+  }
+  return snapshotDynamicDeterministicProperties(
+    dynamicDeterministicDataValue(value, 'properties'), budget,
+  );
+}
+
+function dynamicDeterministicNumber(value: unknown, integer = false): number {
+  let parsed: number;
+  if (typeof value === 'number') parsed = value;
+  else {
+    if (value === null || typeof value !== 'object' || isProxy(value)
+      || Object.getPrototypeOf(value) !== Neo4jInteger.prototype) {
+      return deterministicProviderResultInvalid();
+    }
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== 2 || !keys.includes('low') || !keys.includes('high')) {
+      return deterministicProviderResultInvalid();
+    }
+    const low = dynamicDeterministicDataValue(value, 'low');
+    const high = dynamicDeterministicDataValue(value, 'high');
+    if (!Number.isInteger(low) || !Number.isInteger(high)
+      || (low as number) < -2_147_483_648 || (low as number) > 2_147_483_647
+      || (high as number) < -2_147_483_648 || (high as number) > 2_147_483_647) {
+      return deterministicProviderResultInvalid();
+    }
+    parsed = (high as number) * 4_294_967_296 + ((low as number) >>> 0);
+  }
+  if (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER
+    || (integer && !Number.isSafeInteger(parsed))) return deterministicProviderResultInvalid();
+  return parsed;
+}
+
+function dynamicDeterministicConfidence(value: unknown): number {
+  const parsed = dynamicDeterministicNumber(value);
+  if (parsed < 0 || parsed > 1) return deterministicProviderResultInvalid();
+  return parsed;
+}
+
+function snapshotDynamicDeterministicStringArray(
+  value: unknown,
+  budget: DynamicDeterministicBudget,
+): string[] {
+  return snapshotDynamicDeterministicArray(value, MAX_DYNAMIC_DETERMINISTIC_ARRAY)
+    .map((item) => dynamicDeterministicString(item, budget));
+}
+
+function parseDynamicDiscoveryResult(result: unknown): string[] {
+  const budget = createDynamicDeterministicBudget();
+  return snapshotDynamicDeterministicRecords(result, ['name'], 5, budget)
+    .map(([name]) => dynamicDeterministicString(name, budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true));
+}
 
 const MAX_RESOLVED_ENTITY_IDS = 32;
 const MAX_ENTITY_ID_LENGTH = 200;
@@ -739,7 +1023,7 @@ const MAX_STABLE_DETERMINISTIC_TOTAL_VALUES = 16_384;
 type StableDeterministicBudget = { values: number; stringBytes: number };
 
 function stableDeterministicInvalid(): never {
-  throw new Error('stable_deterministic_result_invalid');
+  throw new StableDeterministicResultError();
 }
 
 function deterministicDataValue(object: object, key: PropertyKey): unknown {
@@ -800,6 +1084,7 @@ function snapshotDeterministicProperties(
     if (typeof key !== 'string') return stableDeterministicInvalid();
     const item = deterministicDataValue(value, key);
     consumeStableDeterministicValue(budget, item);
+    if (item !== null && typeof item === 'object' && isProxy(item)) return stableDeterministicInvalid();
     if (Array.isArray(item)) {
       const items = snapshotDeterministicDenseArray(item, MAX_STABLE_DETERMINISTIC_ARRAY);
       for (const nested of items) consumeStableDeterministicValue(budget, nested);
@@ -1061,8 +1346,11 @@ async function runTracedQuery<T>(
     const value = await operation();
     trace.settle(channel, { outcome: 'success' });
     return value;
-  } catch {
-    trace.settle(channel, { outcome: 'safe-failure', code: 'query-failed' });
+  } catch (error) {
+    trace.settle(channel, {
+      outcome: 'safe-failure',
+      code: isDeterministicProviderResultError(error) ? 'invalid-result' : 'query-failed',
+    });
     return undefined;
   }
 }

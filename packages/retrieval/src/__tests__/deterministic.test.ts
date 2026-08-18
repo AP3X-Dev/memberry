@@ -1,13 +1,12 @@
 // packages/retrieval/src/__tests__/deterministic.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Record as Neo4jRecord } from 'neo4j-driver';
 import { DeterministicAssembler } from '../deterministic.js';
 
 // ─── Mock helpers ────────────────────────────────────────────────────────────
 
 function mockRecord(data: Record<string, unknown>) {
-  return {
-    get: (key: string) => data[key],
-  };
+  return new Neo4jRecord(Object.keys(data), Object.values(data));
 }
 
 function mockNeo4jResult(records: Array<Record<string, unknown>>) {

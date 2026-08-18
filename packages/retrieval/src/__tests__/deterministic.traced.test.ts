@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { Record as Neo4jRecord } from 'neo4j-driver';
 
 import { UnifiedAssembler } from '../assembler.js';
 import {
@@ -12,7 +13,7 @@ import {
 const PRIVATE_ENTITY_ID = 'entity-sk_live_12345678901234567890';
 
 function record(values: Record<string, unknown>) {
-  return { get: (key: string) => values[key] };
+  return new Neo4jRecord(Object.keys(values), Object.values(values));
 }
 
 function result(rows: Array<Record<string, unknown>>) {

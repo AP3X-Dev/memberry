@@ -80,21 +80,21 @@ function snapshotRetrievalOptions<T extends object | undefined>(options: T): T {
 
 export interface AssemblerCodeLayer {
   search(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; queryVector?: number[] }): Promise<
-    Array<{ id: string; source_type: string; name: string; kind: string; file_path: string; start_line: number; signature: string; doc_comment: string; score: number }>
+    Array<{ id: string; source_type: string; name: string; kind: string; file_path: string; start_line: number; signature: string; doc_comment: string; score: number; language?: string; content?: string }>
   >;
   /** @internal RET-001B1 structural observation; ordinary callers use search(). */
   searchObserved?(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; queryVector?: number[] }): Promise<RuntimeObserved<
-    Array<{ id: string; source_type: string; name: string; kind: string; file_path: string; start_line: number; signature: string; doc_comment: string; score: number }>
+    Array<{ id: string; source_type: string; name: string; kind: string; file_path: string; start_line: number; signature: string; doc_comment: string; score: number; language?: string; content?: string }>
   >>;
 }
 
 export interface AssemblerMemoryLayer {
   load(scope: { task: string; entities?: string[]; resolvedEntityIds?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; temporal?: TemporalOptions }): Promise<{
-    markdown: string; tokens: number; sources: string[];
+    markdown: string; tokens: number; sources: string[]; assembled_at: string;
   }>;
   /** @internal RET-001B1 fresh path; bypasses memory cache and single-flight. */
   loadFreshObserved?(scope: { task: string; entities?: string[]; resolvedEntityIds?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; temporal?: TemporalOptions }): Promise<RuntimeObserved<{
-    markdown: string; tokens: number; sources: string[];
+    markdown: string; tokens: number; sources: string[]; assembled_at: string;
   }>>;
 }
 
@@ -680,7 +680,7 @@ export class UnifiedAssembler {
           .then((result) => {
             if (traced) {
               const wrapper = parseRuntimeObservedWrapper(result);
-              if (!wrapper || !Array.isArray(wrapper.value)) {
+              if (!wrapper || isProxy(wrapper.value) || !Array.isArray(wrapper.value)) {
                 traceIncompleteReasons?.add('candidate-output-gap');
                 settledLists.arch = [];
                 return;
@@ -739,14 +739,16 @@ export class UnifiedAssembler {
           .then((result) => {
             const wrapper = traced && this.codeLayer!.searchObserved
               ? parseRuntimeObservedWrapper(result) : undefined;
-            if (traced && this.codeLayer!.searchObserved && (!wrapper || !Array.isArray(wrapper.value))) {
+            if (traced && this.codeLayer!.searchObserved
+              && (!wrapper || isProxy(wrapper.value) || !Array.isArray(wrapper.value))) {
               traceIncompleteReasons?.add('candidate-output-gap');
               settledLists.code = [];
               return;
             }
-            const results = wrapper
+            const rawResults = wrapper
               ? wrapper.value as Awaited<ReturnType<AssemblerCodeLayer['search']>>
               : result as Awaited<ReturnType<AssemblerCodeLayer['search']>>;
+            const results = snapshotAssemblerCodeResults(rawResults);
             const mapped = results.map((r) => ({
               id: r.id,
               source_type: 'symbol' as const,
@@ -769,11 +771,13 @@ export class UnifiedAssembler {
             }
           })
           .catch((err) => {
+            const code: RetrievalTraceFailureCode = isAssemblerProviderResultError(err)
+              ? 'invalid-result' : 'query-failed';
             if (traced) settledObservations!.code = structuralObservationFromError(err) ?? {
-              channels: [{ channel: 'code.fulltext', outcome: 'safe-failure', code: 'query-failed' }],
+              channels: [{ channel: 'code.fulltext', outcome: 'safe-failure', code }],
               candidates: [], finalIds: [],
             };
-            logRankedFailure(traced, 'Code search', err);
+            logRankedFailure(traced, 'Code search', err, code);
           }),
       );
     }
@@ -801,22 +805,28 @@ export class UnifiedAssembler {
               settledLists.memory = [];
               return;
             }
-            const ctx = wrapper
+            const rawContext = wrapper
               ? wrapper.value as Awaited<ReturnType<AssemblerMemoryLayer['load']>>
               : result as Awaited<ReturnType<AssemblerMemoryLayer['load']>>;
+            const ctx = snapshotAssemblerMemoryResult(rawContext, memoryScope.max_tokens);
             // AMPService prepends an exact presentation-only H1/task block to
             // its source-final `## [id]` sections. Remove that exact task-bound
             // wrapper in both modes so it cannot become a fabricated result.
             const memoryMarkdown = normalizeMemoryMarkdown(ctx.markdown, task);
             const parsed = parseMemoryMarkdown(memoryMarkdown, ctx.sources);
-            settledLists.memory = parsed;
+            settledLists.memory = parsed.results;
             if (traced) {
               if (this.memoryLayer!.loadFreshObserved) {
                 const observation = parseRuntimeStructuralObservation(wrapper!.observation);
                 if (observation && exactFinalIds(ctx.sources, observation.finalIds)) {
-                  const mapped = mapMemoryObservationToOuter(memoryMarkdown, parsed, observation);
-                  settledObservations!.memory = mapped.observation;
-                  if (!mapped.complete) traceIncompleteReasons?.add('candidate-output-gap');
+                  if (parsed.attributionComplete) {
+                    const mapped = mapMemoryObservationToOuter(parsed.results, observation);
+                    settledObservations!.memory = mapped.observation;
+                    if (!mapped.complete) traceIncompleteReasons?.add('candidate-output-gap');
+                  } else {
+                    settledObservations!.memory = channelOnlyObservation(observation);
+                    traceIncompleteReasons?.add('candidate-output-gap');
+                  }
                 } else {
                   traceIncompleteReasons?.add('candidate-output-gap');
                   if (observation) settledObservations!.memory = channelOnlyObservation(observation);
@@ -825,11 +835,13 @@ export class UnifiedAssembler {
             }
           })
           .catch((err) => {
+            const code: RetrievalTraceFailureCode = isAssemblerProviderResultError(err)
+              ? 'invalid-result' : 'query-failed';
             if (traced) settledObservations!.memory = structuralObservationFromError(err) ?? {
-              channels: [{ channel: 'memory.scope', outcome: 'safe-failure', code: 'query-failed' }],
+              channels: [{ channel: 'memory.scope', outcome: 'safe-failure', code }],
               candidates: [], finalIds: [],
             };
-            logRankedFailure(traced, 'Memory layer', err);
+            logRankedFailure(traced, 'Memory layer', err, code);
           }),
       );
     }
@@ -1016,21 +1028,7 @@ export class UnifiedAssembler {
 
       const value = resolvedEntityIds !== undefined
         ? parseStableArchResult(result, resolvedEntityIds, projectName)
-        : result.records.map((r) => {
-        const props = r.get('e').properties as Record<string, unknown>;
-        const parts: string[] = [`**${props.name}** (${props.category ?? props.type ?? 'entity'})`];
-        if (props.responsibility) parts.push(`Responsibility: ${props.responsibility}`);
-        if (props.interface_desc) parts.push(`Interface: ${(props.interface_desc as string).slice(0, 200)}`);
-
-        return {
-          id: props.id as string,
-          source_type: 'arch_entity' as const,
-          title: props.name as string,
-          content: parts.join('\n'),
-          score: r.get('score') as number,
-          metadata: { category: props.category, name: props.name },
-        };
-        });
+        : parseAssemblerArchResult(result);
       if (observed) {
         observation.channels = [{ channel: 'arch.fulltext', outcome: 'success' }];
         observation.candidates = value.map((candidate, index) => ({
@@ -1046,9 +1044,14 @@ export class UnifiedAssembler {
     } catch (err) {
       if (resolvedEntityIds !== undefined && err instanceof Error
         && err.message === 'stable_arch_result_invalid') throw err;
-      if (observed) console.error('[memberry-retrieval] Arch entity search failed [query-failed]');
-      else console.error('[memberry-retrieval] Arch entity search failed (index may not exist):', err instanceof Error ? err.message : err);
-      if (observed) observation.channels = [{ channel: 'arch.fulltext', outcome: 'safe-failure', code: 'query-failed' }];
+      const code: RetrievalTraceFailureCode = isAssemblerProviderResultError(err)
+        ? 'invalid-result' : 'query-failed';
+      if (observed || code === 'invalid-result') {
+        console.error(`[memberry-retrieval] Arch entity search failed [${code}]`);
+      } else {
+        console.error('[memberry-retrieval] Arch entity search failed (index may not exist):', err instanceof Error ? err.message : err);
+      }
+      if (observed) observation.channels = [{ channel: 'arch.fulltext', outcome: 'safe-failure', code }];
       return { value: [], observation };
     } finally {
       await session.close();
@@ -1057,6 +1060,287 @@ export class UnifiedAssembler {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const MAX_ASSEMBLER_PROVIDER_STRING_BYTES = 65_536;
+const MAX_ASSEMBLER_PROVIDER_AGGREGATE_STRING_BYTES = 256 * 1024;
+const MAX_ASSEMBLER_PROVIDER_ID_BYTES = 512;
+const MAX_ASSEMBLER_CODE_RESULTS = 20;
+const MAX_ASSEMBLER_MEMORY_SOURCES = 512;
+const MAX_ASSEMBLER_ARCH_RESULTS = 15;
+const MAX_ASSEMBLER_ARCH_PROPERTIES = 64;
+const MAX_ASSEMBLER_ARCH_ARRAY = 256;
+const MAX_ASSEMBLER_PROVIDER_VALUES = 8_192;
+const MAX_ASSEMBLER_PROVIDER_SCORE = 1_000_000;
+
+type AssemblerProviderBudget = { values: number; stringBytes: number };
+
+class AssemblerProviderResultError extends Error {
+  constructor() { super('assembler_provider_result_invalid'); }
+}
+
+function assemblerProviderResultInvalid(): never {
+  throw new AssemblerProviderResultError();
+}
+
+function isAssemblerProviderResultError(error: unknown): error is AssemblerProviderResultError {
+  return error instanceof AssemblerProviderResultError;
+}
+
+function assemblerProviderDataValue(value: object, key: PropertyKey): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor || !('value' in descriptor)) return assemblerProviderResultInvalid();
+  return descriptor.value;
+}
+
+function snapshotAssemblerProviderRecord(
+  value: unknown,
+  fields: readonly string[],
+  requiredFields: readonly string[] = fields,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || isProxy(value) || Array.isArray(value)) {
+    return assemblerProviderResultInvalid();
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return assemblerProviderResultInvalid();
+  const keys = Reflect.ownKeys(value);
+  if (keys.length < requiredFields.length || keys.length > fields.length
+    || keys.some((key) => typeof key !== 'string' || !fields.includes(key))
+    || requiredFields.some((field) => !keys.includes(field))) {
+    return assemblerProviderResultInvalid();
+  }
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const field of fields) {
+    if (!keys.includes(field)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(value, field);
+    if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) {
+      return assemblerProviderResultInvalid();
+    }
+    snapshot[field] = descriptor.value;
+  }
+  return snapshot;
+}
+
+function snapshotAssemblerProviderArray(value: unknown, maxLength: number): unknown[] {
+  if (isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    return assemblerProviderResultInvalid();
+  }
+  const length = assemblerProviderDataValue(value, 'length');
+  if (!Number.isSafeInteger(length) || (length as number) < 0 || (length as number) > maxLength) {
+    return assemblerProviderResultInvalid();
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== (length as number) + 1 || keys[keys.length - 1] !== 'length') {
+    return assemblerProviderResultInvalid();
+  }
+  const snapshot: unknown[] = [];
+  for (let index = 0; index < (length as number); index += 1) {
+    if (keys[index] !== String(index)) return assemblerProviderResultInvalid();
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) {
+      return assemblerProviderResultInvalid();
+    }
+    snapshot.push(descriptor.value);
+  }
+  return snapshot;
+}
+
+function consumeAssemblerProviderValue(budget: AssemblerProviderBudget): void {
+  budget.values += 1;
+  if (budget.values > MAX_ASSEMBLER_PROVIDER_VALUES) assemblerProviderResultInvalid();
+}
+
+function assemblerProviderString(
+  value: unknown,
+  budget: AssemblerProviderBudget,
+  maxBytes = MAX_ASSEMBLER_PROVIDER_STRING_BYTES,
+  requireNonEmpty = false,
+): string {
+  consumeAssemblerProviderValue(budget);
+  if (typeof value !== 'string' || (requireNonEmpty && value.length === 0)) {
+    return assemblerProviderResultInvalid();
+  }
+  const remaining = MAX_ASSEMBLER_PROVIDER_AGGREGATE_STRING_BYTES - budget.stringBytes;
+  // JS code units are a conservative lower bound on UTF-8 bytes. Check both
+  // ceilings before Buffer scans malformed or multibyte provider text.
+  if (value.length > maxBytes || value.length > remaining) return assemblerProviderResultInvalid();
+  const bytes = Buffer.byteLength(value, 'utf8');
+  if (bytes > maxBytes || bytes > remaining) return assemblerProviderResultInvalid();
+  budget.stringBytes += bytes;
+  return value;
+}
+
+function assemblerProviderFiniteNumber(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)
+    || Math.abs(value) > MAX_ASSEMBLER_PROVIDER_SCORE) return assemblerProviderResultInvalid();
+  return value;
+}
+
+function snapshotAssemblerCodeResults(value: unknown): Awaited<ReturnType<AssemblerCodeLayer['search']>> {
+  const budget: AssemblerProviderBudget = { values: 0, stringBytes: 0 };
+  const rows = snapshotAssemblerProviderArray(value, MAX_ASSEMBLER_CODE_RESULTS);
+  return rows.map((row) => {
+    const required = [
+      'id', 'source_type', 'name', 'kind', 'file_path', 'start_line', 'signature', 'doc_comment', 'score',
+    ] as const;
+    const item = snapshotAssemblerProviderRecord(row, [...required, 'language', 'content'], required);
+    const id = assemblerProviderString(item.id, budget, MAX_ASSEMBLER_PROVIDER_ID_BYTES, true);
+    const sourceType = assemblerProviderString(item.source_type, budget, 64, true);
+    if (sourceType !== 'symbol' && sourceType !== 'semantic') return assemblerProviderResultInvalid();
+    const name = assemblerProviderString(item.name, budget);
+    const kind = assemblerProviderString(item.kind, budget);
+    const filePath = assemblerProviderString(item.file_path, budget);
+    consumeAssemblerProviderValue(budget);
+    const startLine = item.start_line;
+    if (!Number.isSafeInteger(startLine) || (startLine as number) < 0) return assemblerProviderResultInvalid();
+    const signature = assemblerProviderString(item.signature, budget);
+    const docComment = assemblerProviderString(item.doc_comment, budget);
+    const language = Object.hasOwn(item, 'language')
+      ? assemblerProviderString(item.language, budget) : undefined;
+    const content = Object.hasOwn(item, 'content')
+      ? assemblerProviderString(item.content, budget) : undefined;
+    consumeAssemblerProviderValue(budget);
+    const score = assemblerProviderFiniteNumber(item.score);
+    return {
+      id, source_type: sourceType, name, kind, file_path: filePath,
+      start_line: startLine as number, signature, doc_comment: docComment, score,
+      ...(language !== undefined ? { language } : {}),
+      ...(content !== undefined ? { content } : {}),
+    };
+  });
+}
+
+function snapshotAssemblerMemoryResult(
+  value: unknown,
+  requestedTokens: number,
+): Awaited<ReturnType<AssemblerMemoryLayer['load']>> {
+  const budget: AssemblerProviderBudget = { values: 0, stringBytes: 0 };
+  const context = snapshotAssemblerProviderRecord(value, ['markdown', 'tokens', 'sources', 'assembled_at']);
+  consumeAssemblerProviderValue(budget);
+  const tokens = context.tokens;
+  if (!Number.isSafeInteger(tokens) || (tokens as number) < 0 || (tokens as number) > requestedTokens) {
+    return assemblerProviderResultInvalid();
+  }
+  const markdown = assemblerProviderString(context.markdown, budget);
+  const rawSources = snapshotAssemblerProviderArray(context.sources, MAX_ASSEMBLER_MEMORY_SOURCES);
+  const sources = rawSources.map((source) => assemblerProviderString(
+    source, budget, MAX_ASSEMBLER_PROVIDER_ID_BYTES, true,
+  ));
+  const assembledAt = assemblerProviderString(context.assembled_at, budget);
+  return { markdown, tokens: tokens as number, sources, assembled_at: assembledAt };
+}
+
+function snapshotAssemblerNeo4jRecords(
+  result: unknown,
+  fields: readonly string[],
+  maxRecords: number,
+): unknown[][] {
+  if (result === null || typeof result !== 'object' || isProxy(result)) {
+    return assemblerProviderResultInvalid();
+  }
+  const records = snapshotAssemblerProviderArray(
+    assemblerProviderDataValue(result, 'records'), maxRecords,
+  );
+  return records.map((record) => {
+    if (record === null || typeof record !== 'object' || isProxy(record)
+      || Object.getPrototypeOf(record) !== Neo4jRecord.prototype) {
+      return assemblerProviderResultInvalid();
+    }
+    const ownKeys = Reflect.ownKeys(record);
+    if (ownKeys.length !== 4 || !['keys', 'length', '_fields', '_fieldLookup'].every((key) => ownKeys.includes(key))) {
+      return assemblerProviderResultInvalid();
+    }
+    if (assemblerProviderDataValue(record, 'length') !== fields.length) return assemblerProviderResultInvalid();
+    const keys = snapshotAssemblerProviderArray(assemblerProviderDataValue(record, 'keys'), fields.length);
+    const values = snapshotAssemblerProviderArray(assemblerProviderDataValue(record, '_fields'), fields.length);
+    if (fields.some((field, index) => keys[index] !== field)) return assemblerProviderResultInvalid();
+    const lookup = assemblerProviderDataValue(record, '_fieldLookup');
+    if (lookup === null || typeof lookup !== 'object' || isProxy(lookup)) return assemblerProviderResultInvalid();
+    const lookupPrototype = Object.getPrototypeOf(lookup);
+    if (lookupPrototype !== Object.prototype && lookupPrototype !== null) return assemblerProviderResultInvalid();
+    const lookupKeys = Reflect.ownKeys(lookup);
+    if (lookupKeys.length !== fields.length || fields.some((field) => !lookupKeys.includes(field))) {
+      return assemblerProviderResultInvalid();
+    }
+    fields.forEach((field, index) => {
+      if (assemblerProviderDataValue(lookup, field) !== index) assemblerProviderResultInvalid();
+    });
+    return values;
+  });
+}
+
+function snapshotAssemblerArchProperties(
+  value: unknown,
+  budget: AssemblerProviderBudget,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || isProxy(value)) {
+    return assemblerProviderResultInvalid();
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return assemblerProviderResultInvalid();
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > MAX_ASSEMBLER_ARCH_PROPERTIES) return assemblerProviderResultInvalid();
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const key of keys) {
+    if (typeof key !== 'string') return assemblerProviderResultInvalid();
+    const item = assemblerProviderDataValue(value, key);
+    if (typeof item === 'string') {
+      snapshot[key] = assemblerProviderString(
+        item, budget, key === 'id' ? MAX_ASSEMBLER_PROVIDER_ID_BYTES : MAX_ASSEMBLER_PROVIDER_STRING_BYTES,
+        key === 'id',
+      );
+    } else if (item !== null && typeof item === 'object' && isProxy(item)) {
+      return assemblerProviderResultInvalid();
+    } else if (Array.isArray(item)) {
+      consumeAssemblerProviderValue(budget);
+      snapshot[key] = snapshotAssemblerProviderArray(item, MAX_ASSEMBLER_ARCH_ARRAY).map((nested) => {
+        if (typeof nested === 'string') return assemblerProviderString(nested, budget);
+        consumeAssemblerProviderValue(budget);
+        if (nested === null || ['number', 'boolean', 'undefined'].includes(typeof nested)) return nested;
+        return assemblerProviderResultInvalid();
+      });
+    } else {
+      consumeAssemblerProviderValue(budget);
+      if (item !== null && !['number', 'boolean', 'undefined'].includes(typeof item)) {
+        return assemblerProviderResultInvalid();
+      }
+      snapshot[key] = item;
+    }
+  }
+  return snapshot;
+}
+
+function parseAssemblerArchResult(result: unknown): RetrievalResult[] {
+  const budget: AssemblerProviderBudget = { values: 0, stringBytes: 0 };
+  const rows = snapshotAssemblerNeo4jRecords(result, ['e', 'score'], MAX_ASSEMBLER_ARCH_RESULTS);
+  return rows.map(([entity, rawScore]) => {
+    consumeAssemblerProviderValue(budget);
+    if (entity === null || typeof entity !== 'object' || isProxy(entity)) return assemblerProviderResultInvalid();
+    const props = snapshotAssemblerArchProperties(
+      assemblerProviderDataValue(entity, 'properties'), budget,
+    );
+    if (typeof props.id !== 'string' || typeof props.name !== 'string'
+      || (props.category !== undefined && props.category !== null && typeof props.category !== 'string')
+      || (props.type !== undefined && props.type !== null && typeof props.type !== 'string')
+      || (props.responsibility !== undefined && props.responsibility !== null && typeof props.responsibility !== 'string')
+      || (props.interface_desc !== undefined && props.interface_desc !== null && typeof props.interface_desc !== 'string')) {
+      return assemblerProviderResultInvalid();
+    }
+    consumeAssemblerProviderValue(budget);
+    const score = assemblerProviderFiniteNumber(rawScore);
+    const category = props.category ?? props.type ?? 'entity';
+    const parts: string[] = [`**${props.name}** (${category})`];
+    if (props.responsibility) parts.push(`Responsibility: ${props.responsibility}`);
+    if (props.interface_desc) parts.push(`Interface: ${props.interface_desc.slice(0, 200)}`);
+    return {
+      id: props.id,
+      source_type: 'arch_entity' as const,
+      title: props.name,
+      content: parts.join('\n'),
+      score,
+      metadata: { category: props.category, name: props.name },
+    };
+  });
+}
 
 const MAX_STABLE_ARCH_RECORDS = 32;
 const MAX_STABLE_ARCH_PROPERTIES = 64;
@@ -1125,6 +1409,7 @@ function snapshotArchProperties(value: unknown, budget: StableArchBudget): Recor
     if (typeof key !== 'string') return stableArchInvalid();
     const item = archDataValue(value, key);
     consumeStableArchValue(budget, item);
+    if (item !== null && typeof item === 'object' && isProxy(item)) return stableArchInvalid();
     if (Array.isArray(item)) {
       const items = snapshotArchDenseArray(item, MAX_STABLE_ARCH_ARRAY);
       for (const nested of items) consumeStableArchValue(budget, nested);
@@ -1209,31 +1494,78 @@ function parseStableArchResult(
   });
 }
 
-function parseMemoryMarkdown(markdown: string, sourceIds: string[]): RetrievalResult[] {
-  // Parse the rendered memory markdown back into individual results
+const CORE_MEMORY_AGGREGATE_HEADINGS = new Set([
+  'Core Memory', 'Working Memory', 'Current Facts', 'Fact Timeline',
+]);
+
+interface ParsedMemoryMarkdown {
+  results: RetrievalResult[];
+  attributionComplete: boolean;
+}
+
+function parseMemoryMarkdown(markdown: string, sourceIds: string[]): ParsedMemoryMarkdown {
+  if (markdown.length === 0) {
+    if (sourceIds.length !== 0) return assemblerProviderResultInvalid();
+    return { results: [], attributionComplete: true };
+  }
+
+  const headingPattern = /^## ([^\r\n]+)(?:\r?\n|$)/gm;
+  let match = headingPattern.exec(markdown);
+  if (!match || match.index !== 0) return assemblerProviderResultInvalid();
+
   const results: RetrievalResult[] = [];
-  const sections = markdown.split(/^## /m).filter(Boolean);
+  const archiveIds: string[] = [];
+  const seenArchiveIds = new Set<string>();
+  const aggregateHeadings = new Set<string>();
+  let sawArchive = false;
+  let headingCount = 0;
+  while (match) {
+    headingCount += 1;
+    if (headingCount > sourceIds.length + CORE_MEMORY_AGGREGATE_HEADINGS.size) {
+      return assemblerProviderResultInvalid();
+    }
+    const heading = match[1]!;
 
-  for (let i = 0; i < sections.length; i++) {
-    const section = sections[i];
-    const firstLine = section.split('\n')[0] ?? '';
-    const id = sourceIds[i] ?? `mem-${i}`;
+    if (CORE_MEMORY_AGGREGATE_HEADINGS.has(heading)) {
+      if (sawArchive || aggregateHeadings.has(heading)) return assemblerProviderResultInvalid();
+      aggregateHeadings.add(heading);
+      match = headingPattern.exec(markdown);
+      continue;
+    }
 
-    // Extract confidence from the heading if present
-    const confMatch = firstLine.match(/confidence:\s*([\d.]+)/);
-    const score = confMatch ? parseFloat(confMatch[1]) : 0.5;
-
+    const archive = heading.match(/^\[([^\]\r\n]+)\](?: \(confidence: ([0-9]+(?:\.[0-9]+)?)(?:, score: [0-9]+(?:\.[0-9]+)?)?\))?$/);
+    if (!archive) return assemblerProviderResultInvalid();
+    sawArchive = true;
+    if (archiveIds.length >= sourceIds.length) return assemblerProviderResultInvalid();
+    const id = archive[1]!;
+    if (id.length > MAX_ASSEMBLER_PROVIDER_ID_BYTES
+      || Buffer.byteLength(id, 'utf8') > MAX_ASSEMBLER_PROVIDER_ID_BYTES
+      || seenArchiveIds.has(id)) return assemblerProviderResultInvalid();
+    const confidence = archive[2] === undefined ? undefined : Number(archive[2]);
+    if (confidence !== undefined && (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)) {
+      return assemblerProviderResultInvalid();
+    }
+    archiveIds.push(id);
+    seenArchiveIds.add(id);
+    const next = headingPattern.exec(markdown);
+    const sectionStart = match.index + 3;
+    const sectionEnd = next?.index ?? markdown.length;
     results.push({
       id,
       source_type: 'semantic',
-      title: firstLine.slice(0, 80),
-      content: section.trim(),
-      score,
-      metadata: confMatch ? { confidence: score } : {},
+      title: heading.slice(0, 80),
+      content: markdown.slice(sectionStart, sectionEnd).trim(),
+      score: confidence ?? 0.5,
+      metadata: confidence === undefined ? {} : { confidence },
     });
+    match = next;
   }
 
-  return results;
+  const expectedArchiveIds = sourceIds.slice(sourceIds.length - archiveIds.length);
+  if (!exactFinalIds(archiveIds, expectedArchiveIds)) return assemblerProviderResultInvalid();
+  const attributionComplete = aggregateHeadings.size === 0;
+  if (attributionComplete && archiveIds.length !== sourceIds.length) return assemblerProviderResultInvalid();
+  return { results, attributionComplete };
 }
 
 function buildMemoryTagScope(tagScope?: string[], projectName?: string): string[] | undefined {
@@ -1488,12 +1820,10 @@ function parseRuntimeStructuralObservation(value: unknown): RuntimeStructuralObs
 }
 
 function mapMemoryObservationToOuter(
-  markdown: string,
   parsed: readonly RetrievalResult[],
   observation: RuntimeStructuralObservation,
 ): { observation: RuntimeStructuralObservation; complete: boolean } {
-  const sections = markdown.split(/^## /m).filter(Boolean);
-  if (sections.length !== parsed.length || parsed.length !== observation.finalIds.length) {
+  if (parsed.length !== observation.finalIds.length) {
     return { observation: channelOnlyObservation(observation), complete: false };
   }
   const upstream = new Map(observation.candidates.map((candidate) => [candidate.privateId, candidate]));
@@ -1502,11 +1832,9 @@ function mapMemoryObservationToOuter(
   const usedSourceIds = new Set<string>();
   const usedOuterIds = new Set<string>();
   for (let index = 0; index < parsed.length; index++) {
-    const firstLine = sections[index]?.split('\n')[0] ?? '';
-    const explicit = firstLine.match(/^\[([^\]\r\n]{1,512})\]/)?.[1];
-    const source = explicit ? upstream.get(explicit) : undefined;
     const outer = parsed[index];
-    if (!source || !outer || explicit !== observation.finalIds[index]
+    const source = outer ? upstream.get(outer.id) : undefined;
+    if (!source || !outer || outer.id !== observation.finalIds[index]
       || usedSourceIds.has(source.privateId) || usedOuterIds.has(outer.id)) {
       return { observation: channelOnlyObservation(observation), complete: false };
     }
@@ -1527,8 +1855,13 @@ function mapMemoryObservationToOuter(
   };
 }
 
-function logRankedFailure(traced: boolean, layer: string, error: unknown): void {
-  if (traced) console.error(`[memberry-retrieval] ${layer} failed [query-failed]`);
+function logRankedFailure(
+  traced: boolean,
+  layer: string,
+  error: unknown,
+  code: RetrievalTraceFailureCode = 'query-failed',
+): void {
+  if (traced || code === 'invalid-result') console.error(`[memberry-retrieval] ${layer} failed [${code}]`);
   else console.error(`[memberry-retrieval] ${layer} failed:`, error instanceof Error ? error.message : error);
 }
 
