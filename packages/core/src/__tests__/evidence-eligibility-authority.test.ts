@@ -190,6 +190,18 @@ function maximalSupportedResult(expected: Record<string, unknown>): Record<strin
   });
 }
 
+function minimalSupportedResult(expected: Record<string, unknown>): Record<string, unknown> {
+  const candidates = expected.candidates as readonly ReturnType<typeof descriptor>[];
+  return supported(expected, {
+    receipts: candidates.map((candidate) => receipt(candidate, {
+      provenance: {
+        policy: POLICIES.semantic,
+        ref: 'p',
+      },
+    })),
+  });
+}
+
 function dataAccessor(value: unknown): Record<string, unknown> {
   const input = request();
   Object.defineProperty(input, 'tenantId', { enumerable: true, get: () => value });
@@ -483,7 +495,7 @@ describe('RET-005B-AUTH-001A evidence eligibility authority contract', () => {
 
   it('admits exact-max requests with minimal and maximal conforming supported results', () => {
     const expected = exactMaxAggregateRequest();
-    const minimal = supported(expected);
+    const minimal = minimalSupportedResult(expected);
     expect(deepStringBytes(minimal)).toBe(39_969);
     expect(parseEvidenceEligibilityAuthorityResultV1(minimal, expected).outcome).toBe('supported');
 
