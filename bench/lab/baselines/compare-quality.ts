@@ -38,7 +38,7 @@ export function compareQualityReports(
   candidate: CandidateQualityReport,
   policy?: ComparisonPolicy,
 ): ComparisonResult {
-  const activePolicy = policy ?? {
+  const activePolicy: ComparisonPolicy = policy ?? {
     schemaVersion: 1,
     baseline: baseline.id,
     requireCandidatePass: true,
