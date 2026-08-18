@@ -119,7 +119,7 @@ describe('runMigrations', () => {
     expect(close).toHaveBeenCalledTimes(2);
   });
 
-  it('safely replays 0007 after schema success but migration-record ambiguity', async () => {
+  it('safely replays 0007 and advances 0008 after migration-record ambiguity', async () => {
     const prior = MIGRATIONS.slice(0, 6).map((item) => item.id);
     let applied = [...prior];
     let failRecordOnce = true;
@@ -140,9 +140,16 @@ describe('runMigrations', () => {
 
     await expect(runMigrations(driver)).rejects.toThrow('ambiguous migration record');
     await expect(runMigrations(driver)).resolves.toMatchObject({
-      applied: ['0007-admission-observation-sidecar'],
+      applied: [
+        '0007-admission-observation-sidecar',
+        '0008-evidence-authority-ledger-v1',
+      ],
     });
-    expect(schemaStatements).toHaveLength(4);
+    expect(schemaStatements.filter((statement) => statement.includes('admission_observation')))
+      .toHaveLength(4);
+    expect(schemaStatements.filter((statement) => statement.includes('evidence_authority')))
+      .toHaveLength(13);
+    expect(schemaStatements).toHaveLength(17);
     expect(schemaStatements.every((statement) => statement.includes('IF NOT EXISTS'))).toBe(true);
   });
 
