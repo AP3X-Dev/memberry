@@ -189,8 +189,8 @@ describeLive('EvidenceAuthorityLedger live Neo4j gate', () => {
         'evidence_authority_outbox_id',
       ]);
       const indexes = await session.run(
-        `SHOW INDEXES YIELD name
-         WHERE name STARTS WITH 'evidence_authority_'
+        `SHOW INDEXES YIELD name, owningConstraint
+         WHERE name STARTS WITH 'evidence_authority_' AND owningConstraint IS NULL
          RETURN collect(name) AS names`,
       );
       expect((indexes.records[0]!.get('names') as string[]).sort()).toEqual([
@@ -392,8 +392,19 @@ describeLive('EvidenceAuthorityLedger live Neo4j gate', () => {
          WHERE first.tenant_id = $tenantId AND second.tenant_id = $tenantId
          WITH first, firstOutbox, second, secondEmit, secondOutbox,
               properties(secondOutbox) AS removed
-         CREATE (extra:EvidenceAuthorityOutbox)
-         SET extra = properties(firstOutbox), extra.id = $balancedExtraId
+         CREATE (extra:EvidenceAuthorityOutbox {
+           id: $balancedExtraId,
+           event_id: firstOutbox.event_id,
+           tenant_id: firstOutbox.tenant_id,
+           project_scope: firstOutbox.project_scope,
+           semantic_id: firstOutbox.semantic_id,
+           case_id: firstOutbox.case_id,
+           kind: firstOutbox.kind,
+           action: firstOutbox.action,
+           state: firstOutbox.state,
+           sequence: firstOutbox.sequence,
+           recorded_at: firstOutbox.recorded_at
+         })
          CREATE (first)-[:EMITTED]->(extra)
          DELETE secondEmit, secondOutbox
          RETURN removed`,
