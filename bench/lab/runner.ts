@@ -12,7 +12,8 @@ import type {
 } from './contracts/report.js';
 import type { LabScenario, LabScenarioSplit } from './contracts/scenario.js';
 import { validateScenario } from './contracts/scenario.js';
-import { averageMetrics, DEFAULT_GATE_POLICY, scoreProbe } from './metrics.js';
+import { aggregateContextAccounting, averageMetrics, DEFAULT_GATE_POLICY, probeContextTokens, scoreProbe } from './metrics.js';
+import { pairedEfficiencyInterval, unsupportedEfficiencyInterval, type LabPairedProbe } from './stats.js';
 
 const QUALITY_METRICS: readonly (keyof ProbeMetrics)[] = [
   'recallAtK', 'precisionAtK', 'reciprocalRank', 'ndcgAtK', 'answerCoverage', 'staleSafety', 'isolationSafety',
@@ -128,6 +129,7 @@ export async function runAdapter(options: RunAdapterOptions): Promise<AdapterRun
           query: query.query,
           resultIds: response.results.map((result) => result.id),
           metrics: scoreProbe(input, probeOracle, query.limit, response.results),
+          contextTokens: probeContextTokens(input, query.limit, response.results),
           durationMs: response.durationMs,
         });
       }
@@ -139,6 +141,7 @@ export async function runAdapter(options: RunAdapterOptions): Promise<AdapterRun
         outcome: 'scored',
         probes,
         metrics: averageMetrics(probes.map((probe) => probe.metrics)),
+        contextAccounting: aggregateContextAccounting(probes),
       });
     } catch (error) {
       scenarioReports.push({
@@ -158,8 +161,8 @@ export async function runAdapter(options: RunAdapterOptions): Promise<AdapterRun
 
   const scoredProbes = scenarioReports
     .filter((scenario) => scenario.outcome === 'scored')
-    .flatMap((scenario) => scenario.probes.map((probe) => probe.metrics));
-  const metrics = averageMetrics(scoredProbes);
+    .flatMap((scenario) => scenario.probes);
+  const metrics = averageMetrics(scoredProbes.map((probe) => probe.metrics));
   const stats = await options.adapter.stats(lastNamespace);
   const failures = gateFailures(health.status, scenarioReports, metrics, policy);
   const outcome = scenarioReports.some((scenario) => scenario.outcome === 'failed') || health.status === 'unavailable'
@@ -178,6 +181,7 @@ export async function runAdapter(options: RunAdapterOptions): Promise<AdapterRun
     excludedScenarios,
     scenarioReports,
     metrics,
+    contextAccounting: aggregateContextAccounting(scoredProbes),
     stats,
     gateFailures: failures,
     passed: outcome === 'scored' && failures.length === 0,
@@ -191,6 +195,27 @@ export interface CompareAdaptersOptions {
   scenarios: readonly LabScenario[];
   policy?: LabGatePolicy;
   splits?: readonly LabScenarioSplit[];
+}
+
+/** Probes matched on (scenarioId, probeId) and scored in both arms, in run order. */
+function pairScoredProbes(control: AdapterRunReport, candidate: AdapterRunReport): LabPairedProbe[] {
+  const candidateProbes = new Map(candidate.scenarioReports
+    .filter((scenario) => scenario.outcome === 'scored')
+    .flatMap((scenario) => scenario.probes.map((probe) => [`${scenario.scenarioId}\u0000${probe.probeId}`, probe] as const)));
+  return control.scenarioReports
+    .filter((scenario) => scenario.outcome === 'scored')
+    .flatMap((scenario) => scenario.probes.flatMap((probe) => {
+      const paired = candidateProbes.get(`${scenario.scenarioId}\u0000${probe.probeId}`);
+      // Unpaired probes are excluded from the interval; they stay visible in each arm's report.
+      return paired ? [{
+        scenarioId: scenario.scenarioId,
+        probeId: probe.probeId,
+        controlCoverage: probe.metrics.answerCoverage,
+        controlTokens: probe.contextTokens ?? 0,
+        candidateCoverage: paired.metrics.answerCoverage,
+        candidateTokens: paired.contextTokens ?? 0,
+      }] : [];
+    }));
 }
 
 export async function compareAdapters(options: CompareAdaptersOptions): Promise<ComparisonReport> {
@@ -223,5 +248,20 @@ export async function compareAdapters(options: CompareAdaptersOptions): Promise<
       failures.push({ metric: delta.metric, actual: delta.candidate, expected: `no more than ${policy.maxQualityRegression} below control ${delta.control}`, arm: 'candidate' });
     }
   }
-  return { runId: options.runId, evidenceMode: 'ad-hoc', control, candidate, deltas, failures, passed: failures.length === 0 };
+  const pairs = pairScoredProbes(control, candidate);
+  const controlAccounting = control.contextAccounting ?? aggregateContextAccounting([]);
+  const candidateAccounting = candidate.contextAccounting ?? aggregateContextAccounting([]);
+  // Reported, never gating: the efficiency proxy adds no GateFailure and no delta entry.
+  const efficiency = {
+    metric: 'taskSuccessPer1kTokens' as const,
+    control: controlAccounting,
+    candidate: candidateAccounting,
+    delta: controlAccounting.taskSuccessPer1kTokens !== null && candidateAccounting.taskSuccessPer1kTokens !== null
+      ? candidateAccounting.taskSuccessPer1kTokens - controlAccounting.taskSuccessPer1kTokens
+      : null,
+    interval: control.outcome !== 'scored' || candidate.outcome !== 'scored'
+      ? unsupportedEfficiencyInterval('arm-not-scored', pairs)
+      : pairedEfficiencyInterval(pairs),
+  };
+  return { runId: options.runId, evidenceMode: 'ad-hoc', control, candidate, deltas, efficiency, failures, passed: failures.length === 0 };
 }

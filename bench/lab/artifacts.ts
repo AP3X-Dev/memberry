@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { ComparisonReport, RunManifest } from './contracts/report.js';
+import type { ComparisonEfficiency, ComparisonReport, LabContextAccounting, RunManifest } from './contracts/report.js';
 
 const SECRET_KEY = /(?:authorization|credential|password|secret|token|api[-_]?key|private[-_]?key|cookie)/i;
 const SHA256 = /^(?:sha256:)?([a-f0-9]{64})$/i;
@@ -26,6 +26,38 @@ export function redactConfig(value: unknown, key = ''): unknown {
   return value;
 }
 
+/** Bound proxy labeling: this sentence must accompany every rendered efficiency figure. */
+export const CONTEXT_EFFICIENCY_PROXY_NOTE = '`taskSuccessPer1kTokens` is the deterministic-lab proxy'
+  + " for PRP §6.5's 'task success per 1,000 context tokens'. Its numerator is fixture-oracle answer"
+  + ' coverage on retrieval probes, not agent task completion; no agent executes a task in this lab.'
+  + ' Its denominator is estimated from fixture content of returned results, not from rendered context'
+  + ' actually consumed by a model. It is a comparative efficiency signal between two arms on identical'
+  + ' fixtures, and is not a claim about agent task success.';
+
+function renderAccountingLine(label: string, accounting: LabContextAccounting): string {
+  return accounting.outcome === 'measured' && accounting.taskSuccessPer1kTokens !== null
+    ? `- ${label}: ${fixed(accounting.taskSuccessPer1kTokens)} per 1k tokens (success total ${fixed(accounting.taskSuccessTotal)} over ${accounting.contextTokens} tokens, ${accounting.scoredProbes} probes, estimator \`${accounting.estimatorId}\`)`
+    : `- ${label}: unsupported (${accounting.unsupportedReason ?? 'unknown'})`;
+}
+
+function contextEfficiencySection(efficiency: ComparisonEfficiency): string[] {
+  const { interval } = efficiency;
+  const bound = (value: number | null): string => (value === null ? 'null' : fixed(value));
+  return [
+    '## Context efficiency (deterministic-lab proxy)',
+    '',
+    CONTEXT_EFFICIENCY_PROXY_NOTE,
+    '',
+    renderAccountingLine('Control', efficiency.control),
+    renderAccountingLine('Candidate', efficiency.candidate),
+    `- Delta: ${efficiency.delta === null ? 'unsupported' : `${efficiency.delta >= 0 ? '+' : ''}${fixed(efficiency.delta)}`}`,
+    interval.outcome === 'measured'
+      ? `- Paired bootstrap interval: point ${bound(interval.point)}, 95% two-sided [${bound(interval.lower)}, ${bound(interval.upper)}], one-sided 95% lower bound ${bound(interval.oneSidedLower)} (pairedProbes ${interval.pairedProbes}, resamples ${interval.resamples}, seed ${interval.seed})`
+      : `- Paired bootstrap interval: unsupported (${interval.unsupportedReason ?? 'unknown'}; pairedProbes ${interval.pairedProbes}, resamples ${interval.resamples}, seed ${interval.seed})`,
+    '',
+  ];
+}
+
 export function renderComparisonMarkdown(report: ComparisonReport, manifest: RunManifest): string {
   const lines = [
     `# Evaluation run ${report.runId}`,
@@ -45,6 +77,7 @@ export function renderComparisonMarkdown(report: ComparisonReport, manifest: Run
     '|---|---:|---:|---:|',
     ...report.deltas.map((delta) => `| ${delta.metric} | ${fixed(delta.control)} | ${fixed(delta.candidate)} | ${delta.delta >= 0 ? '+' : ''}${fixed(delta.delta)} |`),
     '',
+    ...(report.efficiency ? contextEfficiencySection(report.efficiency) : []),
     '## Gate failures',
     '',
     ...(report.failures.length

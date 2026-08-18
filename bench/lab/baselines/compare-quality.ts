@@ -24,7 +24,10 @@ interface ComparisonPolicy {
   baseline: string;
   requireCandidatePass: boolean;
   requireSameCorpus: boolean;
-  rules: Array<{ metric: string; direction: 'higher' | 'lower'; allowedRegression: number; hardGate?: boolean }>;
+  /** Material-improvement rules: absent minImprovement keeps allowedRegression arithmetic untouched. */
+  rules: Array<{ metric: string; direction: 'higher' | 'lower'; allowedRegression: number; hardGate?: boolean; minImprovement?: number }>;
+  /** Declared-but-unarmed G2 thresholds; inert until a rule carries minImprovement. */
+  g2Thresholds?: Record<string, { minImprovement: number; armed: boolean; armsWith: string }>;
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -35,7 +38,7 @@ export function compareQualityReports(
   candidate: CandidateQualityReport,
   policy?: ComparisonPolicy,
 ): ComparisonResult {
-  const activePolicy = policy ?? {
+  const activePolicy: ComparisonPolicy = policy ?? {
     schemaVersion: 1,
     baseline: baseline.id,
     requireCandidatePass: true,
@@ -62,10 +65,21 @@ export function compareQualityReports(
       return { metric: rule.metric, baseline: baselineValue, candidate: null, delta: null, pass: false };
     }
     const delta = candidateValue - baselineValue;
-    const pass = rule.direction === 'higher'
-      ? candidateValue + rule.allowedRegression >= baselineValue
-      : candidateValue - rule.allowedRegression <= baselineValue;
-    if (!pass) failures.push(`${rule.metric}: ${candidateValue} regressed from ${baselineValue} (delta ${delta >= 0 ? '+' : ''}${delta}; allowed ${rule.allowedRegression})`);
+    // minImprovement is evaluated in delta form: candidate - baseline >= minImprovement (or
+    // delta <= -minImprovement for lower-is-better). On the committed baseline and every
+    // legacy-lane candidate (metric quanta of 1/60) the delta form and the literal form
+    // candidate >= baseline + minImprovement agree; the delta form is kept as shipped and
+    // statically reviewed.
+    const pass = rule.minImprovement === undefined
+      ? (rule.direction === 'higher'
+        ? candidateValue + rule.allowedRegression >= baselineValue
+        : candidateValue - rule.allowedRegression <= baselineValue)
+      : (rule.direction === 'higher' ? delta >= rule.minImprovement : delta <= -rule.minImprovement);
+    if (!pass) {
+      failures.push(rule.minImprovement === undefined
+        ? `${rule.metric}: ${candidateValue} regressed from ${baselineValue} (delta ${delta >= 0 ? '+' : ''}${delta}; allowed ${rule.allowedRegression})`
+        : `${rule.metric}: ${candidateValue} did not materially improve on ${baselineValue} (delta ${delta >= 0 ? '+' : ''}${delta}; required ${rule.minImprovement})`);
+    }
     return { metric: rule.metric, baseline: baselineValue, candidate: candidateValue, delta, pass };
   });
   return { passed: failures.length === 0, failures, metrics };

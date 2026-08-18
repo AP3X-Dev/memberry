@@ -19,6 +19,7 @@
     { "id": "admissionPolicyParity", "label": "Admission baseline policy parity", "direction": "higher", "unit": "ratio", "requiredInCi": true, "hardGate": true },
     { "id": "admissionDeliveryAccuracy", "label": "Admission sidecar delivery accuracy", "direction": "higher", "unit": "ratio", "requiredInCi": true, "hardGate": true },
     { "id": "admissionContentLeakRate", "label": "Admission evidence content leak rate", "direction": "lower", "unit": "ratio", "requiredInCi": true, "hardGate": true },
-    { "id": "admissionScopeLeakRate", "label": "Admission observation scope leak rate", "direction": "lower", "unit": "ratio", "requiredInCi": true, "hardGate": true }
+    { "id": "admissionScopeLeakRate", "label": "Admission observation scope leak rate", "direction": "lower", "unit": "ratio", "requiredInCi": true, "hardGate": true },
+    { "id": "taskSuccessPer1kTokens", "label": "Task success per 1k context tokens (deterministic-lab proxy)", "direction": "higher", "unit": "ratio", "requiredInCi": true, "hardGate": false }
   ]
 }
