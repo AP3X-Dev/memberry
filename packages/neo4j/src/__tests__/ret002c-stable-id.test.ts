@@ -293,6 +293,60 @@ describe('RET-002C stable Entity.id consumers', () => {
     await expect(invoke('x'.repeat(16_385))).rejects.toThrow('fact_id_batch_invalid_record');
   });
 
+  it('preflights stable fact provider strings before UTF-8 scanning while retaining exact byte checks', async () => {
+    const originalByteLength = Buffer.byteLength;
+    let target = '';
+    let targetScans = 0;
+    Buffer.byteLength = ((
+      input: Parameters<typeof Buffer.byteLength>[0],
+      encoding?: BufferEncoding,
+    ): number => {
+      if (input === target) targetScans += 1;
+      return originalByteLength(input, encoding);
+    }) as typeof Buffer.byteLength;
+    vi.resetModules();
+    try {
+      const { FactStore: DynamicFactStore } = await import('../fact.js');
+      const invoke = (properties: Record<string, unknown>): Promise<unknown> => {
+        const result = { records: [record({
+          ordinal: 0, eid: 'entity-a', facts: [{ properties }],
+        })] };
+        const driver = driverWith(vi.fn(async () => result));
+        return new DynamicFactStore(driver as never).getActiveByEntityIdsBatch(['entity-a']);
+      };
+      const properties = (overrides: Record<string, unknown>): Record<string, unknown> => ({
+        id: 'fact-a', entity_id: 'entity-a', valid_at: '2024-01-01T00:00:00.000Z', ...overrides,
+      });
+
+      target = 'provider-safe-object';
+      targetScans = 0;
+      await expect(invoke(properties({ object: target }))).resolves.toHaveLength(1);
+      expect(targetScans).toBeGreaterThan(0);
+
+      target = 'x'.repeat(16_385);
+      targetScans = 0;
+      await expect(invoke(properties({ object: target })))
+        .rejects.toThrow('fact_id_batch_invalid_record');
+      expect(targetScans).toBe(0);
+
+      target = 'é'.repeat(8_193);
+      targetScans = 0;
+      await expect(invoke(properties({ object: target })))
+        .rejects.toThrow('fact_id_batch_invalid_record');
+      expect(targetScans).toBeGreaterThan(0);
+
+      target = 't'.repeat(16_384);
+      targetScans = 0;
+      const tags = Array.from({ length: 31 }, () => 'f'.repeat(16_384));
+      tags.push(target);
+      await expect(invoke(properties({ tags }))).rejects.toThrow('fact_id_batch_invalid_record');
+      expect(targetScans).toBe(0);
+    } finally {
+      Buffer.byteLength = originalByteLength;
+      vi.resetModules();
+    }
+  });
+
   it.each([
     ['scope', (query: ScopedQuery) => query.byScope({
       entityIds: ['entity-a'], limit: 10, tenantId: 'tenant-a', projectScope: 'project:alpha',
@@ -369,6 +423,58 @@ describe('RET-002C stable Entity.id consumers', () => {
       })).rejects.toThrow('stable_query_result_invalid');
     }
     expect(hooks).not.toHaveBeenCalled();
+  });
+
+  it('preflights stable query provider strings before UTF-8 scanning while retaining exact byte checks', async () => {
+    const originalByteLength = Buffer.byteLength;
+    let target = '';
+    let targetScans = 0;
+    Buffer.byteLength = ((
+      input: Parameters<typeof Buffer.byteLength>[0],
+      encoding?: BufferEncoding,
+    ): number => {
+      if (input === target) targetScans += 1;
+      return originalByteLength(input, encoding);
+    }) as typeof Buffer.byteLength;
+    vi.resetModules();
+    try {
+      const { ScopedQuery: DynamicScopedQuery } = await import('../query.js');
+      const invoke = (projection: Record<string, unknown>): Promise<unknown> => {
+        const run = vi.fn(async () => ({
+          records: [record({ entityId: 'entity-a', s: projection })],
+        }));
+        return new DynamicScopedQuery(driverWith(run) as never).byScope({
+          entityIds: ['entity-a'], limit: 10, tenantId: 'tenant-a', projectScope: 'project:alpha',
+        });
+      };
+
+      target = 'provider-safe-content';
+      targetScans = 0;
+      await expect(invoke(semanticProjection({ content: target }))).resolves.toHaveLength(1);
+      expect(targetScans).toBeGreaterThan(0);
+
+      target = 'x'.repeat(65_537);
+      targetScans = 0;
+      await expect(invoke(semanticProjection({ content: target })))
+        .rejects.toThrow('stable_query_result_invalid');
+      expect(targetScans).toBe(0);
+
+      target = 'é'.repeat(32_769);
+      targetScans = 0;
+      await expect(invoke(semanticProjection({ content: target })))
+        .rejects.toThrow('stable_query_result_invalid');
+      expect(targetScans).toBeGreaterThan(0);
+
+      target = 't'.repeat(65_536);
+      targetScans = 0;
+      const tags = Array.from({ length: 31 }, () => 'f'.repeat(65_536));
+      tags.push(target);
+      await expect(invoke(semanticProjection({ tags }))).rejects.toThrow('stable_query_result_invalid');
+      expect(targetScans).toBe(0);
+    } finally {
+      Buffer.byteLength = originalByteLength;
+      vi.resetModules();
+    }
   });
 
   it('rejects hostile result and record shapes without invoking their hooks', async () => {
