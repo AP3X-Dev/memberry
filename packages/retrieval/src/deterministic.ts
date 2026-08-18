@@ -7,6 +7,7 @@ import { isProxy } from 'node:util/types';
 import { activeRelationshipFilter, tenantWhere, resolveTenant, TENANT_PARAM } from '@memberry/neo4j';
 import type { ContextSection, ContextItem } from './types.js';
 import { DeterministicRuntimeTraceAdapter } from './runtime-trace.js';
+import { assertBoundedQueryInput } from './query-input.js';
 import type {
   RetrievalTraceChannelSettlement,
   RetrievalTraceDeterministicOutputChannelV2,
@@ -46,6 +47,7 @@ export class DeterministicAssembler {
     task: string,
     options?: { entity_scope?: string[]; resolvedEntityIds?: unknown; project_name?: string; max_tokens?: number; as_of?: string; tenantId?: string },
   ): Promise<ContextSection[]> {
+    assertBoundedQueryInput(task);
     options = snapshotDeterministicOptions(options);
     const maxTokens = options?.max_tokens ?? 8000;
     const asOf = options?.as_of;
@@ -207,6 +209,7 @@ export class DeterministicAssembler {
     task: string,
     options?: { entity_scope?: string[]; resolvedEntityIds?: unknown; project_name?: string; max_tokens?: number; as_of?: string; tenantId?: string },
   ): Promise<{ sections: ContextSection[]; trace: RetrievalTraceV1 }> {
+    assertBoundedQueryInput(task);
     options = snapshotDeterministicOptions(options);
     const maxTokens = options?.max_tokens ?? 8000;
     const asOf = options?.as_of;

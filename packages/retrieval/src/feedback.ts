@@ -4,6 +4,10 @@
 
 import type { FeedbackSignal, BoostFactors, SourceType } from './types.js';
 import { resolveTenant, isDefaultTenant } from '@memberry/neo4j';
+import {
+  assertBoundedQueryInput,
+  MAX_FEEDBACK_QUERY_INPUT_CODE_UNITS,
+} from './query-input.js';
 
 // ─── Redis interface (injected, not concrete) ─────────────────────────────────
 
@@ -18,6 +22,12 @@ export interface FeedbackRedisLayer {
 
 const FEEDBACK_PREFIX = 'amp:feedback';
 const MAX_LOG_SIZE = 10000;
+const MAX_FEEDBACK_ID_CODE_UNITS = 500;
+const MAX_FEEDBACK_TIMESTAMP_CODE_UNITS = 500;
+const FEEDBACK_INPUT_INVALID = 'feedback_input_invalid';
+const FEEDBACK_SOURCE_TYPES = new Set<SourceType>([
+  'semantic', 'episodic', 'symbol', 'arch_entity', 'aspect', 'fact',
+]);
 
 // Per-tenant key namespacing. Feedback boosts re-rank retrieval, so a shared
 // (process-global) key set lets one tenant's feedback poison another tenant's
@@ -42,23 +52,24 @@ export class FeedbackTracker {
    * Record that a result was used (or ignored) by an agent.
    * Positive feedback boosts the entity and source type for future queries.
    * Writes are scoped to `tenantId` so one tenant's feedback never re-ranks
-   * another tenant's retrieval (defaults to the DEFAULT tenant when absent).
-   */
+  * another tenant's retrieval (defaults to the DEFAULT tenant when absent).
+  */
   async recordFeedback(signal: FeedbackSignal, tenantId?: string): Promise<void> {
+    const safeSignal = snapshotFeedbackSignal(signal);
     const tenant = resolveTenant(tenantId);
-    const increment = signal.was_useful ? 1 : -0.5;
+    const increment = safeSignal.was_useful ? 1 : -0.5;
 
     // Boost the entities mentioned in the result
-    const entityNames = extractEntityNames(signal.query);
+    const entityNames = extractEntityNames(safeSignal.query);
     for (const entity of entityNames) {
       await this.redis.zincrby(entityBoostKey(tenant), increment, entity);
     }
 
     // Boost the source type
-    await this.redis.zincrby(sourceBoostKey(tenant), increment, signal.source_type);
+    await this.redis.zincrby(sourceBoostKey(tenant), increment, safeSignal.source_type);
 
     // Log the feedback event
-    await this.redis.lpush(feedbackLogKey(tenant), JSON.stringify(signal));
+    await this.redis.lpush(feedbackLogKey(tenant), JSON.stringify(safeSignal));
     await this.redis.ltrim(feedbackLogKey(tenant), 0, MAX_LOG_SIZE - 1);
   }
 
@@ -129,6 +140,67 @@ export class FeedbackTracker {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function snapshotFeedbackSignal(signal: FeedbackSignal): FeedbackSignal {
+  // Read and validate each known field in contract order. A failed field stops
+  // before any later accessor, query scan, tenant resolution, or Redis work.
+  let query: unknown;
+  try {
+    query = signal.query;
+  } catch {
+    throw new Error('query_input_invalid');
+  }
+  assertBoundedQueryInput(query, MAX_FEEDBACK_QUERY_INPUT_CODE_UNITS);
+
+  const resultId = readFeedbackField(signal, 'result_id');
+  if (typeof resultId !== 'string' || resultId.length > MAX_FEEDBACK_ID_CODE_UNITS) {
+    return feedbackInputInvalid();
+  }
+
+  const sourceType = readFeedbackField(signal, 'source_type');
+  if (typeof sourceType !== 'string' || !FEEDBACK_SOURCE_TYPES.has(sourceType as SourceType)) {
+    return feedbackInputInvalid();
+  }
+
+  const wasUseful = readFeedbackField(signal, 'was_useful');
+  if (typeof wasUseful !== 'boolean') return feedbackInputInvalid();
+
+  const sessionId = readFeedbackField(signal, 'session_id');
+  if (typeof sessionId !== 'string' || sessionId.length > MAX_FEEDBACK_ID_CODE_UNITS) {
+    return feedbackInputInvalid();
+  }
+
+  const timestamp = readFeedbackField(signal, 'timestamp');
+  if (typeof timestamp !== 'string' || timestamp.length > MAX_FEEDBACK_TIMESTAMP_CODE_UNITS) {
+    return feedbackInputInvalid();
+  }
+
+  // Null prototype + assignments create exactly six enumerable data properties
+  // in the legacy JSON order. Caller extras and accessors are never enumerated.
+  const snapshot = Object.create(null) as FeedbackSignal;
+  snapshot.query = query;
+  snapshot.result_id = resultId;
+  snapshot.source_type = sourceType as SourceType;
+  snapshot.was_useful = wasUseful;
+  snapshot.session_id = sessionId;
+  snapshot.timestamp = timestamp;
+  return snapshot;
+}
+
+function readFeedbackField(
+  signal: FeedbackSignal,
+  field: Exclude<keyof FeedbackSignal, 'query'>,
+): unknown {
+  try {
+    return signal[field];
+  } catch {
+    return feedbackInputInvalid();
+  }
+}
+
+function feedbackInputInvalid(): never {
+  throw new Error(FEEDBACK_INPUT_INVALID);
+}
 
 function extractEntityNames(text: string): string[] {
   // Extract potential entity names: capitalized words, kebab-case, snake_case identifiers
