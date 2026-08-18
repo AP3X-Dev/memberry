@@ -68,7 +68,7 @@ describe('RET-002C deterministic stable-ID lane', () => {
   });
 
   it.each(['ordinary', 'traced'] as const)('preserves legacy alias/case bytes in %s mode', async (mode) => {
-    const record = (values: Record<string, unknown>) => ({ get: (key: string) => values[key] });
+    const record = (values: Record<string, unknown>) => new Neo4jRecord(Object.keys(values), Object.values(values));
     const runs: ReturnType<typeof vi.fn>[] = [];
     const driver = {
       session: vi.fn(() => {
@@ -76,7 +76,7 @@ describe('RET-002C deterministic stable-ID lane', () => {
           if (cypher.includes('RETURN targetName AS targetName, e')) {
             return { records: [record({ targetName: 'AliasCase', e: { properties: { name: 'CanonicalName', category: 'component' } } })] };
           }
-          if (cypher.includes("type(r) IN ['USES'")) {
+          if (cypher.includes('MATCH (e:Entity {name: targetName})-[r]->(dep:Entity)')) {
             return { records: [record({ targetName: 'AliasCase', name: 'Dependency', relation: 'USES', interface_desc: '' })] };
           }
           return { records: [] };
@@ -326,7 +326,7 @@ describe('RET-002C deterministic stable-ID lane', () => {
           } else {
             await expect(operation).resolves.toMatchObject({
               trace: { events: expect.arrayContaining([
-                expect.objectContaining({ channel: 'arch.entity', outcome: 'safe-failure', code: 'query-failed' }),
+                expect.objectContaining({ channel: 'arch.entity', outcome: 'safe-failure', code: 'invalid-result' }),
               ]) },
             });
           }

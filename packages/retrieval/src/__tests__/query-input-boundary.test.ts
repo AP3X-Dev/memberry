@@ -55,7 +55,9 @@ function dependencies(llmAvailable = true) {
     ltrim: vi.fn(async () => undefined),
   };
   const codeSearch = vi.fn(async () => []);
-  const memoryLoad = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [] }));
+  const memoryLoad = vi.fn(async () => ({
+    markdown: '', tokens: 0, sources: [], assembled_at: '2026-08-18T00:00:00.000Z',
+  }));
   const embed = vi.fn(async () => [1]);
   const embedBatch = vi.fn(async () => []);
   const chat = vi.fn(async () => JSON.stringify({ answer: 'ok', cited: [] }));

@@ -21,7 +21,7 @@ function dependencies(memory: AssemblerMemoryLayer | null) {
 
 describe('RET-002C UnifiedAssembler stable-ID routing', () => {
   it('passes one ordered, deduplicated, frozen ID list to ranked memory', async () => {
-    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [] }));
+    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [], assembled_at: '2026-08-18T00:00:00.000Z' }));
     const { assembler } = dependencies({ load });
     await assembler.assemble('task', {
       strategy: 'ranked', include_arch: false, include_code: false,
@@ -33,7 +33,7 @@ describe('RET-002C UnifiedAssembler stable-ID routing', () => {
   });
 
   it('stable auto assembly does no task embedding, symbol search, collection count, or feedback lookup', async () => {
-    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [] }));
+    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [], assembled_at: '2026-08-18T00:00:00.000Z' }));
     const codeSearch = vi.fn(async () => []);
     const run = vi.fn(async (cypher: string, params?: Record<string, unknown>) => ({
       records: cypher.includes('OPTIONAL MATCH (e:Entity)')
@@ -63,7 +63,7 @@ describe('RET-002C UnifiedAssembler stable-ID routing', () => {
   });
 
   it('keeps every stable-ID entry mode direct-only, including traced ranked/auto, deterministic, and real ask', async () => {
-    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [] }));
+    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [], assembled_at: '2026-08-18T00:00:00.000Z' }));
     const codeSearch = vi.fn(async () => []);
     const run = vi.fn(async (cypher: string, params?: Record<string, unknown>) => ({
       records: cypher.includes('OPTIONAL MATCH (e:Entity)')
@@ -137,7 +137,7 @@ describe('RET-002C UnifiedAssembler stable-ID routing', () => {
   });
 
   it('preserves the exact ranked memory scope when stable IDs are absent', async () => {
-    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [] }));
+    const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [], assembled_at: '2026-08-18T00:00:00.000Z' }));
     const { assembler } = dependencies({ load });
     await assembler.assemble('task', {
       strategy: 'ranked', include_arch: false, include_code: false,
@@ -179,7 +179,7 @@ describe('RET-002C UnifiedAssembler stable-ID routing', () => {
     Object.defineProperty(accessor, '0', { enumerable: true, get: () => { hooks(); return 'entity-a'; } });
     accessor.length = 1;
     for (const value of [proxy, accessor]) {
-      const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [] }));
+      const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [], assembled_at: '2026-08-18T00:00:00.000Z' }));
       const { assembler, driver } = dependencies({ load });
       await expect(assembler.assemble('task', { strategy: 'ranked', resolvedEntityIds: value as never }))
         .rejects.toThrow('resolved_entity_ids_invalid');
@@ -201,7 +201,7 @@ describe('RET-002C UnifiedAssembler stable-ID routing', () => {
     const customProto = Object.assign(Object.create({ inherited: true }), { strategy: 'ranked', resolvedEntityIds: ['entity-a'] });
     const extra = { strategy: 'ranked', resolvedEntityIds: ['entity-a'], secret: 'blocked' };
     for (const options of [proxy, revoked.proxy, accessor, customProto, extra]) {
-      const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [] }));
+      const load = vi.fn(async () => ({ markdown: '', tokens: 0, sources: [], assembled_at: '2026-08-18T00:00:00.000Z' }));
       const { assembler, driver } = dependencies({ load });
       const operation = mode === 'ordinary'
         ? assembler.assemble('task', options as never)

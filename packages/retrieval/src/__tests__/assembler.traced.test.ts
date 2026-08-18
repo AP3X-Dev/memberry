@@ -8,6 +8,7 @@ import { assertRetrievalTraceConformant, assertRetrievalTraceSecretSafe, replayR
 import type { RetrievalTraceV1 } from '../trace.js';
 
 const CANARY_ID = 'raw-private-sk_live_12345678901234567890';
+const ASSEMBLED_AT = '2026-08-18T00:00:00.000Z';
 const DETERMINISTIC_TRACE = JSON.parse(readFileSync(
   new URL('./fixtures/retrieval-trace-deterministic-v2.json', import.meta.url),
   'utf8',
@@ -46,6 +47,7 @@ function makeAssembler(codeDelay: number, memoryDelay: number, malformed = false
     markdown: '## [sem-1] (confidence: 0.90)\nremembered',
     tokens: 10,
     sources: ['sem-1'],
+    assembled_at: ASSEMBLED_AT,
   };
   const memoryLayer = {
     load: vi.fn(async () => memoryValue),
@@ -106,6 +108,7 @@ function makeParityAssembler(options: ParityAssemblerOptions) {
     markdown: options.memoryMarkdown,
     tokens: 10,
     sources: options.memorySources,
+    assembled_at: ASSEMBLED_AT,
   };
   const codeLayer = {
     search: vi.fn(async () => {
@@ -366,9 +369,10 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
     };
     const memoryLayer = {
       load: vi.fn(async () => ({
-        markdown: '# Memory Context\n\n## [ordinary-memory] (confidence: 0.90)\nremembered',
+        markdown: '# Memory Context\n\n**Task:** ordinary ports\n\n## [ordinary-memory] (confidence: 0.90)\nremembered',
         tokens: 5,
         sources: ['ordinary-memory'],
+        assembled_at: ASSEMBLED_AT,
       })),
     };
     const driver = { session: () => ({ run: vi.fn(async () => ({ records: [] })), close: vi.fn() }) };
@@ -543,16 +547,24 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
       value: {
         markdown: '## Current Facts\n\n- one aggregate\n\n## [sem-1] (confidence: 0.90)\nremembered',
         tokens: 10,
-        sources: ['sem-1'],
+        sources: ['fact-1', 'sem-1'],
+        assembled_at: ASSEMBLED_AT,
       },
       observation: {
         channels: [{ channel: 'memory.scope', outcome: 'success' }],
-        candidates: [{
-          privateId: 'sem-1', sourceType: 'semantic',
-          channels: [{ channel: 'memory.scope', rank: 1 }],
-          evidence: { confidence: 0.9 }, estimatedTokens: 3,
-        }],
-        finalIds: ['sem-1'],
+        candidates: [
+          {
+            privateId: 'fact-1', sourceType: 'fact',
+            channels: [{ channel: 'memory.fact', rank: 1 }],
+            evidence: { confidence: 0.9 }, estimatedTokens: 3,
+          },
+          {
+            privateId: 'sem-1', sourceType: 'semantic',
+            channels: [{ channel: 'memory.scope', rank: 1 }],
+            evidence: { confidence: 0.9 }, estimatedTokens: 3,
+          },
+        ],
+        finalIds: ['fact-1', 'sem-1'],
       },
     });
 
@@ -561,7 +573,7 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
       include_code: false,
     });
 
-    expect(result.context.sections.flatMap((section) => section.items)).toHaveLength(2);
+    expect(result.context.sections.flatMap((section) => section.items).map((item) => item.id)).toEqual(['sem-1']);
     expect(result.trace.complete).toBe(false);
     expect(result.trace.incompleteReasons).toContain('candidate-output-gap');
     expect(result.trace.candidates).toHaveLength(0);
@@ -574,6 +586,7 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
         markdown: '# Memory Context\n\n**Task:** faithful memory fixture\n\n## [sem-1] (confidence: 0.90, score: 0.800)\nremembered',
         tokens: 10,
         sources: ['sem-1'],
+        assembled_at: ASSEMBLED_AT,
       },
       observation: {
         channels: [{ channel: 'memory.scope', outcome: 'success' }],
@@ -605,7 +618,7 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
     ]) {
       const { assembler, memoryLayer } = makeAssembler(0, 0);
       memoryLayer.loadFreshObserved.mockResolvedValueOnce({
-        value: { markdown, tokens: 10, sources: ['sem-1'] },
+        value: { markdown, tokens: 10, sources: ['sem-1'], assembled_at: ASSEMBLED_AT },
         observation: {
           channels: [{ channel: 'memory.scope', outcome: 'success' }],
           candidates: [{
@@ -618,8 +631,10 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
       });
 
       const result = await assembler.assembleTraced('exact task', { include_arch: false, include_code: false });
-      expect(result.trace.complete).toBe(false);
-      expect(result.trace.incompleteReasons).toContain('candidate-output-gap');
+      expect(result.context.sections).toEqual([]);
+      expect(result.trace.events).toContainEqual(expect.objectContaining({
+        kind: 'channel-terminal', channel: 'memory.scope', outcome: 'safe-failure', code: 'invalid-result',
+      }));
       expect(result.trace.candidates).toHaveLength(0);
     }
   });
@@ -631,6 +646,7 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
         markdown: '# Memory Context\n\n_No relevant memories found for task: nothing here_\n',
         tokens: 0,
         sources: [],
+        assembled_at: ASSEMBLED_AT,
       },
       observation: {
         channels: [{ channel: 'memory.scope', outcome: 'success' }],
@@ -658,7 +674,7 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
     for (const markdown of cases) {
       const { assembler, memoryLayer } = makeAssembler(0, 0);
       memoryLayer.loadFreshObserved.mockResolvedValueOnce({
-        value: { markdown, tokens: 10, sources: ['sem-1', 'sem-2'] },
+        value: { markdown, tokens: 10, sources: ['sem-1', 'sem-2'], assembled_at: ASSEMBLED_AT },
         observation: {
           channels: [{ channel: 'memory.scope', outcome: 'success' }],
           candidates: [
@@ -670,8 +686,10 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
       });
 
       const result = await assembler.assembleTraced('unsafe markdown map', { include_arch: false, include_code: false });
-      expect(result.trace.complete).toBe(false);
-      expect(result.trace.incompleteReasons).toContain('candidate-output-gap');
+      expect(result.context.sections).toEqual([]);
+      expect(result.trace.events).toContainEqual(expect.objectContaining({
+        kind: 'channel-terminal', channel: 'memory.scope', outcome: 'safe-failure', code: 'invalid-result',
+      }));
       expect(result.trace.candidates).toHaveLength(0);
     }
   });
@@ -695,7 +713,9 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
       },
     });
     memoryLayer.loadFreshObserved.mockResolvedValueOnce({
-      value: { markdown: '## [mem-1] (confidence: 0.90)\nremembered', tokens: 4, sources: ['mem-1'] },
+      value: {
+        markdown: '## [mem-1] (confidence: 0.90)\nremembered', tokens: 4, sources: ['mem-1'], assembled_at: ASSEMBLED_AT,
+      },
       observation: {
         channels: [{ channel: 'memory.scope', outcome: 'success' }],
         candidates: [{
