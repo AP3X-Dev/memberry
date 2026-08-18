@@ -46,7 +46,11 @@ export const EVIDENCE_ELIGIBILITY_AUTHORITY_CONTRACT_ID =
   'memberry.evidence-eligibility-authority' as const;
 export const EVIDENCE_ELIGIBILITY_AUTHORITY_CONTRACT_VERSION = '1.0.0' as const;
 export const EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_CANDIDATES = 128 as const;
-export const EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_AGGREGATE_STRING_BYTES = 32_768 as const;
+export const EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REQUEST_AGGREGATE_STRING_BYTES = 32_768 as const;
+// A supported result repeats every admitted request string and may add, for
+// each of 128 semantic receipts, the longest valid classifications, policy,
+// and provenance ref. 32_768 + 33 fixed result bytes + (128 * 266) = 66_849.
+export const EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES = 66_849 as const;
 export const EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_TENANT_ID_BYTES = 128 as const;
 export const EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_PROJECT_SCOPE_BYTES = 136 as const;
 export const EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_ENTITY_ID_BYTES = 200 as const;
@@ -175,6 +179,7 @@ class BudgetExceeded extends INTRINSIC_ERROR {}
 
 interface ParseState {
   readonly seen: WeakSet<object>;
+  readonly maxStringBytes: number;
   stringBytes: number;
 }
 
@@ -244,8 +249,8 @@ for (let index = 0; index < ARRAY_INDEX_KEYS.length; index += 1) {
 }
 OBJECT_FREEZE(ARRAY_INDEX_KEYS);
 
-function freshState(): ParseState {
-  return { seen: new INTRINSIC_WEAK_SET<object>(), stringBytes: 0 };
+function freshState(maxStringBytes: number): ParseState {
+  return { seen: new INTRINSIC_WEAK_SET<object>(), maxStringBytes, stringBytes: 0 };
 }
 
 function isPrivateError(error: unknown, prototype: object): boolean {
@@ -409,7 +414,7 @@ function boundedString(
   if (bytes > maxBytes) throw new BudgetExceeded();
   if (pattern !== undefined && REGEXP_EXEC(pattern, input) === null) throw new InvalidValue();
   state.stringBytes += bytes;
-  if (state.stringBytes > EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_AGGREGATE_STRING_BYTES) {
+  if (state.stringBytes > state.maxStringBytes) {
     throw new BudgetExceeded();
   }
   return input;
@@ -521,7 +526,7 @@ function descriptorArray(
 }
 
 function parseRequest(input: unknown): EvidenceEligibilityAuthorityRequestV1 {
-  const state = freshState();
+  const state = freshState(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REQUEST_AGGREGATE_STRING_BYTES);
   const entered = enterRecord(input, REQUEST_KEYS, REQUEST_KEYS, state);
   const contractId = literal(
     entered.snapshot.contractId,
@@ -746,7 +751,7 @@ function parseSupportedResult(
   request: EvidenceEligibilityAuthorityRequestV1,
 ): EvidenceEligibilityAuthoritySupportedResultV1 {
   if (request.temporalFrame.mode !== 'current') throw new InvalidValue();
-  const state = freshState();
+  const state = freshState(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES);
   const entered = enterRecord(input, SUPPORTED_RESULT_KEYS, SUPPORTED_RESULT_KEYS, state);
   const echo = requireAuthorityEcho(entered, request, state);
   const outcome = literal(entered.snapshot.outcome, ['supported'] as const, state);
@@ -770,7 +775,7 @@ function parseUnsupportedResult(
   input: unknown,
   request: EvidenceEligibilityAuthorityRequestV1,
 ): EvidenceEligibilityAuthorityUnsupportedResultV1 {
-  const state = freshState();
+  const state = freshState(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES);
   const entered = enterRecord(input, UNSUPPORTED_RESULT_KEYS, UNSUPPORTED_RESULT_KEYS, state);
   const echo = requireAuthorityEcho(entered, request, state);
   const outcome = literal(entered.snapshot.outcome, ['unsupported'] as const, state);

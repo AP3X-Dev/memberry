@@ -6,11 +6,12 @@ import { describe, expect, it } from 'vitest';
 import {
   EVIDENCE_ELIGIBILITY_AUTHORITY_CONTRACT_ID,
   EVIDENCE_ELIGIBILITY_AUTHORITY_CONTRACT_VERSION,
-  EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_AGGREGATE_STRING_BYTES,
   EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_CANDIDATES,
   EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_EVIDENCE_ID_BYTES,
   EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_PROVENANCE_REF_BYTES,
   EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REF_BYTES,
+  EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REQUEST_AGGREGATE_STRING_BYTES,
+  EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES,
   EvidenceEligibilityAuthorityContractError,
   emitEvidenceEligibilityAuthorityRequestV1,
   parseEvidenceEligibilityAuthorityRequestV1,
@@ -148,6 +149,47 @@ function deepStringBytes(value: unknown): number {
   return 0;
 }
 
+function exactMaxAggregateRequest(): Record<string, unknown> {
+  const candidates = Array.from(
+    { length: EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_CANDIDATES },
+    (_, index) => ({
+      ...descriptor(index),
+      ref: `r${'x'.repeat(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REF_BYTES - 5)}${String(index).padStart(3, '0')}`,
+      evidenceId: `e${'y'.repeat(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_EVIDENCE_ID_BYTES - 5)}${String(index).padStart(3, '0')}`,
+    }),
+  );
+  const exact = request(candidates);
+  let excess = deepStringBytes(exact)
+    - EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REQUEST_AGGREGATE_STRING_BYTES;
+  for (let index = candidates.length - 1; index >= 0 && excess > 0; index -= 1) {
+    const candidate = candidates[index]!;
+    const removable = candidate.evidenceId.length - 5;
+    const remove = Math.min(removable, excess);
+    candidate.evidenceId = `${candidate.evidenceId.slice(0, -3 - remove)}${String(index).padStart(3, '0')}`;
+    excess -= remove;
+  }
+  expect(excess).toBe(0);
+  expect(deepStringBytes(exact))
+    .toBe(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REQUEST_AGGREGATE_STRING_BYTES);
+  return exact;
+}
+
+function maximalSupportedResult(expected: Record<string, unknown>): Record<string, unknown> {
+  const candidates = expected.candidates as readonly ReturnType<typeof descriptor>[];
+  return supported(expected, {
+    receipts: candidates.map((candidate) => receipt(candidate, {
+      lifecycle: 'inactive',
+      temporal: 'out-of-frame',
+      supersession: 'superseded',
+      contradiction: 'clear',
+      provenance: {
+        policy: POLICIES.semantic,
+        ref: 'p'.repeat(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_PROVENANCE_REF_BYTES),
+      },
+    })),
+  });
+}
+
 function dataAccessor(value: unknown): Record<string, unknown> {
   const input = request();
   Object.defineProperty(input, 'tenantId', { enumerable: true, get: () => value });
@@ -160,7 +202,8 @@ describe('RET-005B-AUTH-001A evidence eligibility authority contract', () => {
       .toBe('memberry.evidence-eligibility-authority');
     expect(EVIDENCE_ELIGIBILITY_AUTHORITY_CONTRACT_VERSION).toBe('1.0.0');
     expect(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_CANDIDATES).toBe(128);
-    expect(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_AGGREGATE_STRING_BYTES).toBe(32_768);
+    expect(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REQUEST_AGGREGATE_STRING_BYTES).toBe(32_768);
+    expect(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES).toBe(66_849);
   });
 
   it('canonicalizes 0, 1, and 128 ordered descriptors as deeply frozen values', () => {
@@ -428,30 +471,63 @@ describe('RET-005B-AUTH-001A evidence eligibility authority contract', () => {
   });
 
   it('enforces exact aggregate UTF-8 N/N+1 request budgets', () => {
-    const candidates = Array.from(
-      { length: EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_CANDIDATES },
-      (_, index) => ({
-        ...descriptor(index),
-        ref: `r${'x'.repeat(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REF_BYTES - 5)}${String(index).padStart(3, '0')}`,
-        evidenceId: `e${'y'.repeat(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_EVIDENCE_ID_BYTES - 5)}${String(index).padStart(3, '0')}`,
-      }),
-    );
-    const exact = request(candidates);
-    let excess = deepStringBytes(exact) - EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_AGGREGATE_STRING_BYTES;
-    expect(excess).toBeGreaterThan(0);
-    for (let index = candidates.length - 1; index >= 0 && excess > 0; index -= 1) {
-      const candidate = candidates[index]!;
-      const removable = candidate.evidenceId.length - 5;
-      const remove = Math.min(removable, excess);
-      candidate.evidenceId = `${candidate.evidenceId.slice(0, -3 - remove)}${String(index).padStart(3, '0')}`;
-      excess -= remove;
-    }
-    expect(deepStringBytes(exact)).toBe(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_AGGREGATE_STRING_BYTES);
+    const exact = exactMaxAggregateRequest();
+    const candidates = exact.candidates as ReturnType<typeof descriptor>[];
     expect(parseEvidenceEligibilityAuthorityRequestV1(exact).candidates).toHaveLength(128);
     const first = candidates[0]!;
     first.evidenceId += 'z';
-    expect(deepStringBytes(exact)).toBe(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_AGGREGATE_STRING_BYTES + 1);
+    expect(deepStringBytes(exact))
+      .toBe(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_REQUEST_AGGREGATE_STRING_BYTES + 1);
     expectCode(() => parseEvidenceEligibilityAuthorityRequestV1(exact), 'budget-exceeded');
+  });
+
+  it('admits exact-max requests with minimal and maximal conforming supported results', () => {
+    const expected = exactMaxAggregateRequest();
+    const minimal = supported(expected);
+    expect(deepStringBytes(minimal)).toBe(39_969);
+    expect(parseEvidenceEligibilityAuthorityResultV1(minimal, expected).outcome).toBe('supported');
+
+    const maximal = maximalSupportedResult(expected);
+    expect(deepStringBytes(maximal))
+      .toBe(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES);
+    expect(parseEvidenceEligibilityAuthorityResultV1(maximal, expected).outcome).toBe('supported');
+  });
+
+  it('enforces exact ASCII and multibyte N/N+1 result aggregate accounting', () => {
+    const expected = exactMaxAggregateRequest();
+    const exactAscii = maximalSupportedResult(expected);
+    expect(deepStringBytes(exactAscii))
+      .toBe(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES);
+    expect(parseEvidenceEligibilityAuthorityResultV1(exactAscii, expected).outcome).toBe('supported');
+
+    const asciiNPlusOne = structuredClone(exactAscii);
+    const asciiReceipts = asciiNPlusOne.receipts as Array<Record<string, unknown>>;
+    const asciiProvenance = asciiReceipts.at(-1)!.provenance as Record<string, unknown>;
+    asciiProvenance.ref = `${asciiProvenance.ref as string}x`;
+    expect(deepStringBytes(asciiNPlusOne))
+      .toBe(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES + 1);
+    expectCode(
+      () => parseEvidenceEligibilityAuthorityResultV1(asciiNPlusOne, expected),
+      'budget-exceeded',
+    );
+
+    const exactMultibyte = structuredClone(exactAscii);
+    const multibyteReceipts = exactMultibyte.receipts as Array<Record<string, unknown>>;
+    const multibyteProvenance = multibyteReceipts.at(-1)!.provenance as Record<string, unknown>;
+    multibyteProvenance.ref = `${'p'.repeat(196)}🙂`;
+    expect(deepStringBytes(exactMultibyte))
+      .toBe(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES);
+    expectCode(
+      () => parseEvidenceEligibilityAuthorityResultV1(exactMultibyte, expected),
+      'invalid-result',
+    );
+    multibyteProvenance.ref = `${'p'.repeat(197)}🙂`;
+    expect(deepStringBytes(exactMultibyte))
+      .toBe(EVIDENCE_ELIGIBILITY_AUTHORITY_MAX_RESULT_AGGREGATE_STRING_BYTES + 1);
+    expectCode(
+      () => parseEvidenceEligibilityAuthorityResultV1(exactMultibyte, expected),
+      'budget-exceeded',
+    );
   });
 
   it('enforces provenance per-string and aggregate budgets at the result boundary', () => {
