@@ -532,6 +532,7 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     registerRetrievalTools(server as never, container);
     await handlers.get('berry_context')!({
       task: 'stable', strategy: 'deterministic', project_name: 'project:memberry', entity_scope: ['Resolver'],
+      max_tokens: 8_000, include_arch: true, include_memory: true,
     });
     expect(rerankerShadowCoordinator!.trySchedule).not.toHaveBeenCalled();
     expect(container.assembler!.assembleCandidateExecution).toHaveBeenCalledWith(
