@@ -13,6 +13,7 @@ import {
 import { createNeo4jDriver } from '../driver.js';
 import { MIGRATIONS } from '../migrations.js';
 import { initSchema } from '../schema.js';
+import { createEvidenceAuthorityCapture } from '../evidence-authority-capture.js';
 
 const LIVE_ENABLED = process.env.MEMBERRY_NEO4J_INTEGRATION === '1';
 const describeLive = LIVE_ENABLED ? describe : describe.skip;
@@ -663,5 +664,334 @@ describeLive('EvidenceAuthorityLedger live Neo4j gate', () => {
         await direct.close();
       }
     }
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// RET-005B-AUTH-001B2: additive captureCase live gate. The B1 suite above is
+// frozen; this block owns its own driver, fixtures, and full cleanup.
+// ---------------------------------------------------------------------------
+
+describeLive('EvidenceAuthorityLedger captureCase live Neo4j gate (RET-005B-AUTH-001B2)', () => {
+  const captureDriver = createNeo4jDriver(uri, user, password);
+  const captureSuffix = randomUUID().toLowerCase();
+  const captureTenantId = `test-evidence-capture-${captureSuffix}`;
+  const captureProjectScope = `project:test-evidence-capture-${captureSuffix}`;
+  const captureSemanticIds = [
+    'semantic-capture-primary',
+    'semantic-capture-history',
+    'semantic-capture-rollback',
+    'semantic-capture-module',
+  ].map((value) => `${value}-${captureSuffix}`);
+  const captureEpisodeId = `episode-capture-${captureSuffix}`;
+  const captureScope = (semanticId: string): EvidenceAuthorityScopeV1 => ({
+    tenantId: captureTenantId,
+    projectScope: captureProjectScope,
+    semanticId,
+  });
+
+  async function captureScalar(
+    query: string,
+    key: string,
+    params: Record<string, unknown> = {},
+  ): Promise<number> {
+    const session = captureDriver.session();
+    try {
+      const result = await session.run(query, params);
+      return Number(result.records[0]?.get(key) ?? 0);
+    } finally {
+      await session.close();
+    }
+  }
+
+  async function ledgerCounts(semanticId: string) {
+    const params = { tenantId: captureTenantId, semanticId };
+    return {
+      events: await captureScalar(
+        'MATCH (n:EvidenceAuthorityEvent {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+      outboxes: await captureScalar(
+        'MATCH (n:EvidenceAuthorityOutbox {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+      coverage: await captureScalar(
+        'MATCH (n:EvidenceAuthorityCoverage {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+      cases: await captureScalar(
+        'MATCH (n:EvidenceAuthorityCase {tenant_id: $tenantId, semantic_id: $semanticId}) RETURN count(n) AS count',
+        'count',
+        params,
+      ),
+    };
+  }
+
+  function corruptCaptureAppendDriver(base: Driver): Driver {
+    return {
+      session: () => {
+        const session = base.session();
+        return {
+          executeWrite: <T>(work: (tx: ManagedTransaction) => Promise<T>) => session.executeWrite(async (tx) => {
+            const wrapped = {
+              run: async (query: string, params?: Record<string, unknown>) => {
+                const result = await tx.run(query, params);
+                if (!query.includes('evidence-authority:append-capture-coverage-case')
+                  || result.records.length === 0) {
+                  return result;
+                }
+                const original = result.records[0]!;
+                return {
+                  ...result,
+                  records: [{ get: (key: string) => key === 'caseOutbox' ? null : original.get(key) }],
+                } as typeof result;
+              },
+            } as ManagedTransaction;
+            return work(wrapped);
+          }),
+          close: session.close.bind(session),
+        };
+      },
+    } as unknown as Driver;
+  }
+
+  beforeAll(async () => {
+    await captureDriver.getServerInfo();
+    const migration = MIGRATIONS.find((item) => item.id === '0008-evidence-authority-ledger-v1');
+    expect(migration).toBeDefined();
+    await migration!.up(captureDriver);
+    await initSchema(captureDriver);
+    const session = captureDriver.session();
+    try {
+      for (const semanticId of captureSemanticIds) {
+        await session.run(
+          `CREATE (s:Semantic {
+             id: $semanticId, tenant_id: $tenantId, scope: $projectScope,
+             content: 'disposable synthetic capture fixture', confidence: 1.0,
+             signal_count: 0, created_at: datetime(), updated_at: datetime(),
+             decay_class: 'stable', tags: [$projectScope]
+           })`,
+          { semanticId, tenantId: captureTenantId, projectScope: captureProjectScope },
+        );
+      }
+      await session.run(
+        `MATCH (s:Semantic {id: $semanticId, tenant_id: $tenantId})
+         CREATE (e:Episodic {
+           id: $episodeId, tenant_id: $tenantId, scope: $projectScope,
+           content: 'disposable synthetic pre-ledger signal', created_at: datetime()
+         })
+         CREATE (e)-[:CONTRADICTS {detail: 'disposable synthetic detail', valid_at: datetime()}]->(s)`,
+        {
+          semanticId: captureSemanticIds[1],
+          tenantId: captureTenantId,
+          projectScope: captureProjectScope,
+          episodeId: captureEpisodeId,
+        },
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  afterAll(async () => {
+    if (LIVE_ENABLED) {
+      const session = captureDriver.session();
+      try {
+        await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $nodeIds
+           DETACH DELETE n`,
+          {
+            tenantId: captureTenantId,
+            projectScope: captureProjectScope,
+            semanticIds: captureSemanticIds,
+            nodeIds: [...captureSemanticIds, captureEpisodeId],
+          },
+        );
+        const residue = await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $nodeIds
+           RETURN count(n) AS count`,
+          {
+            tenantId: captureTenantId,
+            projectScope: captureProjectScope,
+            semanticIds: captureSemanticIds,
+            nodeIds: [...captureSemanticIds, captureEpisodeId],
+          },
+        );
+        expect(Number(residue.records[0]?.get('count') ?? -1)).toBe(0);
+      } finally {
+        await session.close();
+      }
+    }
+    await captureDriver.close().catch(() => undefined);
+  });
+
+  it('proves atomic combined capture, replay, precondition, rollback, isolation, and revocation', async () => {
+    const primary = captureScope(captureSemanticIds[0]!);
+    const store = createEvidenceAuthorityLedgerPersistence(captureDriver);
+    const captureFacet = createEvidenceAuthorityCaptureFacet(store, primary);
+    const firstOperation = {
+      caseId: 'capture-case-live-1',
+      coverageOperationId: 'capture-op-coverage-live-1',
+      caseOperationId: 'capture-op-case-live-1',
+    };
+
+    // Concurrency on one Semantic: both attempts converge on one stored pair.
+    const [first, concurrent] = await Promise.all([
+      store.captureCase(captureFacet, primary, firstOperation),
+      store.captureCase(captureFacet, primary, firstOperation),
+    ]);
+    expect(first.coverageReceipt).toMatchObject({
+      kind: 'coverage', action: 'opened', state: 'open', sequence: 1,
+    });
+    expect(first.caseReceipt).toMatchObject({
+      kind: 'case', action: 'case_opened', state: 'pending', sequence: 2,
+    });
+    expect(concurrent.coverageReceipt).toEqual(first.coverageReceipt);
+    expect(concurrent.caseReceipt).toEqual(first.caseReceipt);
+    expect(await ledgerCounts(primary.semanticId)).toEqual({
+      events: 2, outboxes: 2, coverage: 1, cases: 1,
+    });
+    expect(await captureScalar(
+      `MATCH (e:EvidenceAuthorityEvent {tenant_id: $tenantId, semantic_id: $semanticId})
+       WHERE NOT (e)-[:EMITTED]->(:EvidenceAuthorityOutbox)
+       RETURN count(e) AS count`,
+      'count',
+      { tenantId: captureTenantId, semanticId: primary.semanticId },
+    )).toBe(0);
+
+    // Idempotent replay of the exact pair.
+    const replay = await store.captureCase(captureFacet, primary, firstOperation);
+    expect(replay.coverageReceipt).toEqual(first.coverageReceipt);
+    expect(replay.caseReceipt).toEqual(first.caseReceipt);
+    expect(await ledgerCounts(primary.semanticId)).toEqual({
+      events: 2, outboxes: 2, coverage: 1, cases: 1,
+    });
+
+    // Second capture on open coverage appends the case alone.
+    const second = await store.captureCase(captureFacet, primary, {
+      caseId: 'capture-case-live-2',
+      coverageOperationId: 'capture-op-coverage-live-2',
+      caseOperationId: 'capture-op-case-live-2',
+    });
+    expect(second.coverageReceipt).toBeNull();
+    expect(second.caseReceipt).toMatchObject({ state: 'pending', sequence: 3 });
+    expect(await ledgerCounts(primary.semanticId)).toEqual({
+      events: 3, outboxes: 3, coverage: 1, cases: 2,
+    });
+
+    // Pre-existing raw CONTRADICTS history fails closed with zero residue.
+    const history = captureScope(captureSemanticIds[1]!);
+    const historyFacet = createEvidenceAuthorityCaptureFacet(store, history);
+    await expect(store.captureCase(historyFacet, history, firstOperation))
+      .rejects.toMatchObject({ code: 'invalid_transition' });
+    expect(await ledgerCounts(history.semanticId)).toEqual({
+      events: 0, outboxes: 0, coverage: 0, cases: 0,
+    });
+
+    // Induced mid-transaction failure rolls back everything: no bare coverage.
+    const rollback = captureScope(captureSemanticIds[2]!);
+    const corrupt = createEvidenceAuthorityLedgerPersistence(corruptCaptureAppendDriver(captureDriver));
+    await expect(corrupt.captureCase(
+      createEvidenceAuthorityCaptureFacet(corrupt, rollback),
+      rollback,
+      firstOperation,
+    )).rejects.toMatchObject({ code: 'write_incomplete' });
+    expect(await ledgerCounts(rollback.semanticId)).toEqual({
+      events: 0, outboxes: 0, coverage: 0, cases: 0,
+    });
+
+    // Isolation: the facet is sealed to its exact scope, and a scope that does
+    // not match the stored node exactly captures nothing.
+    await expect(store.captureCase(captureFacet, history, firstOperation))
+      .rejects.toMatchObject({ code: 'facet_scope_mismatch' });
+    await expect(store.captureCase(
+      captureFacet,
+      { ...primary, tenantId: `${captureTenantId}-wrong` },
+      firstOperation,
+    )).rejects.toMatchObject({ code: 'facet_scope_mismatch' });
+    const foreignScope = {
+      tenantId: captureTenantId,
+      projectScope: `${captureProjectScope}-wrong`,
+      semanticId: rollback.semanticId,
+    };
+    const foreignFacet = createEvidenceAuthorityCaptureFacet(store, foreignScope);
+    await expect(store.captureCase(foreignFacet, foreignScope, firstOperation))
+      .rejects.toMatchObject({ code: 'semantic_not_found' });
+    expect(await ledgerCounts(rollback.semanticId)).toEqual({
+      events: 0, outboxes: 0, coverage: 0, cases: 0,
+    });
+
+    // Revoked coverage refuses further capture.
+    const review = createEvidenceAuthorityReviewFacet(store, rollback);
+    const rollbackFacet = createEvidenceAuthorityCaptureFacet(store, rollback);
+    const opened = await store.openCoverage(rollbackFacet, rollback, { operationId: 'coverage-open' });
+    await store.revokeCoverage(review, opened.facet, rollback, { operationId: 'coverage-revoke' });
+    await expect(store.captureCase(rollbackFacet, rollback, {
+      caseId: 'capture-case-live-late',
+      coverageOperationId: 'capture-op-coverage-live-late',
+      caseOperationId: 'capture-op-case-live-late',
+    })).rejects.toMatchObject({ code: 'facet_revoked' });
+    expect(await ledgerCounts(rollback.semanticId)).toEqual({
+      events: 2, outboxes: 2, coverage: 1, cases: 0,
+    });
+  }, 120_000);
+
+  it('captures end to end through the unwired capture module with digested identity', async () => {
+    const moduleSemanticId = captureSemanticIds[3]!;
+    const capture = createEvidenceAuthorityCapture(captureDriver);
+    const request = {
+      tenantId: captureTenantId,
+      projectScope: captureProjectScope,
+      semanticId: moduleSemanticId,
+      signalKind: 'contradiction' as const,
+      sourceEpisodeId: `_ep-${captureSuffix}`,
+    };
+    const result = await capture.capture(request);
+    expect(result.outcome).toBe('captured');
+    expect(result.outcome === 'captured' && result.receipt).toMatchObject({
+      kind: 'case', action: 'case_opened', state: 'pending', sequence: 2,
+    });
+    expect(await ledgerCounts(moduleSemanticId)).toEqual({
+      events: 2, outboxes: 2, coverage: 1, cases: 1,
+    });
+    expect(await captureScalar(
+      `MATCH (n)
+       WHERE n.tenant_id = $tenantId AND n.semantic_id = $semanticId
+         AND (n:EvidenceAuthorityEvent OR n:EvidenceAuthorityCase OR n:EvidenceAuthorityOutbox)
+         AND (n.id CONTAINS $episodeId OR n.case_id CONTAINS $episodeId OR n.operation_id CONTAINS $episodeId)
+       RETURN count(n) AS count`,
+      'count',
+      {
+        tenantId: captureTenantId,
+        semanticId: moduleSemanticId,
+        episodeId: request.sourceEpisodeId,
+      },
+    )).toBe(0);
+
+    const replay = await capture.capture(request);
+    expect(replay).toEqual(result);
+    expect(await ledgerCounts(moduleSemanticId)).toEqual({
+      events: 2, outboxes: 2, coverage: 1, cases: 1,
+    });
+
+    const uncaptured = await capture.capture({ ...request, projectScope: null });
+    expect(uncaptured).toEqual({
+      contractVersion: 'memberry.evidence-authority-capture/1.0.0',
+      outcome: 'uncaptured',
+      code: 'uncaptured',
+    });
   }, 120_000);
 });

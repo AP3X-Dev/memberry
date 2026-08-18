@@ -102,6 +102,19 @@ export interface EvidenceAuthorityCaseOpenResultV1 {
   readonly receipt: EvidenceAuthorityEventReceiptV1;
 }
 
+/** B2 combined-capture command: one case identity plus one distinct operation id per pair member. */
+export interface EvidenceAuthorityCaptureCaseOperationV1 {
+  readonly caseId: string;
+  readonly coverageOperationId: string;
+  readonly caseOperationId: string;
+}
+
+/** B2 combined-capture outcome: receipts only, never a coverage or case facet. */
+export interface EvidenceAuthorityCaptureCaseResultV1 {
+  readonly coverageReceipt: EvidenceAuthorityEventReceiptV1 | null;
+  readonly caseReceipt: EvidenceAuthorityEventReceiptV1;
+}
+
 export type EvidenceAuthorityLedgerErrorCode =
   | 'invalid_scope'
   | 'invalid_command'
@@ -220,6 +233,11 @@ export interface EvidenceAuthorityLedgerPersistenceV1 {
     scope: unknown,
     operation: unknown,
   ): Promise<EvidenceAuthorityEventReceiptV1>;
+  captureCase(
+    captureFacet: unknown,
+    scope: unknown,
+    operation: unknown,
+  ): Promise<EvidenceAuthorityCaptureCaseResultV1>;
 }
 
 function isLedgerError(value: unknown): value is EvidenceAuthorityLedgerError {
@@ -334,6 +352,22 @@ function parseOpenCaseOperation(value: unknown): EvidenceAuthorityOpenCaseOperat
     throw new EvidenceAuthorityLedgerError('invalid_command');
   }
   return Object.freeze({ caseId: input.caseId, operationId: input.operationId });
+}
+
+function parseCaptureCaseOperation(value: unknown): EvidenceAuthorityCaptureCaseOperationV1 {
+  const input = strictRecord(value, 'invalid_command');
+  exactKeys(input, ['caseId', 'coverageOperationId', 'caseOperationId'], 'invalid_command');
+  if (!identifier(input.caseId)
+    || !identifier(input.coverageOperationId)
+    || !identifier(input.caseOperationId)
+    || input.coverageOperationId === input.caseOperationId) {
+    throw new EvidenceAuthorityLedgerError('invalid_command');
+  }
+  return Object.freeze({
+    caseId: input.caseId,
+    coverageOperationId: input.coverageOperationId,
+    caseOperationId: input.caseOperationId,
+  });
 }
 
 function sameScope(left: EvidenceAuthorityScopeV1, right: EvidenceAuthorityScopeV1): boolean {
@@ -1132,6 +1166,101 @@ RETURN properties(event) AS event,
        properties(outbox) AS outbox,
        properties(target) AS target`;
 
+const CAPTURE_RAW_SIGNAL_QUERY = `/* evidence-authority:capture-raw-signal-count */
+MATCH (semantic:Semantic {id: $semanticId})
+WHERE semantic.tenant_id = $tenantId AND semantic.scope = $projectScope
+OPTIONAL MATCH (semantic)<-[raw:CONTRADICTS|CORRECTS]-()
+RETURN count(raw) AS rawSignalCount`;
+
+const CAPTURE_OPEN_COVERAGE_CASE_QUERY = `/* evidence-authority:append-capture-coverage-case */
+MATCH (ledger:EvidenceAuthorityLedger {id: $ledgerId}),
+      (semantic:Semantic {id: $semanticId})
+WHERE semantic.tenant_id = $tenantId AND semantic.scope = $projectScope
+CREATE (coverageEvent:EvidenceAuthorityEvent {
+  id: $coverageEventId, tenant_id: $tenantId, project_scope: $projectScope,
+  semantic_id: $semanticId, case_id: '', operation_id: $coverageOperationId,
+  kind: 'coverage', action: 'opened', state: 'open',
+  sequence: $coverageSequence, recorded_at: toString(datetime())
+})
+CREATE (coverage:EvidenceAuthorityCoverage {
+  id: $coverageId, tenant_id: $tenantId, project_scope: $projectScope,
+  semantic_id: $semanticId, created_at: coverageEvent.recorded_at
+})
+CREATE (coverageOutbox:EvidenceAuthorityOutbox {
+  id: $coverageOutboxId, event_id: $coverageEventId, tenant_id: $tenantId,
+  project_scope: $projectScope, semantic_id: $semanticId, case_id: '',
+  kind: 'coverage', action: 'opened', state: 'open',
+  sequence: $coverageSequence, recorded_at: coverageEvent.recorded_at
+})
+CREATE (caseEvent:EvidenceAuthorityEvent {
+  id: $caseEventId, tenant_id: $tenantId, project_scope: $projectScope,
+  semantic_id: $semanticId, case_id: $caseId, operation_id: $caseOperationId,
+  kind: 'case', action: 'case_opened', state: 'pending',
+  sequence: $caseSequence, recorded_at: coverageEvent.recorded_at
+})
+CREATE (caseNode:EvidenceAuthorityCase {
+  id: $caseNodeId, tenant_id: $tenantId, project_scope: $projectScope,
+  semantic_id: $semanticId, coverage_id: $coverageId, case_id: $caseId,
+  created_at: coverageEvent.recorded_at
+})
+CREATE (caseOutbox:EvidenceAuthorityOutbox {
+  id: $caseOutboxId, event_id: $caseEventId, tenant_id: $tenantId,
+  project_scope: $projectScope, semantic_id: $semanticId, case_id: $caseId,
+  kind: 'case', action: 'case_opened', state: 'pending',
+  sequence: $caseSequence, recorded_at: coverageEvent.recorded_at
+})
+CREATE (ledger)-[:HAS_COVERAGE]->(coverage)
+CREATE (coverage)-[:COVERS]->(semantic)
+CREATE (ledger)-[:HAS_EVENT]->(coverageEvent)
+CREATE (coverageEvent)-[:FOR_COVERAGE]->(coverage)
+CREATE (coverageEvent)-[:EMITTED]->(coverageOutbox)
+CREATE (ledger)-[:HAS_CASE]->(caseNode)
+CREATE (caseNode)-[:FOR_COVERAGE]->(coverage)
+CREATE (ledger)-[:HAS_EVENT]->(caseEvent)
+CREATE (caseEvent)-[:FOR_CASE]->(caseNode)
+CREATE (caseEvent)-[:EMITTED]->(caseOutbox)
+SET ledger.version = $caseSequence
+RETURN properties(coverageEvent) AS coverageEvent,
+       properties(coverageOutbox) AS coverageOutbox,
+       properties(coverage) AS coverageTarget,
+       properties(caseEvent) AS caseEvent,
+       properties(caseOutbox) AS caseOutbox,
+       properties(caseNode) AS caseTarget`;
+
+function captureQueryParams(
+  coverageSpec: OperationSpec,
+  caseSpec: OperationSpec,
+  version: number,
+): Record<string, unknown> {
+  return {
+    tenantId: coverageSpec.scope.tenantId,
+    projectScope: coverageSpec.scope.projectScope,
+    semanticId: coverageSpec.scope.semanticId,
+    ledgerId: coverageSpec.scope.ledgerId,
+    coverageId: coverageSpec.scope.coverageId,
+    caseId: caseSpec.caseId,
+    caseNodeId: caseSpec.caseNodeId,
+    coverageOperationId: coverageSpec.operationId,
+    coverageEventId: coverageSpec.eventId,
+    coverageOutboxId: coverageSpec.outboxId,
+    caseOperationId: caseSpec.operationId,
+    caseEventId: caseSpec.eventId,
+    caseOutboxId: caseSpec.outboxId,
+    coverageSequence: neo4j.int(version + 1),
+    caseSequence: neo4j.int(version + 2),
+  };
+}
+
+function captureCaseResult(
+  coverageReceipt: EvidenceAuthorityEventReceiptV1 | null,
+  caseReceipt: EvidenceAuthorityEventReceiptV1,
+): EvidenceAuthorityCaptureCaseResultV1 {
+  return Object.freeze(Object.assign(Object.create(null), {
+    coverageReceipt,
+    caseReceipt,
+  })) as EvidenceAuthorityCaptureCaseResultV1;
+}
+
 class EvidenceAuthorityLedgerPersistence implements EvidenceAuthorityLedgerPersistenceV1 {
   private metadata(): { readonly driver: Driver; readonly storeToken: object } {
     const metadata = storeMetadata.get(this);
@@ -1500,6 +1629,245 @@ class EvidenceAuthorityLedgerPersistence implements EvidenceAuthorityLedgerPersi
     );
     const result = await this.perform(spec);
     return sealedResult(this.caseFacet(scope, operation.caseId, spec.caseNodeId), result.receipt);
+  }
+
+  /**
+   * B2 preamble: a fresh copy of the lock/audit/history validation used by
+   * perform(), duplicated so no existing method changes behavior or bytes.
+   */
+  private async capturePreamble(tx: ManagedTransaction, spec: OperationSpec): Promise<number> {
+    const lock = await tx.run(LOCK_QUERY, queryParams(spec));
+    try {
+      const records = (lock as { records?: unknown }).records;
+      if (!Array.isArray(records)) throw new EvidenceAuthorityLedgerError('write_incomplete');
+      if (records.length === 0) throw new EvidenceAuthorityLedgerError('semantic_not_found');
+      if (records.length !== 1) throw new EvidenceAuthorityLedgerError('write_incomplete');
+    } catch (error) {
+      throw normalizedError(error, 'write_incomplete');
+    }
+    const lockRecord = singleRecord(lock, 'write_incomplete');
+    const ledger = properties(
+      safeGet(lockRecord, 'ledger', 'write_incomplete'),
+      LEDGER_KEYS,
+      'write_incomplete',
+    );
+    const version = integer(ledger.version, 'write_incomplete');
+    if (ledger.id !== spec.scope.ledgerId
+      || ledger.tenant_id !== spec.scope.tenantId
+      || ledger.project_scope !== spec.scope.projectScope
+      || ledger.semantic_id !== spec.scope.semanticId
+      || ledger.locked !== true) {
+      throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+    }
+    const auditResult = await tx.run(LEDGER_EVENT_AUDIT_QUERY, queryParams(spec));
+    let auditRows: unknown[];
+    try {
+      auditRows = (auditResult as { records?: unknown }).records as unknown[];
+      if (!Array.isArray(auditRows) || auditRows.length !== version) {
+        throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+      }
+    } catch (error) {
+      throw normalizedError(error, 'existing_state_mismatch');
+    }
+    const auditedEvents = auditRows.map((row) => validateAuditedEvent(spec.scope, row));
+    const orderedEvents = [...auditedEvents].sort((left, right) => left.sequence - right.sequence);
+    const sequences = orderedEvents.map((event) => event.sequence);
+    if (sequences.some((sequence, index) => sequence !== index + 1)) {
+      throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+    }
+    validateOrderedHistory(orderedEvents);
+    return version;
+  }
+
+  /** B2 replay probe: returns the fully validated stored operation, or null when absent. */
+  private async captureReplay(
+    tx: ManagedTransaction,
+    spec: OperationSpec,
+    version: number,
+  ): Promise<OperationResult | null> {
+    const replay = await tx.run(
+      spec.kind === 'coverage' ? REPLAY_COVERAGE_QUERY : REPLAY_CASE_QUERY,
+      queryParams(spec),
+    );
+    const replayRecord = singleRecord(replay, 'existing_state_mismatch');
+    const replayEvent = safeGet(replayRecord, 'event', 'existing_state_mismatch');
+    const replayCount = (key: string) => integer(
+      safeGet(replayRecord, key, 'existing_state_mismatch'),
+      'existing_state_mismatch',
+    );
+    const anyEventCount = replayCount('anyEventCount');
+    const anyOutboxCount = replayCount('anyOutboxCount');
+    if (replayEvent !== null) {
+      const replayEventProperties = properties(
+        replayEvent,
+        EVENT_KEYS,
+        'existing_state_mismatch',
+      );
+      if (replayEventProperties.id !== spec.eventId
+        || replayEventProperties.tenant_id !== spec.scope.tenantId
+        || replayEventProperties.project_scope !== spec.scope.projectScope
+        || replayEventProperties.semantic_id !== spec.scope.semanticId
+        || replayEventProperties.operation_id !== spec.operationId) {
+        throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+      }
+      if (replayEventProperties.case_id !== spec.caseId
+        || replayEventProperties.kind !== spec.kind
+        || replayEventProperties.action !== spec.action
+        || replayEventProperties.state !== spec.state) {
+        throw new EvidenceAuthorityLedgerError('operation_conflict');
+      }
+      if (anyEventCount !== 1
+        || anyOutboxCount !== 1
+        || replayCount('expectedOwnerCount') !== 1
+        || replayCount('expectedEmitCount') !== 1
+        || replayCount('expectedTargetCount') !== 1
+        || replayCount('allOwnerCount') !== 1
+        || replayCount('allEmitCount') !== 1
+        || replayCount('allTargetCount') !== 1
+        || replayCount('allIncomingCount') !== 1) {
+        throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+      }
+      const stored = validateStored(
+        spec,
+        replayEvent,
+        safeGet(replayRecord, 'outbox', 'existing_state_mismatch'),
+        safeGet(replayRecord, 'target', 'existing_state_mismatch'),
+        'existing_state_mismatch',
+      );
+      if (stored.receipt.sequence > version) {
+        throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+      }
+      return stored;
+    }
+    if (safeGet(replayRecord, 'outbox', 'existing_state_mismatch') !== null
+      || safeGet(replayRecord, 'target', 'existing_state_mismatch') !== null
+      || anyEventCount !== 0
+      || anyOutboxCount !== 0
+      || replayCount('expectedOwnerCount') !== 0
+      || replayCount('expectedEmitCount') !== 0
+      || replayCount('expectedTargetCount') !== 0
+      || replayCount('allOwnerCount') !== 0
+      || replayCount('allEmitCount') !== 0
+      || replayCount('allTargetCount') !== 0
+      || replayCount('allIncomingCount') !== 0) {
+      throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+    }
+    return null;
+  }
+
+  /**
+   * B2 combined capture: one executeWrite covering all branches.
+   * No coverage: prove zero incoming raw CONTRADICTS/CORRECTS relationships in
+   * the same transaction, then create coverage + case + paired events at
+   * sequence n+1/n+2 + paired outboxes. Coverage open: create the case alone.
+   * Coverage revoked: facet_revoked. Returns receipts only, never a facet.
+   */
+  async captureCase(
+    rawCaptureFacet: unknown,
+    rawScope: unknown,
+    rawOperation: unknown,
+  ): Promise<EvidenceAuthorityCaptureCaseResultV1> {
+    const scope = parseScope(rawScope);
+    this.requireCaptureFacet(rawCaptureFacet, scope);
+    const operation = parseCaptureCaseOperation(rawOperation);
+    const coverageSpec = operationSpec(
+      scope,
+      operation.coverageOperationId,
+      'coverage',
+      'opened',
+      'open',
+      '',
+      'coverage',
+    );
+    const caseSpec = operationSpec(
+      scope,
+      operation.caseOperationId,
+      'case',
+      'case_opened',
+      'pending',
+      operation.caseId,
+      'case',
+    );
+    return this.managed(async (tx) => {
+      const version = await this.capturePreamble(tx, coverageSpec);
+      const storedCoverage = await this.captureReplay(tx, coverageSpec, version);
+      const storedCase = await this.captureReplay(tx, caseSpec, version);
+      if (storedCase !== null) {
+        if (storedCoverage !== null) {
+          if (storedCase.receipt.sequence !== storedCoverage.receipt.sequence + 1) {
+            throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+          }
+          return captureCaseResult(storedCoverage.receipt, storedCase.receipt);
+        }
+        const coverage = await this.state(tx, coverageSpec, 'coverage', version);
+        if (coverage.target === null) {
+          throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+        }
+        return captureCaseResult(null, storedCase.receipt);
+      }
+      if (storedCoverage !== null) {
+        throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+      }
+      const coverage = await this.state(tx, coverageSpec, 'coverage', version);
+      if (coverage.target !== null) {
+        if (coverage.state === 'revoked') {
+          throw new EvidenceAuthorityLedgerError('facet_revoked');
+        }
+        if (coverage.state !== 'open') {
+          throw new EvidenceAuthorityLedgerError('existing_state_mismatch');
+        }
+        const currentCase = await this.state(tx, caseSpec, 'case', version);
+        if (currentCase.target !== null) {
+          throw new EvidenceAuthorityLedgerError('invalid_transition');
+        }
+        const appended = await tx.run(OPEN_CASE_QUERY, queryParams(caseSpec, version + 1));
+        const appendedRecord = singleRecord(appended, 'write_incomplete');
+        const stored = validateStored(
+          caseSpec,
+          safeGet(appendedRecord, 'event', 'write_incomplete'),
+          safeGet(appendedRecord, 'outbox', 'write_incomplete'),
+          safeGet(appendedRecord, 'target', 'write_incomplete'),
+          'write_incomplete',
+        );
+        if (stored.receipt.sequence !== version + 1) {
+          throw new EvidenceAuthorityLedgerError('write_incomplete');
+        }
+        return captureCaseResult(null, stored.receipt);
+      }
+      const rawSignals = await tx.run(CAPTURE_RAW_SIGNAL_QUERY, queryParams(coverageSpec));
+      const rawSignalRecord = singleRecord(rawSignals, 'existing_state_mismatch');
+      const rawSignalCount = integer(
+        safeGet(rawSignalRecord, 'rawSignalCount', 'existing_state_mismatch'),
+        'existing_state_mismatch',
+      );
+      if (rawSignalCount !== 0) {
+        throw new EvidenceAuthorityLedgerError('invalid_transition');
+      }
+      const appended = await tx.run(
+        CAPTURE_OPEN_COVERAGE_CASE_QUERY,
+        captureQueryParams(coverageSpec, caseSpec, version),
+      );
+      const appendedRecord = singleRecord(appended, 'write_incomplete');
+      const storedCoverageAppend = validateStored(
+        coverageSpec,
+        safeGet(appendedRecord, 'coverageEvent', 'write_incomplete'),
+        safeGet(appendedRecord, 'coverageOutbox', 'write_incomplete'),
+        safeGet(appendedRecord, 'coverageTarget', 'write_incomplete'),
+        'write_incomplete',
+      );
+      const storedCaseAppend = validateStored(
+        caseSpec,
+        safeGet(appendedRecord, 'caseEvent', 'write_incomplete'),
+        safeGet(appendedRecord, 'caseOutbox', 'write_incomplete'),
+        safeGet(appendedRecord, 'caseTarget', 'write_incomplete'),
+        'write_incomplete',
+      );
+      if (storedCoverageAppend.receipt.sequence !== version + 1
+        || storedCaseAppend.receipt.sequence !== version + 2) {
+        throw new EvidenceAuthorityLedgerError('write_incomplete');
+      }
+      return captureCaseResult(storedCoverageAppend.receipt, storedCaseAppend.receipt);
+    });
   }
 
   private async transitionCase(
