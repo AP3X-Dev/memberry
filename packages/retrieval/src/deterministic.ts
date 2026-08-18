@@ -753,6 +753,10 @@ function consumeStableDeterministicValue(budget: StableDeterministicBudget, valu
   budget.values += 1;
   if (budget.values > MAX_STABLE_DETERMINISTIC_TOTAL_VALUES) stableDeterministicInvalid();
   if (typeof value === 'string') {
+    const remainingStringBytes = MAX_STABLE_DETERMINISTIC_TOTAL_STRING_BYTES - budget.stringBytes;
+    if (value.length > MAX_STABLE_DETERMINISTIC_STRING_BYTES || value.length > remainingStringBytes) {
+      stableDeterministicInvalid();
+    }
     const bytes = Buffer.byteLength(value, 'utf8');
     if (bytes > MAX_STABLE_DETERMINISTIC_STRING_BYTES) stableDeterministicInvalid();
     budget.stringBytes += bytes;
