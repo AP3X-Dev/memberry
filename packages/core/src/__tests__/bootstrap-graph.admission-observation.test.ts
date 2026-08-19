@@ -43,7 +43,7 @@ describe('BootstrapGraphService admission sidecar isolation', () => {
 describe('BootstrapGraphService semantic lifecycle stamping (RET-005B-AUTH-001B6P)', () => {
   it('T9: stamps valid_at ON CREATE only and never inside ON MATCH SET', async () => {
     const run = vi.fn(async (_query: string, _params?: Record<string, unknown>) => ({
-      records: [{ get: (key: string) => (key === 'isNew' ? true : 'mock-id') }],
+      records: [{ get: (key: string) => (key === 'isNew' ? true : key === 'linked' ? 0 : 'mock-id') }],
     }));
     const driver = {
       session: vi.fn(() => ({ run, close: vi.fn(async () => undefined) })),
