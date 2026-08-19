@@ -379,7 +379,9 @@ describe('EvidenceAuthorityLedgerPersistence V1', () => {
     expect(fake.coverage.size).toBe(0);
 
     const migrations = readFileSync(resolve(REPO_ROOT, 'packages/neo4j/src/migrations.ts'), 'utf8');
-    const migration = migrations.slice(migrations.indexOf("id: '0008-evidence-authority-ledger-v1'"));
+    const start = migrations.indexOf("id: '0008-evidence-authority-ledger-v1'");
+    const nextId = migrations.indexOf("id: '", start + 5);
+    const migration = nextId === -1 ? migrations.slice(start) : migrations.slice(start, nextId);
     expect(migration).not.toMatch(/MATCH\s*\(s:Semantic\)/);
     expect(migration).not.toMatch(/SET\s+s\./);
     expect(migration).not.toMatch(/backfill/i);
