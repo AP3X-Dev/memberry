@@ -1961,3 +1961,447 @@ describeLive('EvidenceAuthorityRead live Neo4j gate (RET-005B-AUTH-001B3B2)', ()
     expect(modes.every((mode) => mode === 'READ')).toBe(true);
   }, 120_000);
 });
+
+// ---------------------------------------------------------------------------
+// RET-005B-AUTH-001B4: additive clearance derivation live gate. Every suite
+// above is frozen; this block owns its own driver, fixtures, and full
+// cleanup, and proves what no fake can: the capture digest hand copy against
+// real ledger bytes, the record-time invariant against real datetime()
+// output, the zero-edge collect semantic, and the read-only posture.
+// ---------------------------------------------------------------------------
+
+describeLive('EvidenceAuthorityClearance live Neo4j gate (RET-005B-AUTH-001B4)', () => {
+  const clearanceDriver = createNeo4jDriver(uri, user, password);
+  const clearanceSuffix = randomUUID().toLowerCase();
+  const clearanceTenantId = `test-evidence-clearance-${clearanceSuffix}`;
+  const clearanceProjectScope = `project:test-evidence-clearance-${clearanceSuffix}`;
+  const clearanceSemanticIds = [
+    'semantic-clearance-clear',
+    'semantic-clearance-truncated',
+    'semantic-clearance-readonly',
+    'semantic-clearance-zeroedge',
+    'semantic-clearance-absent',
+  ].map((value) => `${value}-${clearanceSuffix}`);
+  const clearanceEpisodeId = `ep-clearance-${clearanceSuffix}`;
+  const clearanceScopeOf = (semanticId: string): EvidenceAuthorityScopeV1 => ({
+    tenantId: clearanceTenantId,
+    projectScope: clearanceProjectScope,
+    semanticId,
+  });
+  let createEvidenceAuthorityClearance:
+    typeof import('../evidence-authority-clearance.js')['createEvidenceAuthorityClearance'];
+  let clearanceCreateHash: typeof import('node:crypto')['createHash'];
+  let liveNeo4j: typeof import('neo4j-driver')['default'];
+
+  // Test-local hand copy of the capture case digest; never imported from the
+  // module under test.
+  const clearanceCaseId = (semanticId: string, sourceEpisodeId: string, signalKind: string): string => {
+    const input = JSON.stringify([
+      'memberry-evidence-authority-capture-v1', 'case',
+      clearanceTenantId, clearanceProjectScope, semanticId,
+      sourceEpisodeId, signalKind,
+    ]);
+    return `capture-case-${clearanceCreateHash('sha256').update(input).digest('hex')}`;
+  };
+
+  async function clearanceScalar(
+    query: string,
+    key: string,
+    params: Record<string, unknown> = {},
+  ): Promise<number> {
+    const session = clearanceDriver.session();
+    try {
+      const result = await session.run(query, params);
+      return Number(result.records[0]?.get(key) ?? 0);
+    } finally {
+      await session.close();
+    }
+  }
+
+  async function clearanceString(
+    query: string,
+    key: string,
+    params: Record<string, unknown> = {},
+  ): Promise<string> {
+    const session = clearanceDriver.session();
+    try {
+      const result = await session.run(query, params);
+      return String(result.records[0]?.get(key) ?? '');
+    } finally {
+      await session.close();
+    }
+  }
+
+  async function clearanceTenantCounts() {
+    const params = { tenantId: clearanceTenantId };
+    const count = (label: string) => clearanceScalar(
+      `MATCH (n:${label} {tenant_id: $tenantId}) RETURN count(n) AS count`,
+      'count',
+      params,
+    );
+    return {
+      ledgers: await count('EvidenceAuthorityLedger'),
+      events: await count('EvidenceAuthorityEvent'),
+      outboxes: await count('EvidenceAuthorityOutbox'),
+      coverage: await count('EvidenceAuthorityCoverage'),
+      cases: await count('EvidenceAuthorityCase'),
+    };
+  }
+
+  async function clearanceLedgerVersion(semanticId: string): Promise<number> {
+    return clearanceScalar(
+      `MATCH (l:EvidenceAuthorityLedger {tenant_id: $tenantId, semantic_id: $semanticId})
+       RETURN l.version AS version`,
+      'version',
+      { tenantId: clearanceTenantId, semanticId },
+    );
+  }
+
+  beforeAll(async () => {
+    ({ createEvidenceAuthorityClearance } = await import('../evidence-authority-clearance.js'));
+    ({ createHash: clearanceCreateHash } = await import('node:crypto'));
+    ({ default: liveNeo4j } = await import('neo4j-driver'));
+    await clearanceDriver.getServerInfo();
+    const migration = MIGRATIONS.find((item) => item.id === '0008-evidence-authority-ledger-v1');
+    expect(migration).toBeDefined();
+    await migration!.up(clearanceDriver);
+    await initSchema(clearanceDriver);
+    const session = clearanceDriver.session();
+    try {
+      // The 'semantic-clearance-absent' id deliberately gets NO Semantic node
+      // and no ledger: it is the entirely-absent arm of the zero-writes test.
+      for (const semanticId of clearanceSemanticIds.slice(0, 4)) {
+        await session.run(
+          `CREATE (s:Semantic {
+             id: $semanticId, tenant_id: $tenantId, scope: $projectScope,
+             content: 'disposable synthetic clearance fixture', confidence: 1.0,
+             signal_count: 0, created_at: datetime(), updated_at: datetime(),
+             decay_class: 'stable', tags: [$projectScope]
+           })`,
+          {
+            semanticId,
+            tenantId: clearanceTenantId,
+            projectScope: clearanceProjectScope,
+          },
+        );
+      }
+    } finally {
+      await session.close();
+    }
+  });
+
+  afterAll(async () => {
+    if (LIVE_ENABLED) {
+      const session = clearanceDriver.session();
+      try {
+        await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $nodeIds
+           DETACH DELETE n`,
+          {
+            tenantId: clearanceTenantId,
+            projectScope: clearanceProjectScope,
+            semanticIds: clearanceSemanticIds,
+            nodeIds: [...clearanceSemanticIds, clearanceEpisodeId],
+          },
+        );
+        const residue = await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $nodeIds
+           RETURN count(n) AS count`,
+          {
+            tenantId: clearanceTenantId,
+            projectScope: clearanceProjectScope,
+            semanticIds: clearanceSemanticIds,
+            nodeIds: [...clearanceSemanticIds, clearanceEpisodeId],
+          },
+        );
+        expect(Number(residue.records[0]?.get('count') ?? -1)).toBe(0);
+      } finally {
+        await session.close();
+      }
+    }
+    await clearanceDriver.close().catch(() => undefined);
+  });
+
+  it('derives a live end-to-end clear: capture first, edge second, adjudicate to rejected (J27, E1.7)', async () => {
+    const semanticId = clearanceSemanticIds[0]!;
+    // Capture FIRST: on a healthy ledger no other order is reachable, because
+    // capture refuses unless the raw signal count is zero.
+    const capture = createEvidenceAuthorityCapture(clearanceDriver);
+    const captured = await capture.capture({
+      tenantId: clearanceTenantId,
+      projectScope: clearanceProjectScope,
+      semanticId,
+      signalKind: 'contradiction' as const,
+      sourceEpisodeId: clearanceEpisodeId,
+    });
+    expect(captured.outcome).toBe('captured');
+    // Edge SECOND, with the producer's app-clock string valid time.
+    const appValidAt = new Date().toISOString();
+    const session = clearanceDriver.session();
+    try {
+      await session.run(
+        `MATCH (s:Semantic {id: $semanticId, tenant_id: $tenantId})
+         CREATE (e:Episodic {
+           id: $episodeId, tenant_id: $tenantId, scope: $projectScope,
+           content: 'disposable synthetic clearance signal', created_at: datetime()
+         })
+         CREATE (e)-[:CONTRADICTS {valid_at: $validAt}]->(s)`,
+        {
+          semanticId,
+          tenantId: clearanceTenantId,
+          projectScope: clearanceProjectScope,
+          episodeId: clearanceEpisodeId,
+          validAt: appValidAt,
+        },
+      );
+    } finally {
+      await session.close();
+    }
+    // Record both real timestamps for the cross-clock note: server-clock
+    // coverage record time vs app-clock edge valid time.
+    const serverRecordedAt = await clearanceString(
+      `MATCH (e:EvidenceAuthorityEvent {tenant_id: $tenantId, semantic_id: $semanticId, kind: 'coverage', action: 'opened'})
+       RETURN e.recorded_at AS recordedAt`,
+      'recordedAt',
+      { tenantId: clearanceTenantId, semanticId },
+    );
+    console.info(`[auth001b4 cross-clock] coverage recorded_at=${serverRecordedAt} edge valid_at=${appValidAt}`);
+    // Adjudicate the digested case to rejected.
+    const adjudication = createEvidenceAuthorityAdjudication(clearanceDriver, {
+      tenantId: clearanceTenantId,
+      projectScope: clearanceProjectScope,
+      principalId: 'principal-live-clearance-alpha',
+    });
+    const adjudicated = await adjudication.adjudicate({
+      semanticId,
+      caseId: clearanceCaseId(semanticId, clearanceEpisodeId, 'contradiction'),
+      decision: 'reject' as const,
+    });
+    expect(adjudicated.outcome).toBe('adjudicated');
+    // The decisive derivation: digest hand copy, argument order, prefix,
+    // canonical-instant predicate against real datetime() bytes, and the
+    // record-time invariant all agree with the ledger or this is red.
+    const clearanceSurface = createEvidenceAuthorityClearance(
+      clearanceDriver,
+      clearanceScopeOf(semanticId),
+    );
+    const result = await clearanceSurface.deriveClearance({ mode: 'current' });
+    expect(result).toEqual({
+      contractVersion: 'memberry.evidence-authority-clearance/1.0.0',
+      outcome: 'clear',
+      observedVersion: await clearanceLedgerVersion(semanticId),
+    });
+    expect(result.outcome === 'clear' && result.observedVersion).toBe(3);
+  }, 120_000);
+
+  it('flips to a coverage gap on live revocation with the case states frozen (J28)', async () => {
+    const semanticId = clearanceSemanticIds[0]!;
+    const caseId = clearanceCaseId(semanticId, clearanceEpisodeId, 'contradiction');
+    const caseEventsBefore = await clearanceScalar(
+      `MATCH (e:EvidenceAuthorityEvent {tenant_id: $tenantId, semantic_id: $semanticId, case_id: $caseId})
+       RETURN count(e) AS count`,
+      'count',
+      { tenantId: clearanceTenantId, semanticId, caseId },
+    );
+    const revocation = createEvidenceAuthorityRevocation(clearanceDriver, {
+      tenantId: clearanceTenantId,
+      projectScope: clearanceProjectScope,
+      principalId: 'principal-live-clearance-alpha',
+    });
+    const revoked = await revocation.revoke({ semanticId });
+    expect(revoked.outcome).toBe('revoked');
+    const clearanceSurface = createEvidenceAuthorityClearance(
+      clearanceDriver,
+      clearanceScopeOf(semanticId),
+    );
+    expect(await clearanceSurface.deriveClearance({ mode: 'current' })).toEqual({
+      contractVersion: 'memberry.evidence-authority-clearance/1.0.0',
+      outcome: 'unsupported',
+      code: 'clearance-coverage-gap',
+    });
+    // The rejected case history is frozen: revocation appended no case event.
+    expect(await clearanceScalar(
+      `MATCH (e:EvidenceAuthorityEvent {tenant_id: $tenantId, semantic_id: $semanticId, case_id: $caseId})
+       RETURN count(e) AS count`,
+      'count',
+      { tenantId: clearanceTenantId, semanticId, caseId },
+    )).toBe(caseEventsBefore);
+  }, 120_000);
+
+  it('refuses a live truncated listing with at least one case pending (J30, F2)', async () => {
+    const semanticId = clearanceSemanticIds[1]!;
+    const primary = clearanceScopeOf(semanticId);
+    const store = createEvidenceAuthorityLedgerPersistence(clearanceDriver);
+    const captureFacet = createEvidenceAuthorityCaptureFacet(store, primary);
+    await store.captureCase(captureFacet, primary, {
+      caseId: 'clearance-trunc-case-000',
+      coverageOperationId: 'clearance-op-coverage-trunc',
+      caseOperationId: 'clearance-op-case-trunc-000',
+    });
+    const coverage = await store.openCoverage(captureFacet, primary, {
+      operationId: 'clearance-op-coverage-trunc',
+    });
+    for (let index = 1; index <= 200; index += 1) {
+      const suffixed = String(index).padStart(3, '0');
+      await store.openCase(captureFacet, coverage.facet, primary, {
+        caseId: `clearance-trunc-case-${suffixed}`,
+        operationId: `clearance-op-case-trunc-${suffixed}`,
+      });
+    }
+    // 201 distinct cases, all pending: the listing truncates, and truncation
+    // refuses before any case state can be weighed.
+    expect(await clearanceScalar(
+      `MATCH (c:EvidenceAuthorityCase {tenant_id: $tenantId, semantic_id: $semanticId})
+       RETURN count(c) AS count`,
+      'count',
+      { tenantId: clearanceTenantId, semanticId },
+    )).toBe(201);
+    const pendingEvents = await clearanceScalar(
+      `MATCH (e:EvidenceAuthorityEvent {tenant_id: $tenantId, semantic_id: $semanticId, kind: 'case', state: 'pending'})
+       RETURN count(e) AS count`,
+      'count',
+      { tenantId: clearanceTenantId, semanticId },
+    );
+    expect(pendingEvents).toBeGreaterThanOrEqual(1);
+    const clearanceSurface = createEvidenceAuthorityClearance(clearanceDriver, primary);
+    expect(await clearanceSurface.deriveClearance({ mode: 'current' })).toEqual({
+      contractVersion: 'memberry.evidence-authority-clearance/1.0.0',
+      outcome: 'unsupported',
+      code: 'clearance-coverage-gap',
+    });
+  }, 300_000);
+
+  it('writes nothing: identical counts and version, no ledger minted for an absent scope, full run in READ mode (J31)', async () => {
+    const semanticId = clearanceSemanticIds[2]!;
+    // A clear-capable zero-edge ledger: capture, adjudicate to rejected.
+    const capture = createEvidenceAuthorityCapture(clearanceDriver);
+    const readonlyEpisodeId = `ep-clearance-readonly-${clearanceSuffix}`;
+    expect((await capture.capture({
+      tenantId: clearanceTenantId,
+      projectScope: clearanceProjectScope,
+      semanticId,
+      signalKind: 'contradiction' as const,
+      sourceEpisodeId: readonlyEpisodeId,
+    })).outcome).toBe('captured');
+    const adjudication = createEvidenceAuthorityAdjudication(clearanceDriver, {
+      tenantId: clearanceTenantId,
+      projectScope: clearanceProjectScope,
+      principalId: 'principal-live-clearance-alpha',
+    });
+    expect((await adjudication.adjudicate({
+      semanticId,
+      caseId: clearanceCaseId(semanticId, readonlyEpisodeId, 'contradiction'),
+      decision: 'reject' as const,
+    })).outcome).toBe('adjudicated');
+
+    const before = await clearanceTenantCounts();
+    const versionBefore = await clearanceLedgerVersion(semanticId);
+
+    // Every session the derivation opens must ask for READ access.
+    const modes: unknown[] = [];
+    const modeDriver = {
+      session: (config?: { defaultAccessMode?: unknown }) => {
+        modes.push(config?.defaultAccessMode);
+        return clearanceDriver.session(config as never);
+      },
+    } as unknown as Driver;
+    const clearanceSurface = createEvidenceAuthorityClearance(modeDriver, clearanceScopeOf(semanticId));
+    const result = await clearanceSurface.deriveClearance({ mode: 'current' });
+    expect(result).toEqual({
+      contractVersion: 'memberry.evidence-authority-clearance/1.0.0',
+      outcome: 'clear',
+      observedVersion: versionBefore,
+    });
+    expect(modes).toHaveLength(3);
+    expect(modes.every((mode) => mode === 'READ')).toBe(true);
+
+    // A derivation against a Semantic with no ledger mints no ledger node.
+    const ghostSemanticId = clearanceSemanticIds[4]!;
+    const ghost = createEvidenceAuthorityClearance(clearanceDriver, clearanceScopeOf(ghostSemanticId));
+    expect(await ghost.deriveClearance({ mode: 'current' })).toEqual({
+      contractVersion: 'memberry.evidence-authority-clearance/1.0.0',
+      outcome: 'unsupported',
+      code: 'clearance-coverage-gap',
+    });
+    expect(await clearanceScalar(
+      `MATCH (l:EvidenceAuthorityLedger {tenant_id: $tenantId, semantic_id: $semanticId})
+       RETURN count(l) AS count`,
+      'count',
+      { tenantId: clearanceTenantId, semanticId: ghostSemanticId },
+    )).toBe(0);
+
+    expect(await clearanceTenantCounts()).toEqual(before);
+    expect(await clearanceLedgerVersion(semanticId)).toBe(versionBefore);
+  }, 120_000);
+
+  it('proves the zero-edge collect semantic live: empty edges, driver-Integer zero count, clear (J32, E1.6)', async () => {
+    const semanticId = clearanceSemanticIds[3]!;
+    const capture = createEvidenceAuthorityCapture(clearanceDriver);
+    const zeroEdgeEpisodeId = `ep-clearance-zeroedge-${clearanceSuffix}`;
+    expect((await capture.capture({
+      tenantId: clearanceTenantId,
+      projectScope: clearanceProjectScope,
+      semanticId,
+      signalKind: 'contradiction' as const,
+      sourceEpisodeId: zeroEdgeEpisodeId,
+    })).outcome).toBe('captured');
+    const adjudication = createEvidenceAuthorityAdjudication(clearanceDriver, {
+      tenantId: clearanceTenantId,
+      projectScope: clearanceProjectScope,
+      principalId: 'principal-live-clearance-alpha',
+    });
+    expect((await adjudication.adjudicate({
+      semanticId,
+      caseId: clearanceCaseId(semanticId, zeroEdgeEpisodeId, 'contradiction'),
+      decision: 'reject' as const,
+    })).outcome).toBe('adjudicated');
+
+    // Observe the raw edge statement's real server response on the way
+    // through: collect must skip the null row, and count must arrive as a
+    // driver Integer of zero. No client-side filtering exists to save it.
+    const observed: Array<{ rawCount: unknown; edges: unknown }> = [];
+    const observingDriver = {
+      session: (config?: unknown) => {
+        const session = clearanceDriver.session(config as never);
+        return {
+          executeRead: <T>(work: (tx: ManagedTransaction) => Promise<T>) => session.executeRead(
+            async (tx) => work({
+              run: async (query: string, params?: Record<string, unknown>) => {
+                const result = await tx.run(query, params);
+                if (query.includes('evidence-authority:clearance-raw-edges') && result.records.length === 1) {
+                  observed.push({
+                    rawCount: result.records[0]!.get('rawCount'),
+                    edges: result.records[0]!.get('edges'),
+                  });
+                }
+                return result;
+              },
+            } as ManagedTransaction),
+          ),
+          close: session.close.bind(session),
+        } as unknown as Session;
+      },
+    } as unknown as Driver;
+    const clearanceSurface = createEvidenceAuthorityClearance(observingDriver, clearanceScopeOf(semanticId));
+    const result = await clearanceSurface.deriveClearance({ mode: 'current' });
+    expect(result).toEqual({
+      contractVersion: 'memberry.evidence-authority-clearance/1.0.0',
+      outcome: 'clear',
+      observedVersion: await clearanceLedgerVersion(semanticId),
+    });
+    expect(observed).toHaveLength(1);
+    expect(liveNeo4j.isInt(observed[0]!.rawCount as object)).toBe(true);
+    expect((observed[0]!.rawCount as { toNumber(): number }).toNumber()).toBe(0);
+    expect(observed[0]!.edges).toEqual([]);
+  }, 120_000);
+});
