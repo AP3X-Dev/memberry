@@ -152,7 +152,8 @@ export async function importFromPath(
           created_at: $created_at,
           updated_at: $updated_at,
           decay_class: $decay_class,
-          tags: $tags
+          tags: $tags,
+          valid_at: $created_at
         })
         WITH s
         CREATE (h:HumanEdit { action: $action, imported_at: $now, strategy: $strategy, target_id: s.id })
@@ -254,6 +255,7 @@ export async function importFromPath(
     try {
       await session.run(
         `MATCH (s:Semantic {id: $id})
+         SET s.invalid_at = CASE WHEN s.valid_at IS NOT NULL AND s.invalid_at IS NULL THEN $now ELSE s.invalid_at END
          SET s.archived = true, s.archived_at = $now`,
         { id, now },
       );

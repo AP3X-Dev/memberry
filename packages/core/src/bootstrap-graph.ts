@@ -367,6 +367,7 @@ export class BootstrapGraphService {
                      s.confidence = $confidence,
                      s.signal_count = 0,
                      s.created_at = $now,
+                     s.valid_at = $now,
                      s.updated_at = $now,
                      s.decay_class = 'stable',
                      s.tags = $tags,

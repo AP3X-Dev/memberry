@@ -643,3 +643,44 @@ describe('ResearchConsolidation', () => {
     });
   });
 });
+
+// ─── RET-005B-AUTH-001B6P: semantic lifecycle producer, site 9 ───────────────
+//
+// The confirming experiments' own instants are not in scope here
+// (pattern.evidence_ids are ids, not timestamps), so the assertion instant is
+// the truthful value: this principle is asserted when consolidation derives it.
+// The refinement to experiment instants is deferred, not hidden.
+describe('ResearchConsolidation semantic lifecycle stamping (RET-005B-AUTH-001B6P)', () => {
+  it('T11: stamps valid_at with the consolidation instant on the created principle', async () => {
+    const sessions: ReturnType<typeof mockSession>[] = [];
+    const driver = mockDriverMultiSession();
+    let callCount = 0;
+    driver.session.mockImplementation(() => {
+      callCount++;
+      const s = mockSession();
+      if (callCount === 1) {
+        s.run.mockResolvedValue({
+          records: [componentRecord('src/hot.ts', 'perf', 2, ['e1', 'e2'], ['A', 'B'])],
+        });
+      }
+      sessions.push(s);
+      return s;
+    });
+
+    await new ResearchConsolidation(driver).run('camp-001');
+
+    const createCall = sessions
+      .flatMap((s) => s.run.mock.calls)
+      .find((call) => typeof call[0] === 'string' && call[0].includes('CREATE (s:Semantic'));
+    expect(createCall).toBeDefined();
+
+    expect(createCall![0]).toContain('valid_at: $now');
+    expect(createCall![0]).not.toContain('invalid_at');
+    const params = createCall![1] as Record<string, unknown>;
+    expect(params.now).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // (A)'s departure at runtime: never a null emission for a lifecycle field.
+    expect(createCall![0]).not.toMatch(/(valid_at|invalid_at)\s*[=:]\s*null/i);
+    expect(Object.prototype.hasOwnProperty.call(params, 'valid_at')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(params, 'invalid_at')).toBe(false);
+  });
+});

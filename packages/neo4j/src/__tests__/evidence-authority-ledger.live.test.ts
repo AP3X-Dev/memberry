@@ -2761,3 +2761,147 @@ describeLive('EvidenceSourceFactState + composition live Neo4j gate (RET-005B-AU
     expect(parseEvidenceEligibilityAuthorityResultV1(result, request)).toEqual(result);
   }, 120_000);
 });
+
+// ---------------------------------------------------------------------------
+// RET-005B-AUTH-001B6P: semantic lifecycle producer live gate. Every suite
+// above is frozen; this block owns its own driver, tenant, fixtures and full
+// cleanup, and proves the two things no mock can: that valid_at actually
+// PERSISTS on a real server through a create/getById round-trip, and that the
+// ON CREATE fencing holds against a replay whose recomputed value WOULD differ.
+// (A before/after comparison on an unchanged source set proves nothing: site
+// 3's value is replay-stable, so a wrongly-placed trailing SET would recompute
+// the identical value and pass. Mutating a source episode's created_at between
+// the two promotions is what makes the arm bite.)
+// ---------------------------------------------------------------------------
+
+describeLive('SemanticStore lifecycle stamping live Neo4j gate (RET-005B-AUTH-001B6P)', () => {
+  const lifecycleDriver = createNeo4jDriver(uri, user, password);
+  const lifecycleSuffix = randomUUID().toLowerCase();
+  const lifecycleTenantId = `test-semantic-lifecycle-${lifecycleSuffix}`;
+  const lifecycleProjectScope = `project:test-semantic-lifecycle-${lifecycleSuffix}`;
+  const createdSemanticId = `semantic-lifecycle-created-${lifecycleSuffix}`;
+  const promotedSemanticId = `semantic-lifecycle-promoted-${lifecycleSuffix}`;
+  const lifecycleEpisodeIds = ['ep-lifecycle-early', 'ep-lifecycle-late']
+    .map((value) => `${value}-${lifecycleSuffix}`);
+  const lifecycleNodeIds = [createdSemanticId, promotedSemanticId, ...lifecycleEpisodeIds];
+  let SemanticStoreCtor: typeof import('../semantic.js')['SemanticStore'];
+
+  beforeAll(async () => {
+    ({ SemanticStore: SemanticStoreCtor } = await import('../semantic.js'));
+    await lifecycleDriver.getServerInfo();
+  });
+
+  afterAll(async () => {
+    if (LIVE_ENABLED) {
+      const session = lifecycleDriver.session();
+      try {
+        await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId OR n.scope = $projectScope OR n.id IN $nodeIds
+           DETACH DELETE n`,
+          { tenantId: lifecycleTenantId, projectScope: lifecycleProjectScope, nodeIds: lifecycleNodeIds },
+        );
+        const residue = await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId OR n.scope = $projectScope OR n.id IN $nodeIds
+           RETURN count(n) AS count`,
+          { tenantId: lifecycleTenantId, projectScope: lifecycleProjectScope, nodeIds: lifecycleNodeIds },
+        );
+        expect(Number(residue.records[0]?.get('count') ?? -1)).toBe(0);
+      } finally {
+        await session.close();
+      }
+    }
+    await lifecycleDriver.close().catch(() => {});
+  });
+
+  it('L1: create persists valid_at equal to the caller created_at and leaves invalid_at absent', async () => {
+    const createdAt = '2026-04-01T09:00:00.000Z';
+    const store = new SemanticStoreCtor(lifecycleDriver);
+
+    await store.create({
+      id: createdSemanticId,
+      content: 'live lifecycle create fixture',
+      confidence: 0.8,
+      signal_count: 1,
+      created_at: createdAt,
+      updated_at: createdAt,
+      decay_class: 'stable',
+      tags: [lifecycleProjectScope],
+      tenant_id: lifecycleTenantId,
+    });
+
+    const fetched = await store.getById(createdSemanticId);
+    expect(fetched?.valid_at).toBe(createdAt);
+    expect(fetched?.invalid_at).toBeUndefined();
+  }, 120_000);
+
+  it('L2: a promote REPLAY does not re-stamp valid_at even when the recomputed value would differ', async () => {
+    const early = '2026-04-02T09:00:00.000Z';
+    const late = '2026-04-02T10:00:00.000Z';
+    const later = '2026-04-02T23:00:00.000Z';
+    const store = new SemanticStoreCtor(lifecycleDriver);
+
+    const session = lifecycleDriver.session();
+    try {
+      await session.run(
+        `CREATE (a:Episodic {
+           id: $earlyId, tenant_id: $tenantId, scope: $projectScope,
+           session_id: 'lifecycle-session', agent_id: 'lifecycle-agent',
+           task: 'lifecycle-task', content: 'earlier source', created_at: $early
+         })
+         CREATE (b:Episodic {
+           id: $lateId, tenant_id: $tenantId, scope: $projectScope,
+           session_id: 'lifecycle-session', agent_id: 'lifecycle-agent',
+           task: 'lifecycle-task', content: 'later source', created_at: $late
+         })`,
+        {
+          earlyId: lifecycleEpisodeIds[0],
+          lateId: lifecycleEpisodeIds[1],
+          tenantId: lifecycleTenantId,
+          projectScope: lifecycleProjectScope,
+          early,
+          late,
+        },
+      );
+    } finally {
+      await session.close();
+    }
+
+    const node = {
+      id: promotedSemanticId,
+      content: 'live lifecycle promote fixture',
+      confidence: 0.8,
+      signal_count: 2,
+      created_at: '2026-04-02T12:00:00.000Z',
+      updated_at: '2026-04-02T12:00:00.000Z',
+      decay_class: 'stable' as const,
+      tags: [lifecycleProjectScope],
+      tenant_id: lifecycleTenantId,
+    };
+
+    await store.promoteFromEpisodic(lifecycleEpisodeIds, node, lifecycleTenantId);
+    const afterFirst = await store.getById(promotedSemanticId);
+    // The LATEST source instant, not the earliest and not the node's created_at.
+    expect(afterFirst?.valid_at).toBe(late);
+
+    // Move a source instant forward, so an ON-CREATE-only stamp and a wrongly
+    // placed trailing SET now disagree.
+    const mutate = lifecycleDriver.session();
+    try {
+      await mutate.run(
+        'MATCH (ep:Episodic {id: $id}) SET ep.created_at = $later',
+        { id: lifecycleEpisodeIds[1], later },
+      );
+    } finally {
+      await mutate.close();
+    }
+
+    // Same provenance ids, so the exact-provenance replay still succeeds.
+    await store.promoteFromEpisodic(lifecycleEpisodeIds, node, lifecycleTenantId);
+    const afterReplay = await store.getById(promotedSemanticId);
+    expect(afterReplay?.valid_at).toBe(late);
+    expect(afterReplay?.valid_at).not.toBe(later);
+    expect(afterReplay?.invalid_at).toBeUndefined();
+  }, 120_000);
+});

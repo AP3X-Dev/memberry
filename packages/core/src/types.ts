@@ -46,6 +46,8 @@ export interface SemanticNode {
   scope?: string;
   /** Tenant this node belongs to (defaults to DEFAULT_TENANT). */
   tenant_id?: string;
+  valid_at?: string;
+  invalid_at?: string;
 }
 
 export interface EntityNode {

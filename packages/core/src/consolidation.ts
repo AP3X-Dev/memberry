@@ -147,6 +147,8 @@ function parseSemanticNode(raw: Record<string, unknown>, label: string): Semanti
       : {}),
     ...(typeof raw.tenant_id === 'string' && raw.tenant_id !== '' ? { tenant_id: raw.tenant_id } : {}),
     ...(Array.isArray(raw.embedding) ? { embedding: raw.embedding as number[] } : {}),
+    ...(typeof raw.valid_at === 'string' ? { valid_at: raw.valid_at } : {}),
+    ...(typeof raw.invalid_at === 'string' ? { invalid_at: raw.invalid_at } : {}),
   };
 }
 
@@ -201,6 +203,14 @@ function parsePartialSemanticNode(raw: Record<string, unknown>, label: string): 
   if ('tenant_id' in raw) {
     if (typeof raw.tenant_id !== 'string') throw new Error(`${label}: invalid "tenant_id"`);
     result.tenant_id = raw.tenant_id;
+  }
+  if ('valid_at' in raw) {
+    if (typeof raw.valid_at !== 'string') throw new Error(`${label}: invalid "valid_at"`);
+    result.valid_at = raw.valid_at;
+  }
+  if ('invalid_at' in raw) {
+    if (typeof raw.invalid_at !== 'string') throw new Error(`${label}: invalid "invalid_at"`);
+    result.invalid_at = raw.invalid_at;
   }
 
   return result;

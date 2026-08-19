@@ -273,7 +273,8 @@ export class ResearchConsolidation {
           created_at: $now,
           updated_at: $now,
           decay_class: 'stable',
-          tags: $tags
+          tags: $tags,
+          valid_at: $now
         })`,
         {
           id,
