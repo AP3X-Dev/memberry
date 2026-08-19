@@ -1601,3 +1601,363 @@ describeLive('EvidenceAuthorityLedger coverage revocation live Neo4j gate (RET-0
     )).toBe(0);
   }, 120_000);
 });
+
+describeLive('EvidenceAuthorityRead live Neo4j gate (RET-005B-AUTH-001B3B2)', () => {
+  const readDriver = createNeo4jDriver(uri, user, password);
+  const readSuffix = randomUUID().toLowerCase();
+  const readTenantId = `test-evidence-read-${readSuffix}`;
+  const readProjectScope = `project:test-evidence-read-${readSuffix}`;
+  const readSemanticIds = [
+    'semantic-read-listing',
+    'semantic-read-revoked',
+    'semantic-read-pull',
+    'semantic-read-uncovered',
+    'semantic-read-missing',
+  ].map((value) => `${value}-${readSuffix}`);
+  const readScope = (semanticId: string): EvidenceAuthorityScopeV1 => ({
+    tenantId: readTenantId,
+    projectScope: readProjectScope,
+    semanticId,
+  });
+  const READ_CONTRACT_VERSION = 'memberry.evidence-authority-read/1.0.0';
+  const EMPTY_READ_LISTING = Object.freeze({
+    contractVersion: READ_CONTRACT_VERSION,
+    coverageState: 'none',
+    cases: {},
+    truncated: false,
+    observedVersion: 0,
+  });
+  const EMPTY_READ_PAGE = Object.freeze({
+    contractVersion: READ_CONTRACT_VERSION,
+    rows: [],
+    observedVersion: 0,
+  });
+  let createEvidenceAuthorityRead:
+    typeof import('../evidence-authority-read.js')['createEvidenceAuthorityRead'];
+  let liveCreateHash: typeof import('node:crypto')['createHash'];
+
+  const readLiveDigest = (kind: string, ...values: string[]): string => {
+    const input = JSON.stringify(['memberry-evidence-authority-ledger-v1', kind, ...values]);
+    return `evidence-authority:${kind}:sha256:${liveCreateHash('sha256').update(input).digest('hex')}`;
+  };
+
+  async function readScalar(
+    query: string,
+    key: string,
+    params: Record<string, unknown> = {},
+  ): Promise<number> {
+    const session = readDriver.session();
+    try {
+      const result = await session.run(query, params);
+      return Number(result.records[0]?.get(key) ?? 0);
+    } finally {
+      await session.close();
+    }
+  }
+
+  async function readTenantCounts() {
+    const params = { tenantId: readTenantId };
+    const count = (label: string) => readScalar(
+      `MATCH (n:${label} {tenant_id: $tenantId}) RETURN count(n) AS count`,
+      'count',
+      params,
+    );
+    return {
+      ledgers: await count('EvidenceAuthorityLedger'),
+      events: await count('EvidenceAuthorityEvent'),
+      outboxes: await count('EvidenceAuthorityOutbox'),
+      coverage: await count('EvidenceAuthorityCoverage'),
+      cases: await count('EvidenceAuthorityCase'),
+    };
+  }
+
+  async function readLedgerVersion(semanticId: string): Promise<number> {
+    return readScalar(
+      `MATCH (l:EvidenceAuthorityLedger {tenant_id: $tenantId, semantic_id: $semanticId})
+       RETURN l.version AS version`,
+      'version',
+      { tenantId: readTenantId, semanticId },
+    );
+  }
+
+  beforeAll(async () => {
+    ({ createEvidenceAuthorityRead } = await import('../evidence-authority-read.js'));
+    ({ createHash: liveCreateHash } = await import('node:crypto'));
+    await readDriver.getServerInfo();
+    const migration = MIGRATIONS.find((item) => item.id === '0008-evidence-authority-ledger-v1');
+    expect(migration).toBeDefined();
+    await migration!.up(readDriver);
+    await initSchema(readDriver);
+    const session = readDriver.session();
+    try {
+      // The 'semantic-read-missing' id deliberately gets NO Semantic node and
+      // no ledger: it is the entirely-absent arm.
+      for (const semanticId of readSemanticIds.slice(0, 4)) {
+        await session.run(
+          `CREATE (s:Semantic {
+             id: $semanticId, tenant_id: $tenantId, scope: $projectScope,
+             content: 'disposable synthetic read fixture', confidence: 1.0,
+             signal_count: 0, created_at: datetime(), updated_at: datetime(),
+             decay_class: 'stable', tags: [$projectScope]
+           })`,
+          {
+            semanticId,
+            tenantId: readTenantId,
+            projectScope: readProjectScope,
+          },
+        );
+      }
+    } finally {
+      await session.close();
+    }
+  });
+
+  afterAll(async () => {
+    if (LIVE_ENABLED) {
+      const session = readDriver.session();
+      try {
+        await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $semanticIds
+           DETACH DELETE n`,
+          {
+            tenantId: readTenantId,
+            projectScope: readProjectScope,
+            semanticIds: readSemanticIds,
+          },
+        );
+        const residue = await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id = $tenantId
+              OR n.project_scope = $projectScope
+              OR n.semantic_id IN $semanticIds
+              OR n.scope = $projectScope
+              OR n.id IN $semanticIds
+           RETURN count(n) AS count`,
+          {
+            tenantId: readTenantId,
+            projectScope: readProjectScope,
+            semanticIds: readSemanticIds,
+          },
+        );
+        expect(Number(residue.records[0]?.get('count') ?? -1)).toBe(0);
+      } finally {
+        await session.close();
+      }
+    }
+    await readDriver.close().catch(() => undefined);
+  });
+
+  it('lists the live case map exactly, with the real ledger version (K22)', async () => {
+    const semanticId = readSemanticIds[0]!;
+    const primary = readScope(semanticId);
+    const store = createEvidenceAuthorityLedgerPersistence(readDriver);
+    const captureFacet = createEvidenceAuthorityCaptureFacet(store, primary);
+    const review = createEvidenceAuthorityReviewFacet(store, primary);
+    await store.captureCase(captureFacet, primary, {
+      caseId: 'read-case-alpha',
+      coverageOperationId: 'read-op-coverage-listing',
+      caseOperationId: 'read-op-case-alpha-open',
+    });
+    // Exact replays return the stored receipts plus the coverage/case facets
+    // without appending: the facet-recovery path the write suite proves.
+    const coverage = await store.openCoverage(captureFacet, primary, {
+      operationId: 'read-op-coverage-listing',
+    });
+    const caseAlpha = await store.openCase(captureFacet, coverage.facet, primary, {
+      caseId: 'read-case-alpha',
+      operationId: 'read-op-case-alpha-open',
+    });
+    const caseBeta = await store.openCase(captureFacet, coverage.facet, primary, {
+      caseId: 'read-case-beta',
+      operationId: 'read-op-case-beta-open',
+    });
+    await store.beginResolution(review, caseAlpha.facet, primary, {
+      operationId: 'read-op-case-alpha-start',
+    });
+    await store.resolveCase(review, caseAlpha.facet, primary, {
+      operationId: 'read-op-case-alpha-done',
+    });
+    await store.rejectCase(review, caseBeta.facet, primary, {
+      operationId: 'read-op-case-beta-reject',
+    });
+
+    const read = createEvidenceAuthorityRead(readDriver, primary);
+    const listing = await read.listCases();
+    expect(listing.coverageState).toBe('open');
+    expect({ ...listing.cases }).toEqual({
+      'read-case-alpha': 'resolved',
+      'read-case-beta': 'rejected',
+    });
+    expect(listing.truncated).toBe(false);
+    expect(listing.observedVersion).toBe(await readLedgerVersion(semanticId));
+    expect(listing.observedVersion).toBe(6);
+  }, 120_000);
+
+  it('shows revocation with frozen case states, and EMPTY_LISTING for uncovered and absent (K23)', async () => {
+    const semanticId = readSemanticIds[1]!;
+    const primary = readScope(semanticId);
+    const store = createEvidenceAuthorityLedgerPersistence(readDriver);
+    const captureFacet = createEvidenceAuthorityCaptureFacet(store, primary);
+    await store.captureCase(captureFacet, primary, {
+      caseId: 'read-case-frozen',
+      coverageOperationId: 'read-op-coverage-revoked',
+      caseOperationId: 'read-op-case-frozen-open',
+    });
+    const revocation = createEvidenceAuthorityRevocation(readDriver, {
+      tenantId: readTenantId,
+      projectScope: readProjectScope,
+      principalId: 'principal-live-read-alpha',
+    });
+    const revoked = await revocation.revoke({ semanticId });
+    expect(revoked.outcome).toBe('revoked');
+
+    const read = createEvidenceAuthorityRead(readDriver, primary);
+    const listing = await read.listCases();
+    expect(listing.coverageState).toBe('revoked');
+    expect({ ...listing.cases }).toEqual({ 'read-case-frozen': 'pending' });
+    expect(listing.truncated).toBe(false);
+    expect(listing.observedVersion).toBe(3);
+
+    const uncovered = createEvidenceAuthorityRead(readDriver, readScope(readSemanticIds[3]!));
+    expect(await uncovered.listCases()).toEqual(EMPTY_READ_LISTING);
+    const absent = createEvidenceAuthorityRead(readDriver, readScope(readSemanticIds[4]!));
+    expect(await absent.listCases()).toEqual(EMPTY_READ_LISTING);
+  }, 120_000);
+
+  it('drains the live outbox in cursor pages, digest chain recomputed, replay identical (K24)', async () => {
+    const semanticId = readSemanticIds[2]!;
+    const primary = readScope(semanticId);
+    const store = createEvidenceAuthorityLedgerPersistence(readDriver);
+    const captureFacet = createEvidenceAuthorityCaptureFacet(store, primary);
+    const review = createEvidenceAuthorityReviewFacet(store, primary);
+    await store.captureCase(captureFacet, primary, {
+      caseId: 'read-case-pull-a',
+      coverageOperationId: 'read-op-coverage-pull',
+      caseOperationId: 'read-op-case-pull-a-open',
+    });
+    const coverage = await store.openCoverage(captureFacet, primary, {
+      operationId: 'read-op-coverage-pull',
+    });
+    const caseA = await store.openCase(captureFacet, coverage.facet, primary, {
+      caseId: 'read-case-pull-a',
+      operationId: 'read-op-case-pull-a-open',
+    });
+    await store.openCase(captureFacet, coverage.facet, primary, {
+      caseId: 'read-case-pull-b',
+      operationId: 'read-op-case-pull-b-open',
+    });
+    await store.beginResolution(review, caseA.facet, primary, {
+      operationId: 'read-op-case-pull-a-start',
+    });
+    await store.resolveCase(review, caseA.facet, primary, {
+      operationId: 'read-op-case-pull-a-done',
+    });
+
+    const read = createEvidenceAuthorityRead(readDriver, primary);
+    const pulled: Array<{
+      id: string; eventId: string; sequence: number; caseId: string | null;
+      kind: string; action: string; state: string; recordedAt: string;
+    }> = [];
+    let cursor = 0;
+    for (;;) {
+      const page = await read.pullOutbox({ afterSequence: cursor, limit: 2 });
+      expect(page.observedVersion).toBe(5);
+      if (page.rows.length === 0) break;
+      expect(page.rows.length).toBeLessThanOrEqual(2);
+      pulled.push(...page.rows);
+      cursor = page.rows[page.rows.length - 1]!.sequence;
+    }
+    expect(pulled.map((row) => row.sequence)).toEqual([1, 2, 3, 4, 5]);
+
+    const session = readDriver.session();
+    try {
+      const result = await session.run(
+        `MATCH (ledger:EvidenceAuthorityLedger {tenant_id: $tenantId, semantic_id: $semanticId})
+               -[:HAS_EVENT]->(event:EvidenceAuthorityEvent)-[:EMITTED]->(outbox:EvidenceAuthorityOutbox)
+         RETURN properties(event) AS event, properties(outbox) AS outbox
+         ORDER BY event.sequence ASC`,
+        { tenantId: readTenantId, semanticId },
+      );
+      expect(result.records).toHaveLength(pulled.length);
+      result.records.forEach((record, index) => {
+        const event = record.get('event') as Record<string, unknown>;
+        const outbox = record.get('outbox') as Record<string, unknown>;
+        const row = pulled[index]!;
+        const expectedEventId = readLiveDigest(
+          'event', readTenantId, readProjectScope, semanticId, String(event.operation_id),
+        );
+        const expectedOutboxId = readLiveDigest('outbox', expectedEventId);
+        expect(event.id).toBe(expectedEventId);
+        expect(row.eventId).toBe(expectedEventId);
+        expect(outbox.id).toBe(expectedOutboxId);
+        expect(row.id).toBe(expectedOutboxId);
+        expect(outbox.event_id).toBe(expectedEventId);
+        expect(row.sequence).toBe(Number(event.sequence));
+        expect(row.sequence).toBe(Number(outbox.sequence));
+        expect(row.kind).toBe(event.kind);
+        expect(row.action).toBe(event.action);
+        expect(row.state).toBe(event.state);
+        expect(row.recordedAt).toBe(event.recorded_at);
+        expect(row.caseId).toBe(event.case_id === '' ? null : event.case_id);
+      });
+    } finally {
+      await session.close();
+    }
+
+    const firstPage = await read.pullOutbox({ afterSequence: 0, limit: 2 });
+    const replayPage = await read.pullOutbox({ afterSequence: 0, limit: 2 });
+    expect(replayPage).toEqual(firstPage);
+    expect(replayPage.rows.map((row) => row.sequence)).toEqual([1, 2]);
+  }, 120_000);
+
+  it('proves zero writes: counts and versions identical after a full listing and drain, and no ledger minted for an absent scope (K25, F11)', async () => {
+    const semanticId = readSemanticIds[2]!;
+    const before = await readTenantCounts();
+    const versionBefore = await readLedgerVersion(semanticId);
+
+    const read = createEvidenceAuthorityRead(readDriver, readScope(semanticId));
+    await read.listCases();
+    let cursor = 0;
+    for (;;) {
+      const page = await read.pullOutbox({ afterSequence: cursor, limit: 2 });
+      if (page.rows.length === 0) break;
+      cursor = page.rows[page.rows.length - 1]!.sequence;
+    }
+
+    const ghostSemanticId = readSemanticIds[4]!;
+    const ghost = createEvidenceAuthorityRead(readDriver, readScope(ghostSemanticId));
+    expect(await ghost.listCases()).toEqual(EMPTY_READ_LISTING);
+    expect(await ghost.pullOutbox({ afterSequence: 0 })).toEqual(EMPTY_READ_PAGE);
+    expect(await readScalar(
+      `MATCH (l:EvidenceAuthorityLedger {tenant_id: $tenantId, semantic_id: $semanticId})
+       RETURN count(l) AS count`,
+      'count',
+      { tenantId: readTenantId, semanticId: ghostSemanticId },
+    )).toBe(0);
+
+    expect(await readTenantCounts()).toEqual(before);
+    expect(await readLedgerVersion(semanticId)).toBe(versionBefore);
+  }, 120_000);
+
+  it('succeeds end to end in READ access mode: no statement requires write capability (K26)', async () => {
+    const modes: unknown[] = [];
+    const modeDriver = {
+      session: (config?: { defaultAccessMode?: unknown }) => {
+        modes.push(config?.defaultAccessMode);
+        return readDriver.session(config as never);
+      },
+    } as unknown as Driver;
+    const read = createEvidenceAuthorityRead(modeDriver, readScope(readSemanticIds[0]!));
+    const listing = await read.listCases();
+    expect(listing.coverageState).toBe('open');
+    const page = await read.pullOutbox({ afterSequence: 0 });
+    expect(page.rows.length).toBeGreaterThan(0);
+    expect(modes).toHaveLength(2);
+    expect(modes.every((mode) => mode === 'READ')).toBe(true);
+  }, 120_000);
+});
