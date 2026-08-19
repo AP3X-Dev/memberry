@@ -75,7 +75,8 @@ export class SemanticStore {
           memory_type: $memory_type,
           tags: $tags,
           scope: $scope,
-          tenant_id: $tenant_id
+          tenant_id: $tenant_id,
+          valid_at: $created_at
         })
         ${embedding ? 'SET s.embedding = $embedding' : ''}
         RETURN s.id AS id
@@ -118,6 +119,8 @@ export class SemanticStore {
       tags: props.tags as string[],
       ...(props.scope != null && { scope: props.scope as string }),
       tenant_id: (props.tenant_id as string | undefined) ?? DEFAULT_TENANT,
+      ...(typeof props.valid_at === 'string' && { valid_at: props.valid_at }),
+      ...(typeof props.invalid_at === 'string' && { invalid_at: props.invalid_at }),
       ...(props.embedding !== undefined && { embedding: props.embedding as number[] }),
     };
   }
@@ -227,7 +230,8 @@ export class SemanticStore {
           new.memory_type = $memory_type,
           new.tags = $tags,
           new.scope = $scope,
-          new.tenant_id = $tenant_id
+          new.tenant_id = $tenant_id,
+          new.valid_at = $now
         ${embedding ? 'SET new.embedding = $embedding' : ''}
         MERGE (new)-[:SUPERSEDES]->(old)
         WITH new, old
@@ -332,7 +336,10 @@ export class SemanticStore {
                       s.memory_type = $memory_type,
                       s.tags = $tags,
                       s.scope = $scope,
-                      s.tenant_id = $tenant_id
+                      s.tenant_id = $tenant_id,
+                      s.valid_at = coalesce(reduce(latest = null, ep IN episodes |
+                        CASE WHEN latest IS NULL OR ep.created_at > latest
+                             THEN ep.created_at ELSE latest END), $created_at)
                       ${embedding ? ', s.embedding = $embedding' : ''}
         WITH s, episodes
         UNWIND episodes AS ep

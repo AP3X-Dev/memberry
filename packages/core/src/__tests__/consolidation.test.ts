@@ -1,4 +1,5 @@
 // packages/core/src/__tests__/consolidation.test.ts
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ConsolidationEngine } from '../consolidation.js';
 import type { ConsolidationRedisLayer, ConsolidationNeo4jLayer } from '../consolidation.js';
@@ -992,5 +993,127 @@ describe('ConsolidationEngine.status', () => {
     const status = await engine.status();
 
     expect(status.pending).toHaveLength(0);
+  });
+});
+
+// ─── RET-005B-AUTH-001B6P: the two allowlist parsers ─────────────────────────
+//
+// The parsers are unexported and _applyProposal discards every lifecycle value
+// before anything downstream sees it (its newNode literals enumerate ten fields
+// and neither lifecycle field is among them), so the PASS-THROUGH is not
+// behaviourally observable through any lawful route and is pinned structurally
+// below instead of by a test that could never fail. What IS observable, and is
+// the load-bearing content, is the drop-vs-throw ASYMMETRY: parseSemanticNode
+// builds by conditional spread and structurally cannot tell absent from
+// present-but-wrong, so it DROPS; parsePartialSemanticNode gates on `in`, can
+// tell them apart, and therefore THROWS. Both follow their own pre-existing
+// convention for all ten of their existing optional fields.
+
+function makeLifecycleSupersedeHarness(after: Record<string, unknown>, before?: Record<string, unknown>) {
+  const node = makeSemanticNode('sem-lifecycle-old');
+  const proposal: ConsolidationProposal = {
+    id: 'prop-lifecycle',
+    type: 'supersede',
+    scope: 'test',
+    affected_ids: ['sem-lifecycle-old'],
+    before: before ?? ({ ...node } as Record<string, unknown>),
+    after,
+    score: 15,
+    created_at: new Date().toISOString(),
+  };
+  const redis = makeRedis({
+    proposals: {
+      save: vi.fn().mockResolvedValue(undefined),
+      get: vi.fn().mockResolvedValue(proposal),
+      listPending: vi.fn().mockResolvedValue(['prop-lifecycle']),
+      remove: vi.fn().mockResolvedValue(undefined),
+    },
+  });
+  const neo4j = makeNeo4j({
+    semantic: {
+      getById: vi.fn().mockResolvedValue(node),
+      updateConfidence: vi.fn().mockResolvedValue(undefined),
+      supersede: vi.fn().mockResolvedValue('new-sem-id'),
+    },
+  });
+  return { node, redis, neo4j, engine: new ConsolidationEngine(redis, neo4j, makeConfig()) };
+}
+
+describe('consolidation lifecycle parsers (RET-005B-AUTH-001B6P)', () => {
+  for (const field of ['valid_at', 'invalid_at'] as const) {
+    it(`T15b: parsePartialSemanticNode THROWS on a wrong-typed ${field}`, async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const node = makeSemanticNode('sem-lifecycle-old');
+      const { neo4j, engine } = makeLifecycleSupersedeHarness({
+        ...node,
+        confidence: 0.9,
+        [field]: 42,
+      } as Record<string, unknown>);
+
+      await expect(engine.reviewProposal('prop-lifecycle', 'approve')).rejects.toThrow(
+        /Failed to apply proposal/,
+      );
+
+      // The rejection alone is NOT the check — any failure inside
+      // _applyProposal produces it. The logged message is what identifies the
+      // parser throw as the cause.
+      const parserErrors = consoleSpy.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes(`invalid "${field}"`),
+      );
+      expect(parserErrors.length).toBeGreaterThan(0);
+      expect(neo4j.semantic.supersede).not.toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+
+    it(`T15a: parseSemanticNode DROPS a wrong-typed ${field} without throwing`, async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const node = makeSemanticNode('sem-lifecycle-old');
+      // Pollute only `before`: parseSemanticNode runs first, so this isolates
+      // the dropping parser from the throwing one.
+      const { neo4j, engine } = makeLifecycleSupersedeHarness(
+        { ...node, confidence: 0.9 } as Record<string, unknown>,
+        { ...node, [field]: 42 } as Record<string, unknown>,
+      );
+
+      await expect(engine.reviewProposal('prop-lifecycle', 'approve')).resolves.toBeUndefined();
+
+      expect(neo4j.semantic.supersede).toHaveBeenCalledTimes(1);
+      const parserErrors = consoleSpy.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes(`invalid "${field}"`),
+      );
+      expect(parserErrors).toHaveLength(0);
+
+      consoleSpy.mockRestore();
+    });
+  }
+
+  // STRUCTURAL, not behavioural: these prove the lines exist and are shaped in
+  // each parser's own convention. They cannot prove a value survives, because
+  // no value can survive _applyProposal today.
+  it('pins each parser to its own convention in the source', () => {
+    const source = readFileSync(new URL('../consolidation.ts', import.meta.url), 'utf8');
+    const fullStart = source.indexOf('function parseSemanticNode(');
+    const partialStart = source.indexOf('function parsePartialSemanticNode(');
+    const partialEnd = source.indexOf('// ─── Dependency interfaces', partialStart);
+    expect(fullStart).toBeGreaterThan(-1);
+    expect(partialStart).toBeGreaterThan(fullStart);
+    expect(partialEnd).toBeGreaterThan(partialStart);
+
+    const full = source.slice(fullStart, partialStart);
+    const partial = source.slice(partialStart, partialEnd);
+
+    for (const field of ['valid_at', 'invalid_at']) {
+      // parseSemanticNode: conditional spread, and NO throw for these fields.
+      expect(full).toContain(`typeof raw.${field} === 'string'`);
+      expect(full).toContain(`${field}: raw.${field}`);
+      expect(full).not.toContain(`invalid "${field}"`);
+
+      // parsePartialSemanticNode: `in` gate + throw, and NO conditional spread.
+      expect(partial).toContain(`'${field}' in raw`);
+      expect(partial).toContain(`invalid "${field}"`);
+      expect(partial).toContain(`result.${field} = raw.${field}`);
+      expect(partial).not.toContain(`...(typeof raw.${field}`);
+    }
   });
 });

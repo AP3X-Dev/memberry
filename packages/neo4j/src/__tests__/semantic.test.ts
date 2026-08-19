@@ -487,4 +487,84 @@ describe('SemanticStore', () => {
       await verifySession.close();
     }
   });
+
+  // RET-005B-AUTH-001B6P T7(b) — the behavioural half of the LATEST-instant
+  // claim. Part (a) (the byte-equal Cypher assertion in
+  // semantic.idempotency.test.ts) bites in every environment; this arm confirms
+  // it against a real server and, like every `it` in this describe, passes
+  // VACUOUSLY when Neo4j is unreachable.
+  it('promoteFromEpisodic stamps valid_at with the LATEST source-episode instant', async () => {
+    if (!neo4jAvailable) return;
+
+    const earlier = '2026-01-01T00:00:00.000Z';
+    const later = '2026-01-01T01:00:00.000Z';
+    const episodicIds = [
+      `${TEST_PREFIX}-episodic-latest-early`,
+      `${TEST_PREFIX}-episodic-latest-late`,
+    ];
+
+    const session = driver.session();
+    try {
+      await session.run(
+        `CREATE (a:Episodic {
+           id: $earlyId, session_id: 'test-session', agent_id: 'test-agent',
+           task: 'test-task', content: 'earlier source', created_at: $earlier
+         })
+         CREATE (b:Episodic {
+           id: $lateId, session_id: 'test-session', agent_id: 'test-agent',
+           task: 'test-task', content: 'later source', created_at: $later
+         })`,
+        { earlyId: episodicIds[0], lateId: episodicIds[1], earlier, later },
+      );
+    } finally {
+      await session.close();
+    }
+
+    const newNode = makeSemanticNode('promoted-latest');
+    const newId = await store.promoteFromEpisodic(episodicIds, newNode);
+    createdIds.push(newId);
+
+    const promoted = await store.getById(newId);
+    // The LATER instant, not the earlier one and not the node's own created_at:
+    // the generalization is evidence-backed only once its full source set exists.
+    expect(promoted?.valid_at).toBe(later);
+    expect(promoted?.valid_at).not.toBe(earlier);
+    expect(promoted?.invalid_at).toBeUndefined();
+  });
+});
+
+// RET-005B-AUTH-001B6P T16 — mapSemantic pass-through. A mock-driver arm, so it
+// bites with or without a server (the same shape as the Integer-mapper test
+// above). Legacy rows predate B6P and MUST map to undefined rather than to a
+// fabricated instant — that is Decision 120 (2)'s refuse-legacy directive
+// expressed mechanically.
+it('maps valid_at/invalid_at through getById, dropping legacy absence and driver junk', async () => {
+  const base = makeSemanticNode('lifecycle-mapper');
+  const legacyProps = { ...base };
+  const statedProps = {
+    ...base,
+    valid_at: '2026-02-01T00:00:00.000Z',
+    invalid_at: '2026-03-01T00:00:00.000Z',
+  };
+  const junkProps = { ...base, valid_at: 12345, invalid_at: { nested: true } };
+
+  const close = vi.fn(async () => undefined);
+  let next: Record<string, unknown> = legacyProps;
+  const run = vi.fn(async () => ({ records: [{ get: () => ({ properties: next }) }] }));
+  const store = new SemanticStore({ session: () => ({ run, close }) } as never);
+
+  const legacy = await store.getById(base.id);
+  expect(legacy?.valid_at).toBeUndefined();
+  expect(legacy?.invalid_at).toBeUndefined();
+  expect(Object.prototype.hasOwnProperty.call(legacy, 'valid_at')).toBe(false);
+
+  next = statedProps;
+  const stated = await store.getById(base.id);
+  expect(stated?.valid_at).toBe('2026-02-01T00:00:00.000Z');
+  expect(stated?.invalid_at).toBe('2026-03-01T00:00:00.000Z');
+
+  next = junkProps;
+  const junk = await store.getById(base.id);
+  expect(junk?.valid_at).toBeUndefined();
+  expect(junk?.invalid_at).toBeUndefined();
 });

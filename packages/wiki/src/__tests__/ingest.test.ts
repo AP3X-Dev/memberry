@@ -450,3 +450,44 @@ describe('IngestionService', () => {
     });
   });
 });
+
+// ─── RET-005B-AUTH-001B6P: semantic lifecycle producer, site 8 ───────────────
+//
+// Wiki ingest asserts the claim at ingest time, so $now IS the assertion
+// instant under (A)'s bound semantics. The ON MATCH arm proves a re-ingest
+// never re-stamps; that clause is a single line, so the slice assertion is a
+// TOTAL guard on it.
+describe('IngestionService semantic lifecycle stamping (RET-005B-AUTH-001B6P)', () => {
+  it('T10: stamps valid_at ON CREATE only and never inside ON MATCH SET', async () => {
+    mockReadFile.mockResolvedValue('Content.');
+    const { driver, getCalls } = createMockDriver();
+    const service = new IngestionService(driver);
+
+    await service.ingest({
+      source_path: '/tmp/doc.md',
+      source_type: 'article',
+      project_tag: 'project:test',
+      claims: [{ content: 'Redis is used for caching', about: ['Redis'], confidence: 0.8 }],
+    });
+
+    const semanticCall = getCalls().find((c) => c.query.includes('MERGE (s:Semantic'));
+    expect(semanticCall).toBeDefined();
+    const query = semanticCall!.query;
+
+    // ON CREATE half.
+    expect(query).toContain('s.valid_at = $now,');
+    expect(query).not.toContain('invalid_at');
+    const params = semanticCall!.params as Record<string, unknown>;
+    expect(params.now).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    // ON MATCH half — total, because the clause is exactly one line.
+    const matchStart = query.indexOf('ON MATCH SET');
+    expect(matchStart).toBeGreaterThan(-1);
+    const onMatchClause = query.slice(matchStart, query.indexOf('RETURN', matchStart));
+    expect(onMatchClause).not.toContain('valid_at');
+    expect(onMatchClause).not.toContain('invalid_at');
+    expect(query).not.toMatch(/(valid_at|invalid_at)\s*[=:]\s*null/i);
+    expect(Object.prototype.hasOwnProperty.call(params, 'valid_at')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(params, 'invalid_at')).toBe(false);
+  });
+});
