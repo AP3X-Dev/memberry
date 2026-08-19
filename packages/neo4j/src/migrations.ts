@@ -18,8 +18,9 @@
 //   3. Drift detection for vector-index dimensions (see checkVectorIndexDimensions).
 //
 // The runner is idempotent: migrations already recorded in :SchemaVersion.applied
-// are skipped. Because every individual statement also uses `IF NOT EXISTS`, an
-// interrupted run is safe to retry.
+// are skipped. An interrupted run is safe to retry because every schema statement
+// uses `IF NOT EXISTS` and every data statement is guarded by a self-extinguishing
+// predicate.
 
 import type { Driver } from 'neo4j-driver';
 import { EMBEDDING_DIM } from '@memberry/core';
@@ -217,6 +218,48 @@ export const MIGRATIONS: Migration[] = [
           'CREATE INDEX evidence_authority_event_target IF NOT EXISTS FOR (n:EvidenceAuthorityEvent) ON (n.case_id, n.sequence)',
           'CREATE INDEX evidence_authority_outbox_scope IF NOT EXISTS FOR (n:EvidenceAuthorityOutbox) ON (n.tenant_id, n.project_scope, n.recorded_at)',
           'CREATE INDEX evidence_authority_outbox_event IF NOT EXISTS FOR (n:EvidenceAuthorityOutbox) ON (n.event_id)',
+        ]) {
+          await session.run(stmt);
+        }
+      } finally {
+        await session.close();
+      }
+    },
+  },
+  // ORDER IS LOAD-BEARING — do not swap these two statements.
+  //
+  // The second statement's third disjunct (`s.invalid_at IS NOT NULL`) reads state
+  // that only the first statement writes. Run them the other way round and that
+  // disjunct is false for every archived legacy node — the whole archived cohort
+  // would be skipped by the valid_at pass and left permanently uncovered, which
+  // repairs nothing.
+  //
+  // Crashing between the two statements is safe: archived nodes are left holding
+  // invalid_at with no valid_at, which reads as not-live under either plausible
+  // reader rule, and a replay converges on the intended end state. Both predicates
+  // are self-extinguishing (each only matches rows it has not yet written), so a
+  // replay after a failed migration-record write is a no-op.
+  //
+  // The `s.archived_at IS NOT NULL` guard in the first statement only avoids a
+  // pointless no-op write; it is not load-bearing for correctness.
+  {
+    id: '0009-semantic-lifecycle-backfill',
+    description:
+      'Backfill the Semantic lifecycle window on pre-existing nodes: invalid_at from ' +
+      'archived_at for archived rows, then valid_at from created_at. Nodes created before ' +
+      'these properties existed carry neither; this gives the legacy population the same ' +
+      'shape CREATE now stamps.',
+    up: async (driver) => {
+      const session = driver.session();
+      try {
+        for (const stmt of [
+          `MATCH (s:Semantic)
+           WHERE s.archived = true AND s.invalid_at IS NULL AND s.archived_at IS NOT NULL
+           SET s.invalid_at = s.archived_at`,
+          `MATCH (s:Semantic)
+           WHERE s.valid_at IS NULL AND s.created_at IS NOT NULL
+             AND (s.archived IS NULL OR s.archived = false OR s.invalid_at IS NOT NULL)
+           SET s.valid_at = s.created_at`,
         ]) {
           await session.run(stmt);
         }

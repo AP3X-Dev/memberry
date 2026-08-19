@@ -143,14 +143,16 @@ describe('runMigrations', () => {
       applied: [
         '0007-admission-observation-sidecar',
         '0008-evidence-authority-ledger-v1',
+        '0009-semantic-lifecycle-backfill',
       ],
     });
     expect(schemaStatements.filter((statement) => statement.includes('admission_observation')))
       .toHaveLength(4);
     expect(schemaStatements.filter((statement) => statement.includes('evidence_authority')))
       .toHaveLength(13);
-    expect(schemaStatements).toHaveLength(17);
-    expect(schemaStatements.every((statement) => statement.includes('IF NOT EXISTS'))).toBe(true);
+    expect(schemaStatements).toHaveLength(19);
+    expect(schemaStatements.filter((s) => /^\s*CREATE\s/i.test(s)).every((s) => s.includes('IF NOT EXISTS'))).toBe(true);
+    expect(schemaStatements.filter((s) => !/^\s*CREATE\s/i.test(s)).every((s) => /IS NULL/.test(s))).toBe(true);
   });
 
   it('0008 is additive, directly repeatable, and contains no data backfill', async () => {
@@ -221,14 +223,73 @@ describe('runMigrations', () => {
 
     await expect(runMigrations(driver)).rejects.toThrow('ambiguous migration record');
     await expect(runMigrations(driver)).resolves.toMatchObject({
-      applied: ['0008-evidence-authority-ledger-v1'],
+      applied: ['0008-evidence-authority-ledger-v1', '0009-semantic-lifecycle-backfill'],
     });
     expect(schemaStatements.length).toBeGreaterThan(10);
     expect(schemaStatements.length % 2).toBe(0);
-    expect(schemaStatements.every((statement) => statement.includes('IF NOT EXISTS'))).toBe(true);
+    expect(schemaStatements.filter((s) => /^\s*CREATE\s/i.test(s)).every((s) => s.includes('IF NOT EXISTS'))).toBe(true);
+    expect(schemaStatements.filter((s) => !/^\s*CREATE\s/i.test(s)).every((s) => /IS NULL/.test(s))).toBe(true);
   });
 });
 
 function resultRecord(values: Record<string, unknown>) {
   return { get: (key: string) => values[key] };
 }
+
+describe('0009-semantic-lifecycle-backfill', () => {
+  // NOTE: 'invalid_at'.includes('valid_at') is TRUE, and the valid_at statement
+  // mentions s.invalid_at in its WHERE clause. Statements are therefore only ever
+  // identified by a SET-anchored, word-bounded regex — never by substring.
+  const SETS_INVALID_AT = /SET\s+s\.invalid_at\b/;
+  const SETS_VALID_AT = /SET\s+s\.valid_at\b/;
+
+  async function captureStatements(): Promise<string[]> {
+    const target = MIGRATIONS.find((item) => item.id === '0009-semantic-lifecycle-backfill');
+    expect(target).toBeDefined();
+    const statements: string[] = [];
+    const driver = {
+      session: vi.fn(() => ({
+        run: vi.fn(async (statement: string) => { statements.push(statement); return { records: [] }; }),
+        close: vi.fn(async () => undefined),
+      })),
+    } as any;
+    await target!.up(driver);
+    return statements.map((statement) => statement.replace(/\s+/g, ' ').trim());
+  }
+
+  it('is present in MIGRATIONS and emits exactly two statements', async () => {
+    expect(MIGRATIONS.map((item) => item.id)).toContain('0009-semantic-lifecycle-backfill');
+    expect(await captureStatements()).toHaveLength(2);
+  });
+
+  it('sets invalid_at strictly before valid_at, because the valid_at predicate reads invalid_at', async () => {
+    const statements = await captureStatements();
+    const invalidIndex = statements.findIndex((statement) => SETS_INVALID_AT.test(statement));
+    const validIndex = statements.findIndex((statement) => SETS_VALID_AT.test(statement));
+    expect(invalidIndex).toBeGreaterThanOrEqual(0);
+    expect(validIndex).toBeGreaterThanOrEqual(0);
+    expect(invalidIndex).toBeLessThan(validIndex);
+  });
+
+  it('carries the guards that make each pass self-extinguishing', async () => {
+    const statements = await captureStatements();
+    const invalidStatement = statements.find((statement) => SETS_INVALID_AT.test(statement))!;
+    const validStatement = statements.find((statement) => SETS_VALID_AT.test(statement))!;
+
+    expect(invalidStatement).toContain('s.archived = true');
+    expect(invalidStatement).toContain('s.invalid_at IS NULL');
+    expect(invalidStatement).toContain('s.archived_at IS NOT NULL');
+
+    expect(validStatement).toContain('s.valid_at IS NULL');
+    expect(validStatement).toContain('s.created_at IS NOT NULL');
+    expect(validStatement).toContain(
+      '(s.archived IS NULL OR s.archived = false OR s.invalid_at IS NOT NULL)',
+    );
+  });
+
+  it('ships no DDL: no IF NOT EXISTS and no CREATE statements', async () => {
+    const statements = await captureStatements();
+    expect(statements.some((statement) => statement.includes('IF NOT EXISTS'))).toBe(false);
+    expect(statements.some((statement) => /^\s*CREATE\s/i.test(statement))).toBe(false);
+  });
+});
