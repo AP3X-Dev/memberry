@@ -2407,6 +2407,362 @@ describeLive('EvidenceAuthorityClearance live Neo4j gate (RET-005B-AUTH-001B4)',
 });
 
 // ---------------------------------------------------------------------------
+// RET-005B-AUTH-001B5: additive fact-state observation and composition live
+// gate. Every suite above is frozen; this block owns its own driver, tenant,
+// fixtures, and full cleanup, and proves what no fake can: the real dispute
+// and invalidate write paths against the derived axes, the real SUPERSEDES_FACT
+// edge arriving as a driver Integer, cross-tenant disclosure zero on a real
+// graph, and the whole composition surviving the sealed parser end to end.
+// ---------------------------------------------------------------------------
+
+describeLive('EvidenceSourceFactState + composition live Neo4j gate (RET-005B-AUTH-001B5)', () => {
+  const factStateDriver = createNeo4jDriver(uri, user, password);
+  const factStateSuffix = randomUUID().toLowerCase();
+  const factStateTenantId = `test-evidence-fact-state-${factStateSuffix}`;
+  const factStateForeignTenantId = `test-evidence-fact-foreign-${factStateSuffix}`;
+  const factStateProjectScope = `project:test-evidence-fact-state-${factStateSuffix}`;
+  const factStateEntityId = `entity-fact-state-${factStateSuffix}`;
+  const factStateOtherEntityId = `entity-fact-other-${factStateSuffix}`;
+  const factStateId = (label: string): string => `fact-${label}-${factStateSuffix}`;
+  const factStateIds = [
+    'live-active', 'live-invalidated', 'live-disputed', 'live-superseding',
+    'live-foreign-tenant', 'live-foreign-entity', 'compose-active',
+    'compose-disputed', 'compose-invalidated', 'compose-superseding',
+  ].map(factStateId);
+  const factStateScope = Object.freeze({
+    tenantId: factStateTenantId,
+    projectScope: factStateProjectScope,
+    resolvedEntityId: factStateEntityId,
+  });
+  const PAST_VALID_AT = '2026-01-01T00:00:00.000Z';
+  const PAST_INVALID_AT = '2026-02-01T00:00:00.000Z';
+
+  let createEvidenceSourceFactState:
+    typeof import('../evidence-source-fact-state.js')['createEvidenceSourceFactState'];
+  let createEvidenceEligibilityComposition:
+    typeof import('../../../core/src/evidence-eligibility-composition.js')['createEvidenceEligibilityComposition'];
+  let parseEvidenceEligibilityAuthorityResultV1:
+    typeof import('../../../core/src/evidence-eligibility-authority.js')['parseEvidenceEligibilityAuthorityResultV1'];
+  let LiveFactStore: typeof import('../fact.js')['FactStore'];
+
+  async function factStateScalar(
+    query: string,
+    key: string,
+    params: Record<string, unknown> = {},
+  ): Promise<number> {
+    const session = factStateDriver.session();
+    try {
+      const result = await session.run(query, params);
+      return Number(result.records[0]?.get(key) ?? 0);
+    } finally {
+      await session.close();
+    }
+  }
+
+  async function createLiveFact(input: {
+    id: string;
+    tenantId: string;
+    entityId: string;
+    status: string;
+    validAt: string;
+    invalidAt: string | null;
+  }): Promise<void> {
+    const session = factStateDriver.session();
+    try {
+      await session.run(
+        `CREATE (f:Fact {
+           id: $id, subject: 'disposable synthetic subject',
+           predicate: 'is', object: 'disposable synthetic object',
+           entity_id: $entityId, tenant_id: $tenantId, scope: 'project',
+           source_episode_ids: [], valid_at: $validAt, invalid_at: $invalidAt,
+           confidence: 1.0, status: $status, inference_type: 'deductive',
+           tags: [$projectScope], created_at: $validAt, updated_at: $validAt
+         })`,
+        {
+          id: input.id,
+          entityId: input.entityId,
+          tenantId: input.tenantId,
+          status: input.status,
+          validAt: input.validAt,
+          invalidAt: input.invalidAt,
+          projectScope: factStateProjectScope,
+        },
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
+  async function factStateTenantCounts() {
+    const nodes = await factStateScalar(
+      'MATCH (n) WHERE n.tenant_id IN $tenantIds RETURN count(n) AS count',
+      'count',
+      { tenantIds: [factStateTenantId, factStateForeignTenantId] },
+    );
+    const edges = await factStateScalar(
+      `MATCH (a:Fact)-[r:SUPERSEDES_FACT]->(b:Fact)
+       WHERE a.tenant_id IN $tenantIds OR b.tenant_id IN $tenantIds
+       RETURN count(r) AS count`,
+      'count',
+      { tenantIds: [factStateTenantId, factStateForeignTenantId] },
+    );
+    return { nodes, edges };
+  }
+
+  function observedEntries(result: unknown): Array<Record<string, unknown>> {
+    expect((result as { outcome: string }).outcome).toBe('observed');
+    return (result as { entries: Array<Record<string, unknown>> }).entries;
+  }
+
+  beforeAll(async () => {
+    ({ createEvidenceSourceFactState } = await import('../evidence-source-fact-state.js'));
+    ({ createEvidenceEligibilityComposition } = await import(
+      '../../../core/src/evidence-eligibility-composition.js'
+    ));
+    ({ parseEvidenceEligibilityAuthorityResultV1 } = await import(
+      '../../../core/src/evidence-eligibility-authority.js'
+    ));
+    ({ FactStore: LiveFactStore } = await import('../fact.js'));
+    await factStateDriver.getServerInfo();
+    await initSchema(factStateDriver);
+    for (const label of [
+      'live-active', 'live-disputed', 'live-invalidated', 'live-superseding',
+      'compose-active', 'compose-disputed', 'compose-invalidated', 'compose-superseding',
+    ]) {
+      await createLiveFact({
+        id: factStateId(label),
+        tenantId: factStateTenantId,
+        entityId: factStateEntityId,
+        status: 'active',
+        validAt: PAST_VALID_AT,
+        invalidAt: null,
+      });
+    }
+    // The disclosure fixtures: same id shape, foreign tenant and foreign
+    // entity, deliberately reachable by an unscoped read and by nothing else.
+    await createLiveFact({
+      id: factStateId('live-foreign-tenant'),
+      tenantId: factStateForeignTenantId,
+      entityId: factStateEntityId,
+      status: 'active',
+      validAt: PAST_VALID_AT,
+      invalidAt: null,
+    });
+    await createLiveFact({
+      id: factStateId('live-foreign-entity'),
+      tenantId: factStateTenantId,
+      entityId: factStateOtherEntityId,
+      status: 'active',
+      validAt: PAST_VALID_AT,
+      invalidAt: null,
+    });
+  });
+
+  afterAll(async () => {
+    if (LIVE_ENABLED) {
+      const session = factStateDriver.session();
+      try {
+        await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id IN $tenantIds
+              OR n.entity_id IN $entityIds
+              OR n.id IN $nodeIds
+           DETACH DELETE n`,
+          {
+            tenantIds: [factStateTenantId, factStateForeignTenantId],
+            entityIds: [factStateEntityId, factStateOtherEntityId],
+            nodeIds: factStateIds,
+          },
+        );
+        const residue = await session.run(
+          `MATCH (n)
+           WHERE n.tenant_id IN $tenantIds
+              OR n.entity_id IN $entityIds
+              OR n.id IN $nodeIds
+           RETURN count(n) AS count`,
+          {
+            tenantIds: [factStateTenantId, factStateForeignTenantId],
+            entityIds: [factStateEntityId, factStateOtherEntityId],
+            nodeIds: factStateIds,
+          },
+        );
+        expect(Number(residue.records[0]?.get('count') ?? -1)).toBe(0);
+      } finally {
+        await session.close();
+      }
+    }
+    await factStateDriver.close().catch(() => undefined);
+  });
+
+  it('observes a live active fact in valid time under the bound scope (T27)', async () => {
+    const surface = createEvidenceSourceFactState(factStateDriver, factStateScope);
+    const result = await surface.observeFactState({
+      mode: 'current',
+      evidenceIds: [factStateId('live-active')],
+    });
+    expect(observedEntries(result)).toEqual([{
+      evidenceId: factStateId('live-active'),
+      status: 'active',
+      withinValidTime: true,
+      superseded: false,
+    }]);
+  }, 120_000);
+
+  it('reads the real invalidate write path, edge and driver Integer included (T28)', async () => {
+    const store = new LiveFactStore(factStateDriver);
+    await store.invalidate(
+      factStateId('live-invalidated'),
+      PAST_INVALID_AT,
+      factStateId('live-superseding'),
+    );
+    const surface = createEvidenceSourceFactState(factStateDriver, factStateScope);
+    const result = await surface.observeFactState({
+      mode: 'current',
+      evidenceIds: [factStateId('live-invalidated')],
+    });
+    expect(observedEntries(result)).toEqual([{
+      evidenceId: factStateId('live-invalidated'),
+      status: 'invalidated',
+      withinValidTime: false,
+      superseded: true,
+    }]);
+    expect(await factStateScalar(
+      `MATCH (:Fact {id: $newId})-[r:SUPERSEDES_FACT]->(:Fact {id: $oldId})
+       RETURN count(r) AS count`,
+      'count',
+      { newId: factStateId('live-superseding'), oldId: factStateId('live-invalidated') },
+    )).toBe(1);
+  }, 120_000);
+
+  it('reads the real dispute write path: contested but still lifecycle-live (T29)', async () => {
+    const store = new LiveFactStore(factStateDriver);
+    await store.dispute(factStateId('live-disputed'));
+    // The pairing the contract demands is derived from the write path, not
+    // arranged: dispute() writes status and updated_at, and never a valid-time
+    // bound, so the record stays in frame while its content is contested.
+    expect(await factStateScalar(
+      `MATCH (f:Fact {id: $id}) WHERE f.invalid_at IS NULL RETURN count(f) AS count`,
+      'count',
+      { id: factStateId('live-disputed') },
+    )).toBe(1);
+    const surface = createEvidenceSourceFactState(factStateDriver, factStateScope);
+    const result = await surface.observeFactState({
+      mode: 'current',
+      evidenceIds: [factStateId('live-disputed')],
+    });
+    expect(observedEntries(result)).toEqual([{
+      evidenceId: factStateId('live-disputed'),
+      status: 'disputed',
+      withinValidTime: true,
+      superseded: false,
+    }]);
+  }, 120_000);
+
+  it('discloses nothing across a tenant or an entity boundary (T30)', async () => {
+    const surface = createEvidenceSourceFactState(factStateDriver, factStateScope);
+    for (const id of [factStateId('live-foreign-tenant'), factStateId('live-foreign-entity')]) {
+      // The node exists and an unscoped read would find it; this surface
+      // cannot see it, and the refusal names nothing about it.
+      expect(await factStateScalar(
+        'MATCH (f:Fact {id: $id}) RETURN count(f) AS count',
+        'count',
+        { id },
+      )).toBe(1);
+      expect(await surface.observeFactState({ mode: 'current', evidenceIds: [id] })).toEqual({
+        contractVersion: 'memberry.evidence-source-fact-state/1.0.0',
+        outcome: 'unsupported',
+        code: 'fact-state-candidate-missing',
+      });
+    }
+    // A batch mixing a visible and an invisible candidate refuses whole.
+    expect(await surface.observeFactState({
+      mode: 'current',
+      evidenceIds: [factStateId('live-active'), factStateId('live-foreign-tenant')],
+    })).toEqual({
+      contractVersion: 'memberry.evidence-source-fact-state/1.0.0',
+      outcome: 'unsupported',
+      code: 'fact-state-candidate-missing',
+    });
+  }, 120_000);
+
+  it('writes nothing, mints no ledger event, and opens a READ session (T31)', async () => {
+    const before = await factStateTenantCounts();
+    const configs: unknown[] = [];
+    const observingDriver = {
+      session: (config?: unknown) => {
+        configs.push(config);
+        return factStateDriver.session(config as never);
+      },
+    } as unknown as Driver;
+    const surface = createEvidenceSourceFactState(observingDriver, factStateScope);
+    const result = await surface.observeFactState({
+      mode: 'current',
+      evidenceIds: [factStateId('live-active'), factStateId('live-disputed')],
+    });
+    expect(observedEntries(result)).toHaveLength(2);
+    expect(configs).toEqual([{ defaultAccessMode: 'READ' }]);
+    expect(await factStateTenantCounts()).toEqual(before);
+    expect(await factStateScalar(
+      `MATCH (n:EvidenceAuthorityEvent) WHERE n.tenant_id IN $tenantIds RETURN count(n) AS count`,
+      'count',
+      { tenantIds: [factStateTenantId, factStateForeignTenantId] },
+    )).toBe(0);
+  }, 120_000);
+
+  it('composes three live facts into a contract-canonical supported result (T32)', async () => {
+    const store = new LiveFactStore(factStateDriver);
+    await store.dispute(factStateId('compose-disputed'));
+    await store.invalidate(
+      factStateId('compose-invalidated'),
+      PAST_INVALID_AT,
+      factStateId('compose-superseding'),
+    );
+    const composition = createEvidenceEligibilityComposition(
+      createEvidenceSourceFactState(factStateDriver, factStateScope),
+    );
+    const request = {
+      contractId: 'memberry.evidence-eligibility-authority',
+      contractVersion: '1.0.0',
+      tenantId: factStateTenantId,
+      projectScope: factStateProjectScope,
+      resolvedEntityId: factStateEntityId,
+      temporalFrame: { mode: 'current' },
+      recordTime: { mode: 'current' },
+      candidates: [
+        { ref: 'c001', sourceType: 'fact', evidenceId: factStateId('compose-active') },
+        { ref: 'c002', sourceType: 'fact', evidenceId: factStateId('compose-disputed') },
+        { ref: 'c003', sourceType: 'fact', evidenceId: factStateId('compose-invalidated') },
+      ],
+    };
+    const result = await composition.composeAuthorityResult(request);
+    expect((result as { outcome: string }).outcome).toBe('supported');
+    const receipts = (result as { receipts: Array<Record<string, unknown>> }).receipts;
+    expect(receipts).toHaveLength(3);
+    expect(receipts.map((receipt) => receipt.ref)).toEqual(['c001', 'c002', 'c003']);
+    expect(receipts.map((receipt) => ({
+      lifecycle: receipt.lifecycle,
+      temporal: receipt.temporal,
+      supersession: receipt.supersession,
+      contradiction: receipt.contradiction,
+    }))).toEqual([
+      { lifecycle: 'active', temporal: 'in-frame', supersession: 'clear', contradiction: 'clear' },
+      { lifecycle: 'active', temporal: 'in-frame', supersession: 'clear', contradiction: 'withheld' },
+      { lifecycle: 'inactive', temporal: 'out-of-frame', supersession: 'superseded', contradiction: 'clear' },
+    ]);
+    for (const receipt of receipts) {
+      expect(receipt.provenance).toEqual({
+        policy: 'fact-current-source-owned-v1',
+        ref: 'memberry.evidence-source-fact-state/1.0.0',
+      });
+    }
+    // The decisive assertion: the module's own output survives the sealed
+    // parser unchanged, so every hand copy and every axis derivation above is
+    // proven against the contract rather than against a fixture.
+    expect(parseEvidenceEligibilityAuthorityResultV1(result, request)).toEqual(result);
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
 // RET-005B-AUTH-001B6P: semantic lifecycle producer live gate. Every suite
 // above is frozen; this block owns its own driver, tenant, fixtures and full
 // cleanup, and proves the two things no mock can: that valid_at actually
