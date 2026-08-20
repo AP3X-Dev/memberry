@@ -2,7 +2,7 @@
 // The unified context assembler — the "super-load" that blends
 // architecture + code + memory into a single context package.
 
-import { Record as Neo4jRecord, type Driver } from 'neo4j-driver';
+import { Record as Neo4jRecord, int as neo4jInt, type Driver } from 'neo4j-driver';
 import { isProxy } from 'node:util/types';
 import type {
   UnifiedContext,
@@ -214,6 +214,42 @@ function parseAskResponse(raw: string, evidence: ContextItem[]): { answer: strin
   }
 }
 
+// ─── Collection-size probe bounds (RET-011) ─────────────────────────────────
+//
+// The probe is `MATCH (s:Symbol) RETURN count(s) AS c` — the canonical label-count
+// form, which Neo4j answers from the count store rather than by scanning, so its
+// cost does not grow with the graph. 2000 ms is therefore a fault bound, not a work
+// bound: nothing about a healthy deployment should approach it at any size. If this
+// query ever stops being count-store-servable — a predicate, a relationship, a
+// second label — this value stops being justified and must be re-derived rather
+// than inherited, because the bound would then start firing on healthy load.
+const COLLECTION_SIZE_QUERY_TIMEOUT_MS = 2_000;
+const COLLECTION_SIZE_CLOSE_TIMEOUT_MS = 500;
+
+/**
+ * Wall-clock bound for one leg of the collection-size probe.
+ *
+ * The driver-side transaction timeout is not a substitute for this: it is a
+ * server-side hint that does not bound a client which never hears back. It is not
+ * redundant with it either — once this race abandons the in-flight run, the
+ * transaction timeout is what releases the pooled connection server-side.
+ *
+ * setTimeout/clearTimeout are resolved at call time, never captured at module load,
+ * so a fake clock installed by a test is the clock in force.
+ */
+async function withCollectionSizeDeadline<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('collection_size_timeout')), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 // ─── Unified assembler ──────────────────────────────────────────────────────
 
 export class UnifiedAssembler {
@@ -408,18 +444,32 @@ export class UnifiedAssembler {
 
   private async getCollectionSize(): Promise<number | undefined> {
     const now = Date.now();
-    if (this.cachedCollectionSize !== undefined && now - this.collectionSizeCachedAt < UnifiedAssembler.COLLECTION_SIZE_TTL_MS) {
+    // `> 0` is the never-probed sentinel: collectionSizeCachedAt initializes to 0,
+    // and dropping the old `cachedCollectionSize !== undefined` conjunct without it
+    // would make `now - 0 < TTL` true on any clock near the epoch. The stamp, not
+    // the value, is now what the TTL governs, because a probe that fails caches
+    // nothing and would otherwise re-fire on every ranked request forever.
+    if (this.collectionSizeCachedAt > 0 && now - this.collectionSizeCachedAt < UnifiedAssembler.COLLECTION_SIZE_TTL_MS) {
       return this.cachedCollectionSize;
     }
     try {
       const session = this.driver.session();
       try {
-        const result = await session.run('MATCH (s:Symbol) RETURN count(s) AS c');
+        const result = await withCollectionSizeDeadline(
+          session.run('MATCH (s:Symbol) RETURN count(s) AS c', {}, { timeout: neo4jInt(COLLECTION_SIZE_QUERY_TIMEOUT_MS) }),
+          COLLECTION_SIZE_QUERY_TIMEOUT_MS,
+        );
         const raw = result.records[0]?.get('c');
         this.cachedCollectionSize = typeof raw === 'number' ? raw : raw?.toNumber?.() ?? undefined;
-        this.collectionSizeCachedAt = now;
       } finally {
-        await session.close();
+        // Stamped on the failure path as well as the success path, so one window is
+        // one probe. The close is bounded too: a hung close in this finally hangs
+        // the ranked request just as surely as a hung run.
+        this.collectionSizeCachedAt = now;
+        await withCollectionSizeDeadline(
+          Promise.resolve().then(() => session.close()),
+          COLLECTION_SIZE_CLOSE_TIMEOUT_MS,
+        );
       }
     } catch { /* proceed without scaling */ }
     return this.cachedCollectionSize;
