@@ -1,0 +1,10 @@
+{"version":"1.0.0","scenarioId":"mh-holdout-01","probes":[{"probeId":"mh-holdout-01-probe","required":["mh-holdout-01-a","mh-holdout-01-b"],"relevant":["mh-holdout-01-a","mh-holdout-01-b"]}]}
+{"version":"1.0.0","scenarioId":"mh-holdout-02","probes":[{"probeId":"mh-holdout-02-probe","required":["mh-holdout-02-a","mh-holdout-02-b"],"relevant":["mh-holdout-02-a","mh-holdout-02-b"]}]}
+{"version":"1.0.0","scenarioId":"mh-holdout-03","probes":[{"probeId":"mh-holdout-03-probe","required":["mh-holdout-03-a","mh-holdout-03-b"],"relevant":["mh-holdout-03-a","mh-holdout-03-b"]}]}
+{"version":"1.0.0","scenarioId":"mh-holdout-04","probes":[{"probeId":"mh-holdout-04-probe","required":["mh-holdout-04-a","mh-holdout-04-b"],"relevant":["mh-holdout-04-a","mh-holdout-04-b"]}]}
+{"version":"1.0.0","scenarioId":"mh-holdout-05","probes":[{"probeId":"mh-holdout-05-probe","required":["mh-holdout-05-a","mh-holdout-05-b"],"relevant":["mh-holdout-05-a","mh-holdout-05-b"]}]}
+{"version":"1.0.0","scenarioId":"mh-holdout-06","probes":[{"probeId":"mh-holdout-06-probe","required":["mh-holdout-06-a","mh-holdout-06-b"],"relevant":["mh-holdout-06-a","mh-holdout-06-b"]}]}
+{"version":"1.0.0","scenarioId":"mh-holdout-07","probes":[{"probeId":"mh-holdout-07-probe","required":["mh-holdout-07-a","mh-holdout-07-b"],"relevant":["mh-holdout-07-a","mh-holdout-07-b"]}]}
+{"version":"1.0.0","scenarioId":"mh-holdout-08","probes":[{"probeId":"mh-holdout-08-probe","required":["mh-holdout-08-a","mh-holdout-08-b"],"relevant":["mh-holdout-08-a","mh-holdout-08-b"]}]}
+{"version":"1.0.0","scenarioId":"mh-holdout-09","probes":[{"probeId":"mh-holdout-09-probe","required":["mh-holdout-09-a","mh-holdout-09-b"],"relevant":["mh-holdout-09-a","mh-holdout-09-b"]}]}
+{"version":"1.0.0","scenarioId":"mh-holdout-10","probes":[{"probeId":"mh-holdout-10-probe","required":["mh-holdout-10-a","mh-holdout-10-b"],"relevant":["mh-holdout-10-a","mh-holdout-10-b"]}]}

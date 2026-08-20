@@ -140,6 +140,52 @@
       ]
     },
     {
+      "id": "memberry-multihop-dev",
+      "version": "1.0.0",
+      "suite": "multi-hop",
+      "kind": "repository",
+      "split": "dev",
+      "oracleAccess": "scorer-only",
+      "requiredInCi": true,
+      "source": { "url": null, "revision": "lab-012-pre-ret007-v1", "path": "bench/lab/datasets/multihop/v1/dev" },
+      "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
+      "dataPolicy": {
+        "reviewStatus": "verified",
+        "containsPersonalData": false,
+        "containsSecrets": false,
+        "containsCustomerData": false,
+        "exclusions": ["real user memory", "credentials", "private customer data", "RET-007 outputs"]
+      },
+      "acquisition": { "status": "bundled" },
+      "artifacts": [
+        { "role": "input", "access": "adapter", "fileName": "input.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v1/dev/input.jsonl", "hashMode": "text-lf", "sha256": "5ee4eebdcf9b7edf8fdfaeba256e7be4db075b683430c12be126e1de8ae0490b", "sizeBytes": 17172 },
+        { "role": "oracle", "access": "scorer", "fileName": "oracle.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v1/dev/oracle.jsonl", "hashMode": "text-lf", "sha256": "eb1786aaac5add95d7832bf76c5e277002e53db9c399c66e2e70516fb3627be5", "sizeBytes": 1680 }
+      ]
+    },
+    {
+      "id": "memberry-multihop-holdout",
+      "version": "1.0.0",
+      "suite": "multi-hop",
+      "kind": "repository",
+      "split": "holdout",
+      "oracleAccess": "scorer-only",
+      "requiredInCi": true,
+      "source": { "url": null, "revision": "lab-012-pre-ret007-v1", "path": "bench/lab/datasets/multihop/v1/holdout" },
+      "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
+      "dataPolicy": {
+        "reviewStatus": "verified",
+        "containsPersonalData": false,
+        "containsSecrets": false,
+        "containsCustomerData": false,
+        "exclusions": ["real user memory", "credentials", "private customer data", "RET-007 outputs"]
+      },
+      "acquisition": { "status": "bundled" },
+      "artifacts": [
+        { "role": "input", "access": "adapter", "fileName": "input.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v1/holdout/input.jsonl", "hashMode": "text-lf", "sha256": "33b7e4b6ce3ce0ef2fdab52a75c678055a70915247a8e20eb5c99fe1c092f962", "sizeBytes": 17860 },
+        { "role": "oracle", "access": "scorer", "fileName": "oracle.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v1/holdout/oracle.jsonl", "hashMode": "text-lf", "sha256": "b1e56a88d6496b2a9e4c297d6295b0901bbcfa9bb2e7900dd4bb80ae1bb1853e", "sizeBytes": 1920 }
+      ]
+    },
+    {
       "id": "memberry-lab-migrated-retrieval",
       "version": "1.0.0",
       "kind": "repository",
