@@ -14,6 +14,7 @@ import type { LabGatePolicy } from '../contracts/report.js';
 import { validateRegistries } from '../registry/validate.js';
 import { compareRegisteredAdapters, writeRequiredCiComparisonArtifacts } from '../registered-adapters.js';
 import { loadRegisteredDatasetDescriptor, loadRegisteredScenariosForScoring } from '../datasets/load-golden.js';
+import { loadG2HoldoutScenariosForScoring } from '../datasets/load-suite.js';
 import { canonicalSha256 } from './canonical.js';
 import { compareQualityReports, loadComparisonPolicy } from './compare-quality.js';
 import { loadAndVerifyBaseline } from './verify.js';
@@ -56,6 +57,8 @@ export async function runDeterministicCiGate(
     registeredGolden: LabGatePolicy;
     protectedTemporalIsolation: LabGatePolicy;
     migratedRetrievalControl: LabGatePolicy;
+    holdoutRecallAt10: LabGatePolicy;
+    holdoutPrecisionAt5: LabGatePolicy;
   };
   if (labPolicy.schemaVersion !== 1) throw new Error('Unsupported lab policy version');
   const baseline = await loadAndVerifyBaseline(undefined, undefined, REPO_ROOT);
@@ -65,12 +68,19 @@ export async function runDeterministicCiGate(
   const comparison = requireGateResult('comparison', compareQualityReports(baseline, candidate, policy));
   if (!comparison.passed) throw new Error(`Baseline comparison failed:\n${comparison.failures.join('\n')}`);
   console.log('Evaluation-lab gate: quality comparison complete.');
-  const [goldenScenarios, goldenDev, goldenHoldout, temporalDataset, retrievalDataset] = await Promise.all([
+  const [
+    goldenScenarios, goldenDev, goldenHoldout, temporalDataset, retrievalDataset,
+    holdoutRecallScenarios, holdoutPrecisionScenarios, g2Dev, g2Holdout,
+  ] = await Promise.all([
     loadRegisteredScenariosForScoring(REPO_ROOT),
     loadRegisteredDatasetDescriptor('memberry-lab-golden-dev', REPO_ROOT),
     loadRegisteredDatasetDescriptor('memberry-lab-golden-holdout', REPO_ROOT),
     loadRegisteredDatasetDescriptor('memberry-lab-temporal-isolation', REPO_ROOT),
     loadRegisteredDatasetDescriptor('memberry-lab-migrated-retrieval', REPO_ROOT),
+    loadG2HoldoutScenariosForScoring('recall', REPO_ROOT),
+    loadG2HoldoutScenariosForScoring('precision', REPO_ROOT),
+    loadRegisteredDatasetDescriptor('memberry-g2-holdout-dev', REPO_ROOT),
+    loadRegisteredDatasetDescriptor('memberry-g2-holdout-holdout', REPO_ROOT),
   ]);
   console.log('Evaluation-lab gate: registered datasets verified.');
   const goldenComparison = requireGateResult('registered-golden', await compareRegisteredAdapters({
@@ -109,6 +119,34 @@ export async function runDeterministicCiGate(
     throw new Error(`Migrated retrieval no-regression gate failed:\n${retrievalComparison.failures.map((failure) => `${failure.metric}: ${failure.actual}; ${failure.expected}`).join('\n')}`);
   }
   console.log('Evaluation-lab gate: retrieval comparison complete.');
+  // Two uniform-k lanes over the same holdout split: one k per call, because a
+  // comparison call is the aggregation unit (runner.ts:143,165). Each lane
+  // gates only its own metric; the other floor is 0 in lab-policy.json.
+  const holdoutRecallComparison = requireGateResult('g2-holdout-recall', await compareRegisteredAdapters({
+    runId: `${runId}-holdout-recall`,
+    controlId: 'scope-aware-bm25-control-v1',
+    candidateId: 'memberry-proxy-v1',
+    scenarios: holdoutRecallScenarios,
+    splits: ['holdout'],
+    policy: labPolicy.holdoutRecallAt10,
+    repoRoot: REPO_ROOT,
+  }));
+  if (!holdoutRecallComparison.passed) {
+    throw new Error(`Holdout recall@10 gate failed:\n${holdoutRecallComparison.failures.map((failure) => `${failure.metric}: ${failure.actual}; ${failure.expected}`).join('\n')}`);
+  }
+  const holdoutPrecisionComparison = requireGateResult('g2-holdout-precision', await compareRegisteredAdapters({
+    runId: `${runId}-holdout-precision`,
+    controlId: 'scope-aware-bm25-control-v1',
+    candidateId: 'memberry-proxy-v1',
+    scenarios: holdoutPrecisionScenarios,
+    splits: ['holdout'],
+    policy: labPolicy.holdoutPrecisionAt5,
+    repoRoot: REPO_ROOT,
+  }));
+  if (!holdoutPrecisionComparison.passed) {
+    throw new Error(`Holdout precision@5 gate failed:\n${holdoutPrecisionComparison.failures.map((failure) => `${failure.metric}: ${failure.actual}; ${failure.expected}`).join('\n')}`);
+  }
+  console.log('Evaluation-lab gate: holdout recall@10 and precision@5 comparisons complete.');
   const goldenDatasetHash = canonicalSha256([
     { id: goldenDev.id, version: goldenDev.version, split: goldenDev.split, hash: goldenDev.hash },
     { id: goldenHoldout.id, version: goldenHoldout.version, split: goldenHoldout.split, hash: goldenHoldout.hash },
@@ -151,18 +189,44 @@ export async function runDeterministicCiGate(
     controlAdapter: retrievalComparison.control.adapterId,
     candidateAdapter: retrievalComparison.candidate.adapterId,
   });
+  const g2DatasetHash = canonicalSha256([
+    { id: g2Dev.id, version: g2Dev.version, split: g2Dev.split, hash: g2Dev.hash },
+    { id: g2Holdout.id, version: g2Holdout.version, split: g2Holdout.split, hash: g2Holdout.hash },
+  ]);
+  const holdoutRecallManifest = createRunManifest({
+    ...retrievalManifest,
+    runId: holdoutRecallComparison.runId,
+    datasetId: 'memberry-g2-holdout-v1',
+    datasetHash: g2DatasetHash,
+    configHash: canonicalSha256(labPolicy.holdoutRecallAt10),
+    config: { gatePolicy: labPolicy.holdoutRecallAt10, datasets: [{ id: g2Dev.id, hash: g2Dev.hash }, { id: g2Holdout.id, hash: g2Holdout.hash }], network: false, credentials: false },
+    controlAdapter: holdoutRecallComparison.control.adapterId,
+    candidateAdapter: holdoutRecallComparison.candidate.adapterId,
+  });
+  const holdoutPrecisionManifest = createRunManifest({
+    ...holdoutRecallManifest,
+    runId: holdoutPrecisionComparison.runId,
+    configHash: canonicalSha256(labPolicy.holdoutPrecisionAt5),
+    config: { gatePolicy: labPolicy.holdoutPrecisionAt5, datasets: [{ id: g2Dev.id, hash: g2Dev.hash }, { id: g2Holdout.id, hash: g2Holdout.hash }], network: false, credentials: false },
+    controlAdapter: holdoutPrecisionComparison.control.adapterId,
+    candidateAdapter: holdoutPrecisionComparison.candidate.adapterId,
+  });
   const goldenPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, goldenComparison.runId), goldenComparison, goldenManifest);
   const protectedPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, protectedComparison.runId), protectedComparison, protectedManifest);
   const retrievalPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, retrievalComparison.runId), retrievalComparison, retrievalManifest);
+  const holdoutRecallPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, holdoutRecallComparison.runId), holdoutRecallComparison, holdoutRecallManifest);
+  const holdoutPrecisionPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, holdoutPrecisionComparison.runId), holdoutPrecisionComparison, holdoutPrecisionManifest);
   console.log('Evaluation-lab gate: retrieval artifacts published.');
   console.log(`Evaluation-lab deterministic gate passed against ${baseline.id}.`);
   for (const metric of comparison.metrics) console.log(`- ${metric.metric}: ${metric.candidate} (baseline ${metric.baseline}, delta ${metric.delta})`);
   console.log(`Registered golden artifact: ${goldenPaths.manifest}`);
   console.log(`Protected artifact: ${protectedPaths.manifest}`);
   console.log(`Retrieval evidence artifact: ${retrievalPaths.manifest}`);
+  console.log(`Holdout recall@10 artifact: ${holdoutRecallPaths.manifest}`);
+  console.log(`Holdout precision@5 artifact: ${holdoutPrecisionPaths.manifest}`);
   console.log(`Admission structural artifact: ${admission.artifacts.manifest}`);
   console.log(`Known retrieval answer coverage remains visible at ${retrievalComparison.candidate.metrics.answerCoverage}; promotion work must improve it without regressing safety.`);
-  return { passed: true, artifacts: [goldenPaths.manifest, protectedPaths.manifest, retrievalPaths.manifest, admission.artifacts.manifest] };
+  return { passed: true, artifacts: [goldenPaths.manifest, protectedPaths.manifest, retrievalPaths.manifest, holdoutRecallPaths.manifest, holdoutPrecisionPaths.manifest, admission.artifacts.manifest] };
 }
 
 // The executable wrapper is bench/lab/ci.mts.

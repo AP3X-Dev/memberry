@@ -1,0 +1,4 @@
+{"version":"1.0.0","scenarioId":"g2-dev-recall-incident-v1","probes":[{"probeId":"g2-dev-recall-incident-v1-q1","relevant":["g2-dev-recall-incident-v1-rel-1","g2-dev-recall-incident-v1-rel-2","g2-dev-recall-incident-v1-rel-3"]}]}
+{"version":"1.0.0","scenarioId":"g2-dev-recall-sdk-v1","probes":[{"probeId":"g2-dev-recall-sdk-v1-q1","relevant":["g2-dev-recall-sdk-v1-rel-1","g2-dev-recall-sdk-v1-rel-2","g2-dev-recall-sdk-v1-rel-3"]}]}
+{"version":"1.0.0","scenarioId":"g2-dev-precision-pricing-v1","probes":[{"probeId":"g2-dev-precision-pricing-v1-q1","relevant":["g2-dev-precision-pricing-v1-rel-1","g2-dev-precision-pricing-v1-rel-2","g2-dev-precision-pricing-v1-rel-3"]}]}
+{"version":"1.0.0","scenarioId":"g2-dev-precision-locale-v1","probes":[{"probeId":"g2-dev-precision-locale-v1-q1","relevant":["g2-dev-precision-locale-v1-rel-1","g2-dev-precision-locale-v1-rel-2","g2-dev-precision-locale-v1-rel-3"]}]}
