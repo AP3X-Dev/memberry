@@ -1885,9 +1885,24 @@ function groupAndBudget(results: RetrievalResult[], maxTokens: number): ContextS
     fact: 'Facts',
   };
 
-  for (const result of results) {
+  // RET-FR-4: fill the budget by score-per-token density rather than fused rank, so one
+  // long high-score result can no longer crowd out several short ones worth more combined.
+  // ponytail: this is the greedy knapsack approximation — it dominates rank-first-fit but
+  // is NOT optimal; swap in a DP pack only if a measured case shows the gap matters.
+  // The sort is stable, so equal densities keep fused rank as the tie-break, and emission
+  // below still walks the fused order so section/item ordering is unchanged.
+  const selected = new Set<RetrievalResult>();
+  const density = (result: RetrievalResult): number =>
+    result.score / Math.max(Math.ceil(result.content.length / 4), 1);
+  for (const result of [...results].sort((a, b) => density(b) - density(a))) {
     const itemTokens = Math.ceil(result.content.length / 4);
     if (tokenCount + itemTokens > maxTokens) continue;
+    selected.add(result);
+    tokenCount += itemTokens;
+  }
+
+  for (const result of results) {
+    if (!selected.has(result)) continue;
 
     const key = result.source_type;
     if (!groups.has(key)) {
@@ -1899,7 +1914,6 @@ function groupAndBudget(results: RetrievalResult[], maxTokens: number): ContextS
       score: result.score,
       metadata: result.metadata,
     });
-    tokenCount += itemTokens;
   }
 
   return [...groups.entries()].map(([key, group]) => ({
