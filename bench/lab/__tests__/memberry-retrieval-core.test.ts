@@ -211,4 +211,76 @@ describe('LAB-010 production retrieval adapter', () => {
     assertNonVacuous(first);
     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
   });
+
+  it('LAB-011 keeps code retrieval enabled for a named namespace through default-tenant assembly', async () => {
+    const source = await readFile(resolve(REPO_ROOT, ADAPTER_ENTRY), 'utf8');
+    expect(source).not.toContain('forces the code channel OFF');
+    expect(source).not.toContain('every lab scenario names one');
+    expect(source).toMatch(/default tenant/);
+    expect(source).toMatch(/namespaceKey \+ inRequestedScope/);
+
+    const namespace: LabNamespace = {
+      runId: 'lab-011-default-tenant',
+      tenant: 'named-tenant',
+      project: 'named-project',
+    };
+    const adapter = new MemBerryRetrievalCoreAdapter();
+    const codeId = 'lab-011-code-only';
+    const ingest = await adapter.ingest({
+      namespace,
+      memories: [{
+        id: codeId,
+        content: 'function selectProductionRetrievalCandidate(): string',
+        kind: 'code',
+        tenant: namespace.tenant,
+        project: namespace.project,
+        recordedAt: '2026-08-20T00:00:00.000Z',
+      }],
+    });
+    expect(ingest.accepted).toBe(1);
+    const results = (await adapter.query({
+      namespace,
+      query: 'select production retrieval candidate',
+      limit: 5,
+    })).results;
+    expect(results.map(({ id }) => id)).toContain(codeId);
+  });
+
+  it('LAB-011 has no exact production-score tie across any visible holdout k boundary', async () => {
+    const inputs = (await loadG2HoldoutScenarioInputs(REPO_ROOT))
+      .filter((input) => input.split === 'holdout');
+    expect(inputs.length).toBeGreaterThan(0);
+    let comparedBoundaries = 0;
+
+    for (const input of inputs) {
+      const namespace: LabNamespace = {
+        runId: `lab-011-boundary-${input.id}`,
+        tenant: input.tenant,
+        project: input.project,
+      };
+      const adapter = new MemBerryRetrievalCoreAdapter();
+      const ingest = await adapter.ingest({ namespace, memories: input.memories });
+      expect(ingest.accepted).toBe(input.memories.length);
+
+      for (const probe of input.queries) {
+        const results = (await adapter.query({
+          namespace,
+          query: probe.query,
+          limit: probe.limit + 1,
+          asOf: probe.asOf,
+          tokenBudget: probe.tokenBudget,
+        })).results;
+        const inside = results[probe.limit - 1];
+        const outside = results[probe.limit];
+        if (!inside || !outside) continue;
+        comparedBoundaries += 1;
+        expect(
+          inside.score,
+          `${input.id}/${probe.id} has an exact score tie across k=${probe.limit}`,
+        ).not.toBe(outside.score);
+      }
+    }
+
+    expect(comparedBoundaries).toBeGreaterThan(0);
+  });
 });
