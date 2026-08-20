@@ -79,6 +79,24 @@ function variableCallObject(
   throw new Error(`missing ${variableName} = ${callName}(...)`);
 }
 
+function aggregateHoldoutLogArguments(sourceFile: ts.SourceFile): ts.Expression[] {
+  const argumentsFound: ts.Expression[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && ts.isIdentifier(node.expression.expression)
+      && node.expression.expression.text === 'console'
+      && node.expression.name.text === 'log'
+      && node.arguments.length === 1
+      && node.arguments[0]!.getText(sourceFile).includes('G2 holdout aggregate lane=')) {
+      argumentsFound.push(node.arguments[0]!);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return argumentsFound;
+}
+
 describe('LAB-011 G2 production binding', () => {
   it('pins exactly the two G2 holdout lanes to production retrieval', async () => {
     const source = await readFile(CI_GATE, 'utf8');
@@ -117,6 +135,39 @@ describe('LAB-011 G2 production binding', () => {
       ));
       expect(writer, `${lane.toLowerCase()} artifact writer`).toBeDefined();
       expect(writer!.arguments[2]?.getText(sourceFile)).toBe(manifest);
+    }
+  });
+
+  it('prints only the exact aggregate metric and adapter identity for each G2 lane', async () => {
+    const source = await readFile(CI_GATE, 'utf8');
+    const sourceFile = ts.createSourceFile(CI_GATE, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    const logArguments = aggregateHoldoutLogArguments(sourceFile);
+    const logs = logArguments.map((argument) => argument.getText(sourceFile));
+
+    expect(logs).toEqual([
+      '`G2 holdout aggregate lane=g2-holdout-recall controlAdapterId=${holdoutRecallComparison.control.adapterId} controlRecallAtK=${holdoutRecallComparison.control.metrics.recallAtK} candidateAdapterId=${holdoutRecallComparison.candidate.adapterId} candidateRecallAtK=${holdoutRecallComparison.candidate.metrics.recallAtK}`',
+      '`G2 holdout aggregate lane=g2-holdout-precision controlAdapterId=${holdoutPrecisionComparison.control.adapterId} controlPrecisionAtK=${holdoutPrecisionComparison.control.metrics.precisionAtK} candidateAdapterId=${holdoutPrecisionComparison.candidate.adapterId} candidatePrecisionAtK=${holdoutPrecisionComparison.candidate.metrics.precisionAtK}`',
+    ]);
+    for (const log of logs) {
+      expect(log).not.toMatch(/scenarioReports|probes|probeId|query|resultIds|oracle|label|relevant|required|stale|forbidden/i);
+    }
+
+    const gate = sourceFile.statements.find((statement): statement is ts.FunctionDeclaration => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'runDeterministicCiGate'
+    ));
+    if (!gate?.body) throw new Error('missing runDeterministicCiGate body');
+    for (const [index, comparison] of ['holdoutRecallComparison', 'holdoutPrecisionComparison'].entries()) {
+      const failureIndex = gate.body.statements.findIndex((statement) => (
+        ts.isIfStatement(statement)
+        && statement.expression.getText(sourceFile) === `!${comparison}.passed`
+      ));
+      const argument = logArguments[index]!;
+      const logIndex = gate.body.statements.findIndex((statement) => (
+        statement.getStart(sourceFile) <= argument.getStart(sourceFile)
+        && statement.getEnd() >= argument.getEnd()
+      ));
+      expect(failureIndex).toBeGreaterThanOrEqual(0);
+      expect(logIndex).toBe(failureIndex + 1);
     }
   });
 });

@@ -134,6 +134,7 @@ export async function runDeterministicCiGate(
   if (!holdoutRecallComparison.passed) {
     throw new Error(`Holdout recall@10 gate failed:\n${holdoutRecallComparison.failures.map((failure) => `${failure.metric}: ${failure.actual}; ${failure.expected}`).join('\n')}`);
   }
+  console.log(`G2 holdout aggregate lane=g2-holdout-recall controlAdapterId=${holdoutRecallComparison.control.adapterId} controlRecallAtK=${holdoutRecallComparison.control.metrics.recallAtK} candidateAdapterId=${holdoutRecallComparison.candidate.adapterId} candidateRecallAtK=${holdoutRecallComparison.candidate.metrics.recallAtK}`);
   const holdoutPrecisionComparison = requireGateResult('g2-holdout-precision', await compareRegisteredAdapters({
     runId: `${runId}-holdout-precision`,
     controlId: 'scope-aware-bm25-control-v1',
@@ -146,6 +147,7 @@ export async function runDeterministicCiGate(
   if (!holdoutPrecisionComparison.passed) {
     throw new Error(`Holdout precision@5 gate failed:\n${holdoutPrecisionComparison.failures.map((failure) => `${failure.metric}: ${failure.actual}; ${failure.expected}`).join('\n')}`);
   }
+  console.log(`G2 holdout aggregate lane=g2-holdout-precision controlAdapterId=${holdoutPrecisionComparison.control.adapterId} controlPrecisionAtK=${holdoutPrecisionComparison.control.metrics.precisionAtK} candidateAdapterId=${holdoutPrecisionComparison.candidate.adapterId} candidatePrecisionAtK=${holdoutPrecisionComparison.candidate.metrics.precisionAtK}`);
   console.log('Evaluation-lab gate: holdout recall@10 and precision@5 comparisons complete.');
   const goldenDatasetHash = canonicalSha256([
     { id: goldenDev.id, version: goldenDev.version, split: goldenDev.split, hash: goldenDev.hash },
