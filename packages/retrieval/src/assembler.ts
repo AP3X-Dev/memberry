@@ -1887,19 +1887,31 @@ function groupAndBudget(results: RetrievalResult[], maxTokens: number): ContextS
 
   // RET-FR-4: fill the budget by score-per-token density rather than fused rank, so one
   // long high-score result can no longer crowd out several short ones worth more combined.
-  // ponytail: this is the greedy knapsack approximation — it dominates rank-first-fit but
-  // is NOT optimal; swap in a DP pack only if a measured case shows the gap matters.
-  // The sort is stable, so equal densities keep fused rank as the tie-break, and emission
-  // below still walks the fused order so section/item ordering is unchanged.
-  const selected = new Set<RetrievalResult>();
-  const density = (result: RetrievalResult): number =>
-    result.score / Math.max(Math.ceil(result.content.length / 4), 1);
+  // Density alone is NOT enough: a cheap dense item can strand the rest of the budget and
+  // lose to plain rank-first-fit. So we also pack the single best-scoring item that fits on
+  // its own and keep whichever packing scores higher — the standard 1/2-approximation guard,
+  // which does dominate rank-first-fit. Still not optimal; swap in a DP pack only if a
+  // measured case shows the gap matters.
+  // The density sort is stable, so equal densities keep fused rank as the tie-break, a tie
+  // between the two packings keeps the density set, and emission below still walks the fused
+  // order so section/item ordering is unchanged.
+  const itemTokens = (result: RetrievalResult): number => Math.ceil(result.content.length / 4);
+  const density = (result: RetrievalResult): number => result.score / Math.max(itemTokens(result), 1);
+  const packed = new Set<RetrievalResult>();
+  let packedScore = 0;
   for (const result of [...results].sort((a, b) => density(b) - density(a))) {
-    const itemTokens = Math.ceil(result.content.length / 4);
-    if (tokenCount + itemTokens > maxTokens) continue;
-    selected.add(result);
-    tokenCount += itemTokens;
+    const tokens = itemTokens(result);
+    if (tokenCount + tokens > maxTokens) continue;
+    packed.add(result);
+    packedScore += result.score;
+    tokenCount += tokens;
   }
+  let best: RetrievalResult | undefined;
+  for (const result of results) {
+    if (itemTokens(result) > maxTokens) continue;
+    if (best === undefined || result.score > best.score) best = result;
+  }
+  const selected = best !== undefined && best.score > packedScore ? new Set([best]) : packed;
 
   for (const result of results) {
     if (!selected.has(result)) continue;
