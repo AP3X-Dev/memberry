@@ -43,8 +43,8 @@ describe('RET-007 query decomposition', () => {
       { ordinal: 1, content: 'Omega target appears with linktoken.' },
     ])).toEqual([1, 1]);
     expect(queryDecompositionMultipliersV1('Find alpha marker and find omega target', [
-      { ordinal: 0, content: 'Alpha marker appears with linkone.' },
-      { ordinal: 1, content: 'Omega target appears with linktwo.' },
+      { ordinal: 0, content: 'Alpha marker contains linkone.' },
+      { ordinal: 1, content: 'Omega target uses linktwo.' },
     ])).toEqual([1, 1]);
     expect(queryDecompositionMultipliersV1('Find alpha marker and find omega target', [
       { ordinal: 0, content: 'Alpha marker and omega target share linktoken.' },

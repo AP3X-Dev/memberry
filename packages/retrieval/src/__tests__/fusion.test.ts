@@ -99,10 +99,10 @@ describe('rrfFusion', () => {
         return [1, 1.25];
       },
     );
-    expect(fused[0]!.id).toBe('second');
+    expect(fused[0]!.id).toBe('first');
     expect(observed).toEqual([
-      { content: 'content of first', ordinal: 0 },
-      { content: 'content of second', ordinal: 1 },
+      { content: 'content of second', ordinal: 0 },
+      { content: 'content of first', ordinal: 1 },
     ]);
     expect(Object.keys((observed as object[])[0]!)).toEqual(['content', 'ordinal']);
   });

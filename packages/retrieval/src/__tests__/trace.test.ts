@@ -170,7 +170,12 @@ describe('RET-001A retrieval trace contract', () => {
     missing.recordScore(missingHandle, { name: 'final', value: 0.91 });
     missing.recordOutput(missingHandle, 1);
     missing.recordTerminal(missingHandle, { outcome: 'included', reasons: [] });
-    expect(() => assertRetrievalTraceConformant(missing.finalize())).toThrow(/decomposition scores/);
+    const missingTrace = missing.finalize();
+    expect(missingTrace.complete).toBe(false);
+    expect(missingTrace.incompleteReasons).toContain('candidate-output-gap');
+    expect(missingTrace.events.some((event) => event.kind === 'candidate-score'
+      && event.name === 'decomposition-multiplier')).toBe(false);
+    expect(() => assertRetrievalTraceConformant(missingTrace)).toThrow(/trace is incomplete/);
 
     const outOfRange = new RetrievalTraceCollector('ranked-v2', rankedRequest);
     settleChannels(outOfRange);
