@@ -9,6 +9,8 @@ import {
   percentileIndex,
   unsupportedEfficiencyInterval,
   type LabPairedProbe,
+  type LabPairedBinaryOutcome,
+  pairedBinaryMeanDeltaInterval,
 } from '../stats.js';
 
 function pair(index: number, overrides: Partial<LabPairedProbe> = {}): LabPairedProbe {
@@ -117,5 +119,65 @@ describe('paired percentile bootstrap', () => {
     expect(interval.level).toBe(BOOTSTRAP_LEVEL);
     expect(interval.seed).toBe(pairedVectorSeed([]));
     expect(interval.point).toBeNull();
+  });
+});
+
+function binaryPair(
+  index: number,
+  controlOutcome: 0 | 1,
+  candidateOutcome: 0 | 1,
+): LabPairedBinaryOutcome {
+  return { scenarioId: `binary-scenario-${index}`, probeId: `binary-probe-${index}`, controlOutcome, candidateOutcome };
+}
+
+describe('paired binary mean-delta bootstrap', () => {
+  it('uses the frozen bootstrap constants and is bit-repeatable from its binary vector seed', () => {
+    const pairs = Array.from({ length: 10 }, (_, index) => binaryPair(index, 0, 1));
+    const first = pairedBinaryMeanDeltaInterval(pairs);
+    expect(pairedBinaryMeanDeltaInterval(pairs)).toEqual(first);
+    expect(first).toMatchObject({
+      outcome: 'measured',
+      pairedProbes: 10,
+      resamples: 2000,
+      level: 0.95,
+      point: 1,
+      lower: 1,
+      upper: 1,
+      oneSidedLower: 1,
+    });
+    expect(first.seed).toBe(fnv1a32(JSON.stringify(pairs.map((entry) => [
+      entry.scenarioId, entry.probeId, entry.controlOutcome, entry.candidateOutcome,
+    ]))));
+  });
+
+  it('reports all-win, all-tie, and all-loss signs exactly', () => {
+    const vector = (control: 0 | 1, candidate: 0 | 1) => (
+      Array.from({ length: 10 }, (_, index) => binaryPair(index, control, candidate))
+    );
+    expect(pairedBinaryMeanDeltaInterval(vector(0, 1)).point).toBe(1);
+    expect(pairedBinaryMeanDeltaInterval(vector(1, 1)).point).toBe(0);
+    expect(pairedBinaryMeanDeltaInterval(vector(1, 0)).point).toBe(-1);
+  });
+
+  it('keeps n=9 unsupported and n=10 measured', () => {
+    const nine = Array.from({ length: 9 }, (_, index) => binaryPair(index, 0, 1));
+    expect(pairedBinaryMeanDeltaInterval(nine)).toMatchObject({
+      outcome: 'unsupported',
+      unsupportedReason: 'insufficient-paired-probes',
+      pairedProbes: 9,
+      point: null,
+      oneSidedLower: null,
+    });
+    expect(pairedBinaryMeanDeltaInterval([...nine, binaryPair(9, 0, 1)]).outcome).toBe('measured');
+  });
+
+  it('rejects duplicate pair identities and non-binary outcomes', () => {
+    const pairs = Array.from({ length: 10 }, (_, index) => binaryPair(index, 0, 1));
+    expect(() => pairedBinaryMeanDeltaInterval([...pairs.slice(0, 9), pairs[0]!]))
+      .toThrow(/duplicate paired binary identity/);
+    expect(() => pairedBinaryMeanDeltaInterval([
+      ...pairs.slice(0, 9),
+      { ...pairs[9]!, candidateOutcome: 0.5 as 0 },
+    ])).toThrow(/binary outcomes must be 0 or 1/);
   });
 });

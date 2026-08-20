@@ -5,6 +5,7 @@ export const LAB_SCENARIO_VERSION = '1.0.0' as const;
 export type ScenarioDimension =
   | 'recall'
   | 'precision'
+  | 'multi-hop'
   | 'ranking'
   | 'temporal'
   | 'stale-safety'
