@@ -1874,7 +1874,6 @@ function logRankedFailure(
 
 function groupAndBudget(results: RetrievalResult[], maxTokens: number): ContextSection[] {
   const groups = new Map<string, { heading: string; items: ContextItem[] }>();
-  let tokenCount = 0;
 
   const headingMap: Record<string, string> = {
     arch_entity: 'Architecture',
@@ -1885,9 +1884,45 @@ function groupAndBudget(results: RetrievalResult[], maxTokens: number): ContextS
     fact: 'Facts',
   };
 
+  // RET-FR-4: fill the budget by score-per-token density rather than fused rank, so one
+  // long high-score result can no longer crowd out several short ones worth more combined.
+  // Density alone is NOT enough: a cheap dense item can strand the rest of the budget and
+  // lose both to a single bigger item and to plain rank-first-fit. So we build three
+  // packings — density-greedy, rank-order first-fit, and the best single item that fits —
+  // and keep whichever scores highest. Rank-first-fit being one of the candidates is what
+  // makes the result never worse than the pre-budget rank order: that holds by construction,
+  // not by argument about approximation ratios (>= OPT/2 does not imply >= rank-first-fit).
+  // Still not optimal; swap in a DP pack only if a measured case shows the gap matters.
+  // The density sort is stable, so equal densities keep fused rank as the tie-break, ties
+  // between packings resolve density > rank > single, and emission below still walks the
+  // fused order so section/item ordering is unchanged.
+  const itemTokens = (result: RetrievalResult): number => Math.ceil(result.content.length / 4);
+  const density = (result: RetrievalResult): number => result.score / Math.max(itemTokens(result), 1);
+  const firstFit = (order: readonly RetrievalResult[]): { set: Set<RetrievalResult>; score: number } => {
+    const set = new Set<RetrievalResult>();
+    let score = 0;
+    let tokens = 0;
+    for (const result of order) {
+      const cost = itemTokens(result);
+      if (tokens + cost > maxTokens) continue;
+      set.add(result);
+      score += result.score;
+      tokens += cost;
+    }
+    return { set, score };
+  };
+  const packed = firstFit([...results].sort((a, b) => density(b) - density(a)));
+  const ranked = firstFit(results);
+  let best: RetrievalResult | undefined;
   for (const result of results) {
-    const itemTokens = Math.ceil(result.content.length / 4);
-    if (tokenCount + itemTokens > maxTokens) continue;
+    if (itemTokens(result) > maxTokens) continue;
+    if (best === undefined || result.score > best.score) best = result;
+  }
+  const bestOfPacks = packed.score >= ranked.score ? packed : ranked;
+  const selected = best !== undefined && best.score > bestOfPacks.score ? new Set([best]) : bestOfPacks.set;
+
+  for (const result of results) {
+    if (!selected.has(result)) continue;
 
     const key = result.source_type;
     if (!groups.has(key)) {
@@ -1899,7 +1934,6 @@ function groupAndBudget(results: RetrievalResult[], maxTokens: number): ContextS
       score: result.score,
       metadata: result.metadata,
     });
-    tokenCount += itemTokens;
   }
 
   return [...groups.entries()].map(([key, group]) => ({

@@ -359,4 +359,96 @@ describe('RET-003B runtime candidate channel service', () => {
     expect(trace.terminalExclusions.every((item) => item.reasons.includes('token-budget'))).toBe(true);
     expect(() => JSON.parse(canonicalTraceJson(trace))).not.toThrow();
   });
+
+  it('packs short candidates a single long one would crowd out of the same token budget', async () => {
+    const scopeRow = (evidenceId: string, content: string) => record(
+      ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+      ['tenant-a', project, entityId, evidenceId, 'Semantic', content, 0.9],
+    );
+    const rows = validRows();
+    rows.scope = [
+      scopeRow('semantic-long', 'L'.repeat(400)),
+      scopeRow('semantic-short-a', 'A'.repeat(40)),
+      scopeRow('semantic-short-b', 'B'.repeat(40)),
+    ];
+    const mock = driver(rows);
+    const service = new RuntimeCandidateChannelService(mock.driver);
+    const receipt = await authorityReceipt();
+    const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
+    const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
+
+    const budgeted = assembler.assembleCandidateExecution('task', execution, 100, false, true).context;
+    const unbudgeted = assembler.assembleCandidateExecution('task', execution, 8_000, false, true).context;
+    const items = budgeted.sections.flatMap((section) => section.items);
+
+    expect(items.map((item) => item.id).sort()).toEqual(['fact-1', 'semantic-short-a', 'semantic-short-b']);
+    expect(budgeted.token_count).toBeLessThanOrEqual(100);
+    // Rank-greedy first-fit spends the whole budget on the long top-ranked item; the budgeted
+    // set must score strictly higher than that single item to beat it.
+    const longScore = unbudgeted.sections.flatMap((section) => section.items)
+      .find((item) => item.id === 'semantic-long')!.score;
+    expect(items.reduce((sum, item) => sum + item.score, 0)).toBeGreaterThan(longScore);
+  });
+
+  it('keeps one item that exactly fills the budget over a denser item that strands the rest', async () => {
+    const rows = validRows();
+    // 40 chars -> 10 tokens, confidence 1 -> provenance 1.1: fills a 10-token budget exactly.
+    rows.scope![0] = record(
+      ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+      ['tenant-a', project, entityId, 'semantic-exact', 'Semantic', 'L'.repeat(40), 1],
+    );
+    // The fact runtime rebuilds content as "subject predicate object" -> 24 chars -> 6 tokens.
+    // Confidence 0 -> provenance 0.9, so it is denser but worth less, and the 4 tokens it
+    // leaves behind are too few to hold anything else.
+    rows.fact![0] = record(
+      ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+      ['tenant-a', project, entityId, 'fact-dense', 'Fact', 'subject predicate object', 0],
+    );
+    const mock = driver(rows);
+    const service = new RuntimeCandidateChannelService(mock.driver);
+    const receipt = await authorityReceipt();
+    const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
+    const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
+
+    const budgeted = assembler.assembleCandidateExecution('task', execution, 10, false, true).context;
+    const unbudgeted = assembler.assembleCandidateExecution('task', execution, 8_000, false, true).context;
+    const items = budgeted.sections.flatMap((section) => section.items);
+    // Density-greedy alone takes the cheap dense item and wastes the remaining 4 tokens; the
+    // budget must instead go to the single item worth more that fits inside it.
+    const denseScore = unbudgeted.sections.flatMap((section) => section.items)
+      .find((item) => item.id === 'fact-dense')!.score;
+
+    expect(items.map((item) => item.id)).toEqual(['semantic-exact']);
+    expect(budgeted.token_count).toBe(10);
+    expect(items.reduce((sum, item) => sum + item.score, 0)).toBeGreaterThan(denseScore);
+  });
+
+  it('fills the budget with two equal-score items over a denser one that strands the rest', async () => {
+    const scopeRow = (evidenceId: string, content: string, score: number) => record(
+      ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+      ['tenant-a', project, entityId, evidenceId, 'Semantic', content, score],
+    );
+    const rows = validRows();
+    // 20 chars -> 5 tokens each: the two confidence-1 rows exactly fill a 10-token budget
+    // together. The confidence-0 row is 8 chars -> 2 tokens, so it is denser but worth less,
+    // and taking it first leaves 8 tokens that can only hold one of the other two.
+    rows.scope = [
+      scopeRow('semantic-a-fits', 'A'.repeat(20), 1),
+      scopeRow('semantic-b-fits', 'B'.repeat(20), 1),
+      scopeRow('semantic-c-dense', 'C'.repeat(8), 0),
+    ];
+    rows.fact = [];
+    const mock = driver(rows);
+    const service = new RuntimeCandidateChannelService(mock.driver);
+    const receipt = await authorityReceipt();
+    const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
+    const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
+
+    const budgeted = assembler.assembleCandidateExecution('task', execution, 10, false, true).context;
+    const items = budgeted.sections.flatMap((section) => section.items);
+    // Density-greedy takes the cheap dense row first and can then afford only one of the
+    // pair; plain rank-order first-fit takes both and spends the whole budget on more value.
+    expect(items.map((item) => item.id)).toEqual(['semantic-a-fits', 'semantic-b-fits']);
+    expect(budgeted.token_count).toBe(10);
+  });
 });
