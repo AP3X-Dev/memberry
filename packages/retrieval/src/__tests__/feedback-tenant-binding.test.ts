@@ -205,6 +205,15 @@ describe('RET-008 tenant-scoped feedback through the assembler', () => {
 
     await recordUsefulFeedback(store, 'beta');
 
+    // A1 and A3 cover the read side. This covers the write side: beta's feedback
+    // has to land in beta's namespace, or the isolation below would hold only
+    // because nothing was ever stored.
+    expect(store.writes).toEqual(expect.arrayContaining([
+      'amp:feedback:beta:entity_boost',
+      'amp:feedback:beta:source_boost',
+    ]));
+    expect(store.writes.filter((key) => !key.startsWith('amp:feedback:beta:'))).toEqual([]);
+
     const afterOtherTenant = await assembler.assemble(TASK, { ...RANKED, tenantId: 'acme' });
     expect(knowledgeItemIds(afterOtherTenant)).toEqual(baselineIds);
     expect(afterOtherTenant.sections).toEqual(baseline.sections);
@@ -321,6 +330,16 @@ describe('RET-008 tenant-scoped feedback through the assembler', () => {
     const secondIds = second.sections.flatMap((section) => section.items.map((item) => item.id));
     expect(new Set(firstIds).size).toBe(firstIds.length);
     expect(firstIds).toEqual(expect.arrayContaining(['mem-1', 'code-1']));
+
+    // The rank-0 results of the two channels must tie, or this stops biting
+    // silently: with distinct scores the sort is total, so a settlement-ordered
+    // variant would land the same way on both runs and the comparison below
+    // would pass while proving nothing. Pin the tie rather than assume it.
+    const scoreOf = (id: string): number => first.sections
+      .flatMap((section) => section.items)
+      .find((item) => item.id === id)!.score;
+    expect(scoreOf('code-1')).toBe(scoreOf('mem-1'));
+
     expect(secondIds).toEqual(firstIds);
     expect(second.sections).toEqual(first.sections);
   });
