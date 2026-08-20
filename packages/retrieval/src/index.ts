@@ -240,6 +240,21 @@ export type {
   RetrievalTraceCollectorOptions,
 } from './trace.js';
 
+// Operator-facing retrieval explanation view (UI-001A)
+export {
+  RETRIEVAL_EXPLANATION_VIEW_CONTRACT_ID,
+  RETRIEVAL_EXPLANATION_VIEW_CONTRACT_VERSION,
+  RETRIEVAL_EXPLANATION_TEXT_MAX_UTF8_BYTES,
+  RetrievalExplanationViewContractError,
+  buildRetrievalExplanationViewV1,
+  renderRetrievalExplanationTextV1,
+} from './retrieval-explanation-view.js';
+export type {
+  RetrievalExplanationViewV1,
+  RetrievalExplanationViewErrorCode,
+  RetrievalExplanationReplayReceiptV1,
+} from './retrieval-explanation-view.js';
+
 // MCP tools
 export { registerRetrievalTools, setRetrievalServiceInstances, createRetrievalContainer, retrievalContainerForTenant, RETRIEVAL_TOOL_NAMES } from './tools.js';
 export type {
