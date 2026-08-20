@@ -40,9 +40,16 @@ export const RETRIEVAL_LATENCY_POLICY_V1: {
     boundMs: CANDIDATE_CHANNEL_EXECUTOR_DEADLINE_MS,
     faultSettlement: 'timeout',
   }),
-  // Query 2000 + commit 500 + rollback 500 + session close 500, all serial
+  // Query 2000 + commit 500 + rollback 500 + session close 500
   // (runtime-candidate-channel.ts QUERY_TIMEOUT_MS / CLOSE_TIMEOUT_MS and the
   // finally block that closes the transaction and the session).
+  //
+  // This is a supremum, not an attainable elapsed time: a query that burns its
+  // full bound throws straight to the catch, so the commit leg never runs. The
+  // reachable maxima are 3000 (query hangs) and 1500 (commit hangs), and 3500 is
+  // only approached as the query completes arbitrarily close to its own bound.
+  // The tests therefore measure both legs and check the decomposition rather
+  // than waiting for a 3500 that no single run produces.
   runtimeCandidateChannelNonFact: Object.freeze({
     boundMs: 3_500,
     faultSettlement: 'timeout',
