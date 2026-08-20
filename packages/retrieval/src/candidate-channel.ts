@@ -97,6 +97,14 @@ export const CANDIDATE_CHANNEL_MAX_AGGREGATE = 512 as const;
 export const CANDIDATE_CHANNEL_MAX_STRING_BYTES = 65_536 as const;
 export const CANDIDATE_CHANNEL_MAX_AGGREGATE_STRING_BYTES = 4_194_304 as const;
 export const CANDIDATE_CHANNEL_MAX_SERIALIZED_BYTES = 33_554_432 as const;
+// RET-009 backstop for a roster runner that never settles. It is a backstop, not a
+// budget: it must stay strictly above every well-behaved worst case, or it preempts
+// a healthy runner. The worst of those today is the memory.fact hop at 7000 ms,
+// composed serially from FACT_ID_BATCH_WALL_TIMEOUT_MS (packages/neo4j/src/fact.ts:675,
+// 6000 ms, bounding session.run) and FACT_ID_BATCH_CLOSE_TIMEOUT_MS (fact.ts:676,
+// 1000 ms, applied afterwards in the outer finally). Raising EITHER of those two
+// constants requires raising this one.
+export const CANDIDATE_CHANNEL_EXECUTOR_DEADLINE_MS = 10_000 as const;
 
 const MAX_RESOLVED_ENTITY_IDS = 32;
 const MAX_TENANT_ID_BYTES = 128;
@@ -1301,7 +1309,13 @@ function parseSerializedAttempt(
 interface ObservedPromiseValue {
   readonly fulfilled: boolean;
   readonly value?: unknown;
+  readonly timedOut?: true;
 }
+
+const EXECUTOR_DEADLINE_OBSERVED: ObservedPromiseValue = frozenRecord({
+  fulfilled: false,
+  timedOut: true as const,
+});
 
 interface PendingAttempt {
   readonly channel: RetrievalTraceChannel;
@@ -1323,14 +1337,34 @@ function startAttempt(
   if (INTRINSIC_NODE_IS_PROXY(returned)) return frozenRecord({ channel, code: 'invalid-result' });
   if (!INTRINSIC_NODE_IS_PROMISE(returned)) return parseAttempt(returned, request, channel);
   if (!isExactNativePromise(returned)) return frozenRecord({ channel, code: 'invalid-result' });
+  // The backstop is armed here, in the pending branch only: the five returns above
+  // would each leave a live handle behind, and arming at await time instead would
+  // bound a roster of N hung runners by N deadlines rather than one, because
+  // attempts start concurrently and are awaited in order.
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const observed = INTRINSIC_PROMISE_THEN(
+    let settle!: (value: ObservedPromiseValue) => void;
+    // No Promise combinator: `race`/`resolve` perform Get(C, "resolve") and consult
+    // Symbol.species on a runner-supplied promise, which is the exact surface
+    // INTRINSIC_PROMISE_SPECIES_DESCRIPTOR and isExactNativePromise exist to remove.
+    // A deferred over the captured intrinsic settles the race on resolve-once
+    // semantics alone, and satisfies isExactNativePromise itself.
+    const observed = new INTRINSIC_PROMISE<ObservedPromiseValue>((resolve) => { settle = resolve; });
+    // setTimeout/clearTimeout are resolved at call time, deliberately unlike every
+    // other intrinsic in this file: a module-load capture binds the real timer
+    // before a test's fake clock is installed, so the deadline could never be
+    // exercised. Precedents: runtime-candidate-channel.ts bounded(),
+    // fact.ts withFactBatchDeadline(). Promise intrinsics stay captured at load.
+    timer = setTimeout(() => { settle(EXECUTOR_DEADLINE_OBSERVED); }, CANDIDATE_CHANNEL_EXECUTOR_DEADLINE_MS);
+    timer.unref?.();
+    INTRINSIC_PROMISE_THEN(
       returned,
-      (value) => frozenRecord({ fulfilled: true, value }),
-      () => frozenRecord({ fulfilled: false }),
-    ) as Promise<ObservedPromiseValue>;
+      (value) => { clearTimeout(timer); settle(frozenRecord({ fulfilled: true, value })); },
+      () => { clearTimeout(timer); settle(frozenRecord({ fulfilled: false })); },
+    );
     return frozenRecord({ channel, observed });
   } catch {
+    if (timer !== undefined) clearTimeout(timer);
     return frozenRecord({ channel, code: 'invalid-result' });
   }
 }
@@ -1366,10 +1400,21 @@ export async function executeCandidateChannelsV1(
       attempts[index] = frozenRecord({ channel: pendingChannel, code: 'invalid-result' });
       continue;
     }
-    // Deliberately no executor deadline here: RET-003B/RET-009 owns never-settling runner deadlines.
+    // The executor deadline is armed per attempt in startAttempt, at
+    // CANDIDATE_CHANNEL_EXECUTOR_DEADLINE_MS; awaiting here is therefore bounded.
     const observed = await pendingObserved;
     if (typeof observed !== 'object' || observed === null) {
       attempts[index] = frozenRecord({ channel: pendingChannel, code: 'invalid-result' });
+      continue;
+    }
+    // Checked before `fulfilled`, which maps everything else to query-failed.
+    // A runner cannot forge this: the wrapper record is only ever built by this
+    // module's own callbacks, and a runner's fulfilled value is nested at .value
+    // and is always a string primitive, since parseSerializedRunnerResult rejects
+    // every non-string. ownDataValue reads own data descriptors only, so
+    // Object.prototype pollution cannot reach the key either.
+    if (ownDataValue(observed, 'timedOut') === true) {
+      attempts[index] = frozenRecord({ channel: pendingChannel, code: 'timeout' });
       continue;
     }
     const fulfilled = ownDataValue(observed, 'fulfilled');

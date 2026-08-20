@@ -19,6 +19,10 @@ import {
   type CandidateChannelRunnerRosterV1,
   type RetrievalTraceChannel,
 } from '../index.js';
+// RET-009: the executor deadline is deliberately not re-exported from index.ts.
+// Under ESM this resolves to the same module instance as the import above.
+import { CANDIDATE_CHANNEL_EXECUTOR_DEADLINE_MS } from '../candidate-channel.js';
+import { RETRIEVAL_LATENCY_POLICY_V1 } from '../retrieval-latency-policy.js';
 
 const CHANNELS = [
   'memory.scope', 'memory.semantic-vector', 'memory.episodic-vector', 'memory.fact',
@@ -1489,5 +1493,134 @@ describe('RET-003A candidate channel contract', () => {
       (result.candidates[0] as { content: string }).content = 'returned-mutated';
     }).toThrow();
     expect(JSON.stringify(result)).toBe(before);
+  });
+});
+
+describe('RET-009 executor backstop deadline', () => {
+  function hung(): Promise<string> {
+    return new Promise<string>(() => undefined);
+  }
+
+  it('A1 settles a never-settling runner as timeout while a sibling settles on its own merits', async () => {
+    vi.useFakeTimers();
+    try {
+      const input = request({ plannedChannels: ['memory.scope', 'code.fulltext'] });
+      const pending = executeCandidateChannelsV1(input, roster([
+        ['memory.scope', () => hung()],
+        ['code.fulltext', async (received) => serialized(
+          'code.fulltext',
+          success('code.fulltext', [candidate('code.fulltext', 'sibling', 1)]),
+          received,
+        )],
+      ]));
+      let settled = false;
+      void pending.then(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(CANDIDATE_CHANNEL_EXECUTOR_DEADLINE_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+
+      const result = await pending;
+      expect(result.settlements).toContainEqual(safeFailure('memory.scope', 'timeout'));
+      expect(result.settlements).not.toContainEqual(safeFailure('memory.scope', 'query-failed'));
+      expect(result.settlements).toContainEqual({
+        contractId: CANDIDATE_CHANNEL_CONTRACT_ID,
+        contractVersion: CANDIDATE_CHANNEL_CONTRACT_VERSION,
+        channel: 'code.fulltext',
+        outcome: 'success',
+        candidateCount: 1,
+      });
+      expect(result.candidates.map((item) => item.evidenceId)).toEqual(['sibling']);
+      // The policy's executor clause, against the behaviour just observed.
+      expect(RETRIEVAL_LATENCY_POLICY_V1.candidateChannelExecutor)
+        .toEqual({ boundMs: CANDIDATE_CHANNEL_EXECUTOR_DEADLINE_MS, faultSettlement: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('A2 bounds three hung runners by one deadline, not one deadline each', async () => {
+    vi.useFakeTimers();
+    try {
+      const channels: readonly RetrievalTraceChannel[] = ['memory.scope', 'code.fulltext', 'arch.entity'];
+      const pending = executeCandidateChannelsV1(
+        request({ plannedChannels: [...channels] }),
+        roster(channels.map((channel) => [channel, () => hung()] as const)),
+      );
+      let settled = false;
+      void pending.then(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(CANDIDATE_CHANNEL_EXECUTOR_DEADLINE_MS - 1);
+      expect(settled).toBe(false);
+      // Attempts are started concurrently, so the whole execution must be bounded
+      // by ONE deadline. Arming in the await loop instead would need 3 x deadline.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+
+      const result = await pending;
+      expect(result.settlements)
+        .toEqual(channels.map((channel) => safeFailure(channel, 'timeout')));
+      expect(result.candidates).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('A3 leaves well-behaved runners unchanged and leaks no armed timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const channels: readonly RetrievalTraceChannel[] = [
+        'memory.scope', 'code.fulltext', 'arch.entity', 'memory.block', 'memory.graph',
+      ];
+      const result = await executeCandidateChannelsV1(
+        request({ plannedChannels: [...channels] }),
+        roster([
+          ['memory.scope', async (received) => serialized(
+            'memory.scope',
+            success('memory.scope', [candidate('memory.scope', 'resolved', 1)]),
+            received,
+          )],
+          ['code.fulltext', async () => { throw new Error('rejected'); }],
+          ['arch.entity', () => { throw new Error('sync-throw'); }],
+          ['memory.block', () => success('memory.block', [])],
+          ['memory.graph', () => new Proxy({}, {})],
+        ]),
+      );
+      expect(result.settlements).toHaveLength(5);
+      expect(result.settlements).toContainEqual({
+        contractId: CANDIDATE_CHANNEL_CONTRACT_ID,
+        contractVersion: CANDIDATE_CHANNEL_CONTRACT_VERSION,
+        channel: 'memory.scope',
+        outcome: 'success',
+        candidateCount: 1,
+      });
+      expect(result.settlements).toContainEqual({
+        contractId: CANDIDATE_CHANNEL_CONTRACT_ID,
+        contractVersion: CANDIDATE_CHANNEL_CONTRACT_VERSION,
+        channel: 'memory.block',
+        outcome: 'success',
+        candidateCount: 0,
+      });
+      expect(result.settlements).toContainEqual(safeFailure('code.fulltext', 'query-failed'));
+      expect(result.settlements).toContainEqual(safeFailure('arch.entity', 'query-failed'));
+      expect(result.settlements).toContainEqual(safeFailure('memory.graph', 'invalid-result'));
+      expect(result.candidates.map((item) => item.evidenceId)).toEqual(['resolved']);
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Early-return paths arm nothing at all: startAttempt returns before the
+      // pending branch for every one of these runners.
+      const early = await executeCandidateChannelsV1(
+        request({ plannedChannels: ['memory.scope', 'code.fulltext'] }),
+        roster([
+          ['memory.scope', () => { throw new Error('sync-throw'); }],
+          ['code.fulltext', () => new Proxy({}, {})],
+        ]),
+      );
+      expect(early.settlements).toHaveLength(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
