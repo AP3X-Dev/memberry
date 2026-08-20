@@ -61,12 +61,26 @@ export const RETRIEVAL_LATENCY_POLICY_V1: {
     boundMs: 7_000,
     faultSettlement: 'timeout',
   }),
-  // Characterized, not fixed: assembler.ts getCollectionSize awaits session.run with
-  // no timeout of any kind. It is fail-open — a failure serves the previously cached
-  // value, or undefined when there is none, and never throws. A hang is unbounded.
-  // Follow-up: RET-011-COLLECTION-SIZE-BOUND.
+  // Query 2000 + session close 500 (assembler.ts COLLECTION_SIZE_QUERY_TIMEOUT_MS /
+  // COLLECTION_SIZE_CLOSE_TIMEOUT_MS, the second bounding the close in the finally).
+  // Unlike the non-fact hop above this composed bound IS attainable: the finally runs
+  // after the try throws, so query-timeout-then-close-timeout is a real serial path.
+  // The hop overlaps the layer fetches, so the marginal wall clock it adds to a
+  // request is max(0, 2500 - layerElapsed), not 2500.
+  //
+  // Still fail-open — a fault serves the previously cached value, or undefined when
+  // there is none, and never throws.
+  //
+  // Ranking side effect, stated because it is real. collectionSize feeds fusion.ts:44
+  // (scaleRrfK) and fusion.ts:120-121 (normalizeScores), both gated on
+  // scoring.ts LARGE_COLLECTION_THRESHOLD = 10_000. A probe that now times out where
+  // it previously completed slowly suppresses the hint, which reverts effectiveK to
+  // the base k and skips sigmoid z-score normalization, so scores and ordering can
+  // change — on deployments at or above that threshold only, and never below it.
+  // The TTL stamp is written on the failure path as well as the success path, so the
+  // degradation is bounded to one probe per TTL window and self-heals on the next.
   collectionSize: Object.freeze({
-    boundMs: null,
+    boundMs: 2_500,
     faultSettlement: 'stale-or-undefined',
   }),
   // Degradation is disclosed, not hidden: a channel that cannot serve settles
