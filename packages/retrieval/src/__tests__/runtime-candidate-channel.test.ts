@@ -389,4 +389,37 @@ describe('RET-003B runtime candidate channel service', () => {
       .find((item) => item.id === 'semantic-long')!.score;
     expect(items.reduce((sum, item) => sum + item.score, 0)).toBeGreaterThan(longScore);
   });
+
+  it('keeps one item that exactly fills the budget over a denser item that strands the rest', async () => {
+    const rows = validRows();
+    // 40 chars -> 10 tokens, confidence 1 -> provenance 1.1: fills a 10-token budget exactly.
+    rows.scope![0] = record(
+      ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+      ['tenant-a', project, entityId, 'semantic-exact', 'Semantic', 'L'.repeat(40), 1],
+    );
+    // The fact runtime rebuilds content as "subject predicate object" -> 24 chars -> 6 tokens.
+    // Confidence 0 -> provenance 0.9, so it is denser but worth less, and the 4 tokens it
+    // leaves behind are too few to hold anything else.
+    rows.fact![0] = record(
+      ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+      ['tenant-a', project, entityId, 'fact-dense', 'Fact', 'subject predicate object', 0],
+    );
+    const mock = driver(rows);
+    const service = new RuntimeCandidateChannelService(mock.driver);
+    const receipt = await authorityReceipt();
+    const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
+    const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
+
+    const budgeted = assembler.assembleCandidateExecution('task', execution, 10, false, true).context;
+    const unbudgeted = assembler.assembleCandidateExecution('task', execution, 8_000, false, true).context;
+    const items = budgeted.sections.flatMap((section) => section.items);
+    // Density-greedy alone takes the cheap dense item and wastes the remaining 4 tokens; the
+    // budget must instead go to the single item worth more that fits inside it.
+    const denseScore = unbudgeted.sections.flatMap((section) => section.items)
+      .find((item) => item.id === 'fact-dense')!.score;
+
+    expect(items.map((item) => item.id)).toEqual(['semantic-exact']);
+    expect(budgeted.token_count).toBe(10);
+    expect(items.reduce((sum, item) => sum + item.score, 0)).toBeGreaterThan(denseScore);
+  });
 });
