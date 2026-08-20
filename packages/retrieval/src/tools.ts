@@ -33,6 +33,10 @@ import {
 } from './runtime-candidate-channel.js';
 import type { CandidateChannelExecutionResultV1 } from './candidate-channel.js';
 import { askRetrievalTokenBudget } from './assembler.js';
+import {
+  buildRetrievalExplanationViewV1,
+  renderRetrievalExplanationTextV1,
+} from './retrieval-explanation-view.js';
 import type { RerankerShadowCoordinatorPortV1 } from './reranker-shadow.js';
 import type { RetrievalResult } from './types.js';
 
@@ -325,13 +329,15 @@ async function resolveRuntimeEntityIds(
   }
 }
 
-function tracedTextContent(markdown: string, traceJson: string): {
+function tracedTextContent(markdown: string, traceJson: string, explanation?: string): {
   content: Array<{ type: 'text'; text: string }>;
 } {
-  return { content: [
+  const content = [
     { type: 'text' as const, text: markdown },
     { type: 'text' as const, text: traceJson },
-  ] };
+  ];
+  if (explanation !== undefined) content.push({ type: 'text' as const, text: explanation });
+  return { content };
 }
 
 export const RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV = 'MEMBERRY_TRACE_VALIDATION_DIAGNOSTICS';
@@ -441,6 +447,8 @@ export function registerRetrievalTools(
       as_of: z.string().optional().describe('ISO 8601 timestamp for point-in-time queries. When set, only knowledge valid at this time is included.'),
       include_trace: z.boolean().optional().default(false)
         .describe('Include a validated canonical retrieval trace as a second text block'),
+      explain: z.boolean().optional().default(false)
+        .describe('Requires include_trace. Add a human-readable explanation of why this evidence was selected as a third text block'),
     },
     { readOnlyHint: true, idempotentHint: true } satisfies ToolAnnotations,
     async (args) => {
@@ -473,7 +481,12 @@ export function registerRetrievalTools(
         const md = assembler.renderMarkdown(assembled.context);
         if (args.include_trace !== true) return textContent(md);
         if (!assembled.trace) throw new Error('candidate_runtime:unavailable');
-        return tracedTextContent(md, serializeApprovedRetrievalTrace(assembled.trace));
+        if (args.explain !== true) return tracedTextContent(md, serializeApprovedRetrievalTrace(assembled.trace));
+        return tracedTextContent(
+          md,
+          serializeApprovedRetrievalTrace(assembled.trace),
+          renderRetrievalExplanationTextV1(buildRetrievalExplanationViewV1(assembled.trace)),
+        );
       }
       // Tenant safety: the deterministic strategy queries un-tenant-stamped
       // Entity/Aspect nodes, so it is not safe for a named tenant. Force the
@@ -511,7 +524,12 @@ export function registerRetrievalTools(
       const traced = await assembler.assembleTraced(args.task, runtimeOptions);
       const md = assembler.renderMarkdown(traced.context);
       const traceJson = serializeApprovedRetrievalTrace(traced.trace);
-      return tracedTextContent(md, traceJson);
+      if (args.explain !== true) return tracedTextContent(md, traceJson);
+      return tracedTextContent(
+        md,
+        traceJson,
+        renderRetrievalExplanationTextV1(buildRetrievalExplanationViewV1(traced.trace)),
+      );
     },
   ));
 
