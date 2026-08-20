@@ -25,7 +25,7 @@ const CHAIN_AUDIT = {
   'mh-holdout-02': ['crates of pears', 'pear crates', 'pantry willow', 'pantry willow', 'hatch copper'],
   'mh-holdout-03': ['intern ivo', 'intern ivo', 'ward heron', 'ward heron', 'half past six'],
   'mh-holdout-04': ['actor uma', 'uma', 'stage blue', 'stage blue', 'thursday evening'],
-  'mh-holdout-05': ['brake assembly', 'brake assembly', 'cable fern', 'cable fern', 'graphite lubricant'],
+  'mh-holdout-05': ['brake assembly', 'brake assembly', 'cable called fern', 'cable fern', 'graphite lubricant'],
   'mh-holdout-06': ['scope vela', 'scope vela', 'lens pearl', 'lens pearl', 'amber coating'],
   'mh-holdout-07': ['map rill', 'map rill', 'vault keeper oren', 'vault keeper oren', 'green transfer sleeve'],
   'mh-holdout-08': ['coin set mica', 'coin set mica', 'steward pia', 'steward pia', 'humidity log'],
