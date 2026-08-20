@@ -19,6 +19,12 @@ export const REGISTERED_ADAPTER_TRUST_BOUNDARY =
   'Required-CI adapters are reviewed repository source with relative-only static dependencies. '
   + 'Node 20 has no stable portable per-module filesystem sandbox, so the lab audits before import, '
   + 'blocks loader, builtin, filesystem, global escape, and runtime-codegen routes, and passes only adapter inputs. '
+  + 'Production source under packages/ is exempt, because it is the subject under evaluation rather than '
+  + 'lab-authored candidate code. Stated without flattery, that exemption skips the import-specifier and '
+  + 'global-identifier scan of the production file AND terminates traversal, so nothing reachable only '
+  + 'through packages/ is audited at all. It is the same scope bench/lab/admission/registered.ts already '
+  + 'accepts in required CI, and it applies only after the repository-escape and scorer-only-path checks, '
+  + 'so production source still cannot enter through a fixture, dataset, registry, test, or oracle path. '
   + 'This is a source-policy boundary, not an operating-system isolation claim.';
 
 interface SystemRegistration {
@@ -40,6 +46,14 @@ const CANONICAL_FACTORIES: Readonly<Record<string, CanonicalFactory>> = Object.f
     create: async () => {
       const { MemBerryProxyAdapter } = await import('./adapters/memberry-proxy.js');
       return new MemBerryProxyAdapter();
+    },
+  },
+  // LAB-010: eligible, not yet bound to any lane — see LAB-011
+  'memberry-retrieval-core-v1': {
+    entry: 'bench/lab/adapters/memberry-retrieval-core.ts',
+    create: async () => {
+      const { MemBerryRetrievalCoreAdapter } = await import('./adapters/memberry-retrieval-core.js');
+      return new MemBerryRetrievalCoreAdapter();
     },
   },
   'scope-aware-bm25-control-v1': {
@@ -137,6 +151,8 @@ export async function auditAdapterDependencies(entry: string, repoRoot = DEFAULT
       continue;
     }
     if (FORBIDDEN_PATH.test(relativePath)) violations.push(`${relativePath}: scorer-only path is forbidden to adapters`);
+    // Production core is the subject under evaluation, not lab-owned candidate code.
+    if (relativePath.startsWith('packages/')) continue;
     const source = await readFile(current, 'utf8');
     const parsed = moduleSpecifiers(source, relativePath);
     violations.push(...parsed.violations);
