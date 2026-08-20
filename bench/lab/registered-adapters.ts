@@ -48,7 +48,7 @@ const CANONICAL_FACTORIES: Readonly<Record<string, CanonicalFactory>> = Object.f
       return new MemBerryProxyAdapter();
     },
   },
-  // LAB-010: eligible, not yet bound to any lane — see LAB-011
+  // LAB-010 adapter; LAB-011 binds it only to the G2 recall and precision holdout lanes.
   'memberry-retrieval-core-v1': {
     entry: 'bench/lab/adapters/memberry-retrieval-core.ts',
     create: async () => {

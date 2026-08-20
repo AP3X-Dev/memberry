@@ -197,10 +197,9 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
     // decision depends on this fixture embedding provider and can select GRAPH,
     // which reads the empty stub driver and returns nothing.
     //
-    // No tenantId is threaded: assembleRankedInternal forces the code channel OFF
-    // for a non-default tenant, and every lab scenario names one. Tenant and
-    // project scope are enforced above by namespaceKey + inRequestedScope, before
-    // the assembler ever sees a memory.
+    // No tenantId is threaded, so the assembler resolves its default tenant and
+    // keeps the code channel enabled. Tenant and project scope are enforced above
+    // by namespaceKey + inRequestedScope, before the assembler sees a memory.
     const context = await assembler.assemble(request.query, {
       strategy: 'ranked',
       include_code: true,

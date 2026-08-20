@@ -125,7 +125,7 @@ export async function runDeterministicCiGate(
   const holdoutRecallComparison = requireGateResult('g2-holdout-recall', await compareRegisteredAdapters({
     runId: `${runId}-holdout-recall`,
     controlId: 'scope-aware-bm25-control-v1',
-    candidateId: 'memberry-proxy-v1',
+    candidateId: 'memberry-retrieval-core-v1',
     scenarios: holdoutRecallScenarios,
     splits: ['holdout'],
     policy: labPolicy.holdoutRecallAt10,
@@ -137,7 +137,7 @@ export async function runDeterministicCiGate(
   const holdoutPrecisionComparison = requireGateResult('g2-holdout-precision', await compareRegisteredAdapters({
     runId: `${runId}-holdout-precision`,
     controlId: 'scope-aware-bm25-control-v1',
-    candidateId: 'memberry-proxy-v1',
+    candidateId: 'memberry-retrieval-core-v1',
     scenarios: holdoutPrecisionScenarios,
     splits: ['holdout'],
     policy: labPolicy.holdoutPrecisionAt5,
