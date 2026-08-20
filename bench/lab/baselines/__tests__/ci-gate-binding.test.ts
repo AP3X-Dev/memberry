@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
 const CI_GATE = resolve(REPO_ROOT, 'bench/lab/baselines/ci-gate.ts');
+const REGISTRY_VALIDATOR = resolve(REPO_ROOT, 'bench/lab/registry/validate.ts');
+const DATASET_HASHER = resolve(REPO_ROOT, 'bench/lab/datasets/hash.ts');
 
 function namedProperty(object: ts.ObjectLiteralExpression, name: string): ts.PropertyAssignment {
   const property = object.properties.find((candidate): candidate is ts.PropertyAssignment => {
@@ -98,16 +100,70 @@ function aggregateHoldoutLogArguments(sourceFile: ts.SourceFile): ts.Expression[
 }
 
 describe('LAB-011 G2 production binding', () => {
+  it('keeps required CI artifact custody integrity-only and the RET-007 ordinary gate dev-only', async () => {
+    const [gateSource, validatorSource, hasherSource] = await Promise.all([
+      readFile(CI_GATE, 'utf8'),
+      readFile(REGISTRY_VALIDATOR, 'utf8'),
+      readFile(DATASET_HASHER, 'utf8'),
+    ]);
+    const gateFile = ts.createSourceFile(CI_GATE, gateSource, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    const registryCalls = callsNamed(gateFile, 'validateRegistries');
+    expect(registryCalls).toHaveLength(1);
+    expect(registryCalls[0]!.arguments).toHaveLength(1);
+    expect(registryCalls[0]!.arguments[0]!.getText(gateFile))
+      .toBe("resolve(REPO_ROOT, 'bench', 'lab', 'registry')");
+
+    const ret007Calls = callsNamed(gateFile, 'runRet007MultiHopDevGate');
+    expect(ret007Calls).toHaveLength(1);
+    const ret007Options = callObject(ret007Calls[0]!);
+    expect(ret007Options.properties.map((property) => property.name?.getText(gateFile))).toEqual([
+      'runId', 'repoRoot', 'policy',
+    ]);
+    expect(gateSource).toContain("import { runRet007MultiHopDevGate } from '../multihop/gate.js';");
+    expect(gateSource).not.toContain('runRet007MultiHopHoldoutGate');
+
+    const validatorFile = ts.createSourceFile(
+      REGISTRY_VALIDATOR, validatorSource, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS,
+    );
+    const requiredArtifactLoop = (() => {
+      let found: ts.ForOfStatement | undefined;
+      const visit = (node: ts.Node): void => {
+        if (ts.isForOfStatement(node)
+          && node.expression.getText(validatorFile).includes('entry.requiredInCi === true')
+          && node.statement.getText(validatorFile).includes('sha256File(')) found = node;
+        ts.forEachChild(node, visit);
+      };
+      visit(validatorFile);
+      return found;
+    })();
+    expect(requiredArtifactLoop).toBeDefined();
+    const custodyLoop = requiredArtifactLoop!.getText(validatorFile);
+    expect(custodyLoop).toContain("sha256File(path, artifact.hashMode as 'bytes' | 'text-lf')");
+    expect(custodyLoop).not.toMatch(/JSON\.parse|readFile|split\(|scenario|record|oracleAccess|console\./);
+
+    const hasherFile = ts.createSourceFile(
+      DATASET_HASHER, hasherSource, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS,
+    );
+    const sha256File = hasherFile.statements.find((statement): statement is ts.FunctionDeclaration => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'sha256File'
+    ));
+    expect(sha256File?.body?.getText(hasherFile).replace(/\r\n/g, '\n')).toBe(`{
+  const content = await readFile(path);
+  return { sha256: sha256(content, mode), sizeBytes: normalizeForHash(content, mode).byteLength };
+}`);
+    expect(hasherSource).not.toMatch(/JSON\.parse|split\(|scenario|record|console\./);
+  });
+
   it('pins exactly the two G2 holdout lanes to production retrieval', async () => {
     const source = await readFile(CI_GATE, 'utf8');
     const sourceFile = ts.createSourceFile(CI_GATE, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
     const comparisonCalls = callsNamed(sourceFile, 'compareRegisteredAdapters');
-    expect(comparisonCalls).toHaveLength(5);
+    expect(comparisonCalls).toHaveLength(7);
     const bindings = new Map(comparisonCalls.map((call) => {
       const object = callObject(call);
       return [comparisonRunId(object), stringProperty(object, 'candidateId')] as const;
     }));
-    expect(bindings.size).toBe(5);
+    expect(bindings.size).toBe(7);
 
     expect(Object.fromEntries(bindings)).toEqual({
       golden: 'memberry-proxy-v1',
@@ -115,7 +171,17 @@ describe('LAB-011 G2 production binding', () => {
       retrieval: 'memberry-proxy-v1',
       'holdout-recall': 'memberry-retrieval-core-v1',
       'holdout-precision': 'memberry-retrieval-core-v1',
+      'ret007-holdout-recall': 'memberry-retrieval-core-query-decomposition-v1',
+      'ret007-holdout-precision': 'memberry-retrieval-core-query-decomposition-v1',
     });
+  });
+
+  it('keeps existing G2 bindings byte-stable and adds separate production-core regression lanes', async () => {
+    const source = await readFile(CI_GATE, 'utf8');
+    expect(source).toMatch(/controlId: 'scope-aware-bm25-control-v1',[\s\S]*?candidateId: 'memberry-retrieval-core-v1',[\s\S]*?scenarios: holdoutRecallScenarios/);
+    expect(source).toMatch(/controlId: 'scope-aware-bm25-control-v1',[\s\S]*?candidateId: 'memberry-retrieval-core-v1',[\s\S]*?scenarios: holdoutPrecisionScenarios/);
+    expect(source).toMatch(/controlId: 'memberry-retrieval-core-v1',[\s\S]*?candidateId: 'memberry-retrieval-core-query-decomposition-v1',[\s\S]*?scenarios: holdoutRecallScenarios/);
+    expect(source).toMatch(/controlId: 'memberry-retrieval-core-v1',[\s\S]*?candidateId: 'memberry-retrieval-core-query-decomposition-v1',[\s\S]*?scenarios: holdoutPrecisionScenarios/);
   });
 
   it('keeps each G2 manifest and artifact writer paired to its own comparison', async () => {
@@ -134,6 +200,26 @@ describe('LAB-011 G2 production binding', () => {
         call.arguments[1]?.getText(sourceFile) === comparison
       ));
       expect(writer, `${lane.toLowerCase()} artifact writer`).toBeDefined();
+      expect(writer!.arguments[2]?.getText(sourceFile)).toBe(manifest);
+    }
+  });
+
+  it('pairs each RET-007 regression manifest and artifact with its own comparison', async () => {
+    const source = await readFile(CI_GATE, 'utf8');
+    const sourceFile = ts.createSourceFile(CI_GATE, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    for (const lane of ['Recall', 'Precision'] as const) {
+      const comparison = `decomposition${lane}Comparison`;
+      const manifest = `decomposition${lane}Manifest`;
+      const manifestObject = variableCallObject(sourceFile, manifest, 'createRunManifest');
+      expect(namedProperty(manifestObject, 'runId').initializer.getText(sourceFile)).toBe(`${comparison}.runId`);
+      expect(namedProperty(manifestObject, 'controlAdapter').initializer.getText(sourceFile))
+        .toBe(`${comparison}.control.adapterId`);
+      expect(namedProperty(manifestObject, 'candidateAdapter').initializer.getText(sourceFile))
+        .toBe(`${comparison}.candidate.adapterId`);
+      const writer = callsNamed(sourceFile, 'writeRequiredCiComparisonArtifacts').find((call) => (
+        call.arguments[1]?.getText(sourceFile) === comparison
+      ));
+      expect(writer).toBeDefined();
       expect(writer!.arguments[2]?.getText(sourceFile)).toBe(manifest);
     }
   });

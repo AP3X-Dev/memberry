@@ -36,6 +36,18 @@ function manifest(runId: string) {
 }
 
 describe('registered adapter evidence boundary', () => {
+  it('loads the query-decomposition candidate as a distinct audited production adapter', async () => {
+    const report = await compareRegisteredAdapters({
+      runId: 'registered-decomposition-comparison',
+      controlId: 'memberry-retrieval-core-v1',
+      candidateId: 'memberry-retrieval-core-query-decomposition-v1',
+      scenarios: TEMPORAL_ISOLATION_SCENARIOS,
+    });
+    expect(report.control.adapterId).toBe('memberry-retrieval-core-v1');
+    expect(report.candidate.adapterId).toBe('memberry-retrieval-core-query-decomposition-v1');
+    expect(report.evidenceMode).toBe('registered-ci');
+  });
+
   it('audits the real candidate graph without granting oracle or filesystem access', async () => {
     const root = resolve(import.meta.dirname, '..', '..', '..');
     const audit = await auditAdapterDependencies(resolve(root, 'bench/lab/adapters/memberry-proxy.ts'), root);
@@ -53,6 +65,23 @@ describe('registered adapter evidence boundary', () => {
     await writeFile(join(root, 'adapters', 'candidate.ts'), 'import { answer } from "../fixtures/secret-oracle.js"; export default answer;\n', 'utf8');
     const audit = await auditAdapterDependencies(join(root, 'adapters', 'candidate.ts'), root);
     expect(audit.violations.join('\n')).toMatch(/scorer-only path is forbidden/);
+  });
+
+  it('rejects every multi-hop gate, scorer, and policy route before adapter execution', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'memberry-adapter-multihop-boundary-'));
+    temporaryRoots.push(root);
+    await mkdir(join(root, 'adapters'));
+    await mkdir(join(root, 'multihop'));
+    for (const name of ['gate', 'scorer-only', 'policy']) {
+      await writeFile(join(root, 'multihop', `${name}.ts`), 'export const protectedValue = 1;\n', 'utf8');
+      await writeFile(
+        join(root, 'adapters', 'candidate.ts'),
+        `import { protectedValue } from "../multihop/${name}.js"; export default protectedValue;\n`,
+        'utf8',
+      );
+      const audit = await auditAdapterDependencies(join(root, 'adapters', 'candidate.ts'), root);
+      expect(audit.violations).toEqual([expect.stringContaining('scorer-only path is forbidden')]);
+    }
   });
 
   it('rejects bare package loaders instead of trusting transitive package behavior', async () => {

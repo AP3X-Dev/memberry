@@ -2,6 +2,8 @@
 // Reciprocal Rank Fusion: merges multiple ranked lists into one.
 // Enhanced with dynamic k scaling, normalization, and MMR diversification.
 
+import { isProxy } from 'node:util/types';
+
 import type { RetrievalResult, BoostFactors } from './types.js';
 import {
   scaleRrfK,
@@ -14,10 +16,34 @@ import {
 /** @internal Structural-only observer for the outer ranked algorithm. */
 export interface RankedFusionObserver {
   rrf(result: RetrievalResult, value: number): void;
-  score(result: RetrievalResult, name: 'feedback-multiplier' | 'provenance-multiplier' | 'lexical-multiplier' | 'normalized', value: number): void;
+  score(result: RetrievalResult, name: 'feedback-multiplier' | 'provenance-multiplier' | 'lexical-multiplier' | 'decomposition-multiplier' | 'normalized', value: number): void;
   candidateWindow(result: RetrievalResult, admitted: boolean): void;
   finalScore(result: RetrievalResult, value: number): void;
   mmr(observation: RankedMmrObservation): void;
+}
+
+export interface DecompositionCandidateWindowV1 {
+  readonly content: string;
+  readonly ordinal: number;
+}
+
+export type DecompositionBoostV1 = (
+  candidates: readonly DecompositionCandidateWindowV1[],
+) => readonly number[];
+
+const DECOMPOSITION_MAX_CANDIDATES_V1 = 100;
+
+function boundedOwnArrayLength(value: unknown, maximum: number): number | undefined {
+  try {
+    if (isProxy(value)) return undefined;
+    if (!Array.isArray(value)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    const length = descriptor && 'value' in descriptor ? descriptor.value : undefined;
+    return typeof length === 'number' && Number.isSafeInteger(length)
+      && length >= 0 && length <= maximum ? length : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -30,6 +56,7 @@ export interface RankedFusionObserver {
  * @param boosts - Optional per-entity and per-source-type boost factors from feedback
  * @param collectionSize - Optional total collection size for dynamic k scaling and normalization
  * @param postBoost - Optional function to apply score boost after RRF but before MMR diversification
+ * @param decompositionBoost - Optional identity-free batch multiplier after lexical boost and before MMR
  */
 export function rrfFusion(
   lists: RetrievalResult[][],
@@ -39,6 +66,7 @@ export function rrfFusion(
   collectionSize?: number,
   postBoost?: (result: RetrievalResult) => number,
   observer?: RankedFusionObserver,
+  decompositionBoost?: DecompositionBoostV1,
 ): RetrievalResult[] {
   // Dynamic k scaling for large collections
   const effectiveK = collectionSize ? scaleRrfK(k, collectionSize) : k;
@@ -128,6 +156,49 @@ export function rrfFusion(
       const before = result.score;
       result.score = postBoost(result);
       observer?.score(result, 'lexical-multiplier', before === 0 ? 1 : result.score / before);
+    }
+    results.sort((a, b) => b.score - a.score);
+  }
+
+  // RET-007: the batch callback receives content and ordinal only. Any throw,
+  // wrong shape, or out-of-range value fails closed to exact identity.
+  if (decompositionBoost) {
+    let multipliers: readonly number[] | undefined;
+    if (results.length <= DECOMPOSITION_MAX_CANDIDATES_V1) try {
+      const sanitized = new Array<Readonly<DecompositionCandidateWindowV1>>(results.length);
+      for (let ordinal = 0; ordinal < results.length; ordinal += 1) {
+        Object.defineProperty(sanitized, ordinal, {
+          value: Object.freeze({ content: results[ordinal]!.content, ordinal }),
+          enumerable: true,
+          writable: false,
+          configurable: false,
+        });
+      }
+      Object.freeze(sanitized);
+      const proposed: unknown = decompositionBoost(sanitized);
+      const proposedLength = boundedOwnArrayLength(proposed, DECOMPOSITION_MAX_CANDIDATES_V1);
+      if (proposedLength === results.length) {
+        const validated = new Array<number>(proposedLength);
+        let valid = true;
+        for (let index = 0; index < proposedLength; index += 1) {
+          const descriptor = Object.getOwnPropertyDescriptor(proposed, index);
+          const value = descriptor && 'value' in descriptor ? descriptor.value : undefined;
+          if (typeof value !== 'number' || !Number.isFinite(value) || value < 1 || value > 1.25) {
+            valid = false;
+            break;
+          }
+          Object.defineProperty(validated, index, {
+            value, enumerable: true, writable: true, configurable: true,
+          });
+        }
+        if (valid) multipliers = Object.freeze(validated);
+      }
+    } catch { /* fixed value-free identity fallback below */ }
+    for (let index = 0; index < results.length; index += 1) {
+      const result = results[index]!;
+      const multiplier = multipliers?.[index] ?? 1;
+      result.score *= multiplier;
+      observer?.score(result, 'decomposition-multiplier', multiplier);
     }
     results.sort((a, b) => b.score - a.score);
   }

@@ -13,6 +13,7 @@ import { TEMPORAL_ISOLATION_SCENARIOS } from '../fixtures/temporal-isolation.js'
 import type { LabGatePolicy } from '../contracts/report.js';
 import { validateRegistries } from '../registry/validate.js';
 import { compareRegisteredAdapters, writeRequiredCiComparisonArtifacts } from '../registered-adapters.js';
+import { runRet007MultiHopDevGate } from '../multihop/gate.js';
 import { loadRegisteredDatasetDescriptor, loadRegisteredScenariosForScoring } from '../datasets/load-golden.js';
 import { loadG2HoldoutScenariosForScoring } from '../datasets/load-suite.js';
 import { canonicalSha256 } from './canonical.js';
@@ -59,6 +60,9 @@ export async function runDeterministicCiGate(
     migratedRetrievalControl: LabGatePolicy;
     holdoutRecallAt10: LabGatePolicy;
     holdoutPrecisionAt5: LabGatePolicy;
+    queryDecompositionDev: LabGatePolicy;
+    queryDecompositionRecallAt10: LabGatePolicy;
+    queryDecompositionPrecisionAt5: LabGatePolicy;
   };
   if (labPolicy.schemaVersion !== 1) throw new Error('Unsupported lab policy version');
   const baseline = await loadAndVerifyBaseline(undefined, undefined, REPO_ROOT);
@@ -149,6 +153,38 @@ export async function runDeterministicCiGate(
   }
   console.log(`G2 holdout aggregate lane=g2-holdout-precision controlAdapterId=${holdoutPrecisionComparison.control.adapterId} controlPrecisionAtK=${holdoutPrecisionComparison.control.metrics.precisionAtK} candidateAdapterId=${holdoutPrecisionComparison.candidate.adapterId} candidatePrecisionAtK=${holdoutPrecisionComparison.candidate.metrics.precisionAtK}`);
   console.log('Evaluation-lab gate: holdout recall@10 and precision@5 comparisons complete.');
+  const ret007Dev = requireGateResult('ret007-multihop-dev', await runRet007MultiHopDevGate({
+    runId: `${runId}-ret007-multihop-dev`,
+    repoRoot: REPO_ROOT,
+    policy: labPolicy.queryDecompositionDev,
+  }));
+  console.log(`RET-007 dev aggregate outcome=${ret007Dev.outcome} split=${ret007Dev.split} metric=${ret007Dev.metric} n=${ret007Dev.n} controlAdapterId=${ret007Dev.controlAdapterId} candidateAdapterId=${ret007Dev.candidateAdapterId} controlSuccessRate=${ret007Dev.controlSuccessRate} candidateSuccessRate=${ret007Dev.candidateSuccessRate} delta=${ret007Dev.delta} intervalOutcome=${ret007Dev.interval.outcome} pairedProbes=${ret007Dev.interval.pairedProbes} resamples=${ret007Dev.interval.resamples} level=${ret007Dev.interval.level} point=${ret007Dev.interval.point} lower=${ret007Dev.interval.lower} upper=${ret007Dev.interval.upper} oneSidedLower=${ret007Dev.interval.oneSidedLower}`);
+  const decompositionRecallComparison = requireGateResult('ret007-g2-holdout-recall', await compareRegisteredAdapters({
+    runId: `${runId}-ret007-holdout-recall`,
+    controlId: 'memberry-retrieval-core-v1',
+    candidateId: 'memberry-retrieval-core-query-decomposition-v1',
+    scenarios: holdoutRecallScenarios,
+    splits: ['holdout'],
+    policy: labPolicy.queryDecompositionRecallAt10,
+    repoRoot: REPO_ROOT,
+  }));
+  if (!decompositionRecallComparison.passed) {
+    throw new Error(`RET-007 recall@10 regression gate failed:\n${decompositionRecallComparison.failures.map((failure) => `${failure.metric}: ${failure.actual}; ${failure.expected}`).join('\n')}`);
+  }
+  console.log(`RET-007 G2 regression aggregate lane=ret007-holdout-recall controlAdapterId=${decompositionRecallComparison.control.adapterId} controlRecallAtK=${decompositionRecallComparison.control.metrics.recallAtK} candidateAdapterId=${decompositionRecallComparison.candidate.adapterId} candidateRecallAtK=${decompositionRecallComparison.candidate.metrics.recallAtK}`);
+  const decompositionPrecisionComparison = requireGateResult('ret007-g2-holdout-precision', await compareRegisteredAdapters({
+    runId: `${runId}-ret007-holdout-precision`,
+    controlId: 'memberry-retrieval-core-v1',
+    candidateId: 'memberry-retrieval-core-query-decomposition-v1',
+    scenarios: holdoutPrecisionScenarios,
+    splits: ['holdout'],
+    policy: labPolicy.queryDecompositionPrecisionAt5,
+    repoRoot: REPO_ROOT,
+  }));
+  if (!decompositionPrecisionComparison.passed) {
+    throw new Error(`RET-007 precision@5 regression gate failed:\n${decompositionPrecisionComparison.failures.map((failure) => `${failure.metric}: ${failure.actual}; ${failure.expected}`).join('\n')}`);
+  }
+  console.log(`RET-007 G2 regression aggregate lane=ret007-holdout-precision controlAdapterId=${decompositionPrecisionComparison.control.adapterId} controlPrecisionAtK=${decompositionPrecisionComparison.control.metrics.precisionAtK} candidateAdapterId=${decompositionPrecisionComparison.candidate.adapterId} candidatePrecisionAtK=${decompositionPrecisionComparison.candidate.metrics.precisionAtK}`);
   const goldenDatasetHash = canonicalSha256([
     { id: goldenDev.id, version: goldenDev.version, split: goldenDev.split, hash: goldenDev.hash },
     { id: goldenHoldout.id, version: goldenHoldout.version, split: goldenHoldout.split, hash: goldenHoldout.hash },
@@ -213,11 +249,29 @@ export async function runDeterministicCiGate(
     controlAdapter: holdoutPrecisionComparison.control.adapterId,
     candidateAdapter: holdoutPrecisionComparison.candidate.adapterId,
   });
+  const decompositionRecallManifest = createRunManifest({
+    ...holdoutRecallManifest,
+    runId: decompositionRecallComparison.runId,
+    configHash: canonicalSha256(labPolicy.queryDecompositionRecallAt10),
+    config: { gatePolicy: labPolicy.queryDecompositionRecallAt10, datasets: [{ id: g2Dev.id, hash: g2Dev.hash }, { id: g2Holdout.id, hash: g2Holdout.hash }], network: false, credentials: false },
+    controlAdapter: decompositionRecallComparison.control.adapterId,
+    candidateAdapter: decompositionRecallComparison.candidate.adapterId,
+  });
+  const decompositionPrecisionManifest = createRunManifest({
+    ...holdoutPrecisionManifest,
+    runId: decompositionPrecisionComparison.runId,
+    configHash: canonicalSha256(labPolicy.queryDecompositionPrecisionAt5),
+    config: { gatePolicy: labPolicy.queryDecompositionPrecisionAt5, datasets: [{ id: g2Dev.id, hash: g2Dev.hash }, { id: g2Holdout.id, hash: g2Holdout.hash }], network: false, credentials: false },
+    controlAdapter: decompositionPrecisionComparison.control.adapterId,
+    candidateAdapter: decompositionPrecisionComparison.candidate.adapterId,
+  });
   const goldenPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, goldenComparison.runId), goldenComparison, goldenManifest);
   const protectedPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, protectedComparison.runId), protectedComparison, protectedManifest);
   const retrievalPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, retrievalComparison.runId), retrievalComparison, retrievalManifest);
   const holdoutRecallPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, holdoutRecallComparison.runId), holdoutRecallComparison, holdoutRecallManifest);
   const holdoutPrecisionPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, holdoutPrecisionComparison.runId), holdoutPrecisionComparison, holdoutPrecisionManifest);
+  const decompositionRecallPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, decompositionRecallComparison.runId), decompositionRecallComparison, decompositionRecallManifest);
+  const decompositionPrecisionPaths = await writeRequiredCiComparisonArtifacts(resolve(ARTIFACT_DIR, decompositionPrecisionComparison.runId), decompositionPrecisionComparison, decompositionPrecisionManifest);
   console.log('Evaluation-lab gate: retrieval artifacts published.');
   console.log(`Evaluation-lab deterministic gate passed against ${baseline.id}.`);
   for (const metric of comparison.metrics) console.log(`- ${metric.metric}: ${metric.candidate} (baseline ${metric.baseline}, delta ${metric.delta})`);
@@ -226,9 +280,11 @@ export async function runDeterministicCiGate(
   console.log(`Retrieval evidence artifact: ${retrievalPaths.manifest}`);
   console.log(`Holdout recall@10 artifact: ${holdoutRecallPaths.manifest}`);
   console.log(`Holdout precision@5 artifact: ${holdoutPrecisionPaths.manifest}`);
+  console.log(`RET-007 recall@10 regression artifact: ${decompositionRecallPaths.manifest}`);
+  console.log(`RET-007 precision@5 regression artifact: ${decompositionPrecisionPaths.manifest}`);
   console.log(`Admission structural artifact: ${admission.artifacts.manifest}`);
   console.log(`Known retrieval answer coverage remains visible at ${retrievalComparison.candidate.metrics.answerCoverage}; promotion work must improve it without regressing safety.`);
-  return { passed: true, artifacts: [goldenPaths.manifest, protectedPaths.manifest, retrievalPaths.manifest, holdoutRecallPaths.manifest, holdoutPrecisionPaths.manifest, admission.artifacts.manifest] };
+  return { passed: true, artifacts: [goldenPaths.manifest, protectedPaths.manifest, retrievalPaths.manifest, holdoutRecallPaths.manifest, holdoutPrecisionPaths.manifest, decompositionRecallPaths.manifest, decompositionPrecisionPaths.manifest, admission.artifacts.manifest] };
 }
 
 // The executable wrapper is bench/lab/ci.mts.

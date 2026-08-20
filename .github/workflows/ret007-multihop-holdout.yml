@@ -1,0 +1,409 @@
+name: RET-007 multi-hop holdout one-shot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: memberry-ret007-multihop-holdout-v1
+  cancel-in-progress: false
+
+jobs:
+  holdout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frozen dependencies before burn
+        run: npm ci
+
+      - name: Build exact source before burn
+        run: npm run build
+
+      - name: Verify source and derive fixed one-shot identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          remote_master="$(git ls-remote origin refs/heads/master | cut -f1)"
+          test -n "$remote_master"
+          test "$source_sha" = "$remote_master"
+          test -z "$(git status --porcelain)"
+          if ! node <<'NODE' 2>/dev/null
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const exact = {
+            'bench/lab/registry/datasets.json': [15953, 'd0cf00d1be40ae64f9eb7a174206a0701de14e4df4be91f721eff416e77a402d'],
+            'bench/lab/multihop/scorer-only.ts': [8958, '0b5d5f4c621b4ed460ee5bd04daa7ac4a9adcf6a821fa4b6a497e277d783617c'],
+            'bench/lab/multihop/policy.ts': [2677, '4de7d29f19523f36d868efba13cfe7686c2af6f0b9206ed838064df609f1fa9e'],
+            'bench/lab/stats.ts': [8051, '66e3e0e45d7b6ddb41dadfdd674475957691ed164a9d273bf4125592cdaedf53'],
+            'bench/lab/baselines/lab-policy.json': [2464, 'ab19e5cf4050e38098be9459477cbedf4a4f33650e5e03ee683c05ca80cdb06a'],
+            'bench/lab/registry/systems.json': [4961, 'a671e60f0bfebf1ec18ccabfefe0d29504cf1169ffedbb7c91d1047612394282'],
+          };
+          for (const [path, [size, hash]] of Object.entries(exact)) {
+            const bytes = fs.readFileSync(path);
+            if (bytes.length !== size || crypto.createHash('sha256').update(bytes).digest('hex') !== hash) process.exit(1);
+          }
+          const registry = JSON.parse(fs.readFileSync('bench/lab/registry/datasets.json', 'utf8'));
+          const holdout = registry.datasets.find(({ id }) => id === 'memberry-multihop-holdout');
+          const expectedArtifacts = [
+            ['input', 'adapter', 'bench/lab/datasets/multihop/v1/holdout/input.jsonl', '33b7e4b6ce3ce0ef2fdab52a75c678055a70915247a8e20eb5c99fe1c092f962', 17860, 'text-lf'],
+            ['oracle', 'scorer', 'bench/lab/datasets/multihop/v1/holdout/oracle.jsonl', 'b1e56a88d6496b2a9e4c297d6295b0901bbcfa9bb2e7900dd4bb80ae1bb1853e', 1920, 'text-lf'],
+          ];
+          const actualArtifacts = holdout?.artifacts?.map(({ role, access, repositoryPath, sha256, sizeBytes, hashMode }) =>
+            [role, access, repositoryPath, sha256, sizeBytes, hashMode]);
+          if (holdout?.version !== '1.0.0' || holdout?.split !== 'holdout'
+            || JSON.stringify(actualArtifacts) !== JSON.stringify(expectedArtifacts)) process.exit(1);
+          const labPolicy = JSON.parse(fs.readFileSync('bench/lab/baselines/lab-policy.json', 'utf8'));
+          const expectedPolicy = { minRecallAtK: 0, minPrecisionAtK: 0, minAnswerCoverage: 0,
+            maxStaleLeakRate: 0, maxIsolationLeakRate: 0, maxDuplicateRate: 0,
+            maxUnknownResultRate: 0, maxQualityRegression: 0 };
+          if (JSON.stringify(labPolicy.queryDecompositionHoldout) !== JSON.stringify(expectedPolicy)) process.exit(1);
+          const systems = JSON.parse(fs.readFileSync('bench/lab/registry/systems.json', 'utf8')).systems;
+          for (const id of ['memberry-retrieval-core-v1', 'memberry-retrieval-core-query-decomposition-v1']) {
+            const system = systems.find((entry) => entry.id === id);
+            if (!system || system.adapter !== 'bench/lab/adapters/memberry-retrieval-core.ts' || system.requiredInCi !== true) process.exit(1);
+          }
+          NODE
+          then
+            echo '::error::ret007-preburn-identity-failure'
+            exit 1
+          fi
+          fixed_identity='RET-007|memberry-multihop-holdout|1.0.0|datasets=d0cf00d1be40ae64f9eb7a174206a0701de14e4df4be91f721eff416e77a402d:15953|input=33b7e4b6ce3ce0ef2fdab52a75c678055a70915247a8e20eb5c99fe1c092f962:17860|oracle=b1e56a88d6496b2a9e4c297d6295b0901bbcfa9bb2e7900dd4bb80ae1bb1853e:1920|scorer=0b5d5f4c621b4ed460ee5bd04daa7ac4a9adcf6a821fa4b6a497e277d783617c:8958|policy=4de7d29f19523f36d868efba13cfe7686c2af6f0b9206ed838064df609f1fa9e:2677|lab-policy=ab19e5cf4050e38098be9459477cbedf4a4f33650e5e03ee683c05ca80cdb06a:2464|systems=a671e60f0bfebf1ec18ccabfefe0d29504cf1169ffedbb7c91d1047612394282:4961|stats=66e3e0e45d7b6ddb41dadfdd674475957691ed164a9d273bf4125592cdaedf53:8051|strict-multi-hop-task-success-v1|point>0|one-sided-lower>=0|quality-regression=0|safety-regression=0|memberry-retrieval-core-v1|memberry-retrieval-core-query-decomposition-v1'
+          fixed_key="$(printf '%s' "$fixed_identity" | sha256sum | cut -c1-32)"
+          printf 'SOURCE_SHA=%s\nFIXED_KEY=%s\n' "$source_sha" "$fixed_key" >> "$GITHUB_ENV"
+
+      - name: Require exact-master post-merge CI before burn
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="$(gh run list --workflow ci.yml --branch master --commit "$SOURCE_SHA" --event push --limit 20 \
+            --json databaseId,headSha,conclusion \
+            --jq ".[] | select(.headSha == \"$SOURCE_SHA\" and .conclusion == \"success\") | .databaseId" | head -n 1)"
+          test -n "$run_id"
+          jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100")"
+          for required in 'unit (20)' 'unit (22)' 'integration'; do
+            test "$(printf '%s' "$jobs" | jq --arg name "$required" '[.jobs[] | select(.name == $name and .conclusion == "success")] | length')" = '1'
+          done
+          printf 'CI_RUN_ID=%s\n' "$run_id" >> "$GITHUB_ENV"
+
+      - name: Burn v1 with creation-only remote ref API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_master="$(git ls-remote origin refs/heads/master | cut -f1)"
+          test -n "$remote_master"
+          test "$remote_master" = "$SOURCE_SHA"
+          tag="memberry-ret007-holdout-v1/${FIXED_KEY}"
+          burn_ref="refs/tags/${tag}"
+          printf 'BURN_REF=%s\nBURN_VERIFIED=0\n' "$burn_ref" >> "$GITHUB_ENV"
+          set +e
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${tag}" \
+            -f sha="${SOURCE_SHA}" >/dev/null 2>&1
+          post_status=$?
+          post_master="$(git ls-remote origin refs/heads/master 2>/dev/null | cut -f1)"
+          post_master_status=$?
+          burn_target="$(git ls-remote origin "$burn_ref" 2>/dev/null | cut -f1)"
+          refetch_status=$?
+          set -e
+          burn_failure=''
+          if [ "$post_status" -ne 0 ]; then
+            burn_failure='ret007-holdout-burn-consumed'
+          elif [ "$post_master_status" -ne 0 ] || [ "$post_master" != "$SOURCE_SHA" ] \
+            || [ "$refetch_status" -ne 0 ] || [ "$burn_target" != "$SOURCE_SHA" ]; then
+            burn_failure='ret007-holdout-burn-target-failure'
+          fi
+          burn_verified=0
+          if [ -z "$burn_failure" ]; then burn_verified=1; fi
+          printf 'BURN_TARGET=%s\nBURN_FAILURE=%s\nBURN_VERIFIED=%s\n' \
+            "$burn_target" "$burn_failure" "$burn_verified" >> "$GITHUB_ENV"
+
+      - name: Write closed aggregate-only holdout receipt after burn
+        if: ${{ always() && env.BURN_REF != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          aggregate=''
+          failure_code="${BURN_FAILURE:-}"
+          if [ "${BURN_VERIFIED:-0}" != '1' ] && [ -z "$failure_code" ]; then
+            failure_code='ret007-holdout-burn-target-failure'
+          fi
+          if [ -z "$failure_code" ]; then
+            set +e
+            aggregate="$(npx tsx -e "import { readFile } from 'node:fs/promises'; import { runRet007MultiHopHoldoutGateClosed } from './bench/lab/multihop/gate.ts'; void (async () => { const p = JSON.parse(await readFile('./bench/lab/baselines/lab-policy.json', 'utf8')); const r = await runRet007MultiHopHoldoutGateClosed({ runId: 'ret007-holdout-v1', policy: p.queryDecompositionHoldout }); process.stdout.write(JSON.stringify(r)); })();" 2>/dev/null)"
+            status=$?
+            set -e
+            if [ "$status" -ne 0 ]; then
+              failure_code='ret007-holdout-execution-failure'
+              aggregate=''
+            fi
+          fi
+          if [ -z "$failure_code" ] && ! AGGREGATE="$aggregate" node <<'NODE' >/dev/null 2>&1
+          const value = JSON.parse(process.env.AGGREGATE);
+          const exact = (object, keys) => object && typeof object === 'object' && !Array.isArray(object)
+            && JSON.stringify(Object.keys(object).sort()) === JSON.stringify([...keys].sort());
+          const finite = (value, min, max) => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
+          const rootKeys = ['outcome', 'failureCodes', 'split', 'metric', 'n', 'controlAdapterId',
+            'candidateAdapterId', 'controlSuccessRate', 'candidateSuccessRate', 'delta', 'interval'];
+          if (!exact(value, rootKeys)) process.exit(1);
+          if (!['passed', 'rejected'].includes(value.outcome) || value.split !== 'holdout'
+            || value.metric !== 'strict-multi-hop-task-success-v1'
+            || value.controlAdapterId !== 'memberry-retrieval-core-v1'
+            || value.candidateAdapterId !== 'memberry-retrieval-core-query-decomposition-v1') process.exit(1);
+          if (value.n !== 10
+            || !finite(value.controlSuccessRate, 0, 1) || !finite(value.candidateSuccessRate, 0, 1)
+            || !finite(value.delta, -1, 1) || !Array.isArray(value.failureCodes)) process.exit(1);
+          const failure = /^(insufficient-paired-probes|point-delta-not-positive|one-sided-lower-below-zero|comparison-failed|quality-regression:(recallAtK|precisionAtK|reciprocalRank|ndcgAtK|answerCoverage|staleSafety|isolationSafety)|safety-regression:(staleLeakRate|isolationLeakRate|duplicateRate|unknownResultRate))$/;
+          if (value.failureCodes.some((code) => typeof code !== 'string' || !failure.test(code))) process.exit(1);
+          if (new Set(value.failureCodes).size !== value.failureCodes.length
+            || Math.abs((value.candidateSuccessRate - value.controlSuccessRate) - value.delta) > Number.EPSILON) process.exit(1);
+          if ((value.outcome === 'passed') !== (value.failureCodes.length === 0)) process.exit(1);
+          const measuredKeys = ['outcome', 'pairedProbes', 'resamples', 'level', 'point', 'lower', 'upper', 'oneSidedLower'];
+          const unsupportedKeys = [...measuredKeys, 'unsupportedReason'];
+          if (!exact(value.interval, value.interval?.outcome === 'measured' ? measuredKeys : unsupportedKeys)) process.exit(1);
+          if (!['measured', 'unsupported'].includes(value.interval.outcome)
+            || !Number.isInteger(value.interval.pairedProbes) || value.interval.pairedProbes < 0
+            || !Number.isInteger(value.interval.resamples) || value.interval.resamples < 0
+            || !finite(value.interval.level, 0, 1)) process.exit(1);
+          for (const key of ['point', 'lower', 'upper', 'oneSidedLower']) {
+            if (value.interval[key] !== null && !finite(value.interval[key], -1, 1)) process.exit(1);
+          }
+          if (value.interval.outcome === 'measured'
+            && ['point', 'lower', 'upper', 'oneSidedLower'].some((key) => !finite(value.interval[key], -1, 1))) process.exit(1);
+          if (value.interval.outcome === 'unsupported'
+            && !['insufficient-paired-probes', 'zero-context-tokens', 'arm-not-scored'].includes(value.interval.unsupportedReason)) process.exit(1);
+          if (value.interval.outcome === 'unsupported'
+            && ['point', 'lower', 'upper', 'oneSidedLower'].some((key) => value.interval[key] !== null)) process.exit(1);
+          if (value.outcome === 'passed' && (value.delta <= 0 || value.interval.outcome !== 'measured'
+            || value.interval.oneSidedLower === null || value.interval.oneSidedLower < 0)) process.exit(1);
+          if (value.outcome === 'passed' && (value.interval.pairedProbes !== 10
+            || value.interval.resamples !== 2000 || value.interval.level !== 0.95
+            || Math.abs(value.interval.point - value.delta) > Number.EPSILON
+            || Math.abs((value.controlSuccessRate * 10) - Math.round(value.controlSuccessRate * 10)) > Number.EPSILON * 10
+            || Math.abs((value.candidateSuccessRate * 10) - Math.round(value.candidateSuccessRate * 10)) > Number.EPSILON * 10)) process.exit(1);
+          NODE
+          then
+            failure_code='ret007-holdout-output-policy-failure'
+            aggregate=''
+          fi
+          if [ -z "$failure_code" ] && [ "$(AGGREGATE="$aggregate" node -e "process.stdout.write(JSON.parse(process.env.AGGREGATE).outcome)" 2>/dev/null)" = 'rejected' ]; then
+            failure_code='ret007-holdout-policy-rejection'
+          fi
+          if ! AGGREGATE="$aggregate" FAILURE_CODE="$failure_code" node <<'NODE' >/dev/null 2>&1
+          const fs = require('fs');
+          let aggregate = null;
+          try { if (process.env.AGGREGATE) aggregate = JSON.parse(process.env.AGGREGATE); } catch {}
+          const failureCode = process.env.FAILURE_CODE || null;
+          const receipt = {
+            schemaVersion: 'ret007-holdout-receipt-v1',
+            outcome: failureCode === null ? 'passed' : 'rejected',
+            failureCode,
+            sourceSha: process.env.SOURCE_SHA,
+            ciRunId: process.env.CI_RUN_ID,
+            burnKey: process.env.FIXED_KEY,
+            burnRef: process.env.BURN_REF,
+            burnTarget: /^[a-f0-9]{40}$/.test(process.env.BURN_TARGET || '') ? process.env.BURN_TARGET : null,
+            identities: {
+              datasetRegistry: { sha256: 'd0cf00d1be40ae64f9eb7a174206a0701de14e4df4be91f721eff416e77a402d', sizeBytes: 15953 },
+              holdoutInput: { sha256: '33b7e4b6ce3ce0ef2fdab52a75c678055a70915247a8e20eb5c99fe1c092f962', sizeBytes: 17860 },
+              holdoutOracle: { sha256: 'b1e56a88d6496b2a9e4c297d6295b0901bbcfa9bb2e7900dd4bb80ae1bb1853e', sizeBytes: 1920 },
+              scorer: { sha256: '0b5d5f4c621b4ed460ee5bd04daa7ac4a9adcf6a821fa4b6a497e277d783617c', sizeBytes: 8958 },
+              policy: { sha256: '4de7d29f19523f36d868efba13cfe7686c2af6f0b9206ed838064df609f1fa9e', sizeBytes: 2677 },
+              labPolicy: { sha256: 'ab19e5cf4050e38098be9459477cbedf4a4f33650e5e03ee683c05ca80cdb06a', sizeBytes: 2464 },
+              systems: { sha256: 'a671e60f0bfebf1ec18ccabfefe0d29504cf1169ffedbb7c91d1047612394282', sizeBytes: 4961 },
+              stats: { sha256: '66e3e0e45d7b6ddb41dadfdd674475957691ed164a9d273bf4125592cdaedf53', sizeBytes: 8051 },
+            },
+            adapters: {
+              control: 'memberry-retrieval-core-v1',
+              candidate: 'memberry-retrieval-core-query-decomposition-v1',
+            },
+            aggregate,
+          };
+          fs.writeFileSync('ret007-holdout-receipt.json', `${JSON.stringify(receipt)}\n`, { encoding: 'utf8', mode: 0o600 });
+          NODE
+          then
+          FAILURE_CODE='ret007-holdout-receipt-write-failure' node <<'NODE' >/dev/null 2>&1
+          const fs = require('fs');
+          const receipt = {
+            schemaVersion: 'ret007-holdout-receipt-v1', outcome: 'rejected',
+            failureCode: process.env.FAILURE_CODE, sourceSha: process.env.SOURCE_SHA,
+            ciRunId: process.env.CI_RUN_ID, burnKey: process.env.FIXED_KEY,
+            burnRef: process.env.BURN_REF, burnTarget: null,
+            identities: {
+              datasetRegistry: { sha256: 'd0cf00d1be40ae64f9eb7a174206a0701de14e4df4be91f721eff416e77a402d', sizeBytes: 15953 },
+              holdoutInput: { sha256: '33b7e4b6ce3ce0ef2fdab52a75c678055a70915247a8e20eb5c99fe1c092f962', sizeBytes: 17860 },
+              holdoutOracle: { sha256: 'b1e56a88d6496b2a9e4c297d6295b0901bbcfa9bb2e7900dd4bb80ae1bb1853e', sizeBytes: 1920 },
+              scorer: { sha256: '0b5d5f4c621b4ed460ee5bd04daa7ac4a9adcf6a821fa4b6a497e277d783617c', sizeBytes: 8958 },
+              policy: { sha256: '4de7d29f19523f36d868efba13cfe7686c2af6f0b9206ed838064df609f1fa9e', sizeBytes: 2677 },
+              labPolicy: { sha256: 'ab19e5cf4050e38098be9459477cbedf4a4f33650e5e03ee683c05ca80cdb06a', sizeBytes: 2464 },
+              systems: { sha256: 'a671e60f0bfebf1ec18ccabfefe0d29504cf1169ffedbb7c91d1047612394282', sizeBytes: 4961 },
+              stats: { sha256: '66e3e0e45d7b6ddb41dadfdd674475957691ed164a9d273bf4125592cdaedf53', sizeBytes: 8051 },
+            },
+            adapters: { control: 'memberry-retrieval-core-v1', candidate: 'memberry-retrieval-core-query-decomposition-v1' },
+            aggregate: null,
+          };
+          fs.writeFileSync('ret007-holdout-receipt.json', `${JSON.stringify(receipt)}\n`, { encoding: 'utf8', mode: 0o600 });
+          NODE
+          fi
+
+      - name: Validate closed receipt before upload
+        if: ${{ always() && env.BURN_REF != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'RECEIPT_VALIDATED=0\n' >> "$GITHUB_ENV"
+          if ! node <<'NODE' >/dev/null 2>&1
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const value = JSON.parse(fs.readFileSync('ret007-holdout-receipt.json', 'utf8'));
+          const exact = (object, keys) => object && typeof object === 'object' && !Array.isArray(object)
+            && JSON.stringify(Object.keys(object).sort()) === JSON.stringify([...keys].sort());
+          if (!exact(value, ['schemaVersion', 'outcome', 'failureCode', 'sourceSha', 'ciRunId', 'burnKey',
+            'burnRef', 'burnTarget', 'identities', 'adapters', 'aggregate'])) process.exit(1);
+          const expectedIdentities = {
+            datasetRegistry: { sha256: 'd0cf00d1be40ae64f9eb7a174206a0701de14e4df4be91f721eff416e77a402d', sizeBytes: 15953 },
+            holdoutInput: { sha256: '33b7e4b6ce3ce0ef2fdab52a75c678055a70915247a8e20eb5c99fe1c092f962', sizeBytes: 17860 },
+            holdoutOracle: { sha256: 'b1e56a88d6496b2a9e4c297d6295b0901bbcfa9bb2e7900dd4bb80ae1bb1853e', sizeBytes: 1920 },
+            scorer: { sha256: '0b5d5f4c621b4ed460ee5bd04daa7ac4a9adcf6a821fa4b6a497e277d783617c', sizeBytes: 8958 },
+            policy: { sha256: '4de7d29f19523f36d868efba13cfe7686c2af6f0b9206ed838064df609f1fa9e', sizeBytes: 2677 },
+            labPolicy: { sha256: 'ab19e5cf4050e38098be9459477cbedf4a4f33650e5e03ee683c05ca80cdb06a', sizeBytes: 2464 },
+            systems: { sha256: 'a671e60f0bfebf1ec18ccabfefe0d29504cf1169ffedbb7c91d1047612394282', sizeBytes: 4961 },
+            stats: { sha256: '66e3e0e45d7b6ddb41dadfdd674475957691ed164a9d273bf4125592cdaedf53', sizeBytes: 8051 },
+          };
+          const fixedIdentity = 'RET-007|memberry-multihop-holdout|1.0.0|datasets=d0cf00d1be40ae64f9eb7a174206a0701de14e4df4be91f721eff416e77a402d:15953|input=33b7e4b6ce3ce0ef2fdab52a75c678055a70915247a8e20eb5c99fe1c092f962:17860|oracle=b1e56a88d6496b2a9e4c297d6295b0901bbcfa9bb2e7900dd4bb80ae1bb1853e:1920|scorer=0b5d5f4c621b4ed460ee5bd04daa7ac4a9adcf6a821fa4b6a497e277d783617c:8958|policy=4de7d29f19523f36d868efba13cfe7686c2af6f0b9206ed838064df609f1fa9e:2677|lab-policy=ab19e5cf4050e38098be9459477cbedf4a4f33650e5e03ee683c05ca80cdb06a:2464|systems=a671e60f0bfebf1ec18ccabfefe0d29504cf1169ffedbb7c91d1047612394282:4961|stats=66e3e0e45d7b6ddb41dadfdd674475957691ed164a9d273bf4125592cdaedf53:8051|strict-multi-hop-task-success-v1|point>0|one-sided-lower>=0|quality-regression=0|safety-regression=0|memberry-retrieval-core-v1|memberry-retrieval-core-query-decomposition-v1';
+          const expectedBurnKey = crypto.createHash('sha256').update(fixedIdentity).digest('hex').slice(0, 32);
+          if (expectedBurnKey !== '416e7a550e0b64aa46e6d01292d5ed78') process.exit(1);
+          if (JSON.stringify(value.identities) !== JSON.stringify(expectedIdentities)) process.exit(1);
+          if (!exact(value.adapters, ['control', 'candidate'])
+            || value.adapters.control !== 'memberry-retrieval-core-v1'
+            || value.adapters.candidate !== 'memberry-retrieval-core-query-decomposition-v1'
+            || value.schemaVersion !== 'ret007-holdout-receipt-v1'
+            || !/^[a-f0-9]{40}$/.test(value.sourceSha)
+            || !/^[0-9]+$/.test(value.ciRunId) || value.burnKey !== expectedBurnKey
+            || value.burnRef !== `refs/tags/memberry-ret007-holdout-v1/${value.burnKey}`) process.exit(1);
+          const fixed = [null, 'ret007-holdout-burn-consumed', 'ret007-holdout-burn-target-failure',
+            'ret007-holdout-execution-failure', 'ret007-holdout-output-policy-failure',
+            'ret007-holdout-policy-rejection', 'ret007-holdout-receipt-write-failure'];
+          if (!fixed.includes(value.failureCode) || (value.outcome === 'passed') !== (value.failureCode === null)) process.exit(1);
+          if (value.failureCode === null && value.burnTarget !== value.sourceSha) process.exit(1);
+          if (value.burnTarget !== null && !/^[a-f0-9]{40}$/.test(value.burnTarget)) process.exit(1);
+          if (value.failureCode === null && value.aggregate?.outcome !== 'passed') process.exit(1);
+          if (value.failureCode === 'ret007-holdout-policy-rejection' && value.aggregate?.outcome !== 'rejected') process.exit(1);
+          if (value.failureCode !== null && value.failureCode !== 'ret007-holdout-policy-rejection' && value.aggregate !== null) process.exit(1);
+          if (value.aggregate !== null) {
+            const aggregateKeys = ['outcome', 'failureCodes', 'split', 'metric', 'n', 'controlAdapterId',
+              'candidateAdapterId', 'controlSuccessRate', 'candidateSuccessRate', 'delta', 'interval'];
+            if (!exact(value.aggregate, aggregateKeys) || value.aggregate.split !== 'holdout'
+              || value.aggregate.metric !== 'strict-multi-hop-task-success-v1'
+              || value.aggregate.controlAdapterId !== value.adapters.control
+              || value.aggregate.candidateAdapterId !== value.adapters.candidate || value.aggregate.n !== 10
+              || !Array.isArray(value.aggregate.failureCodes)) process.exit(1);
+            const finiteRange = (candidate, minimum, maximum) => typeof candidate === 'number'
+              && Number.isFinite(candidate) && candidate >= minimum && candidate <= maximum;
+            const failure = /^(insufficient-paired-probes|point-delta-not-positive|one-sided-lower-below-zero|comparison-failed|quality-regression:(recallAtK|precisionAtK|reciprocalRank|ndcgAtK|answerCoverage|staleSafety|isolationSafety)|safety-regression:(staleLeakRate|isolationLeakRate|duplicateRate|unknownResultRate))$/;
+            if (!['passed', 'rejected'].includes(value.aggregate.outcome)
+              || value.aggregate.failureCodes.some((code) => typeof code !== 'string' || !failure.test(code))
+              || new Set(value.aggregate.failureCodes).size !== value.aggregate.failureCodes.length
+              || !finiteRange(value.aggregate.controlSuccessRate, 0, 1)
+              || !finiteRange(value.aggregate.candidateSuccessRate, 0, 1)
+              || !finiteRange(value.aggregate.delta, -1, 1)) process.exit(1);
+            if ((value.aggregate.outcome === 'passed') !== (value.aggregate.failureCodes.length === 0)) process.exit(1);
+            const interval = value.aggregate.interval;
+            const measured = ['outcome', 'pairedProbes', 'resamples', 'level', 'point', 'lower', 'upper', 'oneSidedLower'];
+            const unsupported = [...measured, 'unsupportedReason'];
+            if (!exact(interval, interval?.outcome === 'measured' ? measured : unsupported)) process.exit(1);
+            const finite = (candidate) => finiteRange(candidate, -1, 1);
+            if (!['measured', 'unsupported'].includes(interval.outcome)
+              || !Number.isInteger(interval.pairedProbes) || interval.pairedProbes < 0 || interval.pairedProbes > 10
+              || !Number.isInteger(interval.resamples) || interval.resamples < 0
+              || !finiteRange(interval.level, 0, 1)) process.exit(1);
+            if (interval.outcome === 'measured'
+              && ['point', 'lower', 'upper', 'oneSidedLower'].some((key) => !finite(interval[key]))) process.exit(1);
+            if (interval.outcome === 'unsupported'
+              && ['point', 'lower', 'upper', 'oneSidedLower'].some((key) => interval[key] !== null)) process.exit(1);
+            if (interval.outcome === 'unsupported'
+              && !['insufficient-paired-probes', 'zero-context-tokens', 'arm-not-scored'].includes(interval.unsupportedReason)) process.exit(1);
+            if (value.aggregate.outcome === 'passed'
+              && (value.aggregate.delta <= 0 || interval.outcome !== 'measured' || interval.oneSidedLower < 0)) process.exit(1);
+            if (value.aggregate.outcome === 'passed' && (interval.pairedProbes !== 10
+              || interval.resamples !== 2000 || interval.level !== 0.95
+              || Math.abs(interval.point - value.aggregate.delta) > Number.EPSILON
+              || Math.abs((value.aggregate.controlSuccessRate * 10)
+                - Math.round(value.aggregate.controlSuccessRate * 10)) > Number.EPSILON * 10
+              || Math.abs((value.aggregate.candidateSuccessRate * 10)
+                - Math.round(value.aggregate.candidateSuccessRate * 10)) > Number.EPSILON * 10)) process.exit(1);
+          }
+          NODE
+          then
+          FAILURE_CODE='ret007-holdout-output-policy-failure' node <<'NODE' >/dev/null 2>&1
+          const fs = require('fs');
+          const burnKey = '416e7a550e0b64aa46e6d01292d5ed78';
+          const receipt = {
+            schemaVersion: 'ret007-holdout-receipt-v1', outcome: 'rejected',
+            failureCode: process.env.FAILURE_CODE, sourceSha: process.env.SOURCE_SHA,
+            ciRunId: process.env.CI_RUN_ID, burnKey,
+            burnRef: `refs/tags/memberry-ret007-holdout-v1/${burnKey}`,
+            burnTarget: /^[a-f0-9]{40}$/.test(process.env.BURN_TARGET || '') ? process.env.BURN_TARGET : null,
+            identities: {
+              datasetRegistry: { sha256: 'd0cf00d1be40ae64f9eb7a174206a0701de14e4df4be91f721eff416e77a402d', sizeBytes: 15953 },
+              holdoutInput: { sha256: '33b7e4b6ce3ce0ef2fdab52a75c678055a70915247a8e20eb5c99fe1c092f962', sizeBytes: 17860 },
+              holdoutOracle: { sha256: 'b1e56a88d6496b2a9e4c297d6295b0901bbcfa9bb2e7900dd4bb80ae1bb1853e', sizeBytes: 1920 },
+              scorer: { sha256: '0b5d5f4c621b4ed460ee5bd04daa7ac4a9adcf6a821fa4b6a497e277d783617c', sizeBytes: 8958 },
+              policy: { sha256: '4de7d29f19523f36d868efba13cfe7686c2af6f0b9206ed838064df609f1fa9e', sizeBytes: 2677 },
+              labPolicy: { sha256: 'ab19e5cf4050e38098be9459477cbedf4a4f33650e5e03ee683c05ca80cdb06a', sizeBytes: 2464 },
+              systems: { sha256: 'a671e60f0bfebf1ec18ccabfefe0d29504cf1169ffedbb7c91d1047612394282', sizeBytes: 4961 },
+              stats: { sha256: '66e3e0e45d7b6ddb41dadfdd674475957691ed164a9d273bf4125592cdaedf53', sizeBytes: 8051 },
+            },
+            adapters: { control: 'memberry-retrieval-core-v1', candidate: 'memberry-retrieval-core-query-decomposition-v1' },
+            aggregate: null,
+          };
+          fs.writeFileSync('ret007-holdout-receipt.json', `${JSON.stringify(receipt)}\n`, { encoding: 'utf8', mode: 0o600 });
+          NODE
+          fi
+          printf 'RECEIPT_VALIDATED=1\n' >> "$GITHUB_ENV"
+
+      - name: Upload closed aggregate-only receipt
+        if: ${{ always() && env.BURN_REF != '' && env.RECEIPT_VALIDATED == '1' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ret007-holdout-receipt-v1
+          path: ret007-holdout-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Adjudicate validated closed receipt
+        if: ${{ always() && env.BURN_REF != '' && env.RECEIPT_VALIDATED == '1' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$(cat ret007-holdout-receipt.json)"
+          printf '%s\n' "$receipt"
+          if ! RECEIPT="$receipt" node -e "process.exit(JSON.parse(process.env.RECEIPT).outcome === 'passed' ? 0 : 1)" 2>/dev/null; then
+            echo '::error::ret007-holdout-rejected'
+            exit 1
+          fi
+
+      - name: Fail closed if no validated receipt exists
+        if: ${{ always() && env.BURN_REF != '' && env.RECEIPT_VALIDATED != '1' }}
+        shell: bash
+        run: |
+          echo '::error::ret007-holdout-output-policy-failure'
+          exit 1

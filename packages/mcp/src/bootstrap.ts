@@ -178,6 +178,7 @@ export function parseTenantDatastores(
 export async function bootstrap(): Promise<BootstrapHandles> {
   const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1';
   const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1';
+  const queryDecompositionEnabled = process.env['MEMBERRY_QUERY_DECOMPOSITION_V1'] === '1';
   const rerankerMode = resolveRerankerShadowModeV1(process.env['MEMBERRY_RERANKER_V1']);
   if (rerankerMode === 'shadow' && (!queryPlannerEnabled || !candidateChannelEnabled)) {
     throw new Error('reranker_shadow:prerequisite_unavailable');
@@ -543,6 +544,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     ampService,
     embedding,
     llm,
+    queryDecompositionEnabled,
   );
   const feedbackTrackerService = new FeedbackTracker(feedbackRedis);
   const dedicatedTenantCandidateDrivers = new Map<string, typeof driver>();

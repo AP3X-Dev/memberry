@@ -87,6 +87,73 @@ describe('rrfFusion', () => {
     expect(fused[0].id).toBe('b');
   });
 
+  it('applies an identity-free batch decomposition multiplier after lexical boost', () => {
+    const list = [makeResult('first', 0.9), makeResult('second', 0.8)];
+    let observed: unknown;
+    const fused = rrfFusion(
+      [list], 10, 60, undefined, undefined,
+      (result) => result.id === 'second' ? result.score * 1.1 : result.score,
+      undefined,
+      (window) => {
+        observed = window;
+        return [1, 1.25];
+      },
+    );
+    expect(fused[0]!.id).toBe('second');
+    expect(observed).toEqual([
+      { content: 'content of first', ordinal: 0 },
+      { content: 'content of second', ordinal: 1 },
+    ]);
+    expect(Object.keys((observed as object[])[0]!)).toEqual(['content', 'ordinal']);
+  });
+
+  it('uses exact identity multipliers when a decomposition callback fails validation', () => {
+    const list = [makeResult('first', 0.9), makeResult('second', 0.8)];
+    const baseline = rrfFusion([list], 10);
+    const malformed = rrfFusion(
+      [list], 10, 60, undefined, undefined, undefined, undefined,
+      () => [1.5],
+    );
+    expect(malformed).toEqual(baseline);
+    const sparse = rrfFusion(
+      [list], 10, 60, undefined, undefined, undefined, undefined,
+      () => new Array<number>(2),
+    );
+    expect(sparse).toEqual(baseline);
+    let accessorCalls = 0;
+    const hostile = [1, 1];
+    Object.defineProperty(hostile, 0, { enumerable: true, get: () => { accessorCalls += 1; return 1.25; } });
+    const accessor = rrfFusion(
+      [list], 10, 60, undefined, undefined, undefined, undefined,
+      () => hostile,
+    );
+    expect(accessor).toEqual(baseline);
+    expect(accessorCalls).toBe(0);
+
+    let proxyTraps = 0;
+    const hostileVector = new Proxy([1.25, 1.25], {
+      get: () => { proxyTraps += 1; throw new Error('forbidden get'); },
+      getOwnPropertyDescriptor: () => { proxyTraps += 1; throw new Error('forbidden descriptor'); },
+    });
+    const proxied = rrfFusion(
+      [list], 10, 60, undefined, undefined, undefined, undefined,
+      () => hostileVector,
+    );
+    expect(proxied).toEqual(baseline);
+    expect(proxyTraps).toBe(0);
+
+    const revoked = Proxy.revocable([1.25, 1.25], {});
+    revoked.revoke();
+    expect(() => rrfFusion(
+      [list], 10, 60, undefined, undefined, undefined, undefined,
+      () => revoked.proxy,
+    )).not.toThrow();
+    expect(rrfFusion(
+      [list], 10, 60, undefined, undefined, undefined, undefined,
+      () => revoked.proxy,
+    )).toEqual(baseline);
+  });
+
   it('uses provenance quality to demote invalidated results during fusion', () => {
     const stale = makeResult('stale', 0.9, 'semantic');
     stale.metadata = {

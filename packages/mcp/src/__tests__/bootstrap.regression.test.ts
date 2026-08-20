@@ -49,6 +49,19 @@ function parseComposeCandidateValue(value: string | undefined): unknown {
   return interpolated.trim();
 }
 
+function parseComposeDecompositionValue(value: string | undefined): unknown {
+  const template = COMPOSE_SOURCE.split(/\r?\n/)
+    .find((line) => line.includes('MEMBERRY_QUERY_DECOMPOSITION_V1:'))
+    ?.split('MEMBERRY_QUERY_DECOMPOSITION_V1: ')[1];
+  if (template === undefined) return undefined;
+  const interpolated = template.replace(
+    '${MEMBERRY_QUERY_DECOMPOSITION_V1:-}',
+    value === undefined || value.length === 0 ? '' : value,
+  );
+  if (interpolated.startsWith('"') && interpolated.endsWith('"')) return JSON.parse(interpolated) as unknown;
+  return interpolated.trim();
+}
+
 function parseComposeRerankerMode(value: string | undefined): unknown {
   const template = COMPOSE_SOURCE.split(/\r?\n/)
     .find((line) => line.includes('MEMBERRY_RERANKER_V1:'))
@@ -63,6 +76,31 @@ function parseComposeRerankerMode(value: string | undefined): unknown {
 }
 
 describe('bootstrap.ts regression', () => {
+  it('RET-007 keeps query decomposition exact-literal default-off and MCP-only', () => {
+    expect(BOOTSTRAP_SOURCE).toContain("const queryDecompositionEnabled = process.env['MEMBERRY_QUERY_DECOMPOSITION_V1'] === '1'");
+    expect(BOOTSTRAP_SOURCE).toMatch(/new UnifiedAssembler\([\s\S]*?llm,\s*queryDecompositionEnabled,\s*\)/);
+    const mcpService = COMPOSE_SOURCE.split('\n  mcp:')[1]?.split('\n  wiki:')[0];
+    const wikiService = COMPOSE_SOURCE.split('\n  wiki:')[1]?.split('\nvolumes:')[0];
+    const exactEntry = 'MEMBERRY_QUERY_DECOMPOSITION_V1: "${MEMBERRY_QUERY_DECOMPOSITION_V1:-}"';
+    expect(mcpService).toContain(exactEntry);
+    expect(COMPOSE_SOURCE.split(exactEntry)).toHaveLength(2);
+    expect(wikiService).not.toContain('MEMBERRY_QUERY_DECOMPOSITION_V1');
+    expect(EXPERIMENTS.experiments).toContainEqual({
+      id: 'retrieval-query-decomposition-v1',
+      owner: 'retrieval-engine',
+      flag: 'MEMBERRY_QUERY_DECOMPOSITION_V1',
+      defaultEnabled: false,
+      control: 'memberry-retrieval-core-v1',
+      rollback: 'Unset MEMBERRY_QUERY_DECOMPOSITION_V1 and restart. No migration or persisted state is involved.',
+    });
+  });
+  it.each([
+    ['unset', undefined, ''], ['empty', '', ''], ['one', '1', '1'], ['leading zero', '01', '01'],
+    ['decimal', '1.0', '1.0'], ['boolean-like', 'true', 'true'], ['whitespace', ' ', ' '],
+  ] as const)('RET-007 preserves %s decomposition input as a string', (_label, value, expected) => {
+    expect(parseComposeDecompositionValue(value)).toBe(expected);
+  });
+
   it('RET-002C2 keeps runtime planning exact-value default-off and injects a driver-backed resolver', () => {
     expect(BOOTSTRAP_SOURCE).toContain("const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1'");
     expect(BOOTSTRAP_SOURCE).toContain('new ScopedEntityResolver(driver, authority)');

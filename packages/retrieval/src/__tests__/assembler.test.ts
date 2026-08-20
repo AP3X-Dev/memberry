@@ -4,6 +4,8 @@ import { UnifiedAssembler, type AssemblerCodeLayer, type AssemblerMemoryLayer } 
 import type { FeedbackRedisLayer } from '../feedback.js';
 import type { EmbeddingProvider, LlmClient, ChatMessage } from '@memberry/core';
 import type { RetrievalResult } from '../types.js';
+import { rrfFusion } from '../fusion.js';
+import type { CandidateChannelExecutionResultV1 } from '../candidate-channel.js';
 
 // ─── Mock modules ────────────────────────────────────────────────────────────
 
@@ -44,11 +46,40 @@ vi.mock('../scoring.js', () => ({
 
 // Mock fusion
 vi.mock('../fusion.js', () => ({
-  rrfFusion: vi.fn().mockImplementation((lists: RetrievalResult[][], limit: number) => {
+  rrfFusion: vi.fn().mockImplementation((
+    lists: RetrievalResult[][],
+    limit: number,
+    _k?: number,
+    _boosts?: unknown,
+    _collectionSize?: number,
+    _postBoost?: unknown,
+    observer?: {
+      rrf(result: RetrievalResult, value: number): void;
+      score(result: RetrievalResult, name: 'decomposition-multiplier', value: number): void;
+      candidateWindow(result: RetrievalResult, admitted: boolean): void;
+      finalScore(result: RetrievalResult, value: number): void;
+    },
+    decompositionBoost?: (window: readonly { content: string; ordinal: number }[]) => readonly number[],
+  ) => {
     // Simple flatten + sort for testing
     const all = lists.flat();
     all.sort((a, b) => b.score - a.score);
-    return all.slice(0, limit);
+    const results = all.slice(0, limit);
+    for (const result of results) {
+      observer?.rrf(result, result.score);
+      observer?.candidateWindow(result, true);
+    }
+    const multipliers = decompositionBoost?.(results.map((result, ordinal) => ({
+      content: result.content, ordinal,
+    })));
+    for (let index = 0; index < results.length; index += 1) {
+      const result = results[index]!;
+      const multiplier = multipliers?.[index] ?? 1;
+      result.score *= multiplier;
+      if (decompositionBoost) observer?.score(result, 'decomposition-multiplier', multiplier);
+      observer?.finalScore(result, result.score);
+    }
+    return results;
   }),
   dedup: vi.fn().mockImplementation((results: RetrievalResult[]) => {
     const seen = new Set<string>();
@@ -152,6 +183,213 @@ describe('UnifiedAssembler', () => {
   });
 
   describe('assemble (ranked strategy)', () => {
+    it('keeps omitted/default and explicit-false bytes, traces, and exact call counts identical across every ranked entrypoint', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-02T03:04:05.000Z'));
+      const run = async (explicitFalse: boolean) => {
+        const localDriver = createMockDriver();
+        const localRedis = createMockRedis();
+        const localCode = createMockCodeLayer();
+        const localMemory = createMockMemoryLayer();
+        const localEmbedding = createMockEmbedding();
+        const localLlm = createMockLlm();
+        const local = explicitFalse
+          ? new UnifiedAssembler(
+              localDriver as never, localRedis, localCode, localMemory, localEmbedding, localLlm, false,
+            )
+          : new UnifiedAssembler(
+              localDriver as never, localRedis, localCode, localMemory, localEmbedding, localLlm,
+            );
+        const calls = () => ({
+          driverSession: vi.mocked(localDriver.session).mock.calls.length,
+          driverRun: vi.mocked(localDriver.mockSession.run).mock.calls.length,
+          code: vi.mocked(localCode.search).mock.calls.length,
+          memory: vi.mocked(localMemory.load).mock.calls.length,
+          embedding: vi.mocked(localEmbedding.embed).mock.calls.length,
+          embeddingBatch: vi.mocked(localEmbedding.embedBatch).mock.calls.length,
+          feedback: vi.mocked(localRedis.zrevrangeWithScores).mock.calls.length,
+          llm: vi.mocked(localLlm.chat).mock.calls.length,
+        });
+        const frame = { mode: 'current' as const };
+        const execution: CandidateChannelExecutionResultV1 = Object.freeze({
+          contractId: 'memberry.candidate-channel', contractVersion: '1.0.0',
+          request: Object.freeze({
+            contractId: 'memberry.candidate-channel', contractVersion: '1.0.0',
+            tenantId: 'tenant-neutral', projectScope: 'project:neutral', resolvedEntityIds: ['entity-neutral'],
+            temporalFrame: frame, plannedChannels: ['memory.scope'],
+            limits: { maxCandidatesPerChannel: 10, maxCandidatesAggregate: 10 },
+          }),
+          candidates: Object.freeze([{
+            contractId: 'memberry.candidate-channel' as const, contractVersion: '1.0.0' as const,
+            channel: 'memory.scope' as const, tenantId: 'tenant-neutral', projectScope: 'project:neutral',
+            resolvedEntityId: 'entity-neutral', temporalFrame: frame, sourceType: 'semantic' as const,
+            evidenceId: 'evidence-neutral', rank: 1, score: 0.9, title: 'neutral', content: 'neutral content',
+            provenance: { kind: 'semantic' as const, semanticId: 'semantic-neutral' },
+          }]),
+          settlements: Object.freeze([{
+            contractId: 'memberry.candidate-channel' as const, contractVersion: '1.0.0' as const,
+            channel: 'memory.scope' as const, outcome: 'success' as const, candidateCount: 1,
+          }]),
+        });
+        const outputs: unknown[] = [];
+        const countSteps: unknown[] = [];
+        outputs.push(await local.assemble('neutral ranked task', { strategy: 'ranked' }));
+        countSteps.push(calls());
+        outputs.push(await local.assemble('neutral auto task', { strategy: 'auto' }));
+        countSteps.push(calls());
+        outputs.push(await local.assembleTraced('neutral traced task', { strategy: 'ranked' }));
+        countSteps.push(calls());
+        outputs.push(await local.ask('neutral ask task', { level: 'low' }));
+        countSteps.push(calls());
+        const beforeCandidate = calls();
+        outputs.push(local.assembleCandidateExecution(
+          'neutral candidate task', execution, 8_000, false, true, true,
+        ));
+        const afterCandidate = calls();
+        countSteps.push(afterCandidate);
+        return { bytes: JSON.stringify(outputs), countSteps, beforeCandidate, afterCandidate };
+      };
+      try {
+        const omitted = await run(false);
+        const explicitFalse = await run(true);
+        expect(explicitFalse.bytes).toBe(omitted.bytes);
+        expect(explicitFalse.countSteps).toEqual(omitted.countSteps);
+        expect(omitted.afterCandidate).toEqual(omitted.beforeCandidate);
+        expect(explicitFalse.afterCandidate).toEqual(explicitFalse.beforeCandidate);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps decomposition absent by default and passes only the internal content/ordinal callback when enabled', async () => {
+      await assembler.assemble('first relationship and second relationship', { strategy: 'ranked' });
+      expect(vi.mocked(rrfFusion).mock.calls.at(-1)?.[7]).toBeUndefined();
+
+      const enabled = new UnifiedAssembler(
+        driver as never,
+        redis,
+        codeLayer,
+        memoryLayer,
+        embedding,
+        null,
+        true,
+      );
+      await enabled.assemble('first relationship and second relationship', { strategy: 'ranked' });
+      const callback = vi.mocked(rrfFusion).mock.calls.at(-1)?.[7];
+      expect(callback).toBeTypeOf('function');
+      expect(callback!([
+        { content: 'first relationship bridge linktoken', ordinal: 0 },
+        { content: 'second relationship bridge linktoken', ordinal: 1 },
+      ])).toEqual([1.25, 1.25]);
+    });
+
+    it('does not add provider, embedding, feedback, collection-size, or LLM calls when enabled', async () => {
+      const run = async (enabled: boolean) => {
+        const localDriver = createMockDriver();
+        const localRedis = createMockRedis();
+        const localCode = createMockCodeLayer();
+        const localMemory = createMockMemoryLayer();
+        const localEmbedding = createMockEmbedding();
+        const localLlm = createMockLlm();
+        const local = new UnifiedAssembler(
+          localDriver as never, localRedis, localCode, localMemory, localEmbedding, localLlm, enabled,
+        );
+        await local.assemble('first relationship and second relationship', { strategy: 'ranked' });
+        return {
+          driverSessions: vi.mocked(localDriver.session).mock.calls.length,
+          code: vi.mocked(localCode.search).mock.calls.length,
+          memory: vi.mocked(localMemory.load).mock.calls.length,
+          embed: vi.mocked(localEmbedding.embed).mock.calls.length,
+          feedback: vi.mocked(localRedis.zrevrangeWithScores).mock.calls.length,
+          llm: vi.mocked(localLlm.chat).mock.calls.length,
+        };
+      };
+      expect(await run(true)).toEqual(await run(false));
+    });
+
+    it('keeps the candidate-channel receipt immutable while using ranked-v2 only on the enabled trace', () => {
+      const frame = { mode: 'current' as const };
+      const execution: CandidateChannelExecutionResultV1 = Object.freeze({
+        contractId: 'memberry.candidate-channel',
+        contractVersion: '1.0.0',
+        request: Object.freeze({
+          contractId: 'memberry.candidate-channel', contractVersion: '1.0.0',
+          tenantId: 'tenant-neutral', projectScope: 'project:neutral', resolvedEntityIds: ['entity-neutral'],
+          temporalFrame: frame, plannedChannels: ['memory.scope'],
+          limits: { maxCandidatesPerChannel: 10, maxCandidatesAggregate: 10 },
+        }),
+        candidates: Object.freeze([
+          {
+            contractId: 'memberry.candidate-channel' as const, contractVersion: '1.0.0' as const,
+            channel: 'memory.scope' as const, tenantId: 'tenant-neutral', projectScope: 'project:neutral',
+            resolvedEntityId: 'entity-neutral', temporalFrame: frame, sourceType: 'semantic' as const,
+            evidenceId: 'evidence-a', rank: 1, score: 0.9, title: 'neutral',
+            content: 'Alpha marker appears with linktoken.', provenance: { kind: 'semantic' as const, semanticId: 'semantic-a' },
+          },
+          {
+            contractId: 'memberry.candidate-channel' as const, contractVersion: '1.0.0' as const,
+            channel: 'memory.scope' as const, tenantId: 'tenant-neutral', projectScope: 'project:neutral',
+            resolvedEntityId: 'entity-neutral', temporalFrame: frame, sourceType: 'semantic' as const,
+            evidenceId: 'evidence-b', rank: 2, score: 0.8, title: 'neutral',
+            content: 'Omega target appears with linktoken.', provenance: { kind: 'semantic' as const, semanticId: 'semantic-b' },
+          },
+        ]),
+        settlements: Object.freeze([{
+          contractId: 'memberry.candidate-channel' as const, contractVersion: '1.0.0' as const,
+          channel: 'memory.scope' as const, outcome: 'success' as const, candidateCount: 2,
+        }]),
+      });
+      const task = 'Locate alpha marker and identify omega target';
+      const control = new UnifiedAssembler(driver as never, redis, null, null, embedding);
+      const candidate = new UnifiedAssembler(driver as never, redis, null, null, embedding, null, true);
+      const before = JSON.stringify(execution);
+      const providerCallsBefore = {
+        sessions: vi.mocked(driver.session).mock.calls.length,
+        embedding: vi.mocked(embedding.embed).mock.calls.length,
+        feedback: vi.mocked(redis.zrevrangeWithScores).mock.calls.length,
+      };
+      const controlResult = control.assembleCandidateExecution(task, execution, 8_000, false, true, true);
+      const providerCallsAfterControl = {
+        sessions: vi.mocked(driver.session).mock.calls.length,
+        embedding: vi.mocked(embedding.embed).mock.calls.length,
+        feedback: vi.mocked(redis.zrevrangeWithScores).mock.calls.length,
+      };
+      const candidateResult = candidate.assembleCandidateExecution(task, execution, 8_000, false, true, true);
+      const providerCallsAfterCandidate = {
+        sessions: vi.mocked(driver.session).mock.calls.length,
+        embedding: vi.mocked(embedding.embed).mock.calls.length,
+        feedback: vi.mocked(redis.zrevrangeWithScores).mock.calls.length,
+      };
+      expect(JSON.stringify(execution)).toBe(before);
+      expect(providerCallsAfterControl).toEqual(providerCallsBefore);
+      expect(providerCallsAfterCandidate).toEqual(providerCallsBefore);
+      expect('trace' in controlResult && controlResult.trace.algorithmVersion).toBe('ranked-v1');
+      expect('trace' in candidateResult && candidateResult.trace.algorithmVersion).toBe('ranked-v2');
+      if (!('trace' in controlResult) || !('trace' in candidateResult)) throw new Error('expected traced candidate result');
+      expect(candidateResult.trace.events.filter((event) => event.kind === 'candidate-score'
+        && event.name === 'decomposition-multiplier')).toHaveLength(2);
+      const authorityProjection = (trace: typeof candidateResult.trace) => ({
+        schemaVersion: trace.schemaVersion,
+        requestShape: trace.requestShape,
+        complete: trace.complete,
+        incompleteReasons: trace.incompleteReasons,
+        candidates: trace.candidates,
+        events: trace.events
+          .filter((event) => event.kind !== 'ranked-output' && event.kind !== 'mmr-round'
+            && !(event.kind === 'candidate-score'
+              && (event.name === 'decomposition-multiplier' || event.name === 'final')))
+          .map(({ sequence: _sequence, ...event }) => event),
+        terminalExclusions: trace.terminalExclusions,
+      });
+      expect(authorityProjection(candidateResult.trace)).toEqual(authorityProjection(controlResult.trace));
+      expect(candidateResult.trace.requestShape.plannedChannels).toEqual(execution.request.plannedChannels);
+      expect(candidateResult.trace.events.filter((event) => event.kind === 'channel-attempt'))
+        .toEqual(controlResult.trace.events.filter((event) => event.kind === 'channel-attempt'));
+      expect(candidateResult.trace.events.filter((event) => event.kind === 'channel-terminal'))
+        .toEqual(controlResult.trace.events.filter((event) => event.kind === 'channel-terminal'));
+      expect(execution.request.limits).toEqual({ maxCandidatesPerChannel: 10, maxCandidatesAggregate: 10 });
+    });
+
     it('returns unified context with correct task and strategy', async () => {
       const ctx = await assembler.assemble('find auth code', { strategy: 'ranked' });
 

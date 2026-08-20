@@ -40,6 +40,46 @@
     "maxUnknownResultRate": 0,
     "maxQualityRegression": 0
   },
+  "queryDecompositionDev": {
+    "minRecallAtK": 0,
+    "minPrecisionAtK": 0,
+    "minAnswerCoverage": 0,
+    "maxStaleLeakRate": 0,
+    "maxIsolationLeakRate": 0,
+    "maxDuplicateRate": 0,
+    "maxUnknownResultRate": 0,
+    "maxQualityRegression": 0
+  },
+  "queryDecompositionHoldout": {
+    "minRecallAtK": 0,
+    "minPrecisionAtK": 0,
+    "minAnswerCoverage": 0,
+    "maxStaleLeakRate": 0,
+    "maxIsolationLeakRate": 0,
+    "maxDuplicateRate": 0,
+    "maxUnknownResultRate": 0,
+    "maxQualityRegression": 0
+  },
+  "queryDecompositionRecallAt10": {
+    "minRecallAtK": 1,
+    "minPrecisionAtK": 0,
+    "minAnswerCoverage": 1,
+    "maxStaleLeakRate": 0,
+    "maxIsolationLeakRate": 0,
+    "maxDuplicateRate": 0,
+    "maxUnknownResultRate": 0,
+    "maxQualityRegression": 0
+  },
+  "queryDecompositionPrecisionAt5": {
+    "minRecallAtK": 0,
+    "minPrecisionAtK": 0.7,
+    "minAnswerCoverage": 1,
+    "maxStaleLeakRate": 0,
+    "maxIsolationLeakRate": 0,
+    "maxDuplicateRate": 0,
+    "maxUnknownResultRate": 0,
+    "maxQualityRegression": 0
+  },
   "migratedRetrievalControl": {
     "minRecallAtK": 0.8461538461538461,
     "minPrecisionAtK": 0.5512820512820512,

@@ -9,7 +9,7 @@ import { compareAdapters } from './runner.js';
 
 const DEFAULT_REPO_ROOT = resolve(process.cwd());
 const DEFAULT_SYSTEM_REGISTRY = resolve(DEFAULT_REPO_ROOT, 'bench', 'lab', 'registry', 'systems.json');
-const FORBIDDEN_PATH = /(?:^|\/)(?:fixtures|datasets|registry|__tests__)(?:\/|$)|(?:^|[-_.])oracles?(?:[-_.]|$)/i;
+const FORBIDDEN_PATH = /(?:^|\/)(?:fixtures|datasets|registry|multihop|__tests__)(?:\/|$)|(?:^|[-_.])oracles?(?:[-_.]|$)/i;
 const FORBIDDEN_GLOBAL_IDENTIFIERS = new Set([
   'Bun', 'Deno', 'Function', 'eval', 'global', 'globalThis', 'module', 'process', 'require',
 ]);
@@ -54,6 +54,13 @@ const CANONICAL_FACTORIES: Readonly<Record<string, CanonicalFactory>> = Object.f
     create: async () => {
       const { MemBerryRetrievalCoreAdapter } = await import('./adapters/memberry-retrieval-core.js');
       return new MemBerryRetrievalCoreAdapter();
+    },
+  },
+  'memberry-retrieval-core-query-decomposition-v1': {
+    entry: 'bench/lab/adapters/memberry-retrieval-core.ts',
+    create: async () => {
+      const { MemBerryRetrievalCoreQueryDecompositionAdapter } = await import('./adapters/memberry-retrieval-core.js');
+      return new MemBerryRetrievalCoreQueryDecompositionAdapter();
     },
   },
   'scope-aware-bm25-control-v1': {

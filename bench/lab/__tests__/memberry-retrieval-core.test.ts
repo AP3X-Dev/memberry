@@ -17,7 +17,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { LabMemory, LabNamespace, LabQueryResult } from '../contracts/adapter.js';
 import { MemBerryProxyAdapter } from '../adapters/memberry-proxy.js';
-import { MemBerryRetrievalCoreAdapter } from '../adapters/memberry-retrieval-core.js';
+import {
+  MemBerryRetrievalCoreAdapter,
+  MemBerryRetrievalCoreQueryDecompositionAdapter,
+} from '../adapters/memberry-retrieval-core.js';
 import { loadG2HoldoutScenarioInputs } from '../datasets/load-suite.js';
 import { TEMPORAL_ISOLATION_SCENARIOS } from '../fixtures/temporal-isolation.js';
 import { auditAdapterDependencies, compareRegisteredAdapters } from '../registered-adapters.js';
@@ -99,6 +102,32 @@ function assertNonVacuous(results: readonly LabQueryResult[]): void {
 }
 
 describe('LAB-010 production retrieval adapter', () => {
+  it('RET-007 registers a distinct candidate over identical fixture persistence', async () => {
+    const control = new MemBerryRetrievalCoreAdapter();
+    const candidate = new MemBerryRetrievalCoreQueryDecompositionAdapter();
+    const memories: readonly LabMemory[] = [
+      { id: 'neutral-a', content: 'Alpha marker appears with linktoken.', recordedAt: '2026-01-01T00:00:00.000Z' },
+      { id: 'neutral-b', content: 'Omega target appears with linktoken.', recordedAt: '2026-01-01T00:00:00.000Z' },
+      { id: 'neutral-c', content: 'Neutral text uses another token.', recordedAt: '2026-01-01T00:00:00.000Z' },
+    ];
+    for (const adapter of [control, candidate]) {
+      expect((await adapter.ingest({ namespace: NAMESPACE, memories })).accepted).toBe(memories.length);
+    }
+    const request = {
+      namespace: NAMESPACE,
+      query: 'Locate alpha marker and identify omega target',
+      limit: 3,
+    };
+    const controlResult = await control.query(request);
+    const candidateResult = await candidate.query(request);
+    expect(control.id).toBe('memberry-retrieval-core-v1');
+    expect(candidate.id).toBe('memberry-retrieval-core-query-decomposition-v1');
+    expect(candidateResult.results.map(({ id }) => id).sort())
+      .toEqual(controlResult.results.map(({ id }) => id).sort());
+    expect(candidateResult.results.map(({ score }) => score))
+      .not.toEqual(controlResult.results.map(({ score }) => score));
+  });
+
   it('A1 loads through the registered required-CI path', async () => {
     const report = await compareRegisteredAdapters({
       runId: 'lab-010-registered',

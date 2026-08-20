@@ -177,6 +177,10 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
     'namespaces', 'feedback', 'stats', 'cleanup', 'project-scope', 'tenant-scope', 'temporal-filtering',
   ]);
 
+  constructor(private readonly queryDecompositionEnabled = false) {
+    super();
+  }
+
   async query(request: QueryRequest): Promise<QueryResponse> {
     this.queryCount += 1;
     const scoped = (this.stores.get(namespaceKey(request.namespace)) ?? [])
@@ -192,6 +196,8 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
       layers.codeLayer,
       layers.memoryLayer,
       FIXTURE_EMBEDDING,
+      null,
+      this.queryDecompositionEnabled,
     );
     // 'ranked', never 'auto': 'auto' would route through classifyIntent, whose
     // decision depends on this fixture embedding provider and can select GRAPH,
@@ -218,5 +224,15 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
       .map((item) => ({ id: item.id, score: item.score }))
       .sort((left, right) => right.score - left.score || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
     return { results: ranked.slice(0, request.limit) };
+  }
+}
+
+/** Same production assembler and fixture persistence, with RET-007 enabled. */
+export class MemBerryRetrievalCoreQueryDecompositionAdapter extends MemBerryRetrievalCoreAdapter {
+  override readonly id: string = 'memberry-retrieval-core-query-decomposition-v1';
+  override readonly displayName: string = 'MemBerry production retrieval core with query decomposition';
+
+  constructor() {
+    super(true);
   }
 }

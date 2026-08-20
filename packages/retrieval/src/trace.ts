@@ -51,7 +51,7 @@ const AGGREGATE_LIMITS = Object.freeze({
 const MAX_TRACE_NUMBER = 1_000_000;
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
-export type RetrievalTraceAlgorithmVersion = 'ranked-v1' | 'deterministic-v1' | 'deterministic-v2';
+export type RetrievalTraceAlgorithmVersion = 'ranked-v1' | 'ranked-v2' | 'deterministic-v1' | 'deterministic-v2';
 export type RetrievalTraceSourceType =
   | 'semantic' | 'episodic' | 'symbol' | 'arch_entity' | 'aspect' | 'fact' | 'block';
 export type RetrievalTraceChannel =
@@ -83,13 +83,13 @@ export type RetrievalTraceFailureStage = 'intent' | 'embedding' | 'feedback';
 export type RetrievalTraceTerminalOutcome = 'included' | 'excluded' | 'failed';
 export type RetrievalTraceScoreName =
   | 'input' | 'rrf' | 'feedback-multiplier' | 'provenance-multiplier'
-  | 'lexical-multiplier' | 'normalized' | 'final';
+  | 'lexical-multiplier' | 'decomposition-multiplier' | 'normalized' | 'final';
 export type RetrievalTraceIncompleteReason =
   | 'channel-gap' | 'channel-accounting-conflict' | 'candidate-terminal-gap'
   | 'candidate-terminal-conflict' | 'candidate-output-gap' | 'candidate-event-conflict'
   | 'candidate-identity-collision' | 'mmr-gap' | 'limit-overflow';
 
-const ALGORITHMS = ['ranked-v1', 'deterministic-v1', 'deterministic-v2'] as const;
+const ALGORITHMS = ['ranked-v1', 'ranked-v2', 'deterministic-v1', 'deterministic-v2'] as const;
 const SOURCE_TYPES = ['semantic', 'episodic', 'symbol', 'arch_entity', 'aspect', 'fact', 'block'] as const;
 export const RETRIEVAL_TRACE_CHANNEL_ORDER = Object.freeze([
   'memory.scope', 'memory.semantic-vector', 'memory.episodic-vector', 'memory.fact', 'memory.block', 'memory.graph',
@@ -111,7 +111,7 @@ const FAILURE_STAGES = ['intent', 'embedding', 'feedback'] as const;
 const TERMINAL_OUTCOMES = ['included', 'excluded', 'failed'] as const;
 const SCORE_NAMES = [
   'input', 'rrf', 'feedback-multiplier', 'provenance-multiplier',
-  'lexical-multiplier', 'normalized', 'final',
+  'lexical-multiplier', 'decomposition-multiplier', 'normalized', 'final',
 ] as const;
 const INCOMPLETE_REASONS = [
   'channel-gap', 'channel-accounting-conflict', 'candidate-terminal-gap',
@@ -162,6 +162,10 @@ const deterministicV2SourceBinding: Readonly<Record<RetrievalTraceDeterministicO
 
 function orderForAlgorithm(algorithmVersion: RetrievalTraceAlgorithmVersion): ReadonlyMap<RetrievalTraceChannel, number> {
   return algorithmVersion === 'deterministic-v2' ? deterministicV2ChannelOrder : channelOrder;
+}
+
+function isRankedAlgorithm(algorithmVersion: RetrievalTraceAlgorithmVersion): boolean {
+  return algorithmVersion === 'ranked-v1' || algorithmVersion === 'ranked-v2';
 }
 
 function isDeterministicV2OutputChannel(
@@ -640,6 +644,7 @@ function validateCandidate(
 }
 
 function scoreBounds(name: RetrievalTraceScoreName): readonly [number, number] {
+  if (name === 'decomposition-multiplier') return [1, 1.25];
   if (name.endsWith('multiplier')) return [0, 4];
   if (name === 'input') return [-1, 1];
   if (name === 'final') return [0, 4];
@@ -889,7 +894,7 @@ function outputEvents(trace: RetrievalTraceV1): Array<Extract<RetrievalTraceStag
 }
 
 function reconstructFromEvents(trace: RetrievalTraceV1): RetrievalTraceReplayResult {
-  const expectedKind = trace.algorithmVersion === 'ranked-v1' ? 'ranked-output' : 'deterministic-output';
+  const expectedKind = isRankedAlgorithm(trace.algorithmVersion) ? 'ranked-output' : 'deterministic-output';
   const outputs = outputEvents(trace).filter((event) => event.kind === expectedKind).sort((a, b) => a.rank - b.rank);
   const terminals = terminalEvents(trace);
   // V2 output ranks are derived from canonical source-final candidate order and
@@ -968,7 +973,7 @@ function conformanceErrors(trace: RetrievalTraceV1): string[] {
 
   const terminals = terminalEvents(trace);
   const outputs = outputEvents(trace);
-  const expectedOutputKind = trace.algorithmVersion === 'ranked-v1' ? 'ranked-output' : 'deterministic-output';
+  const expectedOutputKind = isRankedAlgorithm(trace.algorithmVersion) ? 'ranked-output' : 'deterministic-output';
   if (outputs.some((event) => event.kind !== expectedOutputKind)) errors.push('output event does not match trace algorithm');
   for (const ref of refs) {
     const terminal = terminals.filter((event) => event.ref === ref);
@@ -999,6 +1004,18 @@ function conformanceErrors(trace: RetrievalTraceV1): string[] {
   for (const event of [...filterEvents, ...scoreEvents]) if (!refs.has(event.ref)) errors.push('candidate event references an unknown ref');
   const eventIdentities = [...filterEvents.map((event) => `filter:${event.ref}:${event.name}`), ...scoreEvents.map((event) => `score:${event.ref}:${event.name}`)];
   if (new Set(eventIdentities).size !== eventIdentities.length) errors.push('candidate has duplicate filter or score events');
+  const decompositionScores = scoreEvents.filter((event) => event.name === 'decomposition-multiplier');
+  if (trace.algorithmVersion === 'ranked-v2') {
+    const admitted = filterEvents
+      .filter((event) => event.name === 'candidate-window' && event.outcome === 'pass')
+      .map((event) => event.ref).sort(compareText);
+    const scored = decompositionScores.map((event) => event.ref).sort(compareText);
+    if (canonicalTraceJson(admitted) !== canonicalTraceJson(scored)) {
+      errors.push('ranked-v2 decomposition scores do not match the admitted candidate window');
+    }
+  } else if (decompositionScores.length > 0) {
+    errors.push('decomposition score is only valid for ranked-v2');
+  }
   for (const terminal of terminals) {
     const filters = filterEvents.filter((event) => event.ref === terminal.ref);
     const failed = filters.filter((event) => event.outcome === 'fail');
@@ -1064,7 +1081,7 @@ function conformanceErrors(trace: RetrievalTraceV1): string[] {
     const actualOrder = outputs.sort((a, b) => a.rank - b.rank).map((event) => event.ref);
     if (canonicalTraceJson(expectedOrder) !== canonicalTraceJson(actualOrder)) errors.push('ranked MMR output is not replayable from rounds');
     if ([...included].some((ref) => !selected.includes(ref))) errors.push('included MMR candidate was never selected');
-  } else if (trace.algorithmVersion === 'ranked-v1') {
+  } else if (isRankedAlgorithm(trace.algorithmVersion)) {
     const finals = new Map(scoreEvents.filter((event) => event.name === 'final').map((event) => [event.ref, event.value]));
     const includedRefs = terminals.filter((event) => event.outcome === 'included').map((event) => event.ref);
     if (includedRefs.some((ref) => !finals.has(ref))) errors.push('ranked included candidate is missing final score');
@@ -1590,7 +1607,7 @@ export class RetrievalTraceCollector {
     }
     for (const entry of [...sortedEntries].filter((item) => item.outputRank !== undefined).sort((a, b) => a.outputRank! - b.outputRank!)) {
       eventsWithoutSequence.push({
-        kind: this.algorithmVersion === 'ranked-v1' ? 'ranked-output' : 'deterministic-output',
+        kind: isRankedAlgorithm(this.algorithmVersion) ? 'ranked-output' : 'deterministic-output',
         ref: refs.get(entry)!, rank: entry.outputRank!,
       });
     }

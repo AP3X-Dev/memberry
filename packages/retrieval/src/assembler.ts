@@ -13,6 +13,7 @@ import type {
   BoostFactors,
 } from './types.js';
 import { rrfFusion, dedup } from './fusion.js';
+import { queryDecompositionMultipliersV1 } from './query-decomposition.js';
 import { DeterministicAssembler, normalizeResolvedEntityIds } from './deterministic.js';
 import { FeedbackTracker, type FeedbackRedisLayer } from './feedback.js';
 import { expandQuery } from './expand.js';
@@ -266,6 +267,7 @@ export class UnifiedAssembler {
     private memoryLayer: AssemblerMemoryLayer | null,
     private embedding: EmbeddingProvider,
     private llm: LlmClient | null = null,
+    private queryDecompositionEnabled = false,
   ) {
     this.deterministic = new DeterministicAssembler(driver);
     this.feedback = new FeedbackTracker(redis);
@@ -415,8 +417,15 @@ export class UnifiedAssembler {
       query: task,
       maxTokens,
       plannedChannels: execution.request.plannedChannels,
+      decompositionEnabled: this.queryDecompositionEnabled,
     }, incompleteReasons) : undefined;
-    const fused = rrfFusion(lists, 50, 60, undefined, undefined, undefined, traceAdapter);
+    const decompositionBoost = this.queryDecompositionEnabled
+      ? (candidates: readonly { content: string; ordinal: number }[]) =>
+          queryDecompositionMultipliersV1(task, candidates)
+      : undefined;
+    const fused = rrfFusion(
+      lists, 50, 60, undefined, undefined, undefined, traceAdapter, decompositionBoost,
+    );
     const deduped = dedup(fused);
     traceAdapter?.recordDedup(fused.map((result) => result.id), deduped.map((result) => result.id));
     if (postDedupObserver) {
@@ -964,11 +973,18 @@ export class UnifiedAssembler {
       temporalFilterApplied: Boolean(opts.as_of),
       query: task,
       maxTokens: opts.max_tokens,
+      decompositionEnabled: this.queryDecompositionEnabled,
     }, traceIncompleteReasons ? [...traceIncompleteReasons] : []) : undefined;
     if (stageFailures) {
       for (const failure of stageFailures) traceAdapter?.recordStageFailure(failure.stage, failure.code);
     }
-    const fused = rrfFusion(lists, 50, 60, boosts, collectionSize, textBoostFn, traceAdapter);
+    const decompositionBoost = this.queryDecompositionEnabled
+      ? (candidates: readonly { content: string; ordinal: number }[]) =>
+          queryDecompositionMultipliersV1(task, candidates)
+      : undefined;
+    const fused = rrfFusion(
+      lists, 50, 60, boosts, collectionSize, textBoostFn, traceAdapter, decompositionBoost,
+    );
     const deduped = dedup(fused);
     traceAdapter?.recordDedup(fused.map((result) => result.id), deduped.map((result) => result.id));
 

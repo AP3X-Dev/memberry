@@ -192,6 +192,31 @@ jobs:
           check_candidate_value '1.0' '1.0'
           check_candidate_value 'true' 'true'
           check_candidate_value '1 ' '1 '
+          check_decomposition_value() {
+            local input="$1"
+            local expected="$2"
+            local rendered
+            if [[ "$input" == '__UNSET__' ]]; then
+              rendered="$(env -u MEMBERRY_QUERY_DECOMPOSITION_V1 docker compose --env-file /dev/null --profile app --profile wiki config --format json)"
+            else
+              rendered="$(MEMBERRY_QUERY_DECOMPOSITION_V1="$input" docker compose --env-file /dev/null --profile app --profile wiki config --format json)"
+            fi
+            COMPOSE_JSON="$rendered" EXPECTED="$expected" node <<'NODE'
+          const config = JSON.parse(process.env.COMPOSE_JSON);
+          const expected = process.env.EXPECTED;
+          const mcpValue = config?.services?.mcp?.environment?.MEMBERRY_QUERY_DECOMPOSITION_V1;
+          const wikiEnvironment = config?.services?.wiki?.environment ?? {};
+          if (typeof mcpValue !== 'string' || mcpValue !== expected) process.exit(1);
+          if (Object.hasOwn(wikiEnvironment, 'MEMBERRY_QUERY_DECOMPOSITION_V1')) process.exit(1);
+          NODE
+          }
+          check_decomposition_value '__UNSET__' ''
+          check_decomposition_value '' ''
+          check_decomposition_value '1' '1'
+          check_decomposition_value '01' '01'
+          check_decomposition_value '1.0' '1.0'
+          check_decomposition_value 'true' 'true'
+          check_decomposition_value ' ' ' '
 
       - name: Install dependencies
         run: npm ci

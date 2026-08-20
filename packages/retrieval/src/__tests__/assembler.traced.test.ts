@@ -86,6 +86,7 @@ interface ParityAssemblerOptions {
   codeReject?: boolean;
   memoryMarkdown: string;
   memorySources: string[];
+  queryDecompositionEnabled?: boolean;
 }
 
 const PARITY_CODE_RESULT = {
@@ -166,7 +167,15 @@ function makeParityAssembler(options: ParityAssemblerOptions) {
   };
   const redis = { get: vi.fn(async () => null), set: vi.fn(async () => undefined) };
   const embedding = { available: false, embed: vi.fn(), embedBatch: vi.fn() };
-  return new UnifiedAssembler(driver as never, redis, codeLayer, memoryLayer, embedding);
+  return new UnifiedAssembler(
+    driver as never,
+    redis,
+    codeLayer,
+    memoryLayer,
+    embedding,
+    null,
+    options.queryDecompositionEnabled ?? false,
+  );
 }
 
 function orderedIds(context: Awaited<ReturnType<UnifiedAssembler['assemble']>>): string[] {
@@ -174,6 +183,35 @@ function orderedIds(context: Awaited<ReturnType<UnifiedAssembler['assemble']>>):
 }
 
 describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
+  it('uses ranked-v2 only when decomposition is enabled and records one bounded multiplier per admitted candidate', async () => {
+    const task = 'locate alpha marker and identify omega target';
+    const common = {
+      task,
+      memoryMarkdown: '## [memory-one]\nalpha marker linktoken\n## [memory-two]\nomega target linktoken',
+      memorySources: ['memory-one', 'memory-two'],
+    };
+    const control = makeParityAssembler(common);
+    const candidate = makeParityAssembler({ ...common, queryDecompositionEnabled: true });
+    const options = { strategy: 'ranked' as const, include_arch: false, include_code: false };
+
+    const controlTrace = (await control.assembleTraced(task, options)).trace;
+    const candidateTrace = (await candidate.assembleTraced(task, options)).trace;
+    expect(controlTrace.algorithmVersion).toBe('ranked-v1');
+    expect(controlTrace.events.some((event) => event.kind === 'candidate-score'
+      && event.name === 'decomposition-multiplier')).toBe(false);
+    expect(candidateTrace.algorithmVersion).toBe('ranked-v2');
+    const admitted = candidateTrace.events.filter((event) => event.kind === 'candidate-filter'
+      && event.name === 'candidate-window' && event.outcome === 'pass');
+    const multipliers = candidateTrace.events.filter((event) => event.kind === 'candidate-score'
+      && event.name === 'decomposition-multiplier');
+    expect(multipliers).toHaveLength(admitted.length);
+    expect(multipliers.every((event) => event.kind === 'candidate-score'
+      && event.value >= 1 && event.value <= 1.25)).toBe(true);
+    expect(JSON.stringify(candidateTrace)).not.toContain(task);
+    assertRetrievalTraceConformant(candidateTrace);
+    assertRetrievalTraceSecretSafe(candidateTrace);
+  });
+
   it('keeps ordinary and traced presentation identical for an exact nonempty AMP wrapper', async () => {
     const task = 'exact wrapped task';
     const assembler = makeParityAssembler({

@@ -150,6 +150,36 @@ function buildDeterministicV2(order: 'forward' | 'reverse' = 'forward') {
 }
 
 describe('RET-001A retrieval trace contract', () => {
+  it('binds ranked-v2 to one bounded decomposition score per admitted candidate', () => {
+    const collector = new RetrievalTraceCollector('ranked-v2', rankedRequest);
+    settleChannels(collector);
+    const handle = collector.addCandidate(candidate('memory.scope', 1));
+    collector.recordFilter(handle, { name: 'candidate-window', outcome: 'pass' });
+    collector.recordScore(handle, { name: 'decomposition-multiplier', value: 1.25 });
+    collector.recordScore(handle, { name: 'final', value: 0.91 });
+    collector.recordOutput(handle, 1);
+    collector.recordTerminal(handle, { outcome: 'included', reasons: [] });
+    const trace = collector.finalize();
+    expect(trace.algorithmVersion).toBe('ranked-v2');
+    expect(() => assertRetrievalTraceConformant(trace)).not.toThrow();
+
+    const missing = new RetrievalTraceCollector('ranked-v2', rankedRequest);
+    settleChannels(missing);
+    const missingHandle = missing.addCandidate(candidate('memory.scope', 1));
+    missing.recordFilter(missingHandle, { name: 'candidate-window', outcome: 'pass' });
+    missing.recordScore(missingHandle, { name: 'final', value: 0.91 });
+    missing.recordOutput(missingHandle, 1);
+    missing.recordTerminal(missingHandle, { outcome: 'included', reasons: [] });
+    expect(() => assertRetrievalTraceConformant(missing.finalize())).toThrow(/decomposition scores/);
+
+    const outOfRange = new RetrievalTraceCollector('ranked-v2', rankedRequest);
+    settleChannels(outOfRange);
+    const rangeHandle = outOfRange.addCandidate(candidate('memory.scope', 1));
+    expect(() => outOfRange.recordScore(rangeHandle, {
+      name: 'decomposition-multiplier', value: 1.250001,
+    })).toThrow(/semantic bounds/);
+  });
+
   it('derives deterministic-v2 refs and outputs from the frozen algorithm order', () => {
     expect(RETRIEVAL_TRACE_DETERMINISTIC_OUTPUT_CHANNEL_ORDER_V2).toEqual([
       'arch.hierarchy', 'arch.entity', 'arch.dependency', 'arch.aspect', 'memory.graph',

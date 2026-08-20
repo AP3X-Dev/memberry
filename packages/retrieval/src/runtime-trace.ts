@@ -53,6 +53,7 @@ export interface RankedTraceRequestFacts {
   query: string;
   maxTokens: number;
   plannedChannels?: readonly RetrievalTraceChannel[];
+  decompositionEnabled?: boolean;
 }
 
 export interface DeterministicTraceRequestFacts {
@@ -229,7 +230,7 @@ export class RankedRuntimeTraceAdapter implements RankedFusionObserver {
           observation.channels.map((entry) => entry.channel as RetrievalTraceChannel)))]
           .sort((a, b) => CHANNEL_ORDER.indexOf(a) - CHANNEL_ORDER.indexOf(b))
       : [...facts.plannedChannels];
-    this.collector = new RetrievalTraceCollector('ranked-v1', {
+    this.collector = new RetrievalTraceCollector(facts.decompositionEnabled ? 'ranked-v2' : 'ranked-v1', {
       sources: { code: facts.includeCode, architecture: facts.includeArchitecture, memory: facts.includeMemory },
       projectScopeApplied: facts.projectScopeApplied,
       tenantScope: facts.namedTenant ? 'named' : 'default',
@@ -319,7 +320,7 @@ export class RankedRuntimeTraceAdapter implements RankedFusionObserver {
     this.withHandle(result.id, (handle) => this.collector.recordScore(handle, { name: 'rrf', value }));
   }
 
-  score(result: RetrievalResult, name: 'feedback-multiplier' | 'provenance-multiplier' | 'lexical-multiplier' | 'normalized', value: number): void {
+  score(result: RetrievalResult, name: 'feedback-multiplier' | 'provenance-multiplier' | 'lexical-multiplier' | 'decomposition-multiplier' | 'normalized', value: number): void {
     this.withHandle(result.id, (handle) => this.collector.recordScore(handle, { name: name as RetrievalTraceScoreName, value }));
   }
 

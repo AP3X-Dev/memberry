@@ -54,6 +54,7 @@ const ENV_KEYS = [
   'MEMBERRY_ALLOW_DEFAULT_TENANT', 'MEMBERRY_TENANT_DATASTORES', 'MEMBERRY_QUERY_PLANNER_V1',
   'MEMBERRY_CANDIDATE_CHANNEL_V1', 'MEMBERRY_READONLY', 'MEMBERRY_WIKI_AUTOREFRESH',
   'MEMBERRY_RERANKER_V1',
+  'MEMBERRY_QUERY_DECOMPOSITION_V1',
 ] as const;
 
 function restoreEnv(): void {
@@ -109,12 +110,33 @@ async function stopComposition(): Promise<void> {
 
 async function candidateOffBytes(value: undefined | '01', args: Record<string, unknown>): Promise<string> {
   delete process.env['MEMBERRY_RERANKER_V1'];
+  delete process.env['MEMBERRY_QUERY_DECOMPOSITION_V1'];
   if (value === undefined) delete process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'];
   else process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] = value;
   bootstrapHandles = await bootstrap();
   mcpHandle = await createAMPServer().startSSE(0);
   const port = (mcpHandle.httpServer.address() as AddressInfo).port;
   tenantClient = await connectClient(TOKEN, port, `ret003b-off-${value ?? 'unset'}`);
+  const ordinary = await tenantClient.callTool({ name: 'berry_context', arguments: { ...args, include_trace: false } });
+  const traced = await tenantClient.callTool({ name: 'berry_context', arguments: { ...args, include_trace: true } });
+  const ask = await tenantClient.callTool({ name: 'berry_ask', arguments: {
+    question: 'safe?', reasoning_level: 'low', project_name: PROJECT, entity_scope: [HINT],
+  } });
+  const bytes = JSON.stringify([ordinary, traced, ask]);
+  await stopComposition();
+  return bytes;
+}
+
+async function decompositionBytes(value: undefined | '01' | '1', args: Record<string, unknown>): Promise<string> {
+  delete process.env['MEMBERRY_RERANKER_V1'];
+  process.env['MEMBERRY_QUERY_PLANNER_V1'] = '1';
+  process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] = '1';
+  if (value === undefined) delete process.env['MEMBERRY_QUERY_DECOMPOSITION_V1'];
+  else process.env['MEMBERRY_QUERY_DECOMPOSITION_V1'] = value;
+  bootstrapHandles = await bootstrap();
+  mcpHandle = await createAMPServer().startSSE(0);
+  const port = (mcpHandle.httpServer.address() as AddressInfo).port;
+  tenantClient = await connectClient(TOKEN, port, `ret007-${value ?? 'unset'}`);
   const ordinary = await tenantClient.callTool({ name: 'berry_context', arguments: { ...args, include_trace: false } });
   const traced = await tenantClient.callTool({ name: 'berry_context', arguments: { ...args, include_trace: true } });
   const ask = await tenantClient.callTool({ name: 'berry_ask', arguments: {
@@ -345,6 +367,16 @@ describe.skipIf(!ENABLED)('RET-003B required real-bootstrap HTTP candidate compo
     const unsetBytes = await candidateOffBytes(undefined, args);
     const aliasBytes = await candidateOffBytes('01', args);
     expect(aliasBytes).toBe(unsetBytes);
+    const decompositionUnset = await decompositionBytes(undefined, args);
+    const decompositionAlias = await decompositionBytes('01', args);
+    expect(decompositionAlias).toBe(decompositionUnset);
+    const decompositionEnabled = await decompositionBytes('1', {
+      ...args,
+      task: 'find alpha marker and identify omega target',
+    });
+    expect(decompositionEnabled).toContain('"algorithmVersion":"ranked-v2"');
+    expect(decompositionEnabled).toContain('"name":"decomposition-multiplier"');
+    expect(decompositionEnabled).not.toContain('FOREIGN');
     succeeded = true;
   }, 90_000);
 });

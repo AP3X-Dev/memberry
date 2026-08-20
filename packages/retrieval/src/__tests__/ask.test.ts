@@ -23,12 +23,29 @@ function ctxWith(ids: string[]): UnifiedContext {
   };
 }
 
-function makeAssembler(llm: LlmClient): UnifiedAssembler {
+function makeAssembler(llm: LlmClient, queryDecompositionEnabled = false): UnifiedAssembler {
   // assemble() is stubbed per-test, so the driver/redis/embedding are never used.
-  return new UnifiedAssembler({} as never, {} as never, null, null, {} as never, llm);
+  return new UnifiedAssembler({} as never, {} as never, null, null, {} as never, llm, queryDecompositionEnabled);
 }
 
 describe('UnifiedAssembler.ask (dialectic retrieval)', () => {
+  it('keeps synthesis byte-identical for identical retrieved evidence across the default-off and enabled constructors', async () => {
+    const make = (enabled: boolean) => {
+      const chat = vi.fn().mockResolvedValue(JSON.stringify({ answer: 'same answer', cited: [1] }));
+      const assembler = makeAssembler(fakeLlm(chat), enabled);
+      vi.spyOn(assembler, 'assemble').mockResolvedValue(ctxWith(['same']));
+      return { assembler, chat };
+    };
+    const control = make(false);
+    const candidate = make(true);
+    const [controlResult, candidateResult] = await Promise.all([
+      control.assembler.ask('same question'),
+      candidate.assembler.ask('same question'),
+    ]);
+    expect(candidateResult).toEqual(controlResult);
+    expect(candidate.chat.mock.calls).toEqual(control.chat.mock.calls);
+  });
+
   it('synthesizes an answer and maps cited numbers to evidence node IDs', async () => {
     const chat = vi.fn().mockResolvedValue(JSON.stringify({ answer: 'X uses Y.', cited: [1, 3] }));
     const a = makeAssembler(fakeLlm(chat));
