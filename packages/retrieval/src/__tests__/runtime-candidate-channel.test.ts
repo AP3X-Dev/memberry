@@ -359,4 +359,34 @@ describe('RET-003B runtime candidate channel service', () => {
     expect(trace.terminalExclusions.every((item) => item.reasons.includes('token-budget'))).toBe(true);
     expect(() => JSON.parse(canonicalTraceJson(trace))).not.toThrow();
   });
+
+  it('packs short candidates a single long one would crowd out of the same token budget', async () => {
+    const scopeRow = (evidenceId: string, content: string) => record(
+      ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+      ['tenant-a', project, entityId, evidenceId, 'Semantic', content, 0.9],
+    );
+    const rows = validRows();
+    rows.scope = [
+      scopeRow('semantic-long', 'L'.repeat(400)),
+      scopeRow('semantic-short-a', 'A'.repeat(40)),
+      scopeRow('semantic-short-b', 'B'.repeat(40)),
+    ];
+    const mock = driver(rows);
+    const service = new RuntimeCandidateChannelService(mock.driver);
+    const receipt = await authorityReceipt();
+    const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
+    const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
+
+    const budgeted = assembler.assembleCandidateExecution('task', execution, 100, false, true).context;
+    const unbudgeted = assembler.assembleCandidateExecution('task', execution, 8_000, false, true).context;
+    const items = budgeted.sections.flatMap((section) => section.items);
+
+    expect(items.map((item) => item.id).sort()).toEqual(['fact-1', 'semantic-short-a', 'semantic-short-b']);
+    expect(budgeted.token_count).toBeLessThanOrEqual(100);
+    // Rank-greedy first-fit spends the whole budget on the long top-ranked item; the budgeted
+    // set must score strictly higher than that single item to beat it.
+    const longScore = unbudgeted.sections.flatMap((section) => section.items)
+      .find((item) => item.id === 'semantic-long')!.score;
+    expect(items.reduce((sum, item) => sum + item.score, 0)).toBeGreaterThan(longScore);
+  });
 });
