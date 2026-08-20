@@ -94,6 +94,52 @@
       ]
     },
     {
+      "id": "memberry-g2-holdout-dev",
+      "version": "1.0.0",
+      "suite": "g2-holdout",
+      "kind": "repository",
+      "split": "dev",
+      "oracleAccess": "scorer-only",
+      "requiredInCi": true,
+      "source": { "url": null, "revision": "1.0.0", "path": "bench/lab/datasets/g2/v1/dev" },
+      "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
+      "dataPolicy": {
+        "reviewStatus": "verified",
+        "containsPersonalData": false,
+        "containsSecrets": false,
+        "containsCustomerData": false,
+        "exclusions": ["real user memory", "credentials", "private customer data"]
+      },
+      "acquisition": { "status": "bundled" },
+      "artifacts": [
+        { "role": "input", "access": "adapter", "fileName": "input.jsonl", "repositoryPath": "bench/lab/datasets/g2/v1/dev/input.jsonl", "hashMode": "text-lf", "sha256": "1e8e33bd5184d8ec11201204570edf607bdd06b2ddfb7e523352bdffd11ebf38", "sizeBytes": 10419 },
+        { "role": "oracle", "access": "scorer", "fileName": "oracle.jsonl", "repositoryPath": "bench/lab/datasets/g2/v1/dev/oracle.jsonl", "hashMode": "text-lf", "sha256": "496e2c2260f87fc56335b55b2abd9e78ed1d1b4fdd96bbb126d28ecd78045b28", "sizeBytes": 910 }
+      ]
+    },
+    {
+      "id": "memberry-g2-holdout-holdout",
+      "version": "1.0.0",
+      "suite": "g2-holdout",
+      "kind": "repository",
+      "split": "holdout",
+      "oracleAccess": "scorer-only",
+      "requiredInCi": true,
+      "source": { "url": null, "revision": "1.0.0", "path": "bench/lab/datasets/g2/v1/holdout" },
+      "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
+      "dataPolicy": {
+        "reviewStatus": "verified",
+        "containsPersonalData": false,
+        "containsSecrets": false,
+        "containsCustomerData": false,
+        "exclusions": ["real user memory", "credentials", "private customer data"]
+      },
+      "acquisition": { "status": "bundled" },
+      "artifacts": [
+        { "role": "input", "access": "adapter", "fileName": "input.jsonl", "repositoryPath": "bench/lab/datasets/g2/v1/holdout/input.jsonl", "hashMode": "text-lf", "sha256": "2a8a573877512eba7b3dc9070287dc7cb25d5a72a3425fb832ee8a7b2f1d6c2b", "sizeBytes": 56464 },
+        { "role": "oracle", "access": "scorer", "fileName": "oracle.jsonl", "repositoryPath": "bench/lab/datasets/g2/v1/holdout/oracle.jsonl", "hashMode": "text-lf", "sha256": "ca7cba35d6b18a9f4a964157a37ced3812b9e50b6c994736f98befe12e53cfac", "sizeBytes": 5425 }
+      ]
+    },
+    {
       "id": "memberry-lab-migrated-retrieval",
       "version": "1.0.0",
       "kind": "repository",
