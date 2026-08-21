@@ -212,8 +212,9 @@ describe('RET-001A retrieval trace contract', () => {
     expect(Object.getPrototypeOf(reranker)).toBeNull();
     expect(Object.getPrototypeOf(reranker.provider)).toBeNull();
     expect(Object.getPrototypeOf(reranker.candidates[0]!)).toBeNull();
-    expect(rerankers[0]).toEqual({
-      sequence: 12,
+    expect(reranker.sequence).toBe(15);
+    expect(reranker).toEqual({
+      sequence: 15,
       kind: 'reranker-stage',
       provider: {
         providerId: 'memberry.local.lexical',

@@ -124,6 +124,10 @@ describe('memberry.reranker v1 core boundary', () => {
       cases.push({ surface, index: 0 }, { surface, index: 127 });
     }
     for (const testCase of cases) {
+      const scores = Array.from(
+        { length: RERANKER_MAX_CANDIDATES },
+        (_, index) => (RERANKER_MAX_CANDIDATES - index) / RERANKER_MAX_CANDIDATES,
+      );
       let setters = 0;
       let getters = 0;
       const inserted = Object.create(Object.getPrototypeOf(Array.prototype)) as object;
@@ -140,13 +144,9 @@ describe('memberry.reranker v1 core boundary', () => {
           set: () => { setters += 1; },
         });
         if (testCase.surface === 'inserted') Object.setPrototypeOf(Array.prototype, inserted);
-        const provider = createRerankerProviderV1(IDENTITY, async (serialized) => {
+        const provider = createRerankerProviderV1(IDENTITY, (serialized) => {
           const request = parseSerializedRerankerProviderRequestV1(serialized);
-          const scores = Array.from(
-            { length: request.candidateCount },
-            (_, index) => (request.candidateCount - index) / request.candidateCount,
-          );
-          return serializeRerankerProviderResponseV1(request, IDENTITY, scores);
+          return Promise.resolve(serializeRerankerProviderResponseV1(request, IDENTITY, scores));
         });
         result = await executeCalibratedRerankV1({ query: 'canonical helper', candidates: inputs }, provider);
       } finally {

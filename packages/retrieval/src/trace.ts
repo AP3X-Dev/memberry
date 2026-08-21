@@ -1384,7 +1384,8 @@ function rerankerEvents(trace: RetrievalTraceV1): RetrievalTraceRerankerEventV2[
 }
 
 function rankedV2PresentationOrder(trace: RetrievalTraceV1): string[] {
-  const reranker = rerankerEvents(trace)[0];
+  const events = rerankerEvents(trace);
+  const reranker = events.length === 0 ? undefined : events[0];
   if (!reranker) return [];
   const rankedCandidates = copyTraceArray(reranker.candidates);
   TRACE_ARRAY_SORT(rankedCandidates, (left, right) => left.rerankedRank - right.rerankedRank);
@@ -1556,7 +1557,8 @@ function conformanceErrors(trace: RetrievalTraceV1): string[] {
     const terminal = filterTraceArray(terminals, (event) => event.ref === ref);
     const output = filterTraceArray(outputs, (event) => event.ref === ref);
     if (terminal.length !== 1) appendTraceError(errors, 'candidate does not have exactly one terminal event');
-    if (terminal[0]?.outcome === 'included' ? output.length !== 1 : output.length !== 0) {
+    const settledTerminal = terminal.length === 0 ? undefined : terminal[0];
+    if (settledTerminal?.outcome === 'included' ? output.length !== 1 : output.length !== 0) {
       appendTraceError(errors, 'candidate output settlement disagrees with terminal event');
     }
   }
@@ -1661,7 +1663,7 @@ function conformanceErrors(trace: RetrievalTraceV1): string[] {
         const pairOrder = copyTraceArray(record.pairwise);
         TRACE_ARRAY_SORT(pairOrder, (a, b) => b.similarity - a.similarity
           || compareText(a.selectedRef, b.selectedRef));
-        const maximum = pairOrder[0];
+        const maximum = pairOrder.length === 0 ? undefined : pairOrder[0];
         const derivedMaximum = maximum?.similarity ?? 0;
         const derivedAgainst = maximum?.selectedRef ?? null;
         if (record.maxSimilarity !== derivedMaximum || record.againstRef !== derivedAgainst) {
@@ -1674,7 +1676,7 @@ function conformanceErrors(trace: RetrievalTraceV1): string[] {
       }
       const recordOrder = copyTraceArray(round.records);
       TRACE_ARRAY_SORT(recordOrder, (a, b) => b.objective - a.objective || compareText(a.ref, b.ref));
-      const winner = recordOrder[0]?.ref;
+      const winner = (recordOrder.length === 0 ? undefined : recordOrder[0])?.ref;
       if (winner !== round.selectedRef) appendTraceError(errors, 'MMR selected ref is not the objective winner');
       defineTraceArrayItem(selected, selected.length, round.selectedRef);
       eligible = filterTraceArray(eligible, (ref) => ref !== round.selectedRef);
@@ -1710,7 +1712,7 @@ function conformanceErrors(trace: RetrievalTraceV1): string[] {
   const rerankers = rerankerEvents(trace);
   if (trace.algorithmVersion === 'ranked-v2') {
     if (rerankers.length !== 1) appendTraceError(errors, 'ranked-v2 requires exactly one reranker stage');
-    const reranker = rerankers[0];
+    const reranker = rerankers.length === 0 ? undefined : rerankers[0];
     if (reranker) {
       const baselineRefs = mapTraceArray(reranker.candidates, (candidate) => candidate.ref);
       const selectedRefs: string[] = [];
@@ -1827,8 +1829,8 @@ function containsRecognizedSecret(value: unknown): boolean {
 }
 
 export function assertRetrievalTraceSecretSafe(value: unknown): asserts value is RetrievalTraceV1 {
-  assertValidTrace(value);
   assertSecretRedactionIntrinsic();
+  assertValidTrace(value);
   if (containsRecognizedSecret(value)) throw new RetrievalTraceValidationError('trace contains a recognized secret shape');
 }
 
@@ -2618,7 +2620,7 @@ export class RetrievalTraceCollector {
           const maximumOrder = copyTraceArray(pairwise);
           TRACE_ARRAY_SORT(maximumOrder, (a, b) => b.similarity - a.similarity
             || compareText(a.selectedRef, b.selectedRef));
-          const maximum = maximumOrder[0];
+          const maximum = maximumOrder.length === 0 ? undefined : maximumOrder[0];
           const maxSimilarity = maximum?.similarity ?? 0;
           defineTraceArrayItem(records, recordIndex, {
             ref: TRACE_MAP_GET(refs, record.candidate)!, relevance: record.relevance, maxSimilarity,

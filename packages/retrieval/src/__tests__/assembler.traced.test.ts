@@ -859,9 +859,15 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
     expect(trace.algorithmVersion).toBe('ranked-v2');
     expect(trace.events.filter((event) => event.kind === 'reranker-stage')).toHaveLength(1);
     expect(replay?.resultOrder).toEqual(trace.resultOrder);
-    expect(JSON.stringify(trace)).not.toContain('private-alpha');
-    expect(JSON.stringify(trace)).not.toContain('private-beta');
-    expect(JSON.stringify(trace)).not.toContain('evidence');
+    const traceBytes = JSON.stringify(trace);
+    expect(traceBytes).not.toContain('private-alpha');
+    expect(traceBytes).not.toContain('private-beta');
+    expect(traceBytes).not.toContain('alpha evidence');
+    expect(traceBytes).not.toContain('beta evidence');
+    expect(traceBytes).not.toContain('"privateId"');
+    expect(traceBytes).not.toContain('"content"');
+    expect(traceBytes).not.toContain('"title"');
+    expect(traceBytes).not.toContain('"query"');
     assertRetrievalTraceConformant(trace);
 
     const missingBudget = new RankedRuntimeTraceAdapter(observations, [baseline], facts, [], 'ranked-v2');
