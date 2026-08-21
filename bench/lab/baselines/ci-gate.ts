@@ -13,7 +13,7 @@ import { TEMPORAL_ISOLATION_SCENARIOS } from '../fixtures/temporal-isolation.js'
 import type { LabGatePolicy } from '../contracts/report.js';
 import { validateRegistries } from '../registry/validate.js';
 import { compareRegisteredAdapters, writeRequiredCiComparisonArtifacts } from '../registered-adapters.js';
-import { runRet007MultiHopDevGate } from '../multihop/gate.js';
+import { runRet007MultiHopDevGateClosed } from '../multihop/gate.js';
 import { loadRegisteredDatasetDescriptor, loadRegisteredScenariosForScoring } from '../datasets/load-golden.js';
 import { loadG2HoldoutScenariosForScoring } from '../datasets/load-suite.js';
 import { canonicalSha256 } from './canonical.js';
@@ -153,12 +153,37 @@ export async function runDeterministicCiGate(
   }
   console.log(`G2 holdout aggregate lane=g2-holdout-precision controlAdapterId=${holdoutPrecisionComparison.control.adapterId} controlPrecisionAtK=${holdoutPrecisionComparison.control.metrics.precisionAtK} candidateAdapterId=${holdoutPrecisionComparison.candidate.adapterId} candidatePrecisionAtK=${holdoutPrecisionComparison.candidate.metrics.precisionAtK}`);
   console.log('Evaluation-lab gate: holdout recall@10 and precision@5 comparisons complete.');
-  const ret007Dev = requireGateResult('ret007-multihop-dev', await runRet007MultiHopDevGate({
+  const ret007Dev = requireGateResult('ret007-multihop-dev', await runRet007MultiHopDevGateClosed({
     runId: `${runId}-ret007-multihop-dev`,
     repoRoot: REPO_ROOT,
     policy: labPolicy.queryDecompositionDev,
   }));
-  console.log(`RET-007 dev aggregate outcome=${ret007Dev.outcome} split=${ret007Dev.split} metric=${ret007Dev.metric} n=${ret007Dev.n} controlAdapterId=${ret007Dev.controlAdapterId} candidateAdapterId=${ret007Dev.candidateAdapterId} controlSuccessRate=${ret007Dev.controlSuccessRate} candidateSuccessRate=${ret007Dev.candidateSuccessRate} delta=${ret007Dev.delta} intervalOutcome=${ret007Dev.interval.outcome} pairedProbes=${ret007Dev.interval.pairedProbes} resamples=${ret007Dev.interval.resamples} level=${ret007Dev.interval.level} point=${ret007Dev.interval.point} lower=${ret007Dev.interval.lower} upper=${ret007Dev.interval.upper} oneSidedLower=${ret007Dev.interval.oneSidedLower}`);
+  const ret007DevAggregate = {
+    outcome: ret007Dev.outcome,
+    failureCodes: ret007Dev.failureCodes,
+    split: ret007Dev.split,
+    metric: ret007Dev.metric,
+    n: ret007Dev.n,
+    controlAdapterId: ret007Dev.controlAdapterId,
+    candidateAdapterId: ret007Dev.candidateAdapterId,
+    controlSuccessRate: ret007Dev.controlSuccessRate,
+    candidateSuccessRate: ret007Dev.candidateSuccessRate,
+    delta: ret007Dev.delta,
+    interval: {
+      outcome: ret007Dev.interval.outcome,
+      pairedProbes: ret007Dev.interval.pairedProbes,
+      resamples: ret007Dev.interval.resamples,
+      level: ret007Dev.interval.level,
+      point: ret007Dev.interval.point,
+      lower: ret007Dev.interval.lower,
+      upper: ret007Dev.interval.upper,
+      oneSidedLower: ret007Dev.interval.oneSidedLower,
+    },
+  };
+  console.log(JSON.stringify(ret007DevAggregate));
+  if (ret007Dev.outcome !== 'passed') {
+    throw new Error(`ret007-dev:${ret007Dev.failureCodes.join(',')}`);
+  }
   const decompositionRecallComparison = requireGateResult('ret007-g2-holdout-recall', await compareRegisteredAdapters({
     runId: `${runId}-ret007-holdout-recall`,
     controlId: 'memberry-retrieval-core-v1',

@@ -81,6 +81,21 @@ function variableCallObject(
   throw new Error(`missing ${variableName} = ${callName}(...)`);
 }
 
+function variableObject(sourceFile: ts.SourceFile, variableName: string): ts.ObjectLiteralExpression {
+  let found: ts.ObjectLiteralExpression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === variableName
+      && node.initializer
+      && ts.isObjectLiteralExpression(node.initializer)) found = node.initializer;
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  if (!found) throw new Error(`missing ${variableName} object literal`);
+  return found;
+}
+
 function aggregateHoldoutLogArguments(sourceFile: ts.SourceFile): ts.Expression[] {
   const argumentsFound: ts.Expression[] = [];
   const visit = (node: ts.Node): void => {
@@ -113,14 +128,83 @@ describe('LAB-011 G2 production binding', () => {
     expect(registryCalls[0]!.arguments[0]!.getText(gateFile))
       .toBe("resolve(REPO_ROOT, 'bench', 'lab', 'registry')");
 
-    const ret007Calls = callsNamed(gateFile, 'runRet007MultiHopDevGate');
+    const ret007Calls = callsNamed(gateFile, 'runRet007MultiHopDevGateClosed');
     expect(ret007Calls).toHaveLength(1);
     const ret007Options = callObject(ret007Calls[0]!);
     expect(ret007Options.properties.map((property) => property.name?.getText(gateFile))).toEqual([
       'runId', 'repoRoot', 'policy',
     ]);
-    expect(gateSource).toContain("import { runRet007MultiHopDevGate } from '../multihop/gate.js';");
+    expect(gateSource).toContain("import { runRet007MultiHopDevGateClosed } from '../multihop/gate.js';");
+    expect(gateSource).not.toContain('runRet007MultiHopDevGate(');
     expect(gateSource).not.toContain('runRet007MultiHopHoldoutGate');
+
+    const deterministicGate = gateFile.statements.find((statement): statement is ts.FunctionDeclaration => (
+      ts.isFunctionDeclaration(statement) && statement.name?.text === 'runDeterministicCiGate'
+    ));
+    if (!deterministicGate?.body) throw new Error('missing runDeterministicCiGate body');
+    const ret007Call = ret007Calls[0]!;
+    const ret007Statement = deterministicGate.body.statements.find((statement) => (
+      statement.getStart(gateFile) <= ret007Call.getStart(gateFile)
+      && statement.getEnd() >= ret007Call.getEnd()
+    ));
+    let aggregateLog: ts.CallExpression | undefined;
+    const findAggregateLog = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)
+        && ts.isPropertyAccessExpression(node.expression)
+        && ts.isIdentifier(node.expression.expression)
+        && node.expression.expression.text === 'console'
+        && node.expression.name.text === 'log'
+        && node.arguments.length === 1) {
+        const argument = node.arguments[0]!;
+        if (ts.isCallExpression(argument)
+          && ts.isPropertyAccessExpression(argument.expression)
+          && ts.isIdentifier(argument.expression.expression)
+          && argument.expression.expression.text === 'JSON'
+          && argument.expression.name.text === 'stringify'
+          && argument.arguments.length === 1
+          && argument.arguments[0]!.getText(gateFile) === 'ret007DevAggregate') aggregateLog = node;
+      }
+      ts.forEachChild(node, findAggregateLog);
+    };
+    findAggregateLog(gateFile);
+    expect(aggregateLog).toBeDefined();
+    const aggregateLogStatement = deterministicGate.body.statements.find((statement) => (
+      statement.getStart(gateFile) <= aggregateLog!.getStart(gateFile)
+      && statement.getEnd() >= aggregateLog!.getEnd()
+    ));
+    const explicitReject = deterministicGate.body.statements.find((statement) => (
+      ts.isIfStatement(statement)
+      && statement.expression.getText(gateFile) === "ret007Dev.outcome !== 'passed'"
+    ));
+    expect(ret007Statement).toBeDefined();
+    expect(aggregateLogStatement).toBeDefined();
+    expect(explicitReject).toBeDefined();
+    expect(ret007Statement!.getStart(gateFile)).toBeLessThan(aggregateLogStatement!.getStart(gateFile));
+    expect(aggregateLogStatement!.getStart(gateFile)).toBeLessThan(explicitReject!.getStart(gateFile));
+    expect(aggregateLogStatement!.getText(gateFile)).toBe('console.log(JSON.stringify(ret007DevAggregate));');
+    expect(explicitReject!.getText(gateFile)).toBe(`if (ret007Dev.outcome !== 'passed') {
+    throw new Error(\`ret007-dev:\${ret007Dev.failureCodes.join(',')}\`);
+  }`);
+
+    const aggregate = variableObject(gateFile, 'ret007DevAggregate');
+    expect(aggregate.properties.map((property) => property.name?.getText(gateFile))).toEqual([
+      'outcome', 'failureCodes', 'split', 'metric', 'n', 'controlAdapterId', 'candidateAdapterId',
+      'controlSuccessRate', 'candidateSuccessRate', 'delta', 'interval',
+    ]);
+    expect(aggregate.properties.every(ts.isPropertyAssignment)).toBe(true);
+    for (const property of aggregate.properties.slice(0, -1)) {
+      if (!ts.isPropertyAssignment(property)) throw new Error('aggregate field must be explicit');
+      expect(property.initializer.getText(gateFile)).toBe(`ret007Dev.${property.name.getText(gateFile)}`);
+    }
+    const intervalProperty = namedProperty(aggregate, 'interval');
+    if (!ts.isObjectLiteralExpression(intervalProperty.initializer)) throw new Error('interval must be explicit');
+    expect(intervalProperty.initializer.properties.map((property) => property.name?.getText(gateFile))).toEqual([
+      'outcome', 'pairedProbes', 'resamples', 'level', 'point', 'lower', 'upper', 'oneSidedLower',
+    ]);
+    expect(intervalProperty.initializer.properties.every((property) => (
+      ts.isPropertyAssignment(property)
+      && property.initializer.getText(gateFile) === `ret007Dev.interval.${property.name.getText(gateFile)}`
+    ))).toBe(true);
 
     const validatorFile = ts.createSourceFile(
       REGISTRY_VALIDATOR, validatorSource, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS,

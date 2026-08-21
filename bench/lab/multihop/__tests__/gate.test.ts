@@ -19,15 +19,30 @@ function isClosedDevReceipt(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const receipt = value as Record<string, unknown>;
   const rootKeys = [
-    'outcome', 'split', 'metric', 'n', 'controlAdapterId', 'candidateAdapterId',
+    'outcome', 'failureCodes', 'split', 'metric', 'n', 'controlAdapterId', 'candidateAdapterId',
     'controlSuccessRate', 'candidateSuccessRate', 'delta', 'interval',
   ];
   if (JSON.stringify(Object.keys(receipt).sort()) !== JSON.stringify([...rootKeys].sort())) return false;
-  if (receipt.outcome !== 'passed' || receipt.split !== 'dev'
+  if ((receipt.outcome !== 'passed' && receipt.outcome !== 'rejected') || receipt.split !== 'dev'
     || receipt.metric !== 'strict-multi-hop-task-success-v1'
     || receipt.controlAdapterId !== 'memberry-retrieval-core-v1'
     || receipt.candidateAdapterId !== 'memberry-retrieval-core-query-decomposition-v1'
     || receipt.n !== 10) return false;
+  const allowedFailureCodes = new Set([
+    'insufficient-paired-probes', 'point-delta-not-positive',
+    'one-sided-lower-below-zero', 'comparison-failed',
+    ...[
+      'recallAtK', 'precisionAtK', 'reciprocalRank', 'ndcgAtK', 'answerCoverage',
+      'staleSafety', 'isolationSafety',
+    ].map((metric) => `quality-regression:${metric}`),
+    ...[
+      'staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate',
+    ].map((metric) => `safety-regression:${metric}`),
+  ]);
+  if (!Array.isArray(receipt.failureCodes)
+    || !receipt.failureCodes.every((code) => typeof code === 'string' && allowedFailureCodes.has(code))
+    || new Set(receipt.failureCodes).size !== receipt.failureCodes.length
+    || (receipt.outcome === 'passed') !== (receipt.failureCodes.length === 0)) return false;
   const finite = (candidate: unknown, minimum: number, maximum: number) =>
     typeof candidate === 'number' && Number.isFinite(candidate)
       && candidate >= minimum && candidate <= maximum;
@@ -50,20 +65,27 @@ function isClosedDevReceipt(value: unknown): boolean {
 }
 
 describe.sequential('RET-007 scorer-owned dev gate', () => {
-  it('returns only the closed aggregate receipt and rejects neutral control parity', async () => {
-    const { runRet007MultiHopDevGate } = await import('../gate.js');
-    const receipt = await runRet007MultiHopDevGate({
+  it('returns the rejected aggregate-only receipt before the strict gate raises the identical failure', async () => {
+    const { runRet007MultiHopDevGate, runRet007MultiHopDevGateClosed } = await import('../gate.js');
+    const options = {
       runId: 'ret007-dev-gate-test',
       repoRoot: REPO_ROOT,
       policy: await loadPolicy(),
-    });
+    };
+    const receipt = await runRet007MultiHopDevGateClosed(options);
     expect(Reflect.ownKeys(receipt)).toEqual([
-      'outcome', 'split', 'metric', 'n', 'controlAdapterId', 'candidateAdapterId',
+      'outcome', 'failureCodes', 'split', 'metric', 'n', 'controlAdapterId', 'candidateAdapterId',
       'controlSuccessRate', 'candidateSuccessRate', 'delta', 'interval',
     ]);
-    expect(receipt.outcome).toBe('passed');
-    expect(receipt.delta).toBeGreaterThan(0);
+    expect(receipt.outcome).toBe('rejected');
+    expect(receipt.failureCodes).toEqual(['point-delta-not-positive']);
+    expect(receipt.controlSuccessRate).toBe(1);
+    expect(receipt.candidateSuccessRate).toBe(1);
+    expect(receipt.delta).toBe(0);
     expect(receipt.interval.oneSidedLower).toBeGreaterThanOrEqual(0);
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(Object.isFrozen(receipt.failureCodes)).toBe(true);
+    expect(Object.isFrozen(receipt.interval)).toBe(true);
     expect(isClosedDevReceipt(receipt)).toBe(true);
     const replay = JSON.parse(JSON.stringify(receipt)) as unknown;
     expect(isClosedDevReceipt(replay)).toBe(true);
@@ -74,14 +96,17 @@ describe.sequential('RET-007 scorer-owned dev gate', () => {
       interval: { ...receipt.interval, probe: 'forbidden-extra-key' },
     })).toBe(false);
     expect(isClosedDevReceipt({ ...receipt, candidateAdapterId: 'substituted-adapter' })).toBe(false);
+    expect(isClosedDevReceipt({ ...receipt, failureCodes: ['scenario-specific-output'] })).toBe(false);
+    const expectedFailure = `ret007-dev:${receipt.failureCodes.join(',')}`;
+    await expect(runRet007MultiHopDevGate(options)).rejects.toThrow(new Error(expectedFailure));
   });
 
   it('records exactly the literal dev descriptor and its two artifact opens through the sole file-open seam', async () => {
-    const { runRet007MultiHopDevGate } = await import('../gate.js');
+    const { runRet007MultiHopDevGateClosed } = await import('../gate.js');
     const descriptorRequests: unknown[] = [];
     const artifactOpens: string[] = [];
     let loadedDescriptor: Awaited<ReturnType<typeof loadRegisteredDatasetDescriptor>> | undefined;
-    await runRet007MultiHopDevGate({
+    const receipt = await runRet007MultiHopDevGateClosed({
       runId: 'ret007-dev-isolation-test',
       repoRoot: REPO_ROOT,
       policy: await loadPolicy(),
@@ -105,9 +130,14 @@ describe.sequential('RET-007 scorer-owned dev gate', () => {
       loadedDescriptor!.inputArtifacts[0]!.path,
       loadedDescriptor!.oracleArtifacts[0]!.path,
     ].sort());
+    expect(isClosedDevReceipt(receipt)).toBe(true);
+    const serialized = JSON.stringify(receipt);
+    expect(JSON.parse(serialized)).toEqual(receipt);
+    expect(serialized).not.toContain(loadedDescriptor!.inputArtifacts[0]!.path);
+    expect(serialized).not.toContain(loadedDescriptor!.oracleArtifacts[0]!.path);
 
     const source = await readFile(resolve(REPO_ROOT, 'bench/lab/multihop/gate.ts'), 'utf8');
-    const devWrapper = source.match(/export function runRet007MultiHopDevGate[\s\S]*?\n}\n/)?.[0] ?? '';
+    const devWrapper = source.match(/export function runRet007MultiHopDevGateClosed[\s\S]*?\n}\n/)?.[0] ?? '';
     expect(devWrapper).toContain("split: 'dev'");
     expect(devWrapper).toContain("custodian.loadDescriptor('memberry-multihop-dev', repoRoot, 'all')");
     expect(devWrapper).not.toContain('holdout');

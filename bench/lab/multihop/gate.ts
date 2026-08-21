@@ -132,13 +132,23 @@ function requirePassed(
   });
 }
 
-/** Scorer-owned ordinary-CI gate. The wrapper binds the dev descriptor literally. */
+/** Strict dev gate retained for callers that require policy rejection as an exception. */
 export function runRet007MultiHopDevGate(options: {
   readonly runId: string;
   readonly repoRoot?: string;
   readonly policy: LabGatePolicy;
   readonly custodian?: Ret007GateCustodianV1;
 }): Promise<Readonly<Ret007MultiHopGateReceipt>> {
+  return runRet007MultiHopDevGateClosed(options).then(requirePassed);
+}
+
+/** Scorer-owned ordinary-CI evaluator. This wrapper binds the dev descriptor literally. */
+export function runRet007MultiHopDevGateClosed(options: {
+  readonly runId: string;
+  readonly repoRoot?: string;
+  readonly policy: LabGatePolicy;
+  readonly custodian?: Ret007GateCustodianV1;
+}): Promise<Readonly<Ret007MultiHopGateEvaluationReceipt>> {
   const repoRoot = resolve(options.repoRoot ?? process.cwd());
   const custodian = options.custodian ?? DEFAULT_CUSTODIAN;
   return custodian.loadDescriptor('memberry-multihop-dev', repoRoot, 'all').then((descriptor) =>
@@ -149,7 +159,7 @@ export function runRet007MultiHopDevGate(options: {
       split: 'dev',
       descriptor,
       custodian,
-    })).then(requirePassed);
+    }));
 }
 
 /** Scorer-custodian manual gate. No ordinary CI entrypoint imports this symbol. */
