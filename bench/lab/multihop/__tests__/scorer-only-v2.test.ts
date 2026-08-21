@@ -177,10 +177,11 @@ describe('LAB-013 scorer-only v2 qualification and strict paired metric', () => 
     expect(qualifyMultiHopV2ControlReceipt(emptyLane).failures).toEqual(['dev:low:missing-success-or-failure']);
   });
 
-  it('fails closed on Windows, candidate-observed, artifact-drifted, and per-case-bearing receipts', () => {
-    const windows = structuredClone(receipt()) as unknown as MultiHopV2ControlQualificationReceipt;
-    (windows.runtime as { platform: string }).platform = 'win32';
-    expect(() => qualifyMultiHopV2ControlReceipt(windows)).toThrow(/hosted independent pre-candidate/);
+  it('fails closed on an invalid joined runtime, candidate-observed, artifact-drifted, and per-case-bearing receipts', () => {
+    const invalidJoinedRuntime = structuredClone(receipt()) as unknown as MultiHopV2ControlQualificationReceipt;
+    (invalidJoinedRuntime.runtime as { platform: string }).platform = 'win32';
+    expect(() => qualifyMultiHopV2ControlReceipt(invalidJoinedRuntime))
+      .toThrow(/joined Node 20\+22 runtime mismatch/);
 
     const observed = structuredClone(receipt()) as unknown as MultiHopV2ControlQualificationReceipt;
     (observed as { candidateArtifactsObserved: boolean }).candidateArtifactsObserved = true;
