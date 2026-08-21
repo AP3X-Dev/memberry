@@ -27,7 +27,9 @@ details remain in
 
 - **Last updated:** 2026-08-21
 - **Exact remote master:** `d984c6b0900894333cc7e184760ca6cd1b3c1d98`
-- **Active critical-path phase:** Phase 2 — Retrieval 2.0
+- **Active critical-path phase:** Phase 6 — Identity, tenancy, privacy, and
+  providers; Retrieval 2.0 remains open but is parked at its declared escape
+  condition
 - **Highest phase started:** Phase 9
 - **Closed phase gates:** G0, G1
 - **Open phase gates:** G2 through G9 and GF
@@ -38,16 +40,16 @@ details remain in
 
 ## NEXT ACTION
 
-1. Monitor post-master CI run `32440317151` for exact merge
-   `d984c6b0900894333cc7e184760ca6cd1b3c1d98`.
-2. If and only if Node 20, Node 22, integration, artifacts, and cleanup are
-   green, run the manual LAB-013 production-control qualification with
-   `source_sha=d984c6b0900894333cc7e184760ca6cd1b3c1d98` while `master` still points
-   to that exact SHA.
-3. Accept only the joined Node 20+22 authoritative receipt. Per-node evidence,
-   a tombstone, divergence, or an out-of-band SHA leaves LAB-013 unqualified.
-4. Do not run or register a candidate until control headroom is independently
-   approved.
+1. Merge this roadmap update after exact-head CI. LAB-013 is terminally
+   unqualified; do not mutate v2, register or run a v2 candidate, or author an
+   additive v3 instrument without a separate owner decision.
+2. Resume the independent G6 lane at SEC-001. Trace the existing unwired
+   SEC-001A capability contract through the authenticated MCP composition root,
+   enumerate the complete deny-by-default actor/tenant/project/tool/operation
+   matrix, and bind the smallest reversible SEC-001B runtime packet.
+3. Keep deployment, live-service changes, credential handling, and destructive
+   tenant/data operations out of scope. The first SEC-001B deliverable is a
+   reviewed design/effect-chain binding, not a flag flip or deployment.
 
 ## Immediate Retrieval 2.0 exit checklist
 
@@ -58,22 +60,19 @@ details remain in
 - [x] Author candidate-blind, non-saturated multi-hop v2 instrument (LAB-013).
 - [x] Merge LAB-013 instrument-only PR #50 as `d984c6b`; no qualification or
   capability claim.
-- [ ] Pass exact-merge post-master CI (`32440317151`).
-- [ ] Produce the joined Node 20+22 LAB-013 control qualification receipt.
-- [ ] Prove both dev and holdout control success are between 30% and 70%.
-- [ ] Prove every low/medium/high distractor stratum contains both control
-  successes and failures.
-- [ ] Freeze LAB-013 permanently after qualification.
-- [ ] Run the existing generic query-decomposition algorithm unchanged on v2
-  dev as RET-007 capability hypothesis 1.
-- [ ] If hypothesis 1 fails, try at most one genuinely different generic
-  capability hypothesis. The leading design is bounded clause-local candidate
-  retrieval because post-retrieval reranking cannot recover an absent hop.
-- [ ] Require positive dev multi-hop task-success delta with unchanged
-  isolation, stale, recall, precision, token, and provider-call protections.
-- [ ] Execute the one-shot aggregate-only candidate holdout only after the dev
-  and regression gates pass.
-- [ ] Close RET-007 only on positive unchanged-policy holdout evidence.
+- [x] Pass exact-merge post-master CI (`32440317151`): Node 20, Node 22,
+  integration, artifacts, and cleanup all succeeded.
+- [x] Execute the exact-source joined Node 20+22 LAB-013 control qualification
+  as run `32441685712` against `d984c6b`; both nodes agreed and the sole
+  authoritative output was a `control-headroom-rejected` tombstone (SHA-256
+  `862b6134c10172888b5f6274596d974f2466c9f32d6f1683e61532295fa1e4d1`).
+- [x] Record the terminal headroom result: dev control `5/20` (`25%`), holdout
+  control `3/20` (`15%`); holdout low and medium strata had no successes.
+- [x] Freeze LAB-013 permanently after rejection. No candidate was registered
+  or executed, and no production capability was changed.
+- [x] Apply the declared escape condition: do not run either RET-007 v2
+  hypothesis or the v2 candidate holdout; park RET-007 pending a separate owner
+  decision on any additive v3 instrument and advance the independent G6 lane.
 - [ ] Implement RET-010: a real response-path reranker and real ranking model.
   A shadow-mode flag or identity provider does not satisfy this item.
 - [ ] Arm the previously declared G2 improvement threshold only when the
@@ -97,8 +96,9 @@ details remain in
 
 ```text
 NOW
-  -> qualify LAB-013 control headroom
-  -> RET-007 actual multi-hop capability
+  -> SEC-001 authenticated capability binding
+  -> G6 security/tenancy lane
+  -> return to RET-007 only after a separate additive-v3 owner decision
   -> RET-010 real response-path reranker
   -> G2 Retrieval 2.0
        |-> Lane A: G3 lifecycle -> G5 temporal -> G7 reliability
@@ -141,7 +141,8 @@ freeze G3, G6, or G8 indefinitely.
 - [x] RET-005 — Contradiction/stale/dedup post-filter
 - [ ] RET-006 — Token-budget evidence optimizer `(partial: budget evidence
   advanced; material utility gate remains open)`
-- [ ] RET-007 — Query decomposition for multi-hop tasks
+- [ ] RET-007 — Query decomposition for multi-hop tasks `(blocked: LAB-013 v2
+  control rejected; additive v3 requires a separate owner decision)`
 - [x] RET-008 — Tenant-scoped learned routing and feedback
 - [x] RET-009 — Caching, timeout, and provider fallback
 - [ ] RET-010 — Real reranker promotion into the served response path
@@ -259,6 +260,10 @@ freeze G3, G6, or G8 indefinitely.
   remain as a regression instrument but cannot prove a positive RET-007 delta.
 - **RET-007 v1 approach 1:** post-retrieval bridge multipliers changed no strict
   top-10 outcomes. Do not rerun it against LAB-012 or weaken that policy.
+- **LAB-013 v2 control:** exact-source joined Node 20/22 qualification rejected
+  control headroom (dev 25%, holdout 15%; holdout low/medium had zero
+  successes). Do not mutate v2, run a v2 candidate, or treat the tombstone as
+  infrastructure failure.
 - **Flag-only reranker promotion:** the current reranker is shadow-only and the
   wired baseline provider is identity. A flag flip cannot improve served order.
 - **Endless evaluator repair:** a candidate failure is not permission to build a
