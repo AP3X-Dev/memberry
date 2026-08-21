@@ -13,7 +13,12 @@ import {
 const MAX_TRACE_JSON_BYTES = 4_194_304;
 const MAX_MARKDOWN_BYTES = 4_194_304;
 const TRACE_HARD_CANDIDATE_LIMIT = 512;
-const TRACE_HARD_EVENT_LIMIT = 8_192;
+export const TRACE_HARD_EVENT_LIMIT = 8_192;
+export const RET010D_RANKED_V2_TRACE_HARD_EVENT_LIMIT = 8_193;
+
+export function traceHardEventLimitV1(algorithm: RetrievalTraceAlgorithmVersion): number {
+  return algorithm === 'ranked-v2' ? RET010D_RANKED_V2_TRACE_HARD_EVENT_LIMIT : TRACE_HARD_EVENT_LIMIT;
+}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -35,6 +40,15 @@ export interface TraceInspectionSummary {
   readonly resultOrderBindingDigest: string;
   readonly replayStateDigest: string;
 }
+
+export type Ret010dRerankerStageSummary =
+  | Readonly<{ present: false }>
+  | Readonly<{
+      present: true;
+      outcome: 'reranked' | 'baseline';
+      candidateCount: number;
+      providerIdentity: 'memberry.local.lexical/bm25f-query-v1/fixed-blend-v1/local';
+    }>;
 
 export type TraceToolInspection =
   | { readonly markdown: string; readonly contentBlockCount: 1 }
@@ -215,7 +229,8 @@ function traceSummary(
   const trace = parsed as RetrievalTraceV1;
   if (trace.algorithmVersion !== expectedAlgorithm) fail('RET001D_TRACE_ALGORITHM_MISMATCH');
   if (trace.complete !== true || trace.incompleteReasons.length !== 0) fail('RET001D_TRACE_INCOMPLETE');
-  if (trace.candidates.length > TRACE_HARD_CANDIDATE_LIMIT || trace.events.length > TRACE_HARD_EVENT_LIMIT) {
+  const eventLimit = traceHardEventLimitV1(trace.algorithmVersion);
+  if (trace.candidates.length > TRACE_HARD_CANDIDATE_LIMIT || trace.events.length > eventLimit) {
     fail('RET001D_TRACE_BOUNDS_INVALID');
   }
   if (trace.candidates.length === 0 || trace.events.length === 0 || trace.resultOrder.length === 0
@@ -290,6 +305,36 @@ function traceSummary(
   });
 }
 
+export function inspectRet010dRerankerStage(
+  result: unknown,
+  expected: 'absent' | 'reranked' | 'baseline',
+): Ret010dRerankerStageSummary {
+  const parts = textParts(result);
+  if (parts.length !== 2) fail('RET010D_TRACE_BLOCK_COUNT');
+  let parsed: unknown;
+  try { parsed = JSON.parse(parts[1]!); } catch { fail('RET010D_TRACE_INVALID'); }
+  try { assertRetrievalTraceConformant(parsed); } catch { fail('RET010D_TRACE_INVALID'); }
+  const trace = parsed as RetrievalTraceV1;
+  const events = trace.events.filter((event) => event.kind === 'reranker-stage');
+  if (expected === 'absent') {
+    if (events.length !== 0 || trace.algorithmVersion === 'ranked-v2') fail('RET010D_RERANKER_STAGE_INVALID');
+    return Object.freeze({ present: false });
+  }
+  if (trace.algorithmVersion !== 'ranked-v2' || events.length !== 1) fail('RET010D_RERANKER_STAGE_INVALID');
+  const event = events[0]!;
+  if (event.kind !== 'reranker-stage' || event.outcome !== expected
+    || event.provider.providerId !== 'memberry.local.lexical'
+    || event.provider.modelId !== 'bm25f-query-v1'
+    || event.provider.calibrationId !== 'fixed-blend-v1'
+    || event.provider.locality !== 'local') fail('RET010D_RERANKER_STAGE_INVALID');
+  return Object.freeze({
+    present: true,
+    outcome: event.outcome,
+    candidateCount: event.candidates.length,
+    providerIdentity: 'memberry.local.lexical/bm25f-query-v1/fixed-blend-v1/local',
+  });
+}
+
 export function inspectTraceToolResult(
   result: unknown,
   expectation: {
@@ -355,6 +400,53 @@ function assertBooleanRecord(value: unknown, keys: readonly string[]): void {
   for (const key of keys) if (descriptorValue(record, key, 'RET001D_MANIFEST_SHAPE') !== true) fail('RET001D_MANIFEST_SHAPE');
 }
 
+interface ManifestTraceCounts {
+  readonly candidateCount: number;
+  readonly eventCount: number;
+  readonly resultCount: number;
+}
+
+function assertTraceSummary(
+  value: unknown,
+  actualAlgorithm: unknown,
+  code: 'RET001D_MANIFEST_SHAPE' | 'RET010D_MANIFEST_SHAPE',
+  keyCode: 'RET001D_MANIFEST_KEYS' | 'RET010D_MANIFEST_KEYS',
+): ManifestTraceCounts {
+  const trace = plainRecord(value, code);
+  exactKeys(trace, [
+    'algorithmVersion', 'candidateCount', 'canonical', 'channelSettlementComplete', 'complete', 'eventCount',
+    'exclusionCount', 'markdownResultCountEquivalent', 'plannedChannelCount', 'replayEquivalent', 'replayStateDigest',
+    'resultCount', 'resultOrderBindingDigest', 'settledChannelCount', 'terminalCount', 'terminalCoverageComplete',
+  ], keyCode);
+  const traceValue = (key: string) => descriptorValue(trace, key, code);
+  const algorithm = traceValue('algorithmVersion');
+  const candidateCount = traceValue('candidateCount');
+  const eventCount = traceValue('eventCount');
+  const resultCount = traceValue('resultCount');
+  if (traceValue('complete') !== true || traceValue('canonical') !== true || traceValue('replayEquivalent') !== true
+    || traceValue('channelSettlementComplete') !== true || traceValue('terminalCoverageComplete') !== true
+    || traceValue('markdownResultCountEquivalent') !== true
+    || !['deterministic-v2', 'ranked-v1', 'ranked-v2'].includes(String(algorithm))
+    || algorithm !== actualAlgorithm
+    || typeof traceValue('replayStateDigest') !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(String(traceValue('replayStateDigest')))
+    || typeof traceValue('resultOrderBindingDigest') !== 'string'
+    || !/^sha256:[0-9a-f]{64}$/.test(String(traceValue('resultOrderBindingDigest')))
+    || !['candidateCount', 'eventCount', 'exclusionCount', 'plannedChannelCount', 'resultCount', 'settledChannelCount', 'terminalCount']
+      .every((key) => Number.isSafeInteger(traceValue(key)) && Number(traceValue(key)) >= 0)
+    || ['candidateCount', 'eventCount', 'plannedChannelCount', 'resultCount', 'settledChannelCount', 'terminalCount']
+      .some((key) => Number(traceValue(key)) === 0)
+    || traceValue('candidateCount') !== traceValue('terminalCount')
+    || traceValue('plannedChannelCount') !== traceValue('settledChannelCount')
+    || Number(traceValue('resultCount')) > Number(traceValue('candidateCount'))) fail(code);
+  if (Number(candidateCount) > TRACE_HARD_CANDIDATE_LIMIT
+    || Number(eventCount) > traceHardEventLimitV1(algorithm as RetrievalTraceAlgorithmVersion)) fail(code);
+  return Object.freeze({
+    candidateCount: Number(candidateCount),
+    eventCount: Number(eventCount),
+    resultCount: Number(resultCount),
+  });
+}
+
 function assertCase(value: unknown): void {
   const record = plainRecord(value, 'RET001D_MANIFEST_SHAPE');
   exactKeys(record, ['actualAlgorithm', 'authScope', 'contentBlocks', 'id', 'parity', 'requestedStrategy', 'trace'], 'RET001D_MANIFEST_KEYS');
@@ -378,28 +470,76 @@ function assertCase(value: unknown): void {
     || !isDeepStrictEqual([requestedStrategy, actualAlgorithm, authScope], exactCase[id as keyof typeof exactCase])) {
     fail('RET001D_MANIFEST_SHAPE');
   }
-  const trace = plainRecord(descriptorValue(record, 'trace', 'RET001D_MANIFEST_SHAPE'), 'RET001D_MANIFEST_SHAPE');
-  exactKeys(trace, [
-    'algorithmVersion', 'candidateCount', 'canonical', 'channelSettlementComplete', 'complete', 'eventCount',
-    'exclusionCount', 'markdownResultCountEquivalent', 'plannedChannelCount', 'replayEquivalent', 'replayStateDigest',
-    'resultCount', 'resultOrderBindingDigest', 'settledChannelCount', 'terminalCount', 'terminalCoverageComplete',
-  ], 'RET001D_MANIFEST_KEYS');
-  const traceValue = (key: string) => descriptorValue(trace, key, 'RET001D_MANIFEST_SHAPE');
-  if (traceValue('complete') !== true || traceValue('canonical') !== true || traceValue('replayEquivalent') !== true
-    || traceValue('channelSettlementComplete') !== true || traceValue('terminalCoverageComplete') !== true
-    || traceValue('markdownResultCountEquivalent') !== true
-    || !['deterministic-v2', 'ranked-v1'].includes(String(traceValue('algorithmVersion')))
-    || traceValue('algorithmVersion') !== actualAlgorithm
-    || typeof traceValue('replayStateDigest') !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(String(traceValue('replayStateDigest')))
-    || typeof traceValue('resultOrderBindingDigest') !== 'string'
-    || !/^sha256:[0-9a-f]{64}$/.test(String(traceValue('resultOrderBindingDigest')))
-    || !['candidateCount', 'eventCount', 'exclusionCount', 'plannedChannelCount', 'resultCount', 'settledChannelCount', 'terminalCount']
-      .every((key) => Number.isSafeInteger(traceValue(key)) && Number(traceValue(key)) >= 0)
-    || ['candidateCount', 'eventCount', 'plannedChannelCount', 'resultCount', 'settledChannelCount', 'terminalCount']
-      .some((key) => Number(traceValue(key)) === 0)
-    || traceValue('candidateCount') !== traceValue('terminalCount')
-    || traceValue('plannedChannelCount') !== traceValue('settledChannelCount')
-    || Number(traceValue('resultCount')) > Number(traceValue('candidateCount'))) fail('RET001D_MANIFEST_SHAPE');
+  assertTraceSummary(
+    descriptorValue(record, 'trace', 'RET001D_MANIFEST_SHAPE'),
+    actualAlgorithm,
+    'RET001D_MANIFEST_SHAPE',
+    'RET001D_MANIFEST_KEYS',
+  );
+}
+
+const RET010D_CASE_BINDINGS = Object.freeze({
+  'authority-disabled-ranked': ['disabled', 'ranked', 'ranked-v1'],
+  'authority-served-ranked': ['served', 'ranked', 'ranked-v2'],
+  'authority-disabled-auto': ['disabled', 'auto', 'ranked-v1'],
+  'authority-served-auto': ['served', 'auto', 'ranked-v2'],
+  'authority-disabled-deterministic': ['disabled', 'deterministic', 'ranked-v1'],
+  'authority-served-deterministic': ['served', 'deterministic', 'ranked-v1'],
+} as const);
+
+function assertRet010dCase(value: unknown): void {
+  const record = plainRecord(value, 'RET010D_MANIFEST_SHAPE');
+  exactKeys(record, [
+    'actualAlgorithm', 'contentBlocks', 'id', 'parity', 'presentationCount',
+    'presentationOrderDigest', 'requestedStrategy', 'rerankerStage', 'runtimeProfile', 'trace',
+  ], 'RET010D_MANIFEST_KEYS');
+  const id = descriptorValue(record, 'id', 'RET010D_MANIFEST_SHAPE');
+  if (typeof id !== 'string' || !(id in RET010D_CASE_BINDINGS)) fail('RET010D_MANIFEST_SHAPE');
+  const binding = RET010D_CASE_BINDINGS[id as keyof typeof RET010D_CASE_BINDINGS];
+  if (!isDeepStrictEqual([
+    descriptorValue(record, 'runtimeProfile', 'RET010D_MANIFEST_SHAPE'),
+    descriptorValue(record, 'requestedStrategy', 'RET010D_MANIFEST_SHAPE'),
+    descriptorValue(record, 'actualAlgorithm', 'RET010D_MANIFEST_SHAPE'),
+  ], binding)) fail('RET010D_MANIFEST_SHAPE');
+  const blocks = plainRecord(descriptorValue(record, 'contentBlocks', 'RET010D_MANIFEST_SHAPE'), 'RET010D_MANIFEST_SHAPE');
+  exactKeys(blocks, ['false', 'omitted', 'traced'], 'RET010D_MANIFEST_KEYS');
+  if (descriptorValue(blocks, 'omitted', 'RET010D_MANIFEST_SHAPE') !== 1
+    || descriptorValue(blocks, 'false', 'RET010D_MANIFEST_SHAPE') !== 1
+    || descriptorValue(blocks, 'traced', 'RET010D_MANIFEST_SHAPE') !== 2) fail('RET010D_MANIFEST_SHAPE');
+  assertBooleanRecord(descriptorValue(record, 'parity', 'RET010D_MANIFEST_SHAPE'), [
+    'falseEqualsOmitted', 'tracedMarkdownEqualsOrdinary',
+  ]);
+  const count = descriptorValue(record, 'presentationCount', 'RET010D_MANIFEST_SHAPE');
+  const digest = descriptorValue(record, 'presentationOrderDigest', 'RET010D_MANIFEST_SHAPE');
+  if (!Number.isSafeInteger(count) || Number(count) <= 0
+    || typeof digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(digest)) fail('RET010D_MANIFEST_SHAPE');
+  const reranker = plainRecord(descriptorValue(record, 'rerankerStage', 'RET010D_MANIFEST_SHAPE'), 'RET010D_MANIFEST_SHAPE');
+  let rerankerCandidateCount: number | undefined;
+  if (binding[2] === 'ranked-v2') {
+    exactKeys(reranker, ['candidateCount', 'outcome', 'present', 'providerIdentity'], 'RET010D_MANIFEST_KEYS');
+    if (descriptorValue(reranker, 'present', 'RET010D_MANIFEST_SHAPE') !== true
+      || descriptorValue(reranker, 'outcome', 'RET010D_MANIFEST_SHAPE') !== 'reranked'
+      || descriptorValue(reranker, 'providerIdentity', 'RET010D_MANIFEST_SHAPE')
+        !== 'memberry.local.lexical/bm25f-query-v1/fixed-blend-v1/local'
+      || !Number.isSafeInteger(descriptorValue(reranker, 'candidateCount', 'RET010D_MANIFEST_SHAPE'))
+      || Number(descriptorValue(reranker, 'candidateCount', 'RET010D_MANIFEST_SHAPE')) <= 0) {
+      fail('RET010D_MANIFEST_SHAPE');
+    }
+    rerankerCandidateCount = Number(descriptorValue(reranker, 'candidateCount', 'RET010D_MANIFEST_SHAPE'));
+  } else {
+    exactKeys(reranker, ['present'], 'RET010D_MANIFEST_KEYS');
+    if (descriptorValue(reranker, 'present', 'RET010D_MANIFEST_SHAPE') !== false) fail('RET010D_MANIFEST_SHAPE');
+  }
+  const traceCounts = assertTraceSummary(
+    descriptorValue(record, 'trace', 'RET010D_MANIFEST_SHAPE'),
+    binding[2],
+    'RET010D_MANIFEST_SHAPE',
+    'RET010D_MANIFEST_KEYS',
+  );
+  if (Number(count) !== traceCounts.resultCount
+    || (rerankerCandidateCount !== undefined && rerankerCandidateCount > traceCounts.candidateCount)) {
+    fail('RET010D_MANIFEST_SHAPE');
+  }
 }
 
 function serviceIdentity(value: unknown): JsonRecord {
@@ -451,7 +591,7 @@ export function assertTraceConformanceManifest(value: unknown, truth: TraceManif
     || !Number.isSafeInteger(configValue('startupTimeoutMs')) || Number(configValue('startupTimeoutMs')) < 1_000 || Number(configValue('startupTimeoutMs')) > 600_000
     || configValue('responseByteLimit') !== MAX_TRACE_JSON_BYTES) fail('RET001D_MANIFEST_SHAPE');
   const result = plainRecord(descriptorValue(root, 'result', 'RET001D_MANIFEST_SHAPE'), 'RET001D_MANIFEST_SHAPE');
-  exactKeys(result, ['cases', 'fidelity', 'invariants', 'readiness'], 'RET001D_MANIFEST_KEYS');
+  exactKeys(result, ['cases', 'fidelity', 'invariants', 'readiness', 'ret010dCases'], 'RET001D_MANIFEST_KEYS');
   if (descriptorValue(result, 'fidelity', 'RET001D_MANIFEST_SHAPE') !== 'composition-root / live-disposable-persistence') {
     fail('RET001D_MANIFEST_SHAPE');
   }
@@ -461,6 +601,31 @@ export function assertTraceConformanceManifest(value: unknown, truth: TraceManif
   const expectedIds = ['auto', 'deterministic', 'named-tenant-forced-ranked', 'ranked'];
   const actualIds = cases.map((entry) => String(descriptorValue(entry as JsonRecord, 'id', 'RET001D_MANIFEST_SHAPE'))).sort();
   if (!isDeepStrictEqual(actualIds, expectedIds)) fail('RET001D_MANIFEST_SHAPE');
+  const ret010dCases = denseArray(
+    descriptorValue(result, 'ret010dCases', 'RET010D_MANIFEST_SHAPE'), 6, 'RET010D_MANIFEST_SHAPE',
+  );
+  if (ret010dCases.length !== 6) fail('RET010D_MANIFEST_SHAPE');
+  ret010dCases.forEach(assertRet010dCase);
+  const ret010dIds = ret010dCases.map((entry) => String(
+    descriptorValue(entry as JsonRecord, 'id', 'RET010D_MANIFEST_SHAPE'),
+  )).sort();
+  if (!isDeepStrictEqual(ret010dIds, Object.keys(RET010D_CASE_BINDINGS).sort())) fail('RET010D_MANIFEST_SHAPE');
+  const ret010dById = new Map(ret010dCases.map((entry) => {
+    const record = entry as JsonRecord;
+    return [String(descriptorValue(record, 'id', 'RET010D_MANIFEST_SHAPE')), record] as const;
+  }));
+  const ret010dDigest = (id: keyof typeof RET010D_CASE_BINDINGS) => descriptorValue(
+    ret010dById.get(id)!, 'presentationOrderDigest', 'RET010D_MANIFEST_SHAPE',
+  );
+  const ret010dCount = (id: keyof typeof RET010D_CASE_BINDINGS) => descriptorValue(
+    ret010dById.get(id)!, 'presentationCount', 'RET010D_MANIFEST_SHAPE',
+  );
+  if (ret010dDigest('authority-disabled-ranked') === ret010dDigest('authority-served-ranked')
+    || ret010dDigest('authority-disabled-auto') === ret010dDigest('authority-served-auto')
+    || ret010dDigest('authority-disabled-deterministic') !== ret010dDigest('authority-served-deterministic')
+    || ret010dCount('authority-disabled-deterministic') !== ret010dCount('authority-served-deterministic')) {
+    fail('RET010D_MANIFEST_SHAPE');
+  }
   const readiness = plainRecord(descriptorValue(result, 'readiness', 'RET001D_MANIFEST_SHAPE'), 'RET001D_MANIFEST_SHAPE');
   exactKeys(readiness, ['namedTenant', 'singleDefault'], 'RET001D_MANIFEST_KEYS');
   const singleDefault = plainRecord(

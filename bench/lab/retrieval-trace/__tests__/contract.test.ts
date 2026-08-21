@@ -5,12 +5,17 @@ import { describe, expect, it } from 'vitest';
 import {
   canonicalTraceJson,
   RetrievalTraceCollector,
+  type RetrievalTraceRequestShapeV1,
   type RetrievalTraceV1,
 } from '../../../../packages/retrieval/src/index.js';
 import {
   assertTraceConformanceManifest,
+  inspectRet010dRerankerStage,
   inspectTraceToolResult,
+  RET010D_RANKED_V2_TRACE_HARD_EVENT_LIMIT,
   sanitizeTraceConformanceManifest,
+  TRACE_HARD_EVENT_LIMIT,
+  traceHardEventLimitV1,
 } from '../contract.js';
 
 const approvedTrace = JSON.parse(readFileSync(
@@ -82,6 +87,57 @@ function manifestCase(
   };
 }
 
+function ret010dManifestCase(
+  id: 'authority-disabled-ranked' | 'authority-served-ranked'
+    | 'authority-disabled-auto' | 'authority-served-auto'
+    | 'authority-disabled-deterministic' | 'authority-served-deterministic',
+): Record<string, unknown> {
+  const served = id.includes('-served-');
+  const requestedStrategy = id.endsWith('-deterministic') ? 'deterministic'
+    : id.endsWith('-auto') ? 'auto' : 'ranked';
+  const actualAlgorithm = served && requestedStrategy !== 'deterministic' ? 'ranked-v2' : 'ranked-v1';
+  return {
+    id,
+    runtimeProfile: served ? 'served' : 'disabled',
+    requestedStrategy,
+    actualAlgorithm,
+    contentBlocks: { omitted: 1, false: 1, traced: 2 },
+    parity: { falseEqualsOmitted: true, tracedMarkdownEqualsOrdinary: true },
+    presentationCount: 1,
+    presentationOrderDigest: `sha256:${(served && requestedStrategy !== 'deterministic' ? 'd' : 'c').repeat(64)}`,
+    rerankerStage: actualAlgorithm === 'ranked-v2' ? {
+      present: true,
+      outcome: 'reranked',
+      candidateCount: 1,
+      providerIdentity: 'memberry.local.lexical/bm25f-query-v1/fixed-blend-v1/local',
+    } : { present: false },
+    trace: {
+      algorithmVersion: actualAlgorithm,
+      complete: true,
+      candidateCount: 1,
+      eventCount: actualAlgorithm === 'ranked-v2' ? 7 : 6,
+      resultCount: 1,
+      exclusionCount: 0,
+      plannedChannelCount: 1,
+      settledChannelCount: 1,
+      terminalCount: 1,
+      canonical: true,
+      replayEquivalent: true,
+      channelSettlementComplete: true,
+      terminalCoverageComplete: true,
+      markdownResultCountEquivalent: true,
+      resultOrderBindingDigest: `sha256:${'b'.repeat(64)}`,
+      replayStateDigest: `sha256:${'a'.repeat(64)}`,
+    },
+  };
+}
+
+const ret010dIds = [
+  'authority-disabled-ranked', 'authority-served-ranked',
+  'authority-disabled-auto', 'authority-served-auto',
+  'authority-disabled-deterministic', 'authority-served-deterministic',
+] as const;
+
 function validManifest(): Record<string, unknown> {
   return {
     schemaVersion: 1,
@@ -105,6 +161,7 @@ function validManifest(): Record<string, unknown> {
       fidelity: 'composition-root / live-disposable-persistence',
       cases: ['deterministic', 'ranked', 'auto', 'named-tenant-forced-ranked'].map((id) =>
         manifestCase(id as Parameters<typeof manifestCase>[0])),
+      ret010dCases: ret010dIds.map(ret010dManifestCase),
       readiness: {
         singleDefault: { httpStatus: 200, classification: 'ready' },
         namedTenant: { httpStatus: 503, classification: 'expected-logical-multitenant-degraded' },
@@ -139,6 +196,80 @@ function manifestTruth(manifest: Record<string, unknown> = validManifest()): Rec
 }
 
 describe('RET-001D trace conformance contract', () => {
+  it('retains the generic trace bound and reserves exactly one ranked-v2 event', () => {
+    expect(TRACE_HARD_EVENT_LIMIT).toBe(8_192);
+    expect(RET010D_RANKED_V2_TRACE_HARD_EVENT_LIMIT).toBe(8_193);
+    expect(traceHardEventLimitV1('deterministic-v2')).toBe(8_192);
+    expect(traceHardEventLimitV1('ranked-v1')).toBe(8_192);
+    expect(traceHardEventLimitV1('ranked-v2')).toBe(8_193);
+  });
+
+  it('summarizes exactly one frozen ranked-v2 reranker stage without candidate content or IDs', () => {
+    const request: RetrievalTraceRequestShapeV1 = {
+      sources: { code: false, architecture: false, memory: true },
+      projectScopeApplied: true,
+      tenantScope: 'default',
+      entityScope: 'few',
+      tagScope: 'none',
+      temporalFilterApplied: true,
+      queryLength: 'short',
+      queryForm: 'prose',
+      tokenBudget: 'small',
+      diversification: 'mmr',
+      plannedChannels: ['memory.scope'],
+    };
+    const collector = new RetrievalTraceCollector('ranked-v2', request);
+    collector.attemptChannel('memory.scope');
+    collector.settleChannel('memory.scope', { outcome: 'success' });
+    const handle = collector.addCandidate({
+      sourceType: 'semantic', channels: [{ channel: 'memory.scope', rank: 1 }],
+      evidence: { confidence: 0.8 }, estimatedTokens: 1,
+    });
+    collector.recordFilter(handle, { name: 'mmr', outcome: 'pass' });
+    collector.recordMmrRound(1, handle, [{
+      candidate: handle, relevance: 1, lambda: 1, pairwise: [],
+    }]);
+    collector.recordFilter(handle, { name: 'dedup', outcome: 'pass' });
+    collector.recordRerankerStage([handle], {
+      outcome: 'reranked', candidates: [{ candidateHandle: handle, calibratedScore: 1 }],
+    });
+    collector.recordFilter(handle, { name: 'token-budget', outcome: 'pass' });
+    collector.recordTerminal(handle, { outcome: 'included', reasons: [] });
+    collector.recordOutput(handle, 1);
+    const trace = collector.finalize();
+    const rankedMarkdown = markdown
+      .replace('**Strategy:** deterministic | **Tokens:** ~4 | **Sources:** arch_entity:2, aspect:1, semantic:1 | **IDs:** 4',
+        '**Strategy:** ranked | **Tokens:** ~1 | **Sources:** semantic:1 | **IDs:** 1')
+      .replace(/## Architecture[\s\S]*$/, '## Knowledge\n\n<!-- item-a -->\nA');
+    const summary = inspectRet010dRerankerStage(
+      toolResult([rankedMarkdown, canonicalTraceJson(trace)]), 'reranked',
+    );
+    expect(summary).toEqual({
+      present: true,
+      outcome: 'reranked',
+      candidateCount: 1,
+      providerIdentity: 'memberry.local.lexical/bm25f-query-v1/fixed-blend-v1/local',
+    });
+    expect(JSON.stringify(summary)).not.toContain('item-a');
+  });
+
+  it('keeps the original four cases exact while requiring six closed RET-010D profiles', () => {
+    const manifest = validManifest() as any;
+    expect(manifest.result.cases.map((entry: any) => entry.id)).toEqual([
+      'deterministic', 'ranked', 'auto', 'named-tenant-forced-ranked',
+    ]);
+    expect(manifest.result.ret010dCases.map((entry: any) => [
+      entry.id, entry.runtimeProfile, entry.requestedStrategy, entry.actualAlgorithm,
+    ])).toEqual([
+      ['authority-disabled-ranked', 'disabled', 'ranked', 'ranked-v1'],
+      ['authority-served-ranked', 'served', 'ranked', 'ranked-v2'],
+      ['authority-disabled-auto', 'disabled', 'auto', 'ranked-v1'],
+      ['authority-served-auto', 'served', 'auto', 'ranked-v2'],
+      ['authority-disabled-deterministic', 'disabled', 'deterministic', 'ranked-v1'],
+      ['authority-served-deterministic', 'served', 'deterministic', 'ranked-v1'],
+    ]);
+    expect(() => assertTraceConformanceManifest(manifest, manifestTruth(manifest) as never)).not.toThrow();
+  });
   it.each(['omitted', 'false'] as const)('proves %s include_trace is an exact one-block path', (mode) => {
     expect(inspectTraceToolResult(toolResult([markdown]), { mode, ...liveExpectation } as never)).toEqual({
       markdown,
@@ -272,6 +403,103 @@ describe('RET-001D trace conformance contract', () => {
     const manifest = validManifest();
     mutate(manifest);
     expect(() => assertTraceConformanceManifest(manifest, manifestTruth() as never)).toThrow(/^RET001D_/);
+  });
+
+  it.each([
+    ['missing profile case', (manifest: any) => { manifest.result.ret010dCases.pop(); }],
+    ['duplicate profile case', (manifest: any) => {
+      manifest.result.ret010dCases[5] = structuredClone(manifest.result.ret010dCases[0]);
+    }],
+    ['foreign profile id', (manifest: any) => { manifest.result.ret010dCases[0].id = 'authority-shadow-ranked'; }],
+    ['wrong served algorithm', (manifest: any) => {
+      manifest.result.ret010dCases[1].actualAlgorithm = 'ranked-v1';
+    }],
+    ['missing served reranker event', (manifest: any) => {
+      manifest.result.ret010dCases[1].rerankerStage = { present: false };
+    }],
+    ['invented deterministic reranker event', (manifest: any) => {
+      manifest.result.ret010dCases[5].rerankerStage = structuredClone(
+        manifest.result.ret010dCases[1].rerankerStage,
+      );
+    }],
+    ['unchanged served ranked control', (manifest: any) => {
+      manifest.result.ret010dCases[1].presentationOrderDigest =
+        manifest.result.ret010dCases[0].presentationOrderDigest;
+    }],
+    ['changed deterministic bypass', (manifest: any) => {
+      manifest.result.ret010dCases[5].presentationOrderDigest = `sha256:${'e'.repeat(64)}`;
+    }],
+  ])('rejects RET-010D %s', (_label, mutate) => {
+    const manifest = validManifest();
+    mutate(manifest);
+    expect(() => assertTraceConformanceManifest(manifest, manifestTruth() as never)).toThrow(/^RET010D_/);
+  });
+
+  it.each([
+    [512, false],
+    [513, true],
+  ] as const)('enforces the exact RET-010D candidate-count boundary at %i', (candidateCount, rejected) => {
+    const manifest = validManifest() as any;
+    const trace = manifest.result.ret010dCases[0].trace;
+    trace.candidateCount = candidateCount;
+    trace.terminalCount = candidateCount;
+    const assertion = () => assertTraceConformanceManifest(manifest, manifestTruth() as never);
+    if (rejected) expect(assertion).toThrow('RET010D_MANIFEST_SHAPE');
+    else expect(assertion).not.toThrow();
+  });
+
+  it.each([
+    ['ranked-v1', 8_192, false],
+    ['ranked-v1', 8_193, true],
+    ['ranked-v2', 8_193, false],
+    ['ranked-v2', 8_194, true],
+  ] as const)('enforces the %s RET-010D event boundary at %i', (algorithm, eventCount, rejected) => {
+    const manifest = validManifest() as any;
+    const trace = manifest.result.ret010dCases[algorithm === 'ranked-v2' ? 1 : 0].trace;
+    trace.eventCount = eventCount;
+    const assertion = () => assertTraceConformanceManifest(manifest, manifestTruth() as never);
+    if (rejected) expect(assertion).toThrow('RET010D_MANIFEST_SHAPE');
+    else expect(assertion).not.toThrow();
+  });
+
+  it('rejects a RET-010D presentation count that differs from trace result count', () => {
+    const manifest = validManifest() as any;
+    manifest.result.ret010dCases[0].presentationCount = 2;
+    expect(() => assertTraceConformanceManifest(manifest, manifestTruth() as never))
+      .toThrow('RET010D_MANIFEST_SHAPE');
+  });
+
+  it('rejects a ranked-v2 reranker candidate count larger than the trace candidate set', () => {
+    const manifest = validManifest() as any;
+    manifest.result.ret010dCases[1].rerankerStage.candidateCount = 2;
+    expect(() => assertTraceConformanceManifest(manifest, manifestTruth() as never))
+      .toThrow('RET010D_MANIFEST_SHAPE');
+  });
+
+  it('rejects a deterministic matched pair with different presentation counts', () => {
+    const manifest = validManifest() as any;
+    const served = manifest.result.ret010dCases[5];
+    served.presentationCount = 2;
+    served.trace.resultCount = 2;
+    served.trace.candidateCount = 2;
+    served.trace.terminalCount = 2;
+    expect(() => assertTraceConformanceManifest(manifest, manifestTruth() as never))
+      .toThrow('RET010D_MANIFEST_SHAPE');
+  });
+
+  it('sanitizes RET-010D receipts without query, content, private IDs, scope names, or provider bytes', () => {
+    const manifest = validManifest();
+    const truth = manifestTruth(manifest);
+    const forbidden = [
+      'query bytes', 'source content', 'private-id', 'project:secret',
+      '{"contractId":"memberry.reranker"}',
+    ];
+    const sanitized = sanitizeTraceConformanceManifest(manifest, forbidden, truth as never);
+    const bytes = JSON.stringify(sanitized);
+    for (const value of forbidden) expect(bytes).not.toContain(value);
+    expect(() => sanitizeTraceConformanceManifest(
+      { ...manifest, leaked: forbidden[0] }, forbidden, truth as never,
+    )).toThrow('RET001D_MANIFEST_FORBIDDEN_VALUE');
   });
 
   it.each([

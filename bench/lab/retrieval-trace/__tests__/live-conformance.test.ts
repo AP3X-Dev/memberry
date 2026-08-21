@@ -928,9 +928,56 @@ describe('RET-001D live composition harness', () => {
     });
     expect(process.env[RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV]).toBe(parentDiagnosticFlag);
     expect(env.MEMBERRY_TENANT_TOKENS).toBeUndefined();
+    expect(env.MEMBERRY_QUERY_PLANNER_V1).toBeUndefined();
+    expect(env.MEMBERRY_CANDIDATE_CHANNEL_V1).toBeUndefined();
+    expect(env.MEMBERRY_RERANKER_V1).toBeUndefined();
     const named = childEnvironment(config, 'named-tenant', 'C:\\fixture\\export');
     expect(named.MEMBERRY_API_TOKEN).toBeUndefined();
     expect(named.MEMBERRY_TENANT_TOKENS).toBe(`ret001d-named:${config.namedToken}`);
+    for (const profile of ['disabled', 'served'] as const) {
+      const authority = childEnvironment(config, 'single-default', 'C:\\fixture\\export', profile);
+      expect(authority).toMatchObject({
+        MEMBERRY_QUERY_PLANNER_V1: '1',
+        MEMBERRY_CANDIDATE_CHANNEL_V1: '1',
+        MEMBERRY_RERANKER_V1: profile,
+      });
+    }
+    for (const profile of ['shadow', ' enabled', 'served ', '', null]) {
+      expect(() => childEnvironment(
+        config, 'single-default', 'C:\\fixture\\export', profile as never,
+      )).toThrow('RET010D_CHILD_PROFILE_INVALID');
+    }
+  });
+
+  it('runs the original four legacy cases before six sequential closed RET-010D authority profiles', async () => {
+    const source = await readFile(
+      fileURLToPath(new URL('../live-conformance.ts', import.meta.url)), 'utf8',
+    );
+    for (const id of [
+      'authority-disabled-ranked', 'authority-served-ranked',
+      'authority-disabled-auto', 'authority-served-auto',
+      'authority-disabled-deterministic', 'authority-served-deterministic',
+    ]) expect(source.split(`'${id}'`).length).toBeGreaterThanOrEqual(2);
+    expect(source.indexOf("id: 'named-tenant-forced-ranked'"))
+      .toBeLessThan(source.indexOf('await seedRet010dFixtures'));
+    expect(source.indexOf("exportPath, 'disabled'"))
+      .toBeLessThan(source.indexOf("exportPath, 'served'"));
+    expect(source).toContain('RET010D_MATCHED_CONTROL_UNCHANGED');
+    expect(source).toContain('RET010D_DETERMINISTIC_BYPASS_MISMATCH');
+    expect(source).toContain('ret010dCases.length !== 6');
+    expect(source).toContain("as_of: '2026-08-01T00:00:00.000Z'");
+    for (const privateFixtureValue of [
+      'run,',
+      "'stable baseline memory'",
+      "'ret010d-foreign'",
+      '`ret010d-foreign-project-entity-${run}`',
+      '`ret010d-foreign-project-${run}`',
+      '`ret010d-foreign-target-entity-${run}`',
+      '`ret010d-foreign-target-${run}`',
+      '`project:ret010d-foreign-project-${run}`',
+    ]) expect(source).toContain(privateFixtureValue);
+    expect(source).toContain('}, allForbidden, manifestTruth)');
+    expect(source).toContain('for (const value of allForbidden)');
   });
 
   it('wires an immediately drained child stderr parser and resets it before every traced request', async () => {

@@ -64,7 +64,11 @@ describe('RET-003B secure fixed evidence writer', () => {
   linux('writes once with 0600 and rejects an existing leaf', async () => {
     const target = await authority();
     await writeCandidateLiveEvidenceV1();
-    expect(await readFile(target.path, 'utf8')).toContain('"contract":"RET-003B"');
+    const bytes = await readFile(target.path, 'utf8');
+    expect(bytes).toBe('{"contract":"RET-003B","mode":"required","disposable":true,"realBootstrap":true,"centralHttpAuthentication":true,"defaultAndDedicatedRouting":true,"realChannels":3,"unavailableChannels":12,"deterministicRepeat":true,"candidateOffPlannerOnParity":true,"sourceFailureIsolated":true,"cleanupCount":0,"ret010dDefaultOffParity":true,"ret010dExplicitDisabled":true,"ret010dServedRankedV2":true,"ret010dServedAutoRankedV2":true,"ret010dFailureBaseline":true,"ret010dDeterministicBypass":true,"ret010dAskEvidence":true,"ret010dProviderScopeBound":true}\n');
+    for (const forbidden of ['query', 'content', 'candidateId', 'serialized', 'providerRequest', 'responseMarkdown']) {
+      expect(bytes).not.toContain(`"${forbidden}"`);
+    }
     expect((await lstat(target.path)).mode & 0o7777).toBe(0o600);
     expect(await code(writeCandidateLiveEvidenceV1())).toBe('EXISTS');
   });

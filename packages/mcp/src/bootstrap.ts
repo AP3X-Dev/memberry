@@ -47,7 +47,7 @@ import {
   RerankerShadowCoordinatorV1,
   baselineIdentityRerankerScoreV1,
   createLocalRerankerProviderV1,
-  resolveRerankerShadowModeV1,
+  createServedRerankerProviderV1,
   type RerankerShadowSnapshotV1,
 } from '@memberry/retrieval';
 import {
@@ -96,6 +96,17 @@ export interface TenantDatastoreConfig {
   neo4jPassword: string;
   redisUrl: string;
   openaiKey?: string;
+}
+
+export type BootstrapRerankerModeV1 = 'disabled' | 'shadow' | 'served';
+
+/** Resolve the exact bootstrap-owned response mode without trimming, coercion,
+ * aliases, or value reflection. This runs before every startup effect. */
+export function resolveBootstrapRerankerModeV1(raw: string | undefined): BootstrapRerankerModeV1 {
+  if (raw === undefined || raw === '' || raw === 'disabled') return 'disabled';
+  if (raw === 'shadow') return 'shadow';
+  if (raw === 'served') return 'served';
+  throw new Error('reranker_mode:invalid');
 }
 
 async function discoverConcreteScopes(
@@ -178,9 +189,12 @@ export function parseTenantDatastores(
 export async function bootstrap(): Promise<BootstrapHandles> {
   const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1';
   const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1';
-  const rerankerMode = resolveRerankerShadowModeV1(process.env['MEMBERRY_RERANKER_V1']);
+  const rerankerMode = resolveBootstrapRerankerModeV1(process.env['MEMBERRY_RERANKER_V1']);
   if (rerankerMode === 'shadow' && (!queryPlannerEnabled || !candidateChannelEnabled)) {
     throw new Error('reranker_shadow:prerequisite_unavailable');
+  }
+  if (rerankerMode === 'served' && (!queryPlannerEnabled || !candidateChannelEnabled)) {
+    throw new Error('reranker_served:prerequisite_unavailable');
   }
   const rerankerShadowCoordinator = rerankerMode === 'shadow'
     ? new RerankerShadowCoordinatorV1(
@@ -190,6 +204,9 @@ export async function bootstrap(): Promise<BootstrapHandles> {
       ),
       () => {},
     )
+    : null;
+  const servedReranker = rerankerMode === 'served'
+    ? createServedRerankerProviderV1()
     : null;
   const neo4jUri = process.env['NEO4J_URI']?.trim() || 'bolt://localhost:7687';
   const neo4jUser = process.env['NEO4J_USER']?.trim() || 'neo4j';
@@ -543,6 +560,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     ampService,
     embedding,
     llm,
+    servedReranker,
   );
   const feedbackTrackerService = new FeedbackTracker(feedbackRedis);
   const dedicatedTenantCandidateDrivers = new Map<string, typeof driver>();
