@@ -225,4 +225,23 @@ describe('UI-001B explanation view root exports', () => {
     expect(root.RETRIEVAL_EXPLANATION_VIEW_CONTRACT_VERSION).toBe(RETRIEVAL_EXPLANATION_VIEW_CONTRACT_VERSION);
     expect(root.RETRIEVAL_EXPLANATION_TEXT_MAX_UTF8_BYTES).toBe(RETRIEVAL_EXPLANATION_TEXT_MAX_UTF8_BYTES);
   });
+
+  it('keeps RET-010B construction-only and leaves serving/tool wiring to later packets', async () => {
+    const root = await import('../index.js') as Record<string, unknown>;
+    expect(root.SERVED_RERANKER_PROVIDER_IDENTITY).toEqual({
+      providerId: 'memberry.local.lexical',
+      modelId: 'bm25f-query-v1',
+      calibrationId: 'fixed-blend-v1',
+      locality: 'local',
+    });
+    expect(typeof root.createServedRerankerProviderV1).toBe('function');
+    expect(root.applyServedRerankerV1).toBeUndefined();
+    expect(root.parseSerializedRerankerProviderRequestV1).toBeUndefined();
+    expect(root.serializeRerankerProviderResponseV1).toBeUndefined();
+
+    const assemblerSource = readFileSync(new URL('../assembler.ts', import.meta.url), 'utf8');
+    const toolsSource = readFileSync(new URL('../tools.ts', import.meta.url), 'utf8');
+    expect(assemblerSource).not.toMatch(/createServedReranker|applyServedReranker|ranked-v2/);
+    expect(toolsSource).not.toMatch(/createServedReranker|applyServedReranker|ranked-v2/);
+  });
 });

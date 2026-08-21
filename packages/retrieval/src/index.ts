@@ -149,6 +149,16 @@ export type {
   HttpsRerankerProviderConfigV1,
 } from './reranker-providers.js';
 
+// Frozen local served reranker construction surface (RET-010B)
+export {
+  SERVED_RERANKER_PROVIDER_IDENTITY,
+  createServedRerankerProviderV1,
+} from './served-reranker.js';
+export type {
+  ServedRerankerProviderIdentityV1,
+  ServedRerankerConstructionV1,
+} from './served-reranker.js';
+
 // Read-only project/tenant-qualified stable Entity-ID resolution (RET-002B)
 export {
   SCOPED_ENTITY_RESOLVER_MAX_RESULTS,
@@ -233,6 +243,11 @@ export type {
   RetrievalTraceMmrPairwiseInput,
   RetrievalTraceMmrPairwiseV1,
   RetrievalTraceMmrRecordV1,
+  RetrievalTraceRerankerProviderV2,
+  RetrievalTraceRerankerCandidateV2,
+  RetrievalTraceRerankerBaselineCandidateV2,
+  RetrievalTraceRerankerEventV2,
+  RetrievalTraceRerankerOutcomeInput,
   RetrievalTraceStageEventV1,
   RetrievalTraceTerminalExclusionV1,
   RetrievalTraceV1,

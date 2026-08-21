@@ -229,6 +229,15 @@ interface ParsedResponse {
 
 type NullRecord = Record<string, unknown>;
 
+function defineArrayItem<T>(target: T[], index: number, value: T): void {
+  OBJECT_DEFINE_PROPERTY(target, STRING(index), {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
 function nullRecord<T extends object>(fields: T): Readonly<T> {
   const result = OBJECT_CREATE(null) as T;
   const keys = REFLECT_OWN_KEYS(fields);
@@ -311,7 +320,7 @@ function denseArray(input: unknown, max: number): readonly unknown[] {
       const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(input, STRING(index));
       if (descriptor === undefined || !OBJECT_HAS_OWN(descriptor, 'value')
         || descriptor.enumerable !== true) throw new Error();
-      values[index] = descriptor.value;
+      defineArrayItem(values, index, descriptor.value);
     }
     return values;
   } catch (error) {
@@ -394,7 +403,7 @@ function parseInput<T>(input: unknown): ParsedInput<T> {
       if (aggregate > RERANKER_MAX_AGGREGATE_STRING_BYTES) {
         throw new RerankerContractError('request-too-large');
       }
-      candidates[index] = nullRecord({
+      defineArrayItem(candidates, index, nullRecord({
         value: item.value as T,
         sourceType: parsedSourceType,
         title: item.title as string,
@@ -402,7 +411,7 @@ function parseInput<T>(input: unknown): ParsedInput<T> {
         baselineRank: index + 1,
         baselineScore: finiteNumber(item.baselineScore),
         key: candidateKey(index),
-      });
+      }));
     }
     return nullRecord({ query: root.query as string, candidates: OBJECT_FREEZE(candidates) });
   } catch (error) {
@@ -518,10 +527,10 @@ function sha256Utf8(input: string): string {
 function assertResponseFeasible(identity: RerankerProviderIdentityV1): void {
   const scores: ParsedResponseScore[] = [];
   for (let index = 0; index < RERANKER_MAX_CANDIDATES; index += 1) {
-    scores[index] = nullRecord({
+    defineArrayItem(scores, index, nullRecord({
       key: candidateKey(index),
       calibratedScore: 0.9999999999999999,
-    });
+    }));
   }
   const response = serializeProviderResponseBytes(
     STRING_REPEAT('0', 64),
@@ -603,14 +612,14 @@ export function parseSerializedRerankerProviderRequestV1(
       aggregate += stringBytes(item.title, RERANKER_MAX_STRING_BYTES);
       aggregate += stringBytes(item.content, RERANKER_MAX_STRING_BYTES);
       if (aggregate > RERANKER_MAX_AGGREGATE_STRING_BYTES) throw new Error();
-      candidates[index] = nullRecord({
+      defineArrayItem(candidates, index, nullRecord({
         key: item.key as string,
         sourceType: parsedSourceType,
         title: item.title as string,
         content: item.content as string,
         baselineRank: item.baselineRank as number,
         baselineScore: finiteNumber(item.baselineScore),
-      });
+      }));
     }
     OBJECT_FREEZE(candidates);
     const requestDigest = sha256Utf8(serializeDigestPayload(root.query as string, candidates));
@@ -642,10 +651,10 @@ export function serializeRerankerProviderResponseV1(
   }
   const scores: ParsedResponseScore[] = [];
   for (let index = 0; index < rawScores.length; index += 1) {
-    scores[index] = nullRecord({
+    defineArrayItem(scores, index, nullRecord({
       key: request.candidates[index]!.key,
       calibratedScore: calibratedScore(rawScores[index]),
-    });
+    }));
   }
   return serializeProviderResponseBytes(
     request.requestDigest,
@@ -737,10 +746,10 @@ function parseResponse(
     if (typeof scoreRecord.key !== 'string' || !OBJECT_HAS_OWN(expected, scoreRecord.key)
       || OBJECT_HAS_OWN(seen, scoreRecord.key)) throw new Error();
     seen[scoreRecord.key] = true;
-    scores[index] = nullRecord({
+    defineArrayItem(scores, index, nullRecord({
       key: scoreRecord.key,
       calibratedScore: calibratedScore(scoreRecord.calibratedScore),
-    });
+    }));
   }
   OBJECT_FREEZE(scores);
   if (serializeProviderResponseBytes(
