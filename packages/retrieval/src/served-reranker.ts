@@ -180,7 +180,7 @@ function snapshotResults(input: readonly RetrievalResult[]): readonly SafeResult
       || descriptor.enumerable !== true || !isAllowedRecord(descriptor.value)) {
       throw new Error('invalid-results');
     }
-    const value = descriptor.value as RetrievalResult;
+    const value = descriptor.value as unknown as RetrievalResult;
     const id = ownValue(value, 'id');
     const rawSourceType = ownValue(value, 'source_type');
     const title = ownValue(value, 'title');
@@ -404,7 +404,7 @@ export async function applyServedRerankerV1(
         baselineScore: snapshot.score,
       }));
     }
-    const reranked = await executeCalibratedRerankV1(
+    const reranked = await executeCalibratedRerankV1<SafeResult>(
       nullRecord({ query, candidates: OBJECT_FREEZE(candidates) }),
       provider,
       nullRecord({ timeoutMs: RERANKER_DEFAULT_TIMEOUT_MS }),

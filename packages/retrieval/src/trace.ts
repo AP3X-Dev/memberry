@@ -399,11 +399,15 @@ const TRACE_STRING_REPLACE = String.prototype.replace;
 const TRACE_STRING_PROTOTYPE = String.prototype;
 const TRACE_OBJECT_IS = Object.is;
 const TRACE_MAP = Map;
-const TRACE_MAP_GET = Function.prototype.call.bind(Map.prototype.get) as <K, V>(map: Map<K, V>, key: K) => V | undefined;
+const TRACE_MAP_GET = Function.prototype.call.bind(Map.prototype.get) as <K, V>(
+  map: ReadonlyMap<K, V>, key: K,
+) => V | undefined;
 const TRACE_MAP_SET = Function.prototype.call.bind(Map.prototype.set) as <K, V>(map: Map<K, V>, key: K, value: V) => Map<K, V>;
-const TRACE_MAP_HAS = Function.prototype.call.bind(Map.prototype.has) as <K, V>(map: Map<K, V>, key: K) => boolean;
+const TRACE_MAP_HAS = Function.prototype.call.bind(Map.prototype.has) as <K, V>(
+  map: ReadonlyMap<K, V>, key: K,
+) => boolean;
 const TRACE_MAP_FOR_EACH = Function.prototype.call.bind(Map.prototype.forEach) as <K, V>(
-  map: Map<K, V>, callback: (value: V, key: K) => void,
+  map: ReadonlyMap<K, V>, callback: (value: V, key: K) => void,
 ) => void;
 const TRACE_MAP_SIZE_GETTER = TRACE_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(Map.prototype, 'size')!.get!;
 const TRACE_WEAK_MAP_GET = Function.prototype.call.bind(WeakMap.prototype.get) as <K extends object, V>(
@@ -560,13 +564,13 @@ function assertSecretRedactionIntrinsic(): void {
   }
 }
 
-function traceMapValues<K, V>(source: Map<K, V>): V[] {
+function traceMapValues<K, V>(source: ReadonlyMap<K, V>): V[] {
   const target: V[] = [];
   TRACE_MAP_FOR_EACH(source, (value) => defineTraceArrayItem(target, target.length, value));
   return target;
 }
 
-function traceMapSize<K, V>(source: Map<K, V>): number {
+function traceMapSize<K, V>(source: ReadonlyMap<K, V>): number {
   return TRACE_REFLECT_APPLY(TRACE_MAP_SIZE_GETTER, source, []) as number;
 }
 
