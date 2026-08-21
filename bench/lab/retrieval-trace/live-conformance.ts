@@ -356,6 +356,113 @@ export const TRACE_INSPECTION_FIXED_CODES = Object.freeze([
   'RET001D_TRACE_BLOCK_COUNT',
 ] as const);
 
+export const RET010D_CASE_IDS = Object.freeze([
+  'authority-disabled-ranked',
+  'authority-served-ranked',
+  'authority-disabled-auto',
+  'authority-served-auto',
+  'authority-disabled-deterministic',
+  'authority-served-deterministic',
+] as const);
+
+export type Ret010dCaseId = typeof RET010D_CASE_IDS[number];
+
+export const RET010D_CASE_STAGES = Object.freeze([
+  'ordinary-call',
+  'ordinary-presentation',
+  'ordinary-inspection',
+  'false-call',
+  'false-inspection',
+  'traced-call',
+  'traced-inspection',
+  'presentation-parity',
+  'reranker-stage-inspection',
+] as const);
+
+export type Ret010dCaseStage = typeof RET010D_CASE_STAGES[number];
+
+const RET010D_CALL_FIXED_CAUSES = Object.freeze([
+  'RET001D_HTTP_BODY_ABORTED',
+  'RET001D_HTTP_BODY_READ_FAILED',
+  'RET001D_HTTP_BODY_TOO_LARGE',
+  'RET001D_MCP_CORRELATION_INVALID',
+  'RET001D_MCP_ENVELOPE_INVALID',
+  'RET001D_MCP_INITIALIZE_INVALID',
+  'RET001D_MCP_NETWORK',
+  'RET001D_MCP_RPC_ERROR',
+  'RET001D_MCP_TIMEOUT',
+  'RET001D_MCP_TOOL_RESPONSE_INVALID',
+] as const);
+
+const RET010D_PRESENTATION_FIXED_CAUSES = Object.freeze([
+  'RET001D_MCP_RESULT_INVALID',
+  'RET001D_MCP_TOOL_FAILURE',
+  'RET001D_MARKDOWN_INVALID',
+  'RET001D_MARKDOWN_REQUEST_MISMATCH',
+  'RET001D_SEEDED_RESULT_EMPTY',
+  'RET001D_MARKDOWN_PROVENANCE_INVALID',
+  'RET001D_MARKDOWN_RESULT_INVALID',
+  'RET001D_MARKDOWN_RESULT_COUNT_MISMATCH',
+  'RET001D_SEEDED_RESULT_MISSING',
+  'RET001D_MARKDOWN_RESULT_ORDER_MISMATCH',
+  'RET001D_NO_TRACE_BLOCK_COUNT',
+] as const);
+
+const RET010D_TRACED_INSPECTION_FIXED_CAUSES = Object.freeze([
+  ...TRACE_INSPECTION_FIXED_CODES,
+  'RET010D_TRACE_BLOCK_COUNT',
+] as const);
+
+export const RET010D_STAGE_FIXED_CAUSES = Object.freeze({
+  'ordinary-call': RET010D_CALL_FIXED_CAUSES,
+  'ordinary-presentation': RET010D_PRESENTATION_FIXED_CAUSES,
+  'ordinary-inspection': RET010D_PRESENTATION_FIXED_CAUSES,
+  'false-call': RET010D_CALL_FIXED_CAUSES,
+  'false-inspection': RET010D_PRESENTATION_FIXED_CAUSES,
+  'traced-call': RET010D_CALL_FIXED_CAUSES,
+  'traced-inspection': RET010D_TRACED_INSPECTION_FIXED_CAUSES,
+  'presentation-parity': Object.freeze(['RET010D_PRESENTATION_PARITY_MISMATCH'] as const),
+  'reranker-stage-inspection': Object.freeze([
+    'RET001D_MCP_RESULT_INVALID',
+    'RET001D_MCP_TOOL_FAILURE',
+    'RET010D_TRACE_BLOCK_COUNT',
+    'RET010D_TRACE_INVALID',
+    'RET010D_RERANKER_STAGE_INVALID',
+  ] as const),
+} satisfies Record<Ret010dCaseStage, readonly string[]>);
+
+const RET010D_CASE_DIAGNOSTIC = Object.freeze({
+  'authority-disabled-ranked': 'AUTHORITY_DISABLED_RANKED',
+  'authority-served-ranked': 'AUTHORITY_SERVED_RANKED',
+  'authority-disabled-auto': 'AUTHORITY_DISABLED_AUTO',
+  'authority-served-auto': 'AUTHORITY_SERVED_AUTO',
+  'authority-disabled-deterministic': 'AUTHORITY_DISABLED_DETERMINISTIC',
+  'authority-served-deterministic': 'AUTHORITY_SERVED_DETERMINISTIC',
+} satisfies Record<Ret010dCaseId, string>);
+
+const RET010D_STAGE_DIAGNOSTIC = Object.freeze({
+  'ordinary-call': 'ORDINARY_CALL',
+  'ordinary-presentation': 'ORDINARY_PRESENTATION',
+  'ordinary-inspection': 'ORDINARY_INSPECTION',
+  'false-call': 'FALSE_CALL',
+  'false-inspection': 'FALSE_INSPECTION',
+  'traced-call': 'TRACED_CALL',
+  'traced-inspection': 'TRACED_INSPECTION',
+  'presentation-parity': 'PRESENTATION_PARITY',
+  'reranker-stage-inspection': 'RERANKER_STAGE_INSPECTION',
+} satisfies Record<Ret010dCaseStage, string>);
+
+const RET010D_CASE_STAGE_DIAGNOSTICS = new Set<string>();
+for (const id of RET010D_CASE_IDS) {
+  for (const stage of RET010D_CASE_STAGES) {
+    const prefix = `RET010D_CASE_${RET010D_CASE_DIAGNOSTIC[id]}_STAGE_${RET010D_STAGE_DIAGNOSTIC[stage]}`;
+    RET010D_CASE_STAGE_DIAGNOSTICS.add(`${prefix}_UNKNOWN`);
+    for (const cause of RET010D_STAGE_FIXED_CAUSES[stage]) {
+      RET010D_CASE_STAGE_DIAGNOSTICS.add(`${prefix}_${cause.slice('RET001D_'.length)}`);
+    }
+  }
+}
+
 type TraceInspectionFixedCode = typeof TRACE_INSPECTION_FIXED_CODES[number];
 type RankedTracedInspectionByCause = {
   readonly [Code in TraceInspectionFixedCode]: Code extends `RET001D_${infer Subreason}`
@@ -466,6 +573,14 @@ const STATIC_DIAGNOSTIC_CODES = new Set([
   'RET001D_TENANT_ISOLATION_FAILURE',
   'RET001D_TRACE_BLOCK_COUNT',
   'RET001D_TRACED_PARITY_MISMATCH',
+  'RET010D_CASE_STAGE_DIAGNOSTIC_INVALID',
+  'RET010D_CHILD_PROFILE_INVALID',
+  'RET010D_DETERMINISTIC_BYPASS_MISMATCH',
+  'RET010D_MANIFEST_KEYS',
+  'RET010D_MANIFEST_SHAPE',
+  'RET010D_MATCHED_CONTROL_UNCHANGED',
+  'RET010D_NEO4J_SEED_FAILED',
+  'RET010D_NEO4J_SESSION_CLOSE_FAILED',
 ]);
 
 function validSeededCaseDiagnostic(match: RegExpMatchArray): boolean {
@@ -491,6 +606,7 @@ function validSeededCaseDiagnostic(match: RegExpMatchArray): boolean {
 
 function validDynamicDiagnostic(code: string): boolean {
   if (/^RET001D_MCP_HTTP_[1-5][0-9]{2}$/.test(code)) return true;
+  if (RET010D_CASE_STAGE_DIAGNOSTICS.has(code)) return true;
   if (RANKED_TRACED_INSPECTION_DIAGNOSTICS.has(code)) return true;
   const match = code.match(
     /^RET001D_CASE_(DETERMINISTIC|RANKED|AUTO|NAMED_TENANT_FORCED_RANKED)_STAGE_(ORDINARY_CALL|ORDINARY_PRESENTATION|ORDINARY_INSPECTION|FALSE_CALL|FALSE_INSPECTION|TRACED_CALL|TRACED_INSPECTION|FALSE_PARITY|TRACED_PARITY|TENANT_ISOLATION)(?:_SEEDED_(EXPECTED|ALTERNATE|PROJECT_ONLY|NONE)_E(0|[1-9][0-9]{0,2})_A(0|[1-9][0-9]{0,2})_P(0|[1-9][0-9]{0,2})_O(0|[1-9][0-9]{0,2})_T(0|[1-9][0-9]{0,2}))?$/,
@@ -2031,8 +2147,6 @@ async function executeCase(
   };
 }
 
-type Ret010dCaseId = keyof typeof RET010D_LIVE_CASES;
-
 const RET010D_LIVE_CASES = Object.freeze({
   'authority-disabled-ranked': ['disabled', 'ranked', 'ranked-v1'],
   'authority-served-ranked': ['served', 'ranked', 'ranked-v2'],
@@ -2040,7 +2154,42 @@ const RET010D_LIVE_CASES = Object.freeze({
   'authority-served-auto': ['served', 'auto', 'ranked-v2'],
   'authority-disabled-deterministic': ['disabled', 'deterministic', 'ranked-v1'],
   'authority-served-deterministic': ['served', 'deterministic', 'ranked-v1'],
-} as const);
+} as const satisfies Record<
+  Ret010dCaseId,
+  readonly [
+    Exclude<Ret010dRuntimeProfile, 'legacy'>,
+    'ranked' | 'auto' | 'deterministic',
+    RetrievalTraceAlgorithmVersion,
+  ]
+>);
+
+export function ret010dCaseStageDiagnosticCode(
+  id: Ret010dCaseId,
+  stage: Ret010dCaseStage,
+  cause?: unknown,
+): string {
+  if (typeof id !== 'string' || typeof stage !== 'string'
+    || !Object.prototype.hasOwnProperty.call(RET010D_CASE_DIAGNOSTIC, id)
+    || !Object.prototype.hasOwnProperty.call(RET010D_STAGE_DIAGNOSTIC, stage)) {
+    throw new Error('RET010D_CASE_STAGE_DIAGNOSTIC_INVALID');
+  }
+  const prefix = `RET010D_CASE_${RET010D_CASE_DIAGNOSTIC[id]}_STAGE_${RET010D_STAGE_DIAGNOSTIC[stage]}`;
+  const innerCode = safeNativeErrorMessage(cause);
+  if (innerCode === undefined
+    || !(RET010D_STAGE_FIXED_CAUSES[stage] as readonly string[]).includes(innerCode)) {
+    return `${prefix}_UNKNOWN`;
+  }
+  return `${prefix}_${innerCode.slice('RET001D_'.length)}`;
+}
+
+async function atRet010dCaseStage<T>(
+  id: Ret010dCaseId,
+  stage: Ret010dCaseStage,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw new Error(ret010dCaseStageDiagnosticCode(id, stage, error)); }
+}
 
 interface Ret010dExecutedCase {
   readonly manifest: JsonRecord;
@@ -2068,32 +2217,44 @@ async function executeRet010dCase(
     project_name: fixture.project,
     entity_scope: [fixture.target],
   };
-  const ordinaryResult = await transport.call('berry_context', baseArgs);
-  const resultIds = observeOrderedMarkdownResultIds(ordinaryResult, {
-    expectedTask: fixture.query,
-    expectedStrategy: 'ranked',
-    requiredResultIds: [requiredId],
-  });
+  const ordinaryResult = await atRet010dCaseStage(id, 'ordinary-call',
+    () => transport.call('berry_context', baseArgs));
+  const resultIds = await atRet010dCaseStage(id, 'ordinary-presentation',
+    () => observeOrderedMarkdownResultIds(ordinaryResult, {
+      expectedTask: fixture.query,
+      expectedStrategy: 'ranked',
+      requiredResultIds: [requiredId],
+    }));
   const expectation = {
     expectedTask: fixture.query,
     expectedStrategy: 'ranked' as const,
     expectedResultIds: resultIds,
   };
-  const omitted = inspectTraceToolResult(ordinaryResult, { mode: 'omitted', ...expectation });
-  const explicitFalseResult = await transport.call('berry_context', { ...baseArgs, include_trace: false });
-  const explicitFalse = inspectTraceToolResult(explicitFalseResult, { mode: 'false', ...expectation });
-  const tracedResult = await transport.call('berry_context', { ...baseArgs, include_trace: true });
-  const traced = inspectTraceToolResult(tracedResult, {
-    mode: 'true', expectedAlgorithm, forbiddenValues: forbidden, ...expectation,
+  const omitted = await atRet010dCaseStage(id, 'ordinary-inspection',
+    () => inspectTraceToolResult(ordinaryResult, { mode: 'omitted', ...expectation }));
+  const explicitFalseResult = await atRet010dCaseStage(id, 'false-call',
+    () => transport.call('berry_context', { ...baseArgs, include_trace: false }));
+  const explicitFalse = await atRet010dCaseStage(id, 'false-inspection',
+    () => inspectTraceToolResult(explicitFalseResult, { mode: 'false', ...expectation }));
+  const tracedResult = await atRet010dCaseStage(id, 'traced-call',
+    () => transport.call('berry_context', { ...baseArgs, include_trace: true }));
+  const traced = await atRet010dCaseStage(id, 'traced-inspection', () => {
+    const inspected = inspectTraceToolResult(tracedResult, {
+      mode: 'true', expectedAlgorithm, forbiddenValues: forbidden, ...expectation,
+    });
+    if (!('trace' in inspected)) throw new Error('RET010D_TRACE_BLOCK_COUNT');
+    return inspected;
   });
-  if (!('trace' in traced)) throw new Error('RET010D_TRACE_BLOCK_COUNT');
-  if (omitted.markdown !== explicitFalse.markdown || omitted.markdown !== traced.markdown) {
-    throw new Error('RET010D_PRESENTATION_PARITY_MISMATCH');
-  }
-  const rerankerStage = inspectRet010dRerankerStage(
-    tracedResult,
-    servedAttempt ? 'reranked' : 'absent',
-  );
+  await atRet010dCaseStage(id, 'presentation-parity', () => {
+    if (omitted.markdown !== explicitFalse.markdown || omitted.markdown !== traced.markdown) {
+      throw new Error('RET010D_PRESENTATION_PARITY_MISMATCH');
+    }
+  });
+  const rerankerStage = await atRet010dCaseStage(id, 'reranker-stage-inspection',
+    () => inspectRet010dRerankerStage(
+      tracedResult,
+      servedAttempt ? 'reranked' : 'absent',
+    ));
   const presentationOrderDigest = `sha256:${createHash('sha256')
     .update(JSON.stringify(resultIds)).digest('hex')}`;
   return Object.freeze({

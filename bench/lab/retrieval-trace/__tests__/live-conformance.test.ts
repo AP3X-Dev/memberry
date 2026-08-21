@@ -18,6 +18,7 @@ import {
   rankedTraceMcpErrorDiagnostic,
   rankedTraceMcpErrorDiagnosticAfterCapture,
   readBoundedResponseText,
+  ret010dCaseStageDiagnosticCode,
   requiredPresentationIdForCase,
   resolveTraceConformanceConfig,
   runAbortableOperation,
@@ -29,6 +30,9 @@ import {
   traceFixtureForbiddenValues,
   traceFixtureQueries,
   TRACE_INSPECTION_FIXED_CODES,
+  RET010D_CASE_IDS,
+  RET010D_CASE_STAGES,
+  RET010D_STAGE_FIXED_CAUSES,
   TraceMcpTransport,
   TraceValidationStderrParser,
   waitForTraceReadiness,
@@ -491,6 +495,101 @@ describe('RET-001D live composition harness', () => {
   it('keeps the compile-time trace-inspection allowlist exact and fully exercised', () => {
     expect(TRACE_INSPECTION_FIXED_CODES)
       .toEqual(rankedTracedInspectionDiagnostics.map(([innerCode]) => innerCode));
+  });
+
+  it('maps every RET-010D case, stage, and enumerated fixed cause to one exact content-free diagnostic', () => {
+    for (const id of RET010D_CASE_IDS) {
+      const caseCode = id.toUpperCase().replaceAll('-', '_');
+      for (const stage of RET010D_CASE_STAGES) {
+        const stageCode = stage.toUpperCase().replaceAll('-', '_');
+        for (const cause of RET010D_STAGE_FIXED_CAUSES[stage]) {
+          const expected = `RET010D_CASE_${caseCode}_STAGE_${stageCode}_${cause.slice('RET001D_'.length)}`;
+          const code = ret010dCaseStageDiagnosticCode(id, stage, new Error(cause));
+          expect(code).toBe(expected);
+          expect(safeDiagnosticCode(new Error(code))).toBe(code);
+        }
+      }
+    }
+  });
+
+  it('maps unknown RET-010D causes to UNKNOWN for every exact case and stage', () => {
+    const secret = 'RET010D secret fixture/query/result body';
+    for (const id of RET010D_CASE_IDS) {
+      for (const stage of RET010D_CASE_STAGES) {
+        const code = ret010dCaseStageDiagnosticCode(id, stage, new Error(secret));
+        expect(code).toBe(
+          `RET010D_CASE_${id.toUpperCase().replaceAll('-', '_')}`
+          + `_STAGE_${stage.toUpperCase().replaceAll('-', '_')}_UNKNOWN`,
+        );
+        expect(code).not.toContain(secret);
+        expect(safeDiagnosticCode(new Error(code))).toBe(code);
+      }
+    }
+  });
+
+  it.each([
+    ['invalid case string', 'RET010D_SECRET_FIXTURE', 'ordinary-call'],
+    ['invalid stage string', 'authority-disabled-ranked', 'RET010D_SECRET_FIXTURE'],
+    ['proxied case', new Proxy({}, { get() { throw new Error('RET010D_SECRET_FIXTURE'); } }), 'ordinary-call'],
+    ['accessor stage', 'authority-disabled-ranked', Object.defineProperty({}, 'value', {
+      get() { throw new Error('RET010D_SECRET_FIXTURE'); },
+    })],
+  ] as const)('rejects malformed RET-010D diagnostic identity %s without reflecting it', (_label, id, stage) => {
+    let error: unknown;
+    expect(() => {
+      try { ret010dCaseStageDiagnosticCode(id as never, stage as never, new Error('RET010D_SECRET_FIXTURE')); }
+      catch (caught) { error = caught; }
+    }).not.toThrow();
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('RET010D_CASE_STAGE_DIAGNOSTIC_INVALID');
+    expect((error as Error).message).not.toContain('SECRET_FIXTURE');
+    expect(safeDiagnosticCode(error)).toBe('RET010D_CASE_STAGE_DIAGNOSTIC_INVALID');
+  });
+
+  it('maps hostile RET-010D diagnostic causes to UNKNOWN without hooks or reflection', () => {
+    let callbacks = 0;
+    const hostileCauses = [
+      () => 'RET001D_MCP_TIMEOUT',
+      () => Object.defineProperty(new Error('placeholder'), 'message', {
+        configurable: true,
+        get() { callbacks += 1; throw new Error('RET010D_SECRET_FIXTURE'); },
+      }),
+      () => new Proxy(new Error('RET001D_MCP_TIMEOUT'), {
+        get() { callbacks += 1; throw new Error('RET010D_SECRET_FIXTURE'); },
+        getOwnPropertyDescriptor() { callbacks += 1; throw new Error('RET010D_SECRET_FIXTURE'); },
+      }),
+      () => {
+        const pair = Proxy.revocable(new Error('RET001D_MCP_TIMEOUT'), {});
+        pair.revoke();
+        return pair.proxy;
+      },
+      () => new Error(`RET001D_${'A'.repeat(300)}`),
+      () => new Error('RET001D_MCP_TIMEOUT__RET010D_SECRET_FIXTURE'),
+    ];
+    for (const cause of hostileCauses) {
+      for (const id of RET010D_CASE_IDS) {
+        for (const stage of RET010D_CASE_STAGES) {
+          let code: string | undefined;
+          expect(() => { code = ret010dCaseStageDiagnosticCode(id, stage, cause()); }).not.toThrow();
+          expect(code).toMatch(/_UNKNOWN$/);
+          expect(code).not.toContain('SECRET_FIXTURE');
+          expect(safeDiagnosticCode(new Error(code))).toBe(code);
+        }
+      }
+    }
+    expect(callbacks).toBe(0);
+  });
+
+  it.each([
+    'RET010D_CASE_UNKNOWN_STAGE_ORDINARY_CALL_UNKNOWN',
+    'RET010D_CASE_AUTHORITY_DISABLED_RANKED_STAGE_UNKNOWN_UNKNOWN',
+    'RET010D_CASE_AUTHORITY_DISABLED_RANKED_STAGE_ORDINARY_CALL',
+    'RET010D_CASE_AUTHORITY_DISABLED_RANKED_STAGE_ORDINARY_CALL_UNKNOWN_SECRET',
+    'RET010D_CASE_AUTHORITY_DISABLED_RANKED_STAGE_PRESENTATION_PARITY_MCP_TIMEOUT',
+    'RET010D_CASE_authority_disabled_ranked_STAGE_ORDINARY_CALL_UNKNOWN',
+    `RET010D_CASE_${'A'.repeat(300)}`,
+  ])('rejects malformed or value-bearing RET-010D stage diagnostic %s', (code) => {
+    expect(safeDiagnosticCode(new Error(code))).toBe('RET001D_INTERNAL_FAILURE');
   });
 
   it.each(Object.keys(RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_LINES) as RetrievalTraceValidationStage[])(
@@ -978,6 +1077,27 @@ describe('RET-001D live composition harness', () => {
     ]) expect(source).toContain(privateFixtureValue);
     expect(source).toContain('}, allForbidden, manifestTruth)');
     expect(source).toContain('for (const value of allForbidden)');
+  });
+
+  it('wires every RET-010D operation through the closed stage mapper and keeps outer failures fixed', async () => {
+    const source = await readFile(
+      fileURLToPath(new URL('../live-conformance.ts', import.meta.url)), 'utf8',
+    );
+    for (const stage of RET010D_CASE_STAGES) {
+      expect(source).toContain(`atRet010dCaseStage(id, '${stage}'`);
+    }
+    for (const code of [
+      'RET010D_NEO4J_SEED_FAILED',
+      'RET010D_NEO4J_SESSION_CLOSE_FAILED',
+      'RET010D_CHILD_PROFILE_INVALID',
+      'RET010D_MATCHED_CONTROL_UNCHANGED',
+      'RET010D_DETERMINISTIC_BYPASS_MISMATCH',
+      'RET010D_MANIFEST_SHAPE',
+      'RET010D_MANIFEST_KEYS',
+    ]) {
+      expect(source).toContain(`'${code}'`);
+      expect(safeDiagnosticCode(new Error(code))).toBe(code);
+    }
   });
 
   it('wires an immediately drained child stderr parser and resets it before every traced request', async () => {
@@ -1662,6 +1782,14 @@ describe('RET-001D live composition harness', () => {
     'RET001D_TENANT_ISOLATION_FAILURE',
     'RET001D_TRACE_BLOCK_COUNT',
     'RET001D_TRACED_PARITY_MISMATCH',
+    'RET010D_CASE_STAGE_DIAGNOSTIC_INVALID',
+    'RET010D_CHILD_PROFILE_INVALID',
+    'RET010D_DETERMINISTIC_BYPASS_MISMATCH',
+    'RET010D_MANIFEST_KEYS',
+    'RET010D_MANIFEST_SHAPE',
+    'RET010D_MATCHED_CONTROL_UNCHANGED',
+    'RET010D_NEO4J_SEED_FAILED',
+    'RET010D_NEO4J_SESSION_CLOSE_FAILED',
   ])('accepts legitimate static runner diagnostic %s', (code) => {
     expect(safeDiagnosticCode(new Error(code))).toBe(code);
   });
