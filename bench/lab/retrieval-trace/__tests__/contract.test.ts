@@ -213,7 +213,7 @@ describe('RET-001D trace conformance contract', () => {
       tagScope: 'none',
       temporalFilterApplied: true,
       queryLength: 'short',
-      queryForm: 'prose',
+      queryForm: 'natural-language',
       tokenBudget: 'small',
       diversification: 'mmr',
       plannedChannels: ['memory.scope'],
