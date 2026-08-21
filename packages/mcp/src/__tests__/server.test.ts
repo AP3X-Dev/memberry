@@ -12,6 +12,63 @@ import {
 import { TOOL_NAMES, DOMAIN_TOOL_NAMES_MAP, ALWAYS_ON_TOOL_NAMES } from '../tools.js';
 import { registerAdmissionShadowStatusSource } from '../admission-shadow-status.js';
 
+async function initializeMcpSession(
+  baseUrl: string,
+  token: string,
+  id: number,
+): Promise<Record<string, string>> {
+  const baseHeaders = {
+    authorization: `Bearer ${token}`,
+    accept: 'application/json, text/event-stream',
+    'content-type': 'application/json',
+  };
+  const initialize = await fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers: baseHeaders,
+    body: JSON.stringify({
+      jsonrpc: '2.0', id, method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26', capabilities: {},
+        clientInfo: { name: 'sec001b-test', version: '0.0.0' },
+      },
+    }),
+  });
+  expect(initialize.status).toBe(200);
+  const sessionId = initialize.headers.get('mcp-session-id');
+  const protocolVersion = (await initialize.json() as { result?: { protocolVersion?: string } })
+    .result?.protocolVersion ?? '2025-03-26';
+  const headers = {
+    ...baseHeaders,
+    'mcp-session-id': sessionId ?? '',
+    'mcp-protocol-version': protocolVersion,
+  };
+  const initialized = await fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+  });
+  expect(initialized.status).toBe(202);
+  return headers;
+}
+
+async function callMcpTool(
+  baseUrl: string,
+  headers: Record<string, string>,
+  id: number,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(`${baseUrl}/mcp`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args },
+    }),
+  });
+  expect(response.status).toBe(200);
+  return response.json() as Promise<Record<string, unknown>>;
+}
+
 async function withSseServer(run: (baseUrl: string) => Promise<void>): Promise<void> {
   const previousToken = process.env.AMP_API_TOKEN;
   const previousUnauthenticated = process.env.AMP_ALLOW_UNAUTHENTICATED;
@@ -41,6 +98,240 @@ async function withSseServer(run: (baseUrl: string) => Promise<void>): Promise<v
 }
 
 describe('createAMPServer', () => {
+  it('SEC-001B leaves the default-off root McpServer method untouched', () => {
+    const saved = {
+      policy: process.env.MEMBERRY_CAPABILITY_POLICIES_V1,
+      legacyPolicy: process.env.AMP_CAPABILITY_POLICIES_V1,
+    };
+    delete process.env.MEMBERRY_CAPABILITY_POLICIES_V1;
+    delete process.env.AMP_CAPABILITY_POLICIES_V1;
+    try {
+      const amp = createAMPServer();
+      expect(Object.hasOwn(amp.server, 'tool')).toBe(false);
+      expect(amp.toolNames).toHaveLength(49);
+    } finally {
+      if (saved.policy === undefined) delete process.env.MEMBERRY_CAPABILITY_POLICIES_V1;
+      else process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = saved.policy;
+      if (saved.legacyPolicy === undefined) delete process.env.AMP_CAPABILITY_POLICIES_V1;
+      else process.env.AMP_CAPABILITY_POLICIES_V1 = saved.legacyPolicy;
+    }
+  });
+
+  it('SEC-001B reads policy configuration at construction, rejects malformed config, and refuses STDIO before transport', async () => {
+    const saved = {
+      policy: process.env.MEMBERRY_CAPABILITY_POLICIES_V1,
+      legacyPolicy: process.env.AMP_CAPABILITY_POLICIES_V1,
+    };
+    delete process.env.AMP_CAPABILITY_POLICIES_V1;
+    try {
+      process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = '{secret-policy';
+      expect(() => createAMPServer()).toThrow('capability_runtime:invalid-config');
+
+      process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = '[]';
+      const enabled = createAMPServer();
+      expect(Object.hasOwn(enabled.server, 'tool')).toBe(true);
+      const registry = (enabled.server as unknown as {
+        _registeredTools: Record<string, { handler: (...args: unknown[]) => unknown }>;
+      })._registeredTools;
+      expect(await registry.berry_load!.handler({ task: 'root-must-not-run' }, {})).toEqual({
+        content: [{ type: 'text', text: '**Error:** capability denied' }], isError: true,
+      });
+      delete process.env.MEMBERRY_CAPABILITY_POLICIES_V1;
+      await expect(enabled.startStdio()).rejects.toThrow('capability_runtime:invalid-config');
+    } finally {
+      if (saved.policy === undefined) delete process.env.MEMBERRY_CAPABILITY_POLICIES_V1;
+      else process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = saved.policy;
+      if (saved.legacyPolicy === undefined) delete process.env.AMP_CAPABILITY_POLICIES_V1;
+      else process.env.AMP_CAPABILITY_POLICIES_V1 = saved.legacyPolicy;
+    }
+  });
+
+  it('SEC-001B rejects capability mode combined with unauthenticated HTTP before listener startup', async () => {
+    const saved = {
+      policy: process.env.MEMBERRY_CAPABILITY_POLICIES_V1,
+      allow: process.env.MEMBERRY_ALLOW_UNAUTHENTICATED,
+      legacyAllow: process.env.AMP_ALLOW_UNAUTHENTICATED,
+    };
+    process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = '[]';
+    process.env.MEMBERRY_ALLOW_UNAUTHENTICATED = 'true';
+    delete process.env.AMP_ALLOW_UNAUTHENTICATED;
+    try {
+      const amp = createAMPServer();
+      await expect(amp.startSSE(0)).rejects.toThrow('capability_runtime:invalid-config');
+    } finally {
+      if (saved.policy === undefined) delete process.env.MEMBERRY_CAPABILITY_POLICIES_V1;
+      else process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = saved.policy;
+      if (saved.allow === undefined) delete process.env.MEMBERRY_ALLOW_UNAUTHENTICATED;
+      else process.env.MEMBERRY_ALLOW_UNAUTHENTICATED = saved.allow;
+      if (saved.legacyAllow === undefined) delete process.env.AMP_ALLOW_UNAUTHENTICATED;
+      else process.env.AMP_ALLOW_UNAUTHENTICATED = saved.legacyAllow;
+    }
+  });
+
+  it('SEC-001B selects exact tenant/actor policies over Streamable HTTP and denies a missing policy', async () => {
+    const saved = {
+      policy: process.env.MEMBERRY_CAPABILITY_POLICIES_V1,
+      apiTokens: process.env.MEMBERRY_API_TOKENS,
+      tenantTokens: process.env.MEMBERRY_TENANT_TOKENS,
+      apiToken: process.env.MEMBERRY_API_TOKEN,
+      legacyApiToken: process.env.AMP_API_TOKEN,
+      allow: process.env.MEMBERRY_ALLOW_UNAUTHENTICATED,
+    };
+    delete process.env.MEMBERRY_API_TOKEN;
+    delete process.env.AMP_API_TOKEN;
+    delete process.env.MEMBERRY_ALLOW_UNAUTHENTICATED;
+    process.env.MEMBERRY_API_TOKENS = 'alice:tok-alice,bob:tok-bob';
+    process.env.MEMBERRY_TENANT_TOKENS = 'acme:tok-alice,globex:tok-bob';
+    process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = JSON.stringify([{
+      contractId: 'memberry.capability-policy', contractVersion: '1.0.0',
+      actorId: 'alice', tenantId: 'acme',
+      grants: [{
+        scope: { kind: 'tenant' }, domainId: 'tools', toolId: 'berry_tools', operation: 'read',
+      }, {
+        scope: { kind: 'tenant' }, domainId: 'tools', toolId: 'berry_tools', operation: 'update',
+      }, {
+        scope: { kind: 'tenant' }, domainId: 'research', toolId: 'berry_research_init', operation: 'create',
+      }, {
+        scope: { kind: 'tenant' }, domainId: 'admin', toolId: 'berry_query', operation: 'admin',
+      }],
+    }]);
+
+    const amp = createAMPServer();
+    const handle = await amp.startSSE(0);
+    const address = handle.httpServer.address() as AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    try {
+      const aliceHeaders = await initializeMcpSession(baseUrl, 'tok-alice', 100);
+      const allowed = await callMcpTool(baseUrl, aliceHeaders, 101, 'berry_tools', { action: 'list' });
+      expect(allowed).toMatchObject({ result: { content: [{ type: 'text' }] } });
+      expect(JSON.stringify(allowed)).not.toContain('capability denied');
+
+      const enableResearch = await callMcpTool(
+        baseUrl, aliceHeaders, 104, 'berry_tools', { action: 'enable', domain: 'research' },
+      );
+      expect(JSON.stringify(enableResearch)).toContain('Unknown domain');
+      const withheld = await callMcpTool(
+        baseUrl, aliceHeaders, 105, 'berry_research_init', { campaign: 'must-not-run' },
+      );
+      expect(withheld).toHaveProperty('error');
+      expect(JSON.stringify(withheld)).not.toContain('must-not-run');
+
+      const enableAdmin = await callMcpTool(
+        baseUrl, aliceHeaders, 106, 'berry_tools', { action: 'enable', domain: 'admin' },
+      );
+      expect(JSON.stringify(enableAdmin)).not.toContain('capability denied');
+      const refusedCore = await callMcpTool(
+        baseUrl,
+        aliceHeaders,
+        107,
+        'berry_query',
+        { query: 'RETURN "tenant-secret-sentinel"', limit: 1 },
+      );
+      expect(JSON.stringify(refusedCore)).toContain('not available in multi-tenant mode');
+      expect(JSON.stringify(refusedCore)).not.toContain('tenant-secret-sentinel');
+
+      const bobHeaders = await initializeMcpSession(baseUrl, 'tok-bob', 102);
+      const denied = await callMcpTool(baseUrl, bobHeaders, 103, 'berry_tools', { action: 'list' });
+      expect(denied).toMatchObject({
+        result: {
+          content: [{ type: 'text', text: '**Error:** capability denied' }],
+          isError: true,
+        },
+      });
+    } finally {
+      await closeSSEHandle(handle, 500);
+      if (saved.policy === undefined) delete process.env.MEMBERRY_CAPABILITY_POLICIES_V1; else process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = saved.policy;
+      if (saved.apiTokens === undefined) delete process.env.MEMBERRY_API_TOKENS; else process.env.MEMBERRY_API_TOKENS = saved.apiTokens;
+      if (saved.tenantTokens === undefined) delete process.env.MEMBERRY_TENANT_TOKENS; else process.env.MEMBERRY_TENANT_TOKENS = saved.tenantTokens;
+      if (saved.apiToken === undefined) delete process.env.MEMBERRY_API_TOKEN; else process.env.MEMBERRY_API_TOKEN = saved.apiToken;
+      if (saved.legacyApiToken === undefined) delete process.env.AMP_API_TOKEN; else process.env.AMP_API_TOKEN = saved.legacyApiToken;
+      if (saved.allow === undefined) delete process.env.MEMBERRY_ALLOW_UNAUTHENTICATED; else process.env.MEMBERRY_ALLOW_UNAUTHENTICATED = saved.allow;
+    }
+  });
+
+  it('SEC-001B wraps all 49 real single-tenant handlers and missing policy causes zero effects', async () => {
+    const saved = {
+      policy: process.env.MEMBERRY_CAPABILITY_POLICIES_V1,
+      apiToken: process.env.MEMBERRY_API_TOKEN,
+      legacyApiToken: process.env.AMP_API_TOKEN,
+      apiTokens: process.env.MEMBERRY_API_TOKENS,
+      tenantTokens: process.env.MEMBERRY_TENANT_TOKENS,
+    };
+    process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = '[]';
+    process.env.MEMBERRY_API_TOKEN = 'default-token';
+    delete process.env.AMP_API_TOKEN;
+    delete process.env.MEMBERRY_API_TOKENS;
+    delete process.env.MEMBERRY_TENANT_TOKENS;
+    const amp = createAMPServer();
+    const handle = await amp.startSSE(0);
+    const address = handle.httpServer.address() as AddressInfo;
+    try {
+      await initializeMcpSession(`http://127.0.0.1:${address.port}`, 'default-token', 110);
+      const sessionServer = [...handle.streamableServers.values()][0]!;
+      const registry = (sessionServer as unknown as {
+        _registeredTools: Record<string, { handler: (...args: unknown[]) => unknown }>;
+      })._registeredTools;
+      expect(Object.keys(registry).sort()).toEqual([...amp.toolNames].sort());
+      expect(Object.keys(registry)).toHaveLength(49);
+      for (const [name, registered] of Object.entries(registry)) {
+        const result = await registered.handler({}, {});
+        expect(result, name).toEqual({
+          content: [{ type: 'text', text: '**Error:** capability denied' }], isError: true,
+        });
+      }
+    } finally {
+      await closeSSEHandle(handle, 500);
+      if (saved.policy === undefined) delete process.env.MEMBERRY_CAPABILITY_POLICIES_V1; else process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = saved.policy;
+      if (saved.apiToken === undefined) delete process.env.MEMBERRY_API_TOKEN; else process.env.MEMBERRY_API_TOKEN = saved.apiToken;
+      if (saved.legacyApiToken === undefined) delete process.env.AMP_API_TOKEN; else process.env.AMP_API_TOKEN = saved.legacyApiToken;
+      if (saved.apiTokens === undefined) delete process.env.MEMBERRY_API_TOKENS; else process.env.MEMBERRY_API_TOKENS = saved.apiTokens;
+      if (saved.tenantTokens === undefined) delete process.env.MEMBERRY_TENANT_TOKENS; else process.env.MEMBERRY_TENANT_TOKENS = saved.tenantTokens;
+    }
+  });
+
+  it('SEC-001B installs the same deny-before-effect gate on a real authenticated SSE session', async () => {
+    const saved = {
+      policy: process.env.MEMBERRY_CAPABILITY_POLICIES_V1,
+      apiToken: process.env.MEMBERRY_API_TOKEN,
+      legacyApiToken: process.env.AMP_API_TOKEN,
+      apiTokens: process.env.MEMBERRY_API_TOKENS,
+      tenantTokens: process.env.MEMBERRY_TENANT_TOKENS,
+    };
+    process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = '[]';
+    process.env.MEMBERRY_API_TOKEN = 'sse-default-token';
+    delete process.env.AMP_API_TOKEN;
+    delete process.env.MEMBERRY_API_TOKENS;
+    delete process.env.MEMBERRY_TENANT_TOKENS;
+    const amp = createAMPServer();
+    const handle = await amp.startSSE(0);
+    const address = handle.httpServer.address() as AddressInfo;
+    const abort = new AbortController();
+    let response: Response | undefined;
+    try {
+      response = await fetch(`http://127.0.0.1:${address.port}/sse`, {
+        headers: { authorization: 'Bearer sse-default-token', accept: 'text/event-stream' },
+        signal: abort.signal,
+      });
+      expect(response.status).toBe(200);
+      const sessionServer = [...handle.servers.values()][0]!;
+      const registry = (sessionServer as unknown as {
+        _registeredTools: Record<string, { handler: (...args: unknown[]) => unknown }>;
+      })._registeredTools;
+      expect(Object.keys(registry)).toHaveLength(49);
+      expect(await registry.berry_load!.handler({ task: 'must-not-run' }, {})).toEqual({
+        content: [{ type: 'text', text: '**Error:** capability denied' }], isError: true,
+      });
+    } finally {
+      abort.abort();
+      await response?.body?.cancel().catch(() => {});
+      await closeSSEHandle(handle, 500);
+      if (saved.policy === undefined) delete process.env.MEMBERRY_CAPABILITY_POLICIES_V1; else process.env.MEMBERRY_CAPABILITY_POLICIES_V1 = saved.policy;
+      if (saved.apiToken === undefined) delete process.env.MEMBERRY_API_TOKEN; else process.env.MEMBERRY_API_TOKEN = saved.apiToken;
+      if (saved.legacyApiToken === undefined) delete process.env.AMP_API_TOKEN; else process.env.AMP_API_TOKEN = saved.legacyApiToken;
+      if (saved.apiTokens === undefined) delete process.env.MEMBERRY_API_TOKENS; else process.env.MEMBERRY_API_TOKENS = saved.apiTokens;
+      if (saved.tenantTokens === undefined) delete process.env.MEMBERRY_TENANT_TOKENS; else process.env.MEMBERRY_TENANT_TOKENS = saved.tenantTokens;
+    }
+  });
   it('RET-002C2 derives planner eligibility only from configured HTTP auth and leaves the stdio root ineligible', () => {
     const source = readFileSync(new URL('../server.ts', import.meta.url), 'utf8');
     expect(source).toContain('authenticated: effectiveToken !== null');

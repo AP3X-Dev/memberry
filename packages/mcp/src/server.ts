@@ -18,6 +18,13 @@ import { registerGraphTools, GRAPH_TOOL_NAMES } from '@memberry/graph';
 import { readEnv, resolvePort } from '@memberry/core';
 import { getConsolidationAutomationHealth } from './consolidation-coordinator.js';
 import { getAdmissionShadowProcessStatus } from './admission-shadow-status.js';
+import {
+  assertCapabilityToolMatrixV1,
+  CapabilityRuntimeConfigError,
+  installCapabilityRuntimeInterposerV1,
+  parseCapabilityRuntimeConfigV1,
+  validateCapabilityRuntimeIdentityV1,
+} from './capability-runtime.js';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -311,7 +318,27 @@ function registerAllTools(
 }
 
 export function createAMPServer(): AMPMCPServer {
+  const capabilityPolicyLookup = parseCapabilityRuntimeConfigV1(
+    readEnv('MEMBERRY_CAPABILITY_POLICIES_V1'),
+  );
+  const toolNames = [
+    ...TOOL_NAMES,
+    ...RESEARCH_TOOL_NAMES,
+    ...ARCH_TOOL_NAMES,
+    ...CODE_TOOL_NAMES,
+    ...RETRIEVAL_TOOL_NAMES,
+    ...WIKI_TOOL_NAMES,
+    ...GRAPH_TOOL_NAMES,
+  ];
+  assertCapabilityToolMatrixV1(toolNames);
   const server = new McpServer({ name: 'memberry-mcp', version: '0.1.0' });
+  if (capabilityPolicyLookup !== undefined) {
+    installCapabilityRuntimeInterposerV1(
+      server,
+      { tenantId: DEFAULT_TENANT, actorId: 'mcp' },
+      undefined,
+    );
+  }
 
   // Register all MemBerry tools with progressive disclosure
   registerAllTools(server);
@@ -365,6 +392,9 @@ export function createAMPServer(): AMPMCPServer {
     // Priority: MEMBERRY_API_TOKEN env var → unauthenticated opt-out → generated session token
     const allowUnauthenticated =
       (readEnv('MEMBERRY_ALLOW_UNAUTHENTICATED') ?? '').toLowerCase() === 'true';
+    if (capabilityPolicyLookup !== undefined && allowUnauthenticated) {
+      throw new CapabilityRuntimeConfigError();
+    }
 
     // Per-actor named tokens: MEMBERRY_API_TOKENS="alice:tokenA,bob:tokenB".
     // Each token maps to an actor identity, so a leaked token can be revoked
@@ -415,6 +445,15 @@ export function createAMPServer(): AMPMCPServer {
       console.error(
         `[memberry] No MEMBERRY_API_TOKEN set. Generated session token: ${effectiveToken}. Set MEMBERRY_ALLOW_UNAUTHENTICATED=true to disable auth.`,
       );
+    }
+
+    if (capabilityPolicyLookup !== undefined) {
+      for (const [token, actor] of tokenToActor) {
+        const configuredTenant = tokenToTenant.get(token);
+        if (multiTenantMode && !allowDefaultTenant && configuredTenant === undefined) continue;
+        const tenant = multiTenantMode ? (configuredTenant ?? DEFAULT_TENANT) : DEFAULT_TENANT;
+        validateCapabilityRuntimeIdentityV1(tenant, actor);
+      }
     }
 
     if (tokenToActor.size > 0) {
@@ -696,6 +735,13 @@ export function createAMPServer(): AMPMCPServer {
               const tenant = tenantFor(req);
               const actor = actorFor(req) ?? 'mcp';
               const perSessionServer = new McpServer({ name: 'memberry-mcp', version: '0.1.0' });
+              if (capabilityPolicyLookup !== undefined) {
+                installCapabilityRuntimeInterposerV1(
+                  perSessionServer,
+                  { tenantId: tenant, actorId: actor },
+                  capabilityPolicyLookup(tenant, actor),
+                );
+              }
               registerAllTools(perSessionServer, {
                 tenantId: tenant,
                 actor,
@@ -744,6 +790,13 @@ export function createAMPServer(): AMPMCPServer {
             const tenant = tenantFor(req);
             const actor = actorFor(req) ?? 'mcp';
             const perSessionServer = new McpServer({ name: 'memberry-mcp', version: '0.1.0' });
+            if (capabilityPolicyLookup !== undefined) {
+              installCapabilityRuntimeInterposerV1(
+                perSessionServer,
+                { tenantId: tenant, actorId: actor },
+                capabilityPolicyLookup(tenant, actor),
+              );
+            }
             registerAllTools(perSessionServer, {
               tenantId: tenant,
               actor,
@@ -884,6 +937,7 @@ export function createAMPServer(): AMPMCPServer {
   // ─── Stdio transport ──────────────────────────────────────────────────────
 
   async function startStdio(): Promise<void> {
+    if (capabilityPolicyLookup !== undefined) throw new CapabilityRuntimeConfigError();
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error('[memberry-mcp] stdio transport connected');
@@ -891,7 +945,7 @@ export function createAMPServer(): AMPMCPServer {
 
   return {
     server,
-    toolNames: [...TOOL_NAMES, ...RESEARCH_TOOL_NAMES, ...ARCH_TOOL_NAMES, ...CODE_TOOL_NAMES, ...RETRIEVAL_TOOL_NAMES, ...WIKI_TOOL_NAMES, ...GRAPH_TOOL_NAMES],
+    toolNames,
     startSSE,
     startStdio,
   };

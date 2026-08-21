@@ -486,7 +486,7 @@ describe('capability policy v1', () => {
     expect(hooks).toBe(0);
   });
 
-  it('is deterministic, validation-only, relatively imported, and not runtime wired', () => {
+  it('is deterministic, validation-only, and exposed only through the approved root seam', async () => {
     const first = evaluateCapabilityV1(policy(), request());
     const second = evaluateCapabilityV1(policy(), request());
     expect(first).toEqual(second);
@@ -498,6 +498,14 @@ describe('capability policy v1', () => {
     expect(source).not.toMatch(/JSON\.|\.sort\(|for\s*\([^)]*\sof\s|process\.|globalThis\.(?:fetch|process)/);
     expect(source).not.toMatch(/from ['"]node:(?:fs|path|child_process|os|net|http|https|crypto)['"]/);
     expect(source).not.toMatch(/@memberry\/(?:mcp|neo4j|redis)/);
-    expect(index).not.toContain('capability-policy');
+    expect(index.match(/from '\.\/capability-policy\.js'/g)).toHaveLength(2);
+    const root = await import('../index.js');
+    expect(root.CAPABILITY_POLICY_CONTRACT_ID).toBe(CAPABILITY_POLICY_CONTRACT_ID);
+    expect(root.CAPABILITY_POLICY_CONTRACT_VERSION).toBe(CAPABILITY_POLICY_CONTRACT_VERSION);
+    expect(root.CapabilityPolicyContractError).toBe(CapabilityPolicyContractError);
+    expect(root.parseActorCapabilityPolicyV1).toBe(parseActorCapabilityPolicyV1);
+    expect(root.parseCapabilityCheckRequestV1).toBe(parseCapabilityCheckRequestV1);
+    expect(root.evaluateCapabilityV1).toBe(evaluateCapabilityV1);
+    expect(index).not.toContain('CAPABILITY_POLICY_MAX_GRANTS');
   });
 });

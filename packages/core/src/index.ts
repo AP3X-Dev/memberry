@@ -79,3 +79,17 @@ export { resolvePort } from './config/port.js';
 export { getHooksStatus } from './cli/install.js';
 export type { HooksStatus } from './cli/install.js';
 export { isRealpathWithinBase, realpathNearestExisting } from './path-confine.js';
+export {
+  CAPABILITY_POLICY_CONTRACT_ID,
+  CAPABILITY_POLICY_CONTRACT_VERSION,
+  CapabilityPolicyContractError,
+  evaluateCapabilityV1,
+  parseActorCapabilityPolicyV1,
+  parseCapabilityCheckRequestV1,
+} from './capability-policy.js';
+export type {
+  ActorCapabilityPolicyV1,
+  CapabilityCheckRequestV1,
+  CapabilityOperationV1,
+  CapabilityScopeV1,
+} from './capability-policy.js';
