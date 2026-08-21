@@ -43,6 +43,7 @@ import type { RetrievalResult } from './types.js';
 // ─── Service interface (injected) ────────────────────────────────────────────
 
 export interface IUnifiedAssembler {
+  readonly servedRerankerEnabled?: boolean;
   assemble(task: string, options?: {
     strategy?: RetrievalStrategy;
     include_code?: boolean;
@@ -55,6 +56,7 @@ export interface IUnifiedAssembler {
     as_of?: string;
     tenantId?: string;
     resolvedEntityIds?: unknown;
+    servedRerankerDisabled?: true;
   }): Promise<UnifiedContext>;
   assembleTraced(task: string, options?: {
     strategy?: RetrievalStrategy;
@@ -68,6 +70,7 @@ export interface IUnifiedAssembler {
     as_of?: string;
     tenantId?: string;
     resolvedEntityIds?: unknown;
+    servedRerankerDisabled?: true;
   }): Promise<{ context: UnifiedContext; trace: RetrievalTraceV1 }>;
   renderMarkdown(ctx: UnifiedContext): string;
   ask(question: string, options?: {
@@ -99,6 +102,14 @@ export interface IUnifiedAssembler {
     traced?: boolean,
     postDedupObserver?: (candidates: readonly RetrievalResult[]) => void,
   ): { context: UnifiedContext; trace?: RetrievalTraceV1 };
+  assembleCandidateExecutionServed?(
+    task: string,
+    execution: CandidateChannelExecutionResultV1,
+    maxTokens: number,
+    includeArchitecture: boolean,
+    includeMemory: boolean,
+    traced?: boolean,
+  ): Promise<{ context: UnifiedContext; trace?: RetrievalTraceV1 }>;
 }
 
 export interface IRuntimeCandidateChannelService {
@@ -463,14 +474,23 @@ export function registerRetrievalTools(
           entityScope: args.entity_scope,
           ...(args.as_of !== undefined ? { asOf: args.as_of } : {}),
         });
-        if (!candidateRuntime || !assembler.assembleCandidateExecution) throw new Error('candidate_runtime:unavailable');
+        const servedCandidate = assembler.servedRerankerEnabled === true
+          && args.strategy !== 'deterministic';
+        if (!candidateRuntime || !assembler.assembleCandidateExecution
+          || (servedCandidate && !assembler.assembleCandidateExecutionServed)) {
+          throw new Error('candidate_runtime:unavailable');
+        }
         const execution = await candidateRuntime.execute(receipt, {
           includeArchitecture: args.include_arch, includeMemory: args.include_memory,
         });
-        const shadowObserver = args.strategy === 'deterministic'
+        const shadowObserver = servedCandidate || args.strategy === 'deterministic'
           ? undefined
           : candidateShadowObserver(rerankerShadowCoordinator, receipt, execution, args.task);
-        const assembled = shadowObserver
+        const assembled = servedCandidate
+          ? await assembler.assembleCandidateExecutionServed!(
+            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
+          )
+          : shadowObserver
           ? assembler.assembleCandidateExecution(
             args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
             shadowObserver,
@@ -492,6 +512,7 @@ export function registerRetrievalTools(
       // Entity/Aspect nodes, so it is not safe for a named tenant. Force the
       // ranked path (memory is tenant-filtered; arch entities strict-match to
       // empty for a named tenant — no cross-tenant leak).
+      const forcedRanked = tenantId !== DEFAULT_TENANT && args.strategy === 'deterministic';
       const strategy = tenantId !== DEFAULT_TENANT ? 'ranked' : (args.strategy as RetrievalStrategy);
       const options = {
         strategy,
@@ -504,6 +525,7 @@ export function registerRetrievalTools(
         project_name: args.project_name,
         as_of: args.as_of,
         tenantId,
+        ...(forcedRanked ? { servedRerankerDisabled: true as const } : {}),
       };
       const resolvedEntityIds = queryPlannerEnabled
         ? await resolveRuntimeEntityIds(
@@ -559,14 +581,22 @@ export function registerRetrievalTools(
           entityScope: args.entity_scope,
           ...(args.as_of !== undefined ? { asOf: args.as_of } : {}),
         });
-        if (!candidateRuntime || !assembler.askFromContext || !assembler.assembleCandidateExecution) {
+        const servedCandidate = assembler.servedRerankerEnabled === true;
+        if (!candidateRuntime || !assembler.askFromContext || !assembler.assembleCandidateExecution
+          || (servedCandidate && !assembler.assembleCandidateExecutionServed)) {
           throw new Error('candidate_runtime:unavailable');
         }
         const execution = await candidateRuntime.execute(receipt, {
           includeArchitecture: true, includeMemory: true,
         });
-        const shadowObserver = candidateShadowObserver(rerankerShadowCoordinator, receipt, execution, args.question);
-        const assembled = shadowObserver
+        const shadowObserver = servedCandidate
+          ? undefined
+          : candidateShadowObserver(rerankerShadowCoordinator, receipt, execution, args.question);
+        const assembled = servedCandidate
+          ? await assembler.assembleCandidateExecutionServed!(
+            args.question, execution, askRetrievalTokenBudget(args.reasoning_level), true, true, false,
+          )
+          : shadowObserver
           ? assembler.assembleCandidateExecution(
             args.question, execution, askRetrievalTokenBudget(args.reasoning_level), true, true, false,
             shadowObserver,

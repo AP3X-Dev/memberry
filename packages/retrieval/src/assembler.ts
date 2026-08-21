@@ -38,6 +38,11 @@ import {
 } from './runtime-trace.js';
 import type { RetrievalTraceV1 } from './trace.js';
 import type { CandidateChannelExecutionResultV1 } from './candidate-channel.js';
+import {
+  applyServedRerankerV1,
+  type ServedRerankerApplicationResultV1,
+  type ServedRerankerConstructionV1,
+} from './served-reranker.js';
 import type {
   RetrievalTraceFailureCode,
   RetrievalTraceFailureStage,
@@ -48,11 +53,16 @@ import type {
 // the assembler threads an optional tenantId through every direct memory/graph
 // query. We extend the shared type locally so the live retrieval path is
 // tenant-isolated (berry_context / berry_ask) the same way every other read is.
-type TenantRetrievalOptions = RetrievalOptions & { tenantId?: string; resolvedEntityIds?: unknown };
+type TenantRetrievalOptions = RetrievalOptions & {
+  tenantId?: string;
+  resolvedEntityIds?: unknown;
+  servedRerankerDisabled?: true;
+};
 
 const RETRIEVAL_OPTION_KEYS = new Set([
   'strategy', 'include_code', 'include_arch', 'include_memory', 'max_tokens',
   'entity_scope', 'tag_scope', 'project_name', 'as_of', 'tenantId', 'resolvedEntityIds',
+  'servedRerankerDisabled',
 ]);
 
 function snapshotRetrievalOptions<T extends object | undefined>(options: T): T {
@@ -62,8 +72,13 @@ function snapshotRetrievalOptions<T extends object | undefined>(options: T): T {
     throw new Error('retrieval_options_invalid');
   }
   const stableDescriptor = Object.getOwnPropertyDescriptor(options, 'resolvedEntityIds');
-  if (stableDescriptor === undefined) return options;
-  if (!('value' in stableDescriptor)) throw new Error('retrieval_options_invalid');
+  const servedDisabledDescriptor = Object.getOwnPropertyDescriptor(options, 'servedRerankerDisabled');
+  if (stableDescriptor === undefined && servedDisabledDescriptor === undefined) return options;
+  if (stableDescriptor !== undefined && !('value' in stableDescriptor)) throw new Error('retrieval_options_invalid');
+  if (servedDisabledDescriptor !== undefined
+    && (!('value' in servedDisabledDescriptor) || servedDisabledDescriptor.value !== true)) {
+    throw new Error('retrieval_options_invalid');
+  }
   const snapshot: Record<string, unknown> = {};
   for (const key of Reflect.ownKeys(options)) {
     if (typeof key !== 'string' || !RETRIEVAL_OPTION_KEYS.has(key)) {
@@ -258,6 +273,7 @@ export class UnifiedAssembler {
   private cachedCollectionSize: number | undefined;
   private collectionSizeCachedAt = 0;
   private static readonly COLLECTION_SIZE_TTL_MS = 60_000; // 60s cache
+  readonly servedRerankerEnabled: boolean;
 
   constructor(
     private driver: Driver,
@@ -266,9 +282,11 @@ export class UnifiedAssembler {
     private memoryLayer: AssemblerMemoryLayer | null,
     private embedding: EmbeddingProvider,
     private llm: LlmClient | null = null,
+    private readonly servedReranker: ServedRerankerConstructionV1 | null = null,
   ) {
     this.deterministic = new DeterministicAssembler(driver);
     this.feedback = new FeedbackTracker(redis);
+    this.servedRerankerEnabled = servedReranker !== null;
   }
 
   /**
@@ -442,6 +460,106 @@ export class UnifiedAssembler {
     return { context, ...(traceAdapter ? { trace: traceAdapter.finalize() } : {}) };
   }
 
+  /** @internal RET-010C: receipt-only served candidate path. The synchronous
+   * candidate method above remains the exact disabled/shadow implementation. */
+  async assembleCandidateExecutionServed(
+    task: string,
+    execution: CandidateChannelExecutionResultV1,
+    maxTokens: number,
+    includeArchitecture: boolean,
+    includeMemory: boolean,
+    traced = false,
+  ): Promise<TracedUnifiedContext | { context: UnifiedContext }> {
+    assertBoundedQueryInput(task);
+    if (this.servedReranker === null || this.servedReranker === undefined) {
+      throw new Error('served_reranker:unavailable');
+    }
+    const listsByChannel = new Map<string, RetrievalResult[]>();
+    const observations: RuntimeStructuralObservation[] = [];
+    const evidenceByPrivateId = new Map<string, string>();
+    const incompleteReasons: RetrievalTraceIncompleteReason[] = [];
+    for (const settlement of execution.settlements) {
+      if (settlement.outcome === 'safe-failure' && settlement.code === 'budget-exceeded') {
+        if (!incompleteReasons.includes('limit-overflow')) incompleteReasons.push('limit-overflow');
+        continue;
+      }
+      observations.push({
+        channels: [settlement.outcome === 'success'
+          ? { channel: settlement.channel, outcome: 'success' }
+          : { channel: settlement.channel, outcome: 'safe-failure', code: settlement.code as RetrievalTraceFailureCode }],
+        candidates: [],
+        finalIds: [],
+      });
+    }
+    for (const candidate of execution.candidates) {
+      const privateId = `${candidate.channel}\u0000${candidate.rank}\u0000${candidate.evidenceId}`;
+      const result: RetrievalResult = {
+        id: privateId,
+        source_type: candidate.sourceType as RetrievalResult['source_type'],
+        title: candidate.title,
+        content: candidate.content,
+        score: candidate.score,
+        metadata: { title: candidate.title, confidence: candidate.score, evidenceId: candidate.evidenceId },
+      };
+      const list = listsByChannel.get(candidate.channel) ?? [];
+      list.push(result);
+      listsByChannel.set(candidate.channel, list);
+      evidenceByPrivateId.set(privateId, candidate.evidenceId);
+      const observation = observations.find((entry) => entry.channels[0]?.channel === candidate.channel);
+      if (observation) {
+        observation.candidates.push({
+          privateId,
+          sourceType: candidate.sourceType,
+          channels: [{ channel: candidate.channel, rank: candidate.rank, score: candidate.score }],
+          evidence: { confidence: candidate.score },
+          estimatedTokens: Math.ceil(candidate.content.length / 4),
+        });
+        observation.finalIds.push(privateId);
+      }
+    }
+    const lists = execution.request.plannedChannels
+      .map((channel) => listsByChannel.get(channel))
+      .filter((list): list is RetrievalResult[] => list !== undefined);
+    const traceAdapter = traced ? new RankedRuntimeTraceAdapter(observations, lists, {
+      includeCode: false,
+      includeArchitecture,
+      includeMemory,
+      projectScopeApplied: true,
+      projectNameApplied: true,
+      memoryScopeApplied: true,
+      namedTenant: execution.request.tenantId !== 'default',
+      entityCount: execution.request.resolvedEntityIds.length,
+      tagCount: 0,
+      temporalFilterApplied: execution.request.temporalFrame.mode === 'as-of',
+      query: task,
+      maxTokens,
+      plannedChannels: execution.request.plannedChannels,
+    }, incompleteReasons, 'ranked-v2') : undefined;
+    const fused = rrfFusion(lists, 50, 60, undefined, undefined, undefined, traceAdapter);
+    const deduped = dedup(fused);
+    traceAdapter?.recordDedup(fused.map((result) => result.id), deduped.map((result) => result.id));
+    const outcome = await this.applyServedReranker(task, deduped);
+    traceAdapter?.recordReranker(deduped, outcome);
+    const privateSections = groupAndBudget(outcome.results, maxTokens);
+    traceAdapter?.recordBudget(privateSections.flatMap((section) => section.items.map((item) => item.id)));
+    const sections: ContextSection[] = privateSections.map((section) => ({
+      ...section,
+      items: section.items.map((item) => ({
+        ...item,
+        id: evidenceByPrivateId.get(item.id)!,
+        metadata: { ...item.metadata, evidenceId: evidenceByPrivateId.get(item.id)! },
+      })),
+    }));
+    const tokenCount = sections.reduce(
+      (sum, section) => sum + section.items.reduce((itemSum, item) => itemSum + Math.ceil(item.content.length / 4), 0),
+      0,
+    );
+    const context: UnifiedContext = {
+      task, strategy: 'ranked', sections, token_count: tokenCount, assembled_at: new Date().toISOString(),
+    };
+    return { context, ...(traceAdapter ? { trace: traceAdapter.finalize() } : {}) };
+  }
+
   private async getCollectionSize(): Promise<number | undefined> {
     const now = Date.now();
     // `> 0` is the never-probed sentinel: collectionSizeCachedAt initializes to 0,
@@ -498,6 +616,11 @@ export class UnifiedAssembler {
       as_of: options?.as_of,
       tenantId: resolveTenant(options?.tenantId),
       ...(resolvedEntityIds !== undefined ? { resolvedEntityIds } : {}),
+      ...(options !== undefined
+        && Object.hasOwn(options, 'servedRerankerDisabled')
+        && options.servedRerankerDisabled === true
+        ? { servedRerankerDisabled: true as const }
+        : {}),
     };
 
     // Shared query embedding: embed the task at most ONCE per assemble() and reuse
@@ -564,6 +687,11 @@ export class UnifiedAssembler {
       as_of: options?.as_of,
       tenantId: resolveTenant(options?.tenantId),
       ...(resolvedEntityIds !== undefined ? { resolvedEntityIds } : {}),
+      ...(options !== undefined
+        && Object.hasOwn(options, 'servedRerankerDisabled')
+        && options.servedRerankerDisabled === true
+        ? { servedRerankerDisabled: true as const }
+        : {}),
     };
     const assembleDeterministicTraced = async (): Promise<TracedUnifiedContext> => {
       const result = await this.deterministic.assembleTraced(task, {
@@ -694,6 +822,14 @@ export class UnifiedAssembler {
     return (await this.assembleRankedInternal(task, opts, intent, getQueryVec, false)).context;
   }
 
+  private applyServedReranker(
+    task: string,
+    results: readonly RetrievalResult[],
+  ): Promise<ServedRerankerApplicationResultV1> {
+    if (this.servedReranker === null) throw new Error('served_reranker:unavailable');
+    return applyServedRerankerV1(task, results, this.servedReranker);
+  }
+
   private async assembleRankedInternal(
     task: string,
     opts: TenantRetrievalOptions,
@@ -708,6 +844,7 @@ export class UnifiedAssembler {
     const traceIncompleteReasons = traced ? new Set<RetrievalTraceIncompleteReason>() : undefined;
     const tenant = resolveTenant(opts.tenantId);
     const stableIdLane = opts.resolvedEntityIds !== undefined;
+    const servedAttempt = this.servedReranker !== null && opts.servedRerankerDisabled !== true;
 
     // Intent-aware query expansion
     const expansion = expandQuery(task, intent);
@@ -964,16 +1101,18 @@ export class UnifiedAssembler {
       temporalFilterApplied: Boolean(opts.as_of),
       query: task,
       maxTokens: opts.max_tokens,
-    }, traceIncompleteReasons ? [...traceIncompleteReasons] : []) : undefined;
+    }, traceIncompleteReasons ? [...traceIncompleteReasons] : [], servedAttempt ? 'ranked-v2' : 'ranked-v1') : undefined;
     if (stageFailures) {
       for (const failure of stageFailures) traceAdapter?.recordStageFailure(failure.stage, failure.code);
     }
     const fused = rrfFusion(lists, 50, 60, boosts, collectionSize, textBoostFn, traceAdapter);
     const deduped = dedup(fused);
     traceAdapter?.recordDedup(fused.map((result) => result.id), deduped.map((result) => result.id));
+    const servedOutcome = servedAttempt ? await this.applyServedReranker(task, deduped) : undefined;
+    if (servedAttempt) traceAdapter?.recordReranker(deduped, servedOutcome!);
 
     // Budget tokens and group by source type
-    const sections = groupAndBudget(deduped, opts.max_tokens);
+    const sections = groupAndBudget(servedOutcome?.results ?? deduped, opts.max_tokens);
     traceAdapter?.recordBudget(sections.flatMap((section) => section.items.map((item) => item.id)));
 
     const tokenCount = sections.reduce(
@@ -1922,7 +2061,7 @@ function logRankedFailure(
   else console.error(`[memberry-retrieval] ${layer} failed:`, error instanceof Error ? error.message : error);
 }
 
-function groupAndBudget(results: RetrievalResult[], maxTokens: number): ContextSection[] {
+function groupAndBudget(results: readonly RetrievalResult[], maxTokens: number): ContextSection[] {
   const groups = new Map<string, { heading: string; items: ContextItem[] }>();
 
   const headingMap: Record<string, string> = {

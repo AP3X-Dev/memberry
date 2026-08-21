@@ -4,6 +4,14 @@ import { UnifiedAssembler, type AssemblerCodeLayer, type AssemblerMemoryLayer } 
 import type { FeedbackRedisLayer } from '../feedback.js';
 import type { EmbeddingProvider, LlmClient, ChatMessage } from '@memberry/core';
 import type { RetrievalResult } from '../types.js';
+import { replayRetrievalTrace } from '../trace.js';
+import {
+  createServedRerankerProviderV1,
+  SERVED_RERANKER_PROVIDER_IDENTITY,
+  type ServedRerankerConstructionV1,
+} from '../served-reranker.js';
+import { createRerankerProviderV1 } from '../reranker.js';
+import { classifyIntent } from '../intent.js';
 
 // ─── Mock modules ────────────────────────────────────────────────────────────
 
@@ -44,11 +52,41 @@ vi.mock('../scoring.js', () => ({
 
 // Mock fusion
 vi.mock('../fusion.js', () => ({
-  rrfFusion: vi.fn().mockImplementation((lists: RetrievalResult[][], limit: number) => {
+  rrfFusion: vi.fn().mockImplementation((lists: RetrievalResult[][], limit: number, _k?: number,
+    _boosts?: unknown, _collectionSize?: unknown, _postBoost?: unknown, observer?: {
+      rrf(result: RetrievalResult, value: number): void;
+      score(result: RetrievalResult, name: 'feedback-multiplier' | 'provenance-multiplier', value: number): void;
+      candidateWindow(result: RetrievalResult, admitted: boolean): void;
+      finalScore(result: RetrievalResult, value: number): void;
+      mmr(observation: unknown): void;
+    }) => {
     // Simple flatten + sort for testing
     const all = lists.flat();
     all.sort((a, b) => b.score - a.score);
-    return all.slice(0, limit);
+    const selected = all.slice(0, limit);
+    for (const result of selected) {
+      observer?.rrf(result, result.score);
+      observer?.score(result, 'feedback-multiplier', 1);
+      observer?.score(result, 'provenance-multiplier', 1);
+      observer?.candidateWindow(result, true);
+      observer?.finalScore(result, result.score);
+    }
+    const prior: RetrievalResult[] = [];
+    for (let index = 0; index < selected.length; index += 1) {
+      const remaining = selected.slice(index);
+      observer?.mmr({
+        round: index + 1,
+        selected: selected[index]!,
+        lambda: 0.7,
+        records: remaining.map((candidate) => ({
+          candidate,
+          relevance: candidate.score,
+          pairwise: prior.map((item) => ({ selected: item, similarity: 0 })),
+        })),
+      });
+      prior.push(selected[index]!);
+    }
+    return selected;
   }),
   dedup: vi.fn().mockImplementation((results: RetrievalResult[]) => {
     const seen = new Set<string>();
@@ -123,6 +161,35 @@ function createMockLlm(over: Partial<LlmClient> & { chat?: LlmClient['chat'] } =
     available: over.available ?? true,
     modelFor: over.modelFor ?? ((t) => `model-${t}`),
     chat: over.chat ?? vi.fn().mockResolvedValue(JSON.stringify({ answer: 'synthesized', cited: [1] })),
+  };
+}
+
+function servedCodeLayer(): AssemblerCodeLayer {
+  const rows = [
+    {
+      id: 'baseline-first', source_type: 'symbol', name: 'unrelated', kind: 'function',
+      file_path: '/src/a.ts', start_line: 1, signature: 'function unrelated()',
+      doc_comment: 'generic material', score: 0.9,
+    },
+    {
+      id: 'needle-second', source_type: 'symbol', name: 'needle', kind: 'function',
+      file_path: '/src/b.ts', start_line: 2, signature: 'function needle()',
+      doc_comment: 'needle needle needle', score: 0.1,
+    },
+  ];
+  const observation = {
+    channels: [{ channel: 'code.fulltext' as const, outcome: 'success' as const }],
+    candidates: rows.map((row, index) => ({
+      privateId: row.id,
+      sourceType: 'symbol' as const,
+      channels: [{ channel: 'code.fulltext' as const, rank: index + 1, score: row.score }],
+      evidence: {}, estimatedTokens: 8,
+    })),
+    finalIds: rows.map((row) => row.id),
+  };
+  return {
+    search: vi.fn(async () => rows),
+    searchObserved: vi.fn(async () => ({ value: rows, observation })),
   };
 }
 
@@ -661,6 +728,129 @@ describe('UnifiedAssembler', () => {
       );
       // May or may not hit depending on arch include — just verify no crash
       expect(true).toBe(true);
+    });
+  });
+
+  describe('RET-010C served reranker wiring', () => {
+    function servedAssembler(provider: ServedRerankerConstructionV1 | null = createServedRerankerProviderV1()) {
+      return new UnifiedAssembler(
+        driver as never, redis, servedCodeLayer(), null, embedding, null, provider,
+      );
+    }
+
+    it('makes the provider-derived latch observable and changes normal ranked order and tight-budget membership', async () => {
+      const baseline = servedAssembler(null);
+      const served = servedAssembler();
+
+      expect(baseline.servedRerankerEnabled).toBe(false);
+      expect(served.servedRerankerEnabled).toBe(true);
+      const baselineContext = await baseline.assemble('needle', {
+        strategy: 'ranked', include_arch: false, include_memory: false, max_tokens: 8_000,
+      });
+      const servedContext = await served.assemble('needle', {
+        strategy: 'ranked', include_arch: false, include_memory: false, max_tokens: 8_000,
+      });
+      expect(baselineContext.sections.flatMap((section) => section.items).map((item) => item.id))
+        .toEqual(['baseline-first', 'needle-second']);
+      expect(servedContext.sections.flatMap((section) => section.items).map((item) => item.id))
+        .toEqual(['needle-second', 'baseline-first']);
+      const oppositeQuery = await served.assemble('unrelated', {
+        strategy: 'ranked', include_arch: false, include_memory: false, max_tokens: 8_000,
+      });
+      expect(oppositeQuery.sections.flatMap((section) => section.items).map((item) => item.id))
+        .toEqual(['baseline-first', 'needle-second']);
+
+      const tight = await served.assemble('needle', {
+        strategy: 'ranked', include_arch: false, include_memory: false, max_tokens: 30,
+      });
+      expect(tight.sections.flatMap((section) => section.items).map((item) => item.id))
+        .toEqual(['needle-second']);
+    });
+
+    it('selects ranked-v2 before fusion, records the served stage, and replays the final served order', async () => {
+      const traced = await servedAssembler().assembleTraced('needle', {
+        strategy: 'ranked', include_arch: false, include_memory: false, max_tokens: 8_000,
+      });
+
+      expect(traced.trace.algorithmVersion).toBe('ranked-v2');
+      expect(traced.trace.events.some((event) => event.kind === 'reranker-stage')).toBe(true);
+      expect(replayRetrievalTrace(traced.trace).resultOrder).toEqual(traced.trace.resultOrder);
+    });
+
+    it('falls back exactly inside ranked-v2 when the served provider response is invalid', async () => {
+      const invalid = createRerankerProviderV1(
+        SERVED_RERANKER_PROVIDER_IDENTITY,
+        async () => '{"not":"a reranker response"}',
+      ) as ServedRerankerConstructionV1;
+      const baseline = await servedAssembler(null).assemble('needle', {
+        strategy: 'ranked', include_arch: false, include_memory: false,
+      });
+      const traced = await servedAssembler(invalid).assembleTraced('needle', {
+        strategy: 'ranked', include_arch: false, include_memory: false,
+      });
+
+      expect(traced.trace.algorithmVersion).toBe('ranked-v2');
+      expect(traced.context.sections).toEqual(baseline.sections);
+      expect(traced.trace.events).toContainEqual(expect.objectContaining({
+        kind: 'reranker-stage', outcome: 'baseline',
+      }));
+      expect(servedAssembler(invalid).renderMarkdown(traced.context))
+        .toBe(servedAssembler(null).renderMarkdown(baseline));
+    });
+
+    it.each([
+      ['throw', async () => { throw new Error('private-provider-failure'); }],
+      ['timeout', async () => new Promise<string>(() => undefined)],
+    ] as const)('contains provider %s as one exact baseline application', async (_case, implementation) => {
+      const run = vi.fn(async () => await implementation() as never);
+      const provider = createRerankerProviderV1(
+        SERVED_RERANKER_PROVIDER_IDENTITY, run,
+      ) as ServedRerankerConstructionV1;
+      const baselineAssembler = servedAssembler(null);
+      const configured = servedAssembler(provider);
+      const baseline = await baselineAssembler.assemble('needle', {
+        strategy: 'ranked', include_arch: false, include_memory: false,
+      });
+      const fallback = await configured.assemble('needle', {
+        strategy: 'ranked', include_arch: false, include_memory: false,
+      });
+      expect(fallback.sections).toEqual(baseline.sections);
+      expect(configured.renderMarkdown(fallback)).toBe(baselineAssembler.renderMarkdown(baseline));
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps deterministic, auto-GRAPH, and the exact own-data disable latch on ranked-v1 with zero provider calls', async () => {
+      const real = createServedRerankerProviderV1();
+      const run = vi.fn(real.run);
+      const provider = { identity: real.identity, run } as ServedRerankerConstructionV1;
+      const served = servedAssembler(provider);
+
+      await served.assemble('needle', { strategy: 'deterministic' });
+      vi.mocked(classifyIntent).mockResolvedValueOnce({ intent: 'GRAPH', confidence: 1, method: 'rules' });
+      await served.assemble('needle', { strategy: 'auto' });
+      const disabled = await served.assembleTraced('needle', {
+        strategy: 'ranked', include_arch: false, include_memory: false,
+        servedRerankerDisabled: true,
+      });
+
+      expect(run).not.toHaveBeenCalled();
+      expect(disabled.trace.algorithmVersion).toBe('ranked-v1');
+      const inherited = Object.create({ servedRerankerDisabled: true }) as {
+        servedRerankerDisabled?: true; strategy: 'ranked'; include_arch: false; include_memory: false;
+      };
+      inherited.strategy = 'ranked';
+      inherited.include_arch = false;
+      inherited.include_memory = false;
+      await expect(served.assembleTraced('needle', inherited)).rejects.toThrow('retrieval_options_invalid');
+      await expect(served.assembleTraced('needle', {
+        strategy: 'ranked', servedRerankerDisabled: false,
+      } as never)).rejects.toThrow('retrieval_options_invalid');
+      const accessor = { strategy: 'ranked' } as Record<string, unknown>;
+      Object.defineProperty(accessor, 'servedRerankerDisabled', {
+        enumerable: true, get: () => { throw new Error('must-not-read'); },
+      });
+      await expect(served.assembleTraced('needle', accessor as never)).rejects.toThrow('retrieval_options_invalid');
+      expect(run).not.toHaveBeenCalled();
     });
   });
 

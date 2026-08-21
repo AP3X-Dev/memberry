@@ -7,6 +7,10 @@ import { FeedbackTracker } from '../feedback.js';
 import { classifyIntent } from '../intent.js';
 import { DeterministicRuntimeTraceAdapter, RankedRuntimeTraceAdapter } from '../runtime-trace.js';
 import type { UnifiedContext } from '../types.js';
+import {
+  createServedRerankerProviderV1,
+  type ServedRerankerConstructionV1,
+} from '../served-reranker.js';
 
 const LIMIT = 5_000;
 const TOO_LARGE = 'query_input_too_large';
@@ -44,7 +48,7 @@ function hostileOptions(): { value: object; reads: () => number } {
   return { value, reads: () => count };
 }
 
-function dependencies(llmAvailable = true) {
+function dependencies(llmAvailable = true, servedReranker: ServedRerankerConstructionV1 | null = null) {
   const run = vi.fn(async () => ({ records: [] }));
   const close = vi.fn(async () => undefined);
   const session = vi.fn(() => ({ run, close }));
@@ -68,6 +72,7 @@ function dependencies(llmAvailable = true) {
     { load: memoryLoad },
     { available: true, embed, embedBatch },
     { available: llmAvailable, chat, modelFor: vi.fn(() => 'test') } as never,
+    servedReranker,
   );
   return {
     assembler,
@@ -365,6 +370,89 @@ describe('retrieval query input boundary', () => {
       expect(invalidExecution.reads()).toBe(0);
       expect(traceHook).not.toHaveBeenCalled();
       traceHook.mockRestore();
+    },
+  );
+
+  it('assembleCandidateExecutionServed validates before execution and checks provider availability second', async () => {
+    const { assembler } = dependencies();
+    const oversized = hostileExecution();
+    await expect(assembler.assembleCandidateExecutionServed(
+      'x'.repeat(LIMIT + 1), oversized.value as never, 8_000, true, true,
+    )).rejects.toThrowError(TOO_LARGE);
+    expect(oversized.reads()).toBe(0);
+
+    const invalid = hostileValue();
+    const invalidExecution = hostileExecution();
+    await expect(assembler.assembleCandidateExecutionServed(
+      invalid.value as never, invalidExecution.value as never, 8_000, true, true,
+    )).rejects.toThrowError(INVALID);
+    expect(invalid.reads()).toBe(0);
+    expect(invalidExecution.reads()).toBe(0);
+
+    const valid = hostileExecution();
+    await expect(assembler.assembleCandidateExecutionServed(
+      'valid task', valid.value as never, 8_000, true, true,
+    )).rejects.toThrowError('served_reranker:unavailable');
+    expect(valid.reads()).toBe(0);
+  });
+
+  it('served candidate boundary rejects every 5001-unit Unicode class before provider or execution reads', async () => {
+    const real = createServedRerankerProviderV1();
+    const run = vi.fn(real.run);
+    const { assembler } = dependencies(true, { identity: real.identity, run } as ServedRerankerConstructionV1);
+    for (const query of [
+      'x'.repeat(LIMIT + 1),
+      '\uD800'.repeat(LIMIT + 1),
+      '\uFF2D'.repeat(LIMIT + 1),
+      '\u{1F600}'.repeat((LIMIT / 2) + 1),
+    ]) {
+      const execution = hostileExecution();
+      await expect(assembler.assembleCandidateExecutionServed(
+        query, execution.value as never, 8_000, true, true, true,
+      )).rejects.toThrowError(TOO_LARGE);
+      expect(execution.reads()).toBe(0);
+    }
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['ASCII', 'x'.repeat(LIMIT)],
+    ['lone-surrogate', '\uD800'.repeat(LIMIT)],
+    ['fullwidth', '\uFF2D'.repeat(LIMIT)],
+    ['astral', '\u{1F600}'.repeat(LIMIT / 2)],
+  ] as const)('served candidate accepts the exact 5000-code-unit %s boundary', async (_class, query) => {
+    expect(query.length).toBe(LIMIT);
+    const real = createServedRerankerProviderV1();
+    const run = vi.fn(real.run);
+    const { assembler } = dependencies(true, { identity: real.identity, run } as ServedRerankerConstructionV1);
+    const execution = candidateExecution();
+    const served = await assembler.assembleCandidateExecutionServed(
+      query, execution.execution as never, 8_000, true, true,
+    );
+    expect(served.context.sections).toEqual([]);
+    expect(served.context.token_count).toBe(0);
+    expect(execution.reads().settlements).toBeGreaterThan(0);
+    expect(execution.reads().candidates).toBeGreaterThan(0);
+    expect(run.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it.each(['', 'the and', '!!!', 'a x', 'x'.repeat(33), '\u{1F600}'.repeat(LIMIT / 2)])(
+    'served candidate preserves baseline for the valid retained-empty query %s',
+    async (query) => {
+      const real = createServedRerankerProviderV1();
+      const run = vi.fn(real.run);
+      const { assembler } = dependencies(true, { identity: real.identity, run } as ServedRerankerConstructionV1);
+      const syncExecution = candidateExecution();
+      const servedExecution = candidateExecution();
+      const sync = assembler.assembleCandidateExecution(query, syncExecution.execution as never, 8_000, true, true);
+      const served = await assembler.assembleCandidateExecutionServed(
+        query, servedExecution.execution as never, 8_000, true, true,
+      );
+      expect(served.context.sections).toEqual(sync.context.sections);
+      expect(served.context.token_count).toBe(sync.context.token_count);
+      expect(servedExecution.reads().settlements).toBeGreaterThan(0);
+      expect(servedExecution.reads().candidates).toBeGreaterThan(0);
+      expect(run.mock.calls.length).toBeLessThanOrEqual(1);
     },
   );
 
