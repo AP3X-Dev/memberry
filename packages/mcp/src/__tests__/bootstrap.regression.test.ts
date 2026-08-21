@@ -2,6 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import { resolveBootstrapRerankerModeV1 } from '../bootstrap.js';
 
 const BOOTSTRAP_SOURCE = fs.readFileSync(
   path.resolve(__dirname, '../bootstrap.ts'),
@@ -85,8 +86,8 @@ describe('bootstrap.ts regression', () => {
   ] as const)('RET-003B preserves %s candidate input as a string', (_label, value, expected) => {
     expect(parseComposeCandidateValue(value)).toBe(expected);
   });
-  it('RET-004B wires an exact shadow-only mode, local identity provider, non-persistent sink, and shutdown drain', () => {
-    expect(BOOTSTRAP_SOURCE).toContain("resolveRerankerShadowModeV1(process.env['MEMBERRY_RERANKER_V1'])");
+  it('RET-010D preserves the exact shadow coordinator and adds one served provider composition', () => {
+    expect(BOOTSTRAP_SOURCE).toContain("resolveBootstrapRerankerModeV1(process.env['MEMBERRY_RERANKER_V1'])");
     expect(BOOTSTRAP_SOURCE).toContain('RERANKER_SHADOW_PROVIDER_IDENTITY');
     expect(BOOTSTRAP_SOURCE).toContain('baselineIdentityRerankerScoreV1');
     expect(BOOTSTRAP_SOURCE).toContain('await rerankerShadowCoordinator.shutdown()');
@@ -94,15 +95,38 @@ describe('bootstrap.ts regression', () => {
     expect(BOOTSTRAP_SOURCE).not.toContain('rerankerShadowRedis');
     expect(BOOTSTRAP_SOURCE).not.toContain('rerankerShadowDriver');
     expect(BOOTSTRAP_SOURCE).not.toContain('[memberry-reranker-shadow]');
+    expect(BOOTSTRAP_SOURCE.match(/createServedRerankerProviderV1\(\)/g)).toHaveLength(1);
+    expect(BOOTSTRAP_SOURCE).toMatch(/new UnifiedAssembler\([\s\S]*?embedding,\s*llm,\s*servedReranker,\s*\)/);
   });
-  it('RET-004B requires both authority-sealing runtime switches before shadow startup', () => {
+  it('RET-010D requires both authority switches for shadow and served before core effects', () => {
     expect(BOOTSTRAP_SOURCE).toContain("const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1'");
     expect(BOOTSTRAP_SOURCE).toContain("const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1'");
     expect(BOOTSTRAP_SOURCE).toContain("if (rerankerMode === 'shadow' && (!queryPlannerEnabled || !candidateChannelEnabled))");
     expect(BOOTSTRAP_SOURCE).toContain("throw new Error('reranker_shadow:prerequisite_unavailable')");
-    expect(BOOTSTRAP_SOURCE.indexOf('const rerankerMode = resolveRerankerShadowModeV1')).toBeLessThan(
+    expect(BOOTSTRAP_SOURCE).toContain("throw new Error('reranker_served:prerequisite_unavailable')");
+    expect(BOOTSTRAP_SOURCE.indexOf('const rerankerMode = resolveBootstrapRerankerModeV1')).toBeLessThan(
       BOOTSTRAP_SOURCE.indexOf('const core = createCoreServices'),
     );
+    expect(BOOTSTRAP_SOURCE.indexOf("if (rerankerMode === 'served'")).toBeLessThan(
+      BOOTSTRAP_SOURCE.indexOf('const core = createCoreServices'),
+    );
+  });
+  it.each([
+    ['unset', undefined, 'disabled'], ['empty', '', 'disabled'], ['disabled', 'disabled', 'disabled'],
+    ['shadow', 'shadow', 'shadow'], ['served', 'served', 'served'],
+  ] as const)('RET-010D directly resolves accepted %s mode', (_label, raw, expected) => {
+    expect(resolveBootstrapRerankerModeV1(raw)).toBe(expected);
+  });
+  it.each([
+    ' ', ' disabled', 'disabled ', 'Disabled', 'SHADOW', 'Served', '1', 'true', 'enabled',
+    'serve', 'shadow\0', '\tserved', 'served\r\n', 'undefined', 'null',
+  ])('RET-010D rejects raw mode %j with one value-free error', (raw) => {
+    let message = '';
+    try { resolveBootstrapRerankerModeV1(raw); } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe('reranker_mode:invalid');
+    expect(message).not.toContain(raw);
   });
   it.each([
     ['unset', undefined, ''], ['empty', '', ''], ['shadow', 'shadow', 'shadow'],
@@ -111,15 +135,18 @@ describe('bootstrap.ts regression', () => {
   ] as const)('RET-004B preserves %s reranker input exactly for fail-closed parsing', (_label, value, expected) => {
     expect(parseComposeRerankerMode(value)).toBe(expected);
   });
-  it('RET-004B registers the rollback-safe default-off shadow experiment', () => {
+  it('RET-010D atomically supersedes the rollback-safe default-off experiment truth', () => {
     expect(EXPERIMENTS.experiments).toContainEqual({
-      id: 'retrieval-reranker-shadow-v1',
+      id: 'retrieval-reranker-v1',
       owner: 'retrieval-engine',
       flag: 'MEMBERRY_RERANKER_V1',
       defaultEnabled: false,
       control: 'memberry-live-mcp',
-      rollback: 'Unset MEMBERRY_RERANKER_V1 and restart. Shadow observations are content-free and non-persistent; returned context is always baseline-controlled.',
+      rollback: 'Set MEMBERRY_RERANKER_V1=disabled or unset it, then restart. Local reranking is non-persistent; shadow observations remain content-free.',
     });
+    expect(JSON.stringify(EXPERIMENTS)).not.toContain('retrieval-reranker-shadow-v1');
+    expect(JSON.stringify(EXPERIMENTS)).not.toContain('shadow-only');
+    expect(JSON.stringify(EXPERIMENTS)).not.toContain('returned context is always baseline-controlled');
     expect(BOOTSTRAP_SOURCE).not.toContain('MEMBERRY_RERANKER_MODE');
     expect(BOOTSTRAP_SOURCE).not.toContain('MEMBERRY_RERANKER_SHADOW_V1');
   });

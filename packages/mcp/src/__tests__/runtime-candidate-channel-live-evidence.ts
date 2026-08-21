@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 const DIRECTORY = 'memberry-candidate-channel-live';
 const FILENAME = 'evidence.json';
 const ENV = 'MEMBERRY_RET003B_EVIDENCE_PATH';
-const BYTES = '{"contract":"RET-003B","mode":"required","disposable":true,"realBootstrap":true,"centralHttpAuthentication":true,"defaultAndDedicatedRouting":true,"realChannels":3,"unavailableChannels":12,"deterministicRepeat":true,"candidateOffPlannerOnParity":true,"sourceFailureIsolated":true,"cleanupCount":0}\n';
+const BYTES = '{"contract":"RET-003B","mode":"required","disposable":true,"realBootstrap":true,"centralHttpAuthentication":true,"defaultAndDedicatedRouting":true,"realChannels":3,"unavailableChannels":12,"deterministicRepeat":true,"candidateOffPlannerOnParity":true,"sourceFailureIsolated":true,"cleanupCount":0,"ret010dDefaultOffParity":true,"ret010dExplicitDisabled":true,"ret010dServedRankedV2":true,"ret010dServedAutoRankedV2":true,"ret010dFailureBaseline":true,"ret010dDeterministicBypass":true,"ret010dAskEvidence":true,"ret010dProviderScopeBound":true}\n';
 
 type Code = 'INPUT_INVALID' | 'PATH_INVALID' | 'PLATFORM_UNSUPPORTED' | 'PARENT_INVALID'
   | 'PARENT_CHANGED' | 'LEAF_LINK' | 'LEAF_HARDLINK' | 'EXISTS' | 'LEAF_INVALID' | 'WRITE_FAILED';

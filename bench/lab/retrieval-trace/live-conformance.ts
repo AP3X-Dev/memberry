@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,6 +24,7 @@ import {
 } from '../../../packages/retrieval/src/tools.js';
 import {
   assertTraceConformanceManifest,
+  inspectRet010dRerankerStage,
   inspectTraceToolResult,
   sanitizeTraceConformanceManifest,
   observeOrderedMarkdownResultIds,
@@ -36,6 +37,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 300_000;
 const MAX_HTTP_RESPONSE_BYTES = 4_194_304;
 const NAMED_TENANT = 'ret001d-named';
+export type Ret010dRuntimeProfile = 'legacy' | 'disabled' | 'served';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -354,6 +356,113 @@ export const TRACE_INSPECTION_FIXED_CODES = Object.freeze([
   'RET001D_TRACE_BLOCK_COUNT',
 ] as const);
 
+export const RET010D_CASE_IDS = Object.freeze([
+  'authority-disabled-ranked',
+  'authority-served-ranked',
+  'authority-disabled-auto',
+  'authority-served-auto',
+  'authority-disabled-deterministic',
+  'authority-served-deterministic',
+] as const);
+
+export type Ret010dCaseId = typeof RET010D_CASE_IDS[number];
+
+export const RET010D_CASE_STAGES = Object.freeze([
+  'ordinary-call',
+  'ordinary-presentation',
+  'ordinary-inspection',
+  'false-call',
+  'false-inspection',
+  'traced-call',
+  'traced-inspection',
+  'presentation-parity',
+  'reranker-stage-inspection',
+] as const);
+
+export type Ret010dCaseStage = typeof RET010D_CASE_STAGES[number];
+
+const RET010D_CALL_FIXED_CAUSES = Object.freeze([
+  'RET001D_HTTP_BODY_ABORTED',
+  'RET001D_HTTP_BODY_READ_FAILED',
+  'RET001D_HTTP_BODY_TOO_LARGE',
+  'RET001D_MCP_CORRELATION_INVALID',
+  'RET001D_MCP_ENVELOPE_INVALID',
+  'RET001D_MCP_INITIALIZE_INVALID',
+  'RET001D_MCP_NETWORK',
+  'RET001D_MCP_RPC_ERROR',
+  'RET001D_MCP_TIMEOUT',
+  'RET001D_MCP_TOOL_RESPONSE_INVALID',
+] as const);
+
+const RET010D_PRESENTATION_FIXED_CAUSES = Object.freeze([
+  'RET001D_MCP_RESULT_INVALID',
+  'RET001D_MCP_TOOL_FAILURE',
+  'RET001D_MARKDOWN_INVALID',
+  'RET001D_MARKDOWN_REQUEST_MISMATCH',
+  'RET001D_SEEDED_RESULT_EMPTY',
+  'RET001D_MARKDOWN_PROVENANCE_INVALID',
+  'RET001D_MARKDOWN_RESULT_INVALID',
+  'RET001D_MARKDOWN_RESULT_COUNT_MISMATCH',
+  'RET001D_SEEDED_RESULT_MISSING',
+  'RET001D_MARKDOWN_RESULT_ORDER_MISMATCH',
+  'RET001D_NO_TRACE_BLOCK_COUNT',
+] as const);
+
+const RET010D_TRACED_INSPECTION_FIXED_CAUSES = Object.freeze([
+  ...TRACE_INSPECTION_FIXED_CODES,
+  'RET010D_TRACE_BLOCK_COUNT',
+] as const);
+
+export const RET010D_STAGE_FIXED_CAUSES = Object.freeze({
+  'ordinary-call': RET010D_CALL_FIXED_CAUSES,
+  'ordinary-presentation': RET010D_PRESENTATION_FIXED_CAUSES,
+  'ordinary-inspection': RET010D_PRESENTATION_FIXED_CAUSES,
+  'false-call': RET010D_CALL_FIXED_CAUSES,
+  'false-inspection': RET010D_PRESENTATION_FIXED_CAUSES,
+  'traced-call': RET010D_CALL_FIXED_CAUSES,
+  'traced-inspection': RET010D_TRACED_INSPECTION_FIXED_CAUSES,
+  'presentation-parity': Object.freeze(['RET010D_PRESENTATION_PARITY_MISMATCH'] as const),
+  'reranker-stage-inspection': Object.freeze([
+    'RET001D_MCP_RESULT_INVALID',
+    'RET001D_MCP_TOOL_FAILURE',
+    'RET010D_TRACE_BLOCK_COUNT',
+    'RET010D_TRACE_INVALID',
+    'RET010D_RERANKER_STAGE_INVALID',
+  ] as const),
+} satisfies Record<Ret010dCaseStage, readonly string[]>);
+
+const RET010D_CASE_DIAGNOSTIC = Object.freeze({
+  'authority-disabled-ranked': 'AUTHORITY_DISABLED_RANKED',
+  'authority-served-ranked': 'AUTHORITY_SERVED_RANKED',
+  'authority-disabled-auto': 'AUTHORITY_DISABLED_AUTO',
+  'authority-served-auto': 'AUTHORITY_SERVED_AUTO',
+  'authority-disabled-deterministic': 'AUTHORITY_DISABLED_DETERMINISTIC',
+  'authority-served-deterministic': 'AUTHORITY_SERVED_DETERMINISTIC',
+} satisfies Record<Ret010dCaseId, string>);
+
+const RET010D_STAGE_DIAGNOSTIC = Object.freeze({
+  'ordinary-call': 'ORDINARY_CALL',
+  'ordinary-presentation': 'ORDINARY_PRESENTATION',
+  'ordinary-inspection': 'ORDINARY_INSPECTION',
+  'false-call': 'FALSE_CALL',
+  'false-inspection': 'FALSE_INSPECTION',
+  'traced-call': 'TRACED_CALL',
+  'traced-inspection': 'TRACED_INSPECTION',
+  'presentation-parity': 'PRESENTATION_PARITY',
+  'reranker-stage-inspection': 'RERANKER_STAGE_INSPECTION',
+} satisfies Record<Ret010dCaseStage, string>);
+
+const RET010D_CASE_STAGE_DIAGNOSTICS = new Set<string>();
+for (const id of RET010D_CASE_IDS) {
+  for (const stage of RET010D_CASE_STAGES) {
+    const prefix = `RET010D_CASE_${RET010D_CASE_DIAGNOSTIC[id]}_STAGE_${RET010D_STAGE_DIAGNOSTIC[stage]}`;
+    RET010D_CASE_STAGE_DIAGNOSTICS.add(`${prefix}_UNKNOWN`);
+    for (const cause of RET010D_STAGE_FIXED_CAUSES[stage]) {
+      RET010D_CASE_STAGE_DIAGNOSTICS.add(`${prefix}_${cause.slice('RET001D_'.length)}`);
+    }
+  }
+}
+
 type TraceInspectionFixedCode = typeof TRACE_INSPECTION_FIXED_CODES[number];
 type RankedTracedInspectionByCause = {
   readonly [Code in TraceInspectionFixedCode]: Code extends `RET001D_${infer Subreason}`
@@ -464,6 +573,14 @@ const STATIC_DIAGNOSTIC_CODES = new Set([
   'RET001D_TENANT_ISOLATION_FAILURE',
   'RET001D_TRACE_BLOCK_COUNT',
   'RET001D_TRACED_PARITY_MISMATCH',
+  'RET010D_CASE_STAGE_DIAGNOSTIC_INVALID',
+  'RET010D_CHILD_PROFILE_INVALID',
+  'RET010D_DETERMINISTIC_BYPASS_MISMATCH',
+  'RET010D_MANIFEST_KEYS',
+  'RET010D_MANIFEST_SHAPE',
+  'RET010D_MATCHED_CONTROL_UNCHANGED',
+  'RET010D_NEO4J_SEED_FAILED',
+  'RET010D_NEO4J_SESSION_CLOSE_FAILED',
 ]);
 
 function validSeededCaseDiagnostic(match: RegExpMatchArray): boolean {
@@ -489,6 +606,7 @@ function validSeededCaseDiagnostic(match: RegExpMatchArray): boolean {
 
 function validDynamicDiagnostic(code: string): boolean {
   if (/^RET001D_MCP_HTTP_[1-5][0-9]{2}$/.test(code)) return true;
+  if (RET010D_CASE_STAGE_DIAGNOSTICS.has(code)) return true;
   if (RANKED_TRACED_INSPECTION_DIAGNOSTICS.has(code)) return true;
   const match = code.match(
     /^RET001D_CASE_(DETERMINISTIC|RANKED|AUTO|NAMED_TENANT_FORCED_RANKED)_STAGE_(ORDINARY_CALL|ORDINARY_PRESENTATION|ORDINARY_INSPECTION|FALSE_CALL|FALSE_INSPECTION|TRACED_CALL|TRACED_INSPECTION|FALSE_PARITY|TRACED_PARITY|TENANT_ISOLATION)(?:_SEEDED_(EXPECTED|ALTERNATE|PROJECT_ONLY|NONE)_E(0|[1-9][0-9]{0,2})_A(0|[1-9][0-9]{0,2})_P(0|[1-9][0-9]{0,2})_O(0|[1-9][0-9]{0,2})_T(0|[1-9][0-9]{0,2}))?$/,
@@ -781,7 +899,11 @@ export function childEnvironment(
   config: TraceConformanceConfig,
   mode: 'single-default' | 'named-tenant',
   exportPath: string,
+  runtimeProfile: Ret010dRuntimeProfile = 'legacy',
 ): NodeJS.ProcessEnv {
+  if (runtimeProfile !== 'legacy' && runtimeProfile !== 'disabled' && runtimeProfile !== 'served') {
+    throw new Error('RET010D_CHILD_PROFILE_INVALID');
+  }
   const inherited = Object.fromEntries(
     ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'PATH', 'PATHEXT', 'COMSPEC']
       .flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]!]]),
@@ -802,6 +924,11 @@ export function childEnvironment(
     MEMBERRY_EXPORT_PATH: exportPath,
     MEMBERRY_CONSOLIDATION_ENABLED: 'false',
     MEMBERRY_WIKI_AUTOREFRESH: 'false',
+    ...(runtimeProfile === 'legacy' ? {} : {
+      MEMBERRY_QUERY_PLANNER_V1: '1',
+      MEMBERRY_CANDIDATE_CHANNEL_V1: '1',
+      MEMBERRY_RERANKER_V1: runtimeProfile,
+    }),
     [RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENV]: RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED,
     OPENAI_API_KEY: '',
   };
@@ -843,10 +970,11 @@ class CompositionRoot {
     private readonly config: TraceConformanceConfig,
     private readonly mode: 'single-default' | 'named-tenant',
     exportPath: string,
+    runtimeProfile: Ret010dRuntimeProfile = 'legacy',
   ) {
     const command = compositionRootCommand();
     this.child = spawn(command.executable, command.args, {
-      cwd: process.cwd(), env: childEnvironment(config, mode, exportPath),
+      cwd: process.cwd(), env: childEnvironment(config, mode, exportPath, runtimeProfile),
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     if (this.child.stderr === null) {
@@ -903,6 +1031,21 @@ interface FixtureIdentity {
   readonly defaultContent: string;
   readonly namedContent: string;
   readonly decoyContent: string;
+}
+
+interface Ret010dFixtureIdentity {
+  readonly projectName: string;
+  readonly projectScope: string;
+  readonly target: string;
+  readonly query: string;
+  readonly baselineId: string;
+  readonly lexicalId: string;
+  readonly foreignTenantId: string;
+  readonly foreignProjectId: string;
+  readonly futureId: string;
+  readonly foreignTenantContent: string;
+  readonly foreignProjectContent: string;
+  readonly futureContent: string;
 }
 
 interface SeedReadbackFixture {
@@ -1068,6 +1211,50 @@ async function seedFixtures(driver: Driver, fixture: FixtureIdentity, timeoutMs:
       }, timeoutMs, 'RET001D_NEO4J_SEED_FAILED');
   } finally {
     await session.close().catch(() => { throw new Error('RET001D_NEO4J_SESSION_CLOSE_FAILED'); });
+  }
+}
+
+async function seedRet010dFixtures(
+  driver: Driver,
+  run: string,
+  fixture: Ret010dFixtureIdentity,
+  timeoutMs: number,
+): Promise<void> {
+  const session = driver.session();
+  try {
+    await neo4jRun(session,
+      `CREATE (p:Entity {id:$projectId, name:$project, type:'project', category:'project', tenant_id:'default', ret001d_run:$run, created_at:$now})
+       CREATE (e:Entity {id:$targetId, name:$target, type:'service', category:'service', aliases:[$target], tenant_id:'default', ret001d_run:$run, created_at:$now})
+       CREATE (p)-[:CONTAINS {ret001d_run:$run}]->(e)
+       CREATE (baseline:Semantic {id:$baselineId, content:'stable baseline memory', confidence:0.99, signal_count:9, created_at:$now, updated_at:$now, decay_class:'stable', memory_type:'architecture', tags:[$scope], scope:$scope, tenant_id:'default', ret001d_run:$run})
+       CREATE (lexical:Semantic {id:$lexicalId, content:$lexicalContent, confidence:0.01, signal_count:1, created_at:$now, updated_at:$now, decay_class:'stable', memory_type:'architecture', tags:[$scope], scope:$scope, tenant_id:'default', ret001d_run:$run})
+       CREATE (baseline)-[:ABOUT {ret001d_run:$run, valid_at:'2026-01-01T00:00:00.000Z'}]->(e)
+       CREATE (lexical)-[:ABOUT {ret001d_run:$run, valid_at:'2026-01-01T00:00:00.000Z'}]->(e)
+       CREATE (foreignTenant:Semantic {id:$foreignTenantId, content:$foreignTenantContent, confidence:1.0, signal_count:9, created_at:$now, updated_at:$now, decay_class:'stable', memory_type:'architecture', tags:[$scope], scope:$scope, tenant_id:'ret010d-foreign', ret001d_run:$run})
+       CREATE (foreignTenant)-[:ABOUT {ret001d_run:$run, valid_at:'2026-01-01T00:00:00.000Z'}]->(e)
+       CREATE (future:Semantic {id:$futureId, content:$futureContent, confidence:1.0, signal_count:9, created_at:$now, updated_at:$now, decay_class:'stable', memory_type:'architecture', tags:[$scope], scope:$scope, tenant_id:'default', ret001d_run:$run})
+       CREATE (future)-[:ABOUT {ret001d_run:$run, valid_at:'2099-01-01T00:00:00.000Z'}]->(e)
+       CREATE (op:Entity {id:$foreignProjectEntityId, name:$foreignProjectName, type:'project', category:'project', tenant_id:'default', ret001d_run:$run, created_at:$now})
+       CREATE (oe:Entity {id:$foreignProjectTargetId, name:$foreignProjectTarget, type:'service', category:'service', tenant_id:'default', ret001d_run:$run, created_at:$now})
+       CREATE (op)-[:CONTAINS {ret001d_run:$run}]->(oe)
+       CREATE (foreignProject:Semantic {id:$foreignProjectId, content:$foreignProjectContent, confidence:1.0, signal_count:9, created_at:$now, updated_at:$now, decay_class:'stable', memory_type:'architecture', tags:[$foreignScope], scope:$foreignScope, tenant_id:'default', ret001d_run:$run})
+       CREATE (foreignProject)-[:ABOUT {ret001d_run:$run, valid_at:'2026-01-01T00:00:00.000Z'}]->(oe)`,
+      {
+        run, now: new Date().toISOString(), projectId: `ret010d-project-${run}`, project: fixture.projectName,
+        targetId: `ret010d-target-${run}`, target: fixture.target, scope: fixture.projectScope,
+        baselineId: fixture.baselineId, lexicalId: fixture.lexicalId,
+        lexicalContent: fixture.query,
+        foreignTenantId: fixture.foreignTenantId, foreignTenantContent: fixture.foreignTenantContent,
+        futureId: fixture.futureId, futureContent: fixture.futureContent,
+        foreignProjectEntityId: `ret010d-foreign-project-entity-${run}`,
+        foreignProjectName: `ret010d-foreign-project-${run}`,
+        foreignProjectTargetId: `ret010d-foreign-target-entity-${run}`,
+        foreignProjectTarget: `ret010d-foreign-target-${run}`,
+        foreignProjectId: fixture.foreignProjectId, foreignProjectContent: fixture.foreignProjectContent,
+        foreignScope: `project:ret010d-foreign-project-${run}`,
+      }, timeoutMs, 'RET010D_NEO4J_SEED_FAILED');
+  } finally {
+    await session.close().catch(() => { throw new Error('RET010D_NEO4J_SESSION_CLOSE_FAILED'); });
   }
 }
 
@@ -1961,6 +2148,134 @@ async function executeCase(
   };
 }
 
+const RET010D_LIVE_CASES = Object.freeze({
+  'authority-disabled-ranked': ['disabled', 'ranked', 'ranked-v1'],
+  'authority-served-ranked': ['served', 'ranked', 'ranked-v2'],
+  'authority-disabled-auto': ['disabled', 'auto', 'ranked-v1'],
+  'authority-served-auto': ['served', 'auto', 'ranked-v2'],
+  'authority-disabled-deterministic': ['disabled', 'deterministic', 'ranked-v1'],
+  'authority-served-deterministic': ['served', 'deterministic', 'ranked-v1'],
+} as const satisfies Record<
+  Ret010dCaseId,
+  readonly [
+    Exclude<Ret010dRuntimeProfile, 'legacy'>,
+    'ranked' | 'auto' | 'deterministic',
+    RetrievalTraceAlgorithmVersion,
+  ]
+>);
+
+export function ret010dCaseStageDiagnosticCode(
+  id: Ret010dCaseId,
+  stage: Ret010dCaseStage,
+  cause?: unknown,
+): string {
+  if (typeof id !== 'string' || typeof stage !== 'string'
+    || !Object.prototype.hasOwnProperty.call(RET010D_CASE_DIAGNOSTIC, id)
+    || !Object.prototype.hasOwnProperty.call(RET010D_STAGE_DIAGNOSTIC, stage)) {
+    throw new Error('RET010D_CASE_STAGE_DIAGNOSTIC_INVALID');
+  }
+  const prefix = `RET010D_CASE_${RET010D_CASE_DIAGNOSTIC[id]}_STAGE_${RET010D_STAGE_DIAGNOSTIC[stage]}`;
+  const innerCode = safeNativeErrorMessage(cause);
+  if (innerCode === undefined
+    || !(RET010D_STAGE_FIXED_CAUSES[stage] as readonly string[]).includes(innerCode)) {
+    return `${prefix}_UNKNOWN`;
+  }
+  return `${prefix}_${innerCode.slice('RET001D_'.length)}`;
+}
+
+async function atRet010dCaseStage<T>(
+  id: Ret010dCaseId,
+  stage: Ret010dCaseStage,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  try { return await operation(); }
+  catch (error) { throw new Error(ret010dCaseStageDiagnosticCode(id, stage, error)); }
+}
+
+interface Ret010dExecutedCase {
+  readonly manifest: JsonRecord;
+  readonly markdown: string;
+  readonly presentationOrderDigest: string;
+}
+
+async function executeRet010dCase(
+  transport: TraceMcpTransport,
+  id: Ret010dCaseId,
+  fixture: Ret010dFixtureIdentity,
+  forbidden: readonly string[],
+): Promise<Ret010dExecutedCase> {
+  const [runtimeProfile, requestedStrategy, expectedAlgorithm] = RET010D_LIVE_CASES[id];
+  const servedAttempt = expectedAlgorithm === 'ranked-v2';
+  const requiredId = servedAttempt ? fixture.lexicalId : fixture.baselineId;
+  const baseArgs = {
+    task: fixture.query,
+    strategy: requestedStrategy,
+    as_of: '2026-08-01T00:00:00.000Z',
+    include_code: false,
+    include_arch: false,
+    include_memory: true,
+    max_tokens: 6,
+    project_name: fixture.projectScope,
+    entity_scope: [fixture.target],
+  };
+  const ordinaryResult = await atRet010dCaseStage(id, 'ordinary-call',
+    () => transport.call('berry_context', baseArgs));
+  const resultIds = await atRet010dCaseStage(id, 'ordinary-presentation',
+    () => observeOrderedMarkdownResultIds(ordinaryResult, {
+      expectedTask: fixture.query,
+      expectedStrategy: 'ranked',
+      requiredResultIds: [requiredId],
+    }));
+  const expectation = {
+    expectedTask: fixture.query,
+    expectedStrategy: 'ranked' as const,
+    expectedResultIds: resultIds,
+  };
+  const omitted = await atRet010dCaseStage(id, 'ordinary-inspection',
+    () => inspectTraceToolResult(ordinaryResult, { mode: 'omitted', ...expectation }));
+  const explicitFalseResult = await atRet010dCaseStage(id, 'false-call',
+    () => transport.call('berry_context', { ...baseArgs, include_trace: false }));
+  const explicitFalse = await atRet010dCaseStage(id, 'false-inspection',
+    () => inspectTraceToolResult(explicitFalseResult, { mode: 'false', ...expectation }));
+  const tracedResult = await atRet010dCaseStage(id, 'traced-call',
+    () => transport.call('berry_context', { ...baseArgs, include_trace: true }));
+  const traced = await atRet010dCaseStage(id, 'traced-inspection', () => {
+    const inspected = inspectTraceToolResult(tracedResult, {
+      mode: 'true', expectedAlgorithm, forbiddenValues: forbidden, ...expectation,
+    });
+    if (!('trace' in inspected)) throw new Error('RET010D_TRACE_BLOCK_COUNT');
+    return inspected;
+  });
+  await atRet010dCaseStage(id, 'presentation-parity', () => {
+    if (omitted.markdown !== explicitFalse.markdown || omitted.markdown !== traced.markdown) {
+      throw new Error('RET010D_PRESENTATION_PARITY_MISMATCH');
+    }
+  });
+  const rerankerStage = await atRet010dCaseStage(id, 'reranker-stage-inspection',
+    () => inspectRet010dRerankerStage(
+      tracedResult,
+      servedAttempt ? 'reranked' : 'absent',
+    ));
+  const presentationOrderDigest = `sha256:${createHash('sha256')
+    .update(JSON.stringify(resultIds)).digest('hex')}`;
+  return Object.freeze({
+    markdown: omitted.markdown,
+    presentationOrderDigest,
+    manifest: {
+      id,
+      runtimeProfile,
+      requestedStrategy,
+      actualAlgorithm: traced.trace.algorithmVersion,
+      contentBlocks: { omitted: 1, false: 1, traced: 2 },
+      parity: { falseEqualsOmitted: true, tracedMarkdownEqualsOrdinary: true },
+      presentationCount: resultIds.length,
+      presentationOrderDigest,
+      rerankerStage,
+      trace: traced.trace,
+    },
+  });
+}
+
 async function gitState(timeoutMs: number): Promise<{ sha: string; dirty: false }> {
   const [{ stdout: sha }, { stdout: status }] = await Promise.all([
     execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), timeout: timeoutMs }),
@@ -2015,10 +2330,38 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     namedContent: `RET001D ${run} named synthetic semantic content`,
     decoyContent: `RET001D ${run} cross-tenant decoy must never appear`,
   };
+  const ret010dFixture: Ret010dFixtureIdentity = {
+    projectName: `ret010d-project-${run}`,
+    projectScope: `project:ret010d-project-${run}`,
+    target: `ret010d-target-${run}`,
+    query: 'cobalt',
+    baselineId: `ret010d-baseline-${run}`,
+    lexicalId: `ret010d-lexical-${run}`,
+    foreignTenantId: `ret010d-foreign-tenant-${run}`,
+    foreignProjectId: `ret010d-foreign-project-memory-${run}`,
+    futureId: `ret010d-future-${run}`,
+    foreignTenantContent: `RET010D ${run} foreign tenant sentinel`,
+    foreignProjectContent: `RET010D ${run} foreign project sentinel`,
+    futureContent: `RET010D ${run} future sentinel`,
+  };
   const queries = traceFixtureQueries(fixture);
   const forbidden = traceFixtureForbiddenValues(
     [config.defaultToken, config.namedToken, config.neo4jPassword], fixture, queries,
   );
+  const allForbidden = Object.freeze([...new Set([...forbidden,
+    run,
+    ret010dFixture.projectName, ret010dFixture.projectScope,
+    ret010dFixture.target, ret010dFixture.query,
+    ret010dFixture.baselineId, ret010dFixture.lexicalId,
+    'stable baseline memory',
+    ret010dFixture.foreignTenantId, ret010dFixture.foreignProjectId, ret010dFixture.futureId,
+    ret010dFixture.foreignTenantContent, ret010dFixture.foreignProjectContent, ret010dFixture.futureContent,
+    'ret010d-foreign',
+    `ret010d-project-${run}`, `ret010d-target-${run}`,
+    `ret010d-foreign-project-entity-${run}`, `ret010d-foreign-project-${run}`,
+    `ret010d-foreign-target-entity-${run}`, `ret010d-foreign-target-${run}`,
+    `project:ret010d-foreign-project-${run}`,
+  ])]);
   let driver: Driver | undefined;
   let redis: Redis | undefined;
   let tempPath: string | undefined;
@@ -2033,6 +2376,7 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
   let executionError: Error | undefined;
   let observedServices: JsonRecord | undefined;
   const cases: JsonRecord[] = [];
+  const ret010dCases: JsonRecord[] = [];
   const readinessEvidence: Array<{ mode: string; status: number; classification: string }> = [];
 
   try {
@@ -2106,6 +2450,47 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     }, seedReadback, [...forbidden, ...namedIsolation], namedIsolation));
     await active.stop();
     active = undefined;
+
+    await seedRet010dFixtures(driver, run, ret010dFixture, config.requestTimeoutMs);
+    active = new CompositionRoot(config, 'single-default', exportPath, 'disabled');
+    await active.waitUntilReady();
+    const disabledTransport = new TraceMcpTransport(config, config.defaultToken);
+    const disabledRanked = await executeRet010dCase(
+      disabledTransport, 'authority-disabled-ranked', ret010dFixture, allForbidden,
+    );
+    const disabledAuto = await executeRet010dCase(
+      disabledTransport, 'authority-disabled-auto', ret010dFixture, allForbidden,
+    );
+    const disabledDeterministic = await executeRet010dCase(
+      disabledTransport, 'authority-disabled-deterministic', ret010dFixture, allForbidden,
+    );
+    ret010dCases.push(disabledRanked.manifest, disabledAuto.manifest, disabledDeterministic.manifest);
+    await active.stop();
+    active = undefined;
+
+    active = new CompositionRoot(config, 'single-default', exportPath, 'served');
+    await active.waitUntilReady();
+    const servedTransport = new TraceMcpTransport(config, config.defaultToken);
+    const servedRanked = await executeRet010dCase(
+      servedTransport, 'authority-served-ranked', ret010dFixture, allForbidden,
+    );
+    const servedAuto = await executeRet010dCase(
+      servedTransport, 'authority-served-auto', ret010dFixture, allForbidden,
+    );
+    const servedDeterministic = await executeRet010dCase(
+      servedTransport, 'authority-served-deterministic', ret010dFixture, allForbidden,
+    );
+    ret010dCases.push(servedRanked.manifest, servedAuto.manifest, servedDeterministic.manifest);
+    if (disabledRanked.presentationOrderDigest === servedRanked.presentationOrderDigest
+      || disabledAuto.presentationOrderDigest === servedAuto.presentationOrderDigest) {
+      throw new Error('RET010D_MATCHED_CONTROL_UNCHANGED');
+    }
+    if (disabledDeterministic.presentationOrderDigest !== servedDeterministic.presentationOrderDigest
+      || disabledDeterministic.markdown !== servedDeterministic.markdown) {
+      throw new Error('RET010D_DETERMINISTIC_BYPASS_MISMATCH');
+    }
+    await active.stop();
+    active = undefined;
     childProcessesStopped = true;
   } catch (error) {
     executionError = new Error(safeDiagnosticCode(error));
@@ -2142,7 +2527,8 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
   }
 
   if (executionError) throw executionError;
-  if (cases.length !== 4 || graphResidual.nodes !== 0 || graphResidual.relationships !== 0
+  if (cases.length !== 4 || ret010dCases.length !== 6
+    || graphResidual.nodes !== 0 || graphResidual.relationships !== 0
     || redisResidual.ownedCreated !== 7 || redisResidual.ownedRemaining !== 0
     || redisResidual.unexpectedNewKeys !== 0) {
     throw new Error('RET001D_CLEANUP_OR_CASE_COUNT_INVALID');
@@ -2168,6 +2554,7 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     result: {
       fidelity: 'composition-root / live-disposable-persistence',
       cases,
+      ret010dCases,
       readiness: {
         singleDefault: {
           httpStatus: readinessEvidence.find(({ mode }) => mode === 'single-default')?.status,
@@ -2195,10 +2582,10 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
       temporaryExportPathRemoved: tempRemoved,
       disposableServiceOwnership: 'caller-provided-loopback-services',
     },
-  }, forbidden, manifestTruth) as JsonRecord;
+  }, allForbidden, manifestTruth) as JsonRecord;
   assertTraceConformanceManifest(manifest, manifestTruth);
   const serialized = `${JSON.stringify(manifest, null, 2)}\n`;
-  for (const value of forbidden) if (value && serialized.includes(value)) throw new Error('RET001D_MANIFEST_FORBIDDEN_VALUE');
+  for (const value of allForbidden) if (value && serialized.includes(value)) throw new Error('RET001D_MANIFEST_FORBIDDEN_VALUE');
   if (config.evidencePath) {
     try {
       await mkdir(dirname(config.evidencePath), { recursive: true });
