@@ -15,6 +15,16 @@ control run, candidate run, or deployment has been performed. No candidate
 adapter, candidate source, candidate result, control result, or holdout semantic
 outcome was used to author or order the scenarios.
 
+**CI admission status:** both unqualified v2 dataset descriptors are deliberately
+`requiredInCi: false`, so the generic required-dataset CI route cannot treat an
+unqualified instrument as an executable required comparison. Hosted run
+`32437689875` remains red evidence and is not reinterpreted or replaced by this
+registry correction. The instrument remains reachable through its dedicated
+loader/scorer/qualification tests and the explicit manual control-qualification
+workflow. Enabling generic required-CI execution requires a future, separately
+reviewed capability-aware gate that can supply the correct registered arms and
+joined qualification authority without weakening scorer custody.
+
 **Public order-seed commitment (recorded before scenario bytes):** the frozen
 ASCII seed is `memberry-lab013-v2-order-2026-08-20`. Its SHA-256 commitment is
 `8a405c6921dc3e5790f0df6054620099ed98bf54767637229c5544f2e54e241a`.

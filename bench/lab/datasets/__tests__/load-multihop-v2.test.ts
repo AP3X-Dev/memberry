@@ -19,6 +19,7 @@ import {
   MULTIHOP_V2_PROBES_PER_SPLIT,
 } from '../../multihop/policy-v2.js';
 import { auditAdapterDependencies } from '../../registered-adapters.js';
+import { validateDatasetRegistry } from '../../registry/validate.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
 const FROZEN_V2_CHANGE_POLICY = 'Any byte, order, label, policy, or scorer change requires additive multihop/v3 artifacts and independent review.';
@@ -93,8 +94,37 @@ describe('LAB-013 frozen candidate-blind multi-hop v2 datasets', () => {
     expect(sha256(ORDER_SEED)).toBe(MULTIHOP_V2_FREEZE.seedCommitmentSha256);
     expect(MULTIHOP_V2_FREEZE.orderKeyDerivation).toBe('sha256-utf8(seed+LF+scenario_id+LF+neutral_slot_id)');
     const registry = JSON.parse(await readFile(resolve(REPO_ROOT, 'bench/lab/registry/datasets.json'), 'utf8')) as {
-      datasets: Array<{ artifacts: Array<{ repositoryPath: string; sha256: string; sizeBytes: number }> }>;
+      datasets: Array<{
+        id: string; requiredInCi: boolean; oracleAccess: string;
+        artifacts: Array<{ role: string; access: string; repositoryPath: string; sha256: string; sizeBytes: number }>;
+      }>;
     };
+    const v2 = registry.datasets.filter(({ id }) => id.startsWith('memberry-multihop-v2-'));
+    expect(v2.map(({ id }) => id)).toEqual(['memberry-multihop-v2-dev', 'memberry-multihop-v2-holdout']);
+    expect(v2.map(({ requiredInCi, oracleAccess }) => ({ requiredInCi, oracleAccess }))).toEqual([
+      { requiredInCi: false, oracleAccess: 'scorer-only' },
+      { requiredInCi: false, oracleAccess: 'scorer-only' },
+    ]);
+    expect(v2.flatMap(({ artifacts }) => artifacts).map(({ repositoryPath, sha256, sizeBytes }) => ({
+      repositoryPath, sha256, sizeBytes,
+    }))).toEqual([...FROZEN_V2_ARTIFACTS]);
+    const v1 = registry.datasets.filter(({ id }) => [
+      'memberry-multihop-dev', 'memberry-multihop-holdout',
+    ].includes(id));
+    expect(v1.map(({ id, requiredInCi }) => ({ id, requiredInCi }))).toEqual([
+      { id: 'memberry-multihop-dev', requiredInCi: true },
+      { id: 'memberry-multihop-holdout', requiredInCi: true },
+    ]);
+    for (const [id, split] of [
+      ['memberry-multihop-v2-dev', 'dev'],
+      ['memberry-multihop-v2-holdout', 'holdout'],
+    ] as const) {
+      const mutation = structuredClone(registry);
+      mutation.datasets.find((dataset) => dataset.id === id)!.requiredInCi = true;
+      expect(validateDatasetRegistry(mutation)).toContain(
+        `multi-hop requires exactly one immutable required CI ${split} split`,
+      );
+    }
     const registered = registry.datasets.flatMap(({ artifacts }) => artifacts);
     for (const frozen of FROZEN_V2_ARTIFACTS) {
       const bytes = await readFile(resolve(REPO_ROOT, frozen.repositoryPath));

@@ -192,7 +192,7 @@
       "kind": "repository",
       "split": "dev",
       "oracleAccess": "scorer-only",
-      "requiredInCi": true,
+      "requiredInCi": false,
       "source": { "url": null, "revision": "lab-013-candidate-blind-v2", "path": "bench/lab/datasets/multihop/v2/dev" },
       "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
       "dataPolicy": {
@@ -215,7 +215,7 @@
       "kind": "repository",
       "split": "holdout",
       "oracleAccess": "scorer-only",
-      "requiredInCi": true,
+      "requiredInCi": false,
       "source": { "url": null, "revision": "lab-013-candidate-blind-v2", "path": "bench/lab/datasets/multihop/v2/holdout" },
       "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
       "dataPolicy": {
