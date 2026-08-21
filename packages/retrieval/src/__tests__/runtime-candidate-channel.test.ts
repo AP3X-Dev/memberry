@@ -1,13 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import neo4j, { Record as Neo4jRecord } from 'neo4j-driver';
 
-import { canonicalTraceJson, RETRIEVAL_TRACE_CHANNEL_ORDER } from '../trace.js';
+import { canonicalTraceJson, replayRetrievalTrace, RETRIEVAL_TRACE_CHANNEL_ORDER } from '../trace.js';
 import { resolveRuntimeQueryPlannerAuthorityV1 } from '../runtime-query-planner.js';
 import {
   RuntimeCandidateChannelService,
   type RuntimeCandidateDriver,
 } from '../runtime-candidate-channel.js';
 import { UnifiedAssembler } from '../assembler.js';
+import {
+  createServedRerankerProviderV1,
+  SERVED_RERANKER_PROVIDER_IDENTITY,
+  type ServedRerankerConstructionV1,
+} from '../served-reranker.js';
+import { createRerankerProviderV1, parseSerializedRerankerProviderRequestV1 } from '../reranker.js';
 
 const project = 'project:memberry';
 const entityId = 'entity-memberry';
@@ -73,6 +79,18 @@ function validRows(): Record<string, Neo4jRecord[]> {
 }
 
 describe('RET-003B runtime candidate channel service', () => {
+  function candidateAssembler(provider: ServedRerankerConstructionV1): UnifiedAssembler {
+    return new UnifiedAssembler(
+      {} as never,
+      { zincrby: vi.fn(), zrevrangeWithScores: vi.fn(), lpush: vi.fn(), ltrim: vi.fn() },
+      null,
+      null,
+      { embed: vi.fn(), embedBatch: vi.fn() },
+      null,
+      provider,
+    );
+  }
+
   it('does not mint authority from a caller-controlled bare object', async () => {
     const mock = driver(validRows());
     const service = new RuntimeCandidateChannelService(mock.driver);
@@ -450,5 +468,113 @@ describe('RET-003B runtime candidate channel service', () => {
     // pair; plain rank-order first-fit takes both and spends the whole budget on more value.
     expect(items.map((item) => item.id)).toEqual(['semantic-a-fits', 'semantic-b-fits']);
     expect(budgeted.token_count).toBe(10);
+  });
+
+  it('serves only receipt candidates, changes candidate order, and records replayable ranked-v2 evidence', async () => {
+    const rows = validRows();
+    rows.scope = [
+      record(
+        ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+        ['tenant-a', project, entityId, 'semantic-baseline', 'Generic', 'generic generic text', 1],
+      ),
+      record(
+        ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+        ['tenant-a', project, entityId, 'semantic-needle', 'Needle', 'needle needle match', 0.01],
+      ),
+    ];
+    rows.fact = [];
+    const mock = driver(rows);
+    const execution = await new RuntimeCandidateChannelService(mock.driver).execute(
+      await authorityReceipt(), { includeArchitecture: false, includeMemory: true },
+    );
+    const real = createServedRerankerProviderV1();
+    const requests: ReturnType<typeof parseSerializedRerankerProviderRequestV1>[] = [];
+    const provider = {
+      identity: real.identity,
+      run: async (...args: Parameters<typeof real.run>) => {
+        requests.push(parseSerializedRerankerProviderRequestV1(args[0]));
+        return real.run(...args);
+      },
+    } as ServedRerankerConstructionV1;
+    const assembler = candidateAssembler(provider);
+    const baseline = assembler.assembleCandidateExecution('needle', execution, 8_000, false, true);
+    const served = await assembler.assembleCandidateExecutionServed('needle', execution, 8_000, false, true, true);
+
+    expect(baseline.context.sections.flatMap((section) => section.items).map((item) => item.id))
+      .toEqual(['semantic-baseline', 'semantic-needle']);
+    expect(served.context.sections.flatMap((section) => section.items).map((item) => item.id))
+      .toEqual(['semantic-needle', 'semantic-baseline']);
+    const tightBaseline = assembler.assembleCandidateExecution('needle', execution, 5, false, true);
+    const tightServed = await assembler.assembleCandidateExecutionServed('needle', execution, 5, false, true);
+    expect(tightBaseline.context.sections.flatMap((section) => section.items).map((item) => item.id))
+      .toEqual(['semantic-baseline']);
+    expect(tightServed.context.sections.flatMap((section) => section.items).map((item) => item.id))
+      .toEqual(['semantic-needle']);
+    expect(served.trace!.algorithmVersion).toBe('ranked-v2');
+    expect(served.trace!.events).toContainEqual(expect.objectContaining({ kind: 'reranker-stage', outcome: 'reranked' }));
+    expect(replayRetrievalTrace(served.trace!).resultOrder).toEqual(served.trace!.resultOrder);
+    const rerankerEvent = served.trace!.events.find((event) => event.kind === 'reranker-stage');
+    if (rerankerEvent?.kind !== 'reranker-stage') throw new Error('missing reranker stage');
+    expect([...rerankerEvent.candidates].sort((a, b) => a.rerankedRank - b.rerankedRank).map((candidate) => candidate.ref))
+      .toEqual(served.trace!.resultOrder);
+    expect(JSON.stringify(served.trace)).not.toContain('semantic-baseline');
+    expect(JSON.stringify(served.trace)).not.toContain('semantic-needle');
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.candidates.map((candidate) => candidate.content))
+      .toEqual(['generic generic text', 'needle needle match']);
+    expect(JSON.stringify(requests)).not.toContain('tenant-foreign-sentinel');
+    expect(JSON.stringify(requests)).not.toContain('project:foreign-sentinel');
+    expect(JSON.stringify(requests)).not.toContain('time-foreign-sentinel');
+  });
+
+  it('keeps the synchronous shadow seam provider-free and falls back inside ranked-v2 on invalid output', async () => {
+    const rows = validRows();
+    const mock = driver(rows);
+    const execution = await new RuntimeCandidateChannelService(mock.driver).execute(
+      await authorityReceipt(), { includeArchitecture: false, includeMemory: true },
+    );
+    const real = createServedRerankerProviderV1();
+    const run = vi.fn(real.run);
+    const observer = vi.fn();
+    const assembler = candidateAssembler({ identity: real.identity, run } as ServedRerankerConstructionV1);
+    const sync = assembler.assembleCandidateExecution('subject predicate', execution, 8_000, false, true, false, observer);
+    expect(observer).toHaveBeenCalledTimes(1);
+    expect(run).not.toHaveBeenCalled();
+
+    const invalid = createRerankerProviderV1(
+      SERVED_RERANKER_PROVIDER_IDENTITY,
+      async () => '{"invalid":true}',
+    ) as ServedRerankerConstructionV1;
+    const fallback = await candidateAssembler(invalid)
+      .assembleCandidateExecutionServed('subject predicate', execution, 8_000, false, true, true);
+    expect(fallback.context.sections).toEqual(sync.context.sections);
+    expect(fallback.trace!.algorithmVersion).toBe('ranked-v2');
+    expect(fallback.trace!.events).toContainEqual(expect.objectContaining({ kind: 'reranker-stage', outcome: 'baseline' }));
+  });
+
+  it('keeps parallel served candidate executions receipt-local', async () => {
+    const firstRows = validRows();
+    const secondRows = validRows();
+    secondRows.scope![0] = record(
+      ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+      ['tenant-a', project, entityId, 'semantic-other', 'Semantic', 'other query material', 0.9],
+    );
+    const [firstExecution, secondExecution] = await Promise.all([
+      new RuntimeCandidateChannelService(driver(firstRows).driver).execute(
+        await authorityReceipt(), { includeArchitecture: false, includeMemory: true },
+      ),
+      new RuntimeCandidateChannelService(driver(secondRows).driver).execute(
+        await authorityReceipt(), { includeArchitecture: false, includeMemory: true },
+      ),
+    ]);
+    const assembler = candidateAssembler(createServedRerankerProviderV1());
+    const [first, second] = await Promise.all([
+      assembler.assembleCandidateExecutionServed('subject predicate', firstExecution, 8_000, false, true),
+      assembler.assembleCandidateExecutionServed('other query', secondExecution, 8_000, false, true),
+    ]);
+    expect(first.context.sections.flatMap((section) => section.items).map((item) => item.id))
+      .not.toContain('semantic-other');
+    expect(second.context.sections.flatMap((section) => section.items).map((item) => item.id))
+      .toContain('semantic-other');
   });
 });

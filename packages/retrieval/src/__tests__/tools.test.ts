@@ -18,13 +18,14 @@ import {
   type RetrievalTraceValidationStage,
   type IRuntimeCandidateChannelService,
 } from '../tools.js';
-import { canonicalTraceJson, RETRIEVAL_TRACE_CHANNEL_ORDER } from '../trace.js';
+import { canonicalTraceJson, replayRetrievalTrace, RETRIEVAL_TRACE_CHANNEL_ORDER } from '../trace.js';
 import type { RetrievalTraceV1 } from '../trace.js';
 import type { UnifiedContext } from '../types.js';
 import type { QueryPlanV1 } from '../query-plan.js';
 import type { ScopedEntityTrustedAuthorityV1 } from '../scoped-entity-resolver.js';
 import { readRuntimeQueryPlannerAuthorityV1 } from '../runtime-query-planner.js';
 import { UnifiedAssembler } from '../assembler.js';
+import { createServedRerankerProviderV1 } from '../served-reranker.js';
 
 const approvedTrace = JSON.parse(readFileSync(
   new URL('./fixtures/retrieval-trace-deterministic-v2.json', import.meta.url),
@@ -114,14 +115,16 @@ function emptyCtx(): UnifiedContext {
   return { task: 'q', strategy: 'ranked', sections: [], token_count: 0, assembled_at: '2026-06-07T00:00:00.000Z' };
 }
 
-function makeAssembler(): IUnifiedAssembler {
+function makeAssembler(served = false): IUnifiedAssembler {
   return {
+    servedRerankerEnabled: served,
     assemble: vi.fn().mockResolvedValue(emptyCtx()),
     assembleTraced: vi.fn().mockResolvedValue({ context: emptyCtx(), trace: approvedTrace }),
     renderMarkdown: vi.fn().mockReturnValue('# md'),
     ask: vi.fn().mockResolvedValue({ answer: 'a', cited_ids: [], evidence: [], level: 'medium' }),
     askFromContext: vi.fn().mockResolvedValue({ answer: 'a', cited_ids: [], evidence: [], level: 'medium' }),
     assembleCandidateExecution: vi.fn().mockReturnValue({ context: emptyCtx(), trace: approvedTrace }),
+    assembleCandidateExecutionServed: vi.fn().mockResolvedValue({ context: emptyCtx(), trace: approvedTrace }),
   };
 }
 
@@ -211,7 +214,7 @@ describe('registerRetrievalTools — tenant threading', () => {
 
     expect(assembler.assembleTraced).toHaveBeenCalledWith(
       'what depends on auth',
-      expect.objectContaining({ strategy: 'ranked', tenantId: 'acme' }),
+      expect.objectContaining({ strategy: 'ranked', tenantId: 'acme', servedRerankerDisabled: true }),
     );
   });
 
@@ -441,8 +444,10 @@ describe('RET-002C2 authenticated planner wiring', () => {
 });
 
 describe('RET-003B candidate-channel runtime wiring', () => {
-  function candidateContainer(options: { candidate?: boolean; planner?: boolean; authenticated?: boolean; shadow?: boolean } = {}) {
-    const assembler = makeAssembler();
+  function candidateContainer(options: {
+    candidate?: boolean; planner?: boolean; authenticated?: boolean; shadow?: boolean; served?: boolean;
+  } = {}) {
+    const assembler = makeAssembler(options.served ?? false);
     const resolution = Object.freeze({
       resolution: Object.freeze({ state: 'resolved', canonicalEntityIds: Object.freeze(['entity-stable']) }),
       diagnostics: Object.freeze([]),
@@ -540,6 +545,153 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     );
   });
 
+  it('berry_context raw deterministic for a named tenant forces ranked-v1 through the exact disable latch', async () => {
+    const assembler = makeAssembler(true);
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, createRetrievalContainer({ assembler, tenantId: 'acme' }));
+
+    await handlers.get('berry_context')!({ task: 'stable', strategy: 'deterministic' });
+
+    expect(assembler.assemble).toHaveBeenCalledWith('stable', expect.objectContaining({
+      strategy: 'ranked', tenantId: 'acme', servedRerankerDisabled: true,
+    }));
+  });
+
+  it('keeps default-tenant deterministic exact with a served-enabled assembler', async () => {
+    const assembler = makeAssembler(true);
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, createRetrievalContainer({ assembler }));
+    await handlers.get('berry_context')!({ task: 'stable', strategy: 'deterministic' });
+    expect(assembler.assemble).toHaveBeenCalledWith('stable', expect.objectContaining({
+      strategy: 'deterministic', tenantId: 'default',
+    }));
+    expect(vi.mocked(assembler.assemble).mock.calls[0]![1]).not.toHaveProperty('servedRerankerDisabled');
+  });
+
+  it.each(['auto', 'ranked'] as const)('uses the served candidate method for %s and ignores a shadow pointer', async (strategy) => {
+    const { assembler, candidateRuntime, container, rerankerShadowCoordinator } = candidateContainer({
+      served: true, shadow: true,
+    });
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+    await handlers.get('berry_context')!({
+      task: 'served', strategy, project_name: 'project:memberry', entity_scope: ['Resolver'],
+      max_tokens: 8_000, include_arch: true, include_memory: true,
+    });
+
+    expect(candidateRuntime.execute).toHaveBeenCalledTimes(1);
+    expect(assembler.assembleCandidateExecutionServed).toHaveBeenCalledWith(
+      'served', expect.anything(), 8_000, true, true, false,
+    );
+    expect(assembler.assembleCandidateExecution).not.toHaveBeenCalled();
+    expect(rerankerShadowCoordinator!.trySchedule).not.toHaveBeenCalled();
+  });
+
+  it('keeps deterministic candidate context on the synchronous v1 path with a served provider present', async () => {
+    const { assembler, container } = candidateContainer({ served: true, shadow: true });
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+    await handlers.get('berry_context')!({
+      task: 'stable', strategy: 'deterministic', project_name: 'project:memberry', entity_scope: ['Resolver'],
+      max_tokens: 8_000, include_arch: true, include_memory: true,
+    });
+    expect(assembler.assembleCandidateExecution).toHaveBeenCalledWith(
+      'stable', expect.anything(), 8_000, true, true, false,
+    );
+    expect(assembler.assembleCandidateExecutionServed).not.toHaveBeenCalled();
+  });
+
+  it('checks the selected served method before candidate execution', async () => {
+    const { assembler, candidateRuntime, container } = candidateContainer({ served: true });
+    delete assembler.assembleCandidateExecutionServed;
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+    await expect(handlers.get('berry_context')!({
+      task: 'blocked', strategy: 'ranked', project_name: 'project:memberry', entity_scope: ['Resolver'],
+    })).rejects.toThrow('candidate_runtime:unavailable');
+    expect(candidateRuntime.execute).not.toHaveBeenCalled();
+  });
+
+  it('runs the real in-process handler through receipt execution and the served assembler', async () => {
+    const chat = vi.fn().mockResolvedValue(JSON.stringify({ answer: 'served synthesis', cited: [1] }));
+    const realAssembler = new UnifiedAssembler(
+      {} as never,
+      { zincrby: vi.fn(), zrevrangeWithScores: vi.fn(), lpush: vi.fn(), ltrim: vi.fn() },
+      null,
+      null,
+      { embed: vi.fn(), embedBatch: vi.fn() },
+      { available: true, chat, modelFor: vi.fn(() => 'test-model') },
+      createServedRerankerProviderV1(),
+    );
+    const execution = {
+      contractId: 'memberry.candidate-channel' as const,
+      contractVersion: '1.0.0' as const,
+      request: {
+        contractId: 'memberry.candidate-channel' as const,
+        contractVersion: '1.0.0' as const,
+        tenantId: 'tenant-a', projectScope: 'project:memberry', resolvedEntityIds: ['entity-stable'],
+        temporalFrame: { mode: 'current' as const }, plannedChannels: ['memory.scope' as const],
+        limits: { maxCandidatesPerChannel: 64, maxCandidatesAggregate: 128 },
+      },
+      candidates: [
+        {
+          contractId: 'memberry.candidate-channel' as const, contractVersion: '1.0.0' as const,
+          channel: 'memory.scope' as const, tenantId: 'tenant-a', projectScope: 'project:memberry',
+          resolvedEntityId: 'entity-stable', temporalFrame: { mode: 'current' as const },
+          sourceType: 'semantic' as const, evidenceId: 'baseline-first', rank: 1, score: 1,
+          title: 'Generic', content: 'unrelated generic material',
+          provenance: { kind: 'semantic' as const, semanticId: 'baseline-first' },
+        },
+        {
+          contractId: 'memberry.candidate-channel' as const, contractVersion: '1.0.0' as const,
+          channel: 'memory.scope' as const, tenantId: 'tenant-a', projectScope: 'project:memberry',
+          resolvedEntityId: 'entity-stable', temporalFrame: { mode: 'current' as const },
+          sourceType: 'semantic' as const, evidenceId: 'needle-second', rank: 2, score: 0.01,
+          title: 'Needle', content: 'needle needle needle',
+          provenance: { kind: 'semantic' as const, semanticId: 'needle-second' },
+        },
+      ],
+      settlements: [{
+        contractId: 'memberry.candidate-channel' as const, contractVersion: '1.0.0' as const,
+        channel: 'memory.scope' as const, outcome: 'success' as const, candidateCount: 2,
+      }],
+    };
+    const candidateRuntime = { execute: vi.fn().mockResolvedValue(execution) };
+    const resolverFactory = () => ({ resolve: vi.fn().mockResolvedValue({
+      resolution: { state: 'resolved' as const, canonicalEntityIds: ['entity-stable'] }, diagnostics: [],
+    }) });
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, createRetrievalContainer({
+      assembler: realAssembler, tenantId: 'tenant-a', authenticated: true, queryPlannerEnabled: true,
+      resolverFactory, candidateChannelEnabled: true, candidateRuntime,
+    }));
+
+    const response = await handlers.get('berry_context')!({
+      task: 'needle', strategy: 'ranked', project_name: 'project:memberry', entity_scope: ['Resolver'],
+      include_arch: false, include_memory: true, max_tokens: 8_000, include_trace: true,
+    }) as { content: Array<{ text: string }> };
+    expect(candidateRuntime.execute).toHaveBeenCalledTimes(1);
+    expect(response.content[0]!.text.indexOf('needle needle needle'))
+      .toBeLessThan(response.content[0]!.text.indexOf('unrelated generic material'));
+    const trace = JSON.parse(response.content[1]!.text) as RetrievalTraceV1;
+    expect(trace.algorithmVersion).toBe('ranked-v2');
+    expect(replayRetrievalTrace(trace).resultOrder).toEqual(trace.resultOrder);
+    expect(response.content[1]!.text).toBe(canonicalTraceJson(trace));
+
+    const askResponse = await handlers.get('berry_ask')!({
+      question: 'needle', reasoning_level: 'high', project_name: 'project:memberry', entity_scope: ['Resolver'],
+    }) as { content: Array<{ text: string }> };
+    expect(candidateRuntime.execute).toHaveBeenCalledTimes(2);
+    expect(chat).toHaveBeenCalledTimes(1);
+    const prompt = chat.mock.calls[0]![0] as Array<{ role: string; content: string }>;
+    const evidencePrompt = prompt.find((message) => message.role === 'user')!.content;
+    expect(evidencePrompt.indexOf('needle needle needle'))
+      .toBeLessThan(evidencePrompt.indexOf('unrelated generic material'));
+    expect(askResponse.content[0]!.text).toContain('served synthesis');
+    expect(askResponse.content[0]!.text).toContain('needle-second');
+    expect(askResponse.content[0]!.text).toContain('needle needle needle');
+  });
+
   it('candidate-off preserves all three exact legacy adapters and performs zero candidate work', async () => {
     const { assembler, candidateRuntime, container } = candidateContainer({ candidate: false, planner: false });
     const { server, handlers } = makeServerStub();
@@ -632,6 +784,32 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     expect(assembler.askFromContext).toHaveBeenCalledWith('safe?', expect.anything(), 'high');
     expect(assembler.ask).not.toHaveBeenCalled();
     expect(assembler.assemble).not.toHaveBeenCalled();
+  });
+
+  it('feeds berry_ask the exact served candidate context', async () => {
+    const { assembler, container } = candidateContainer({ served: true, shadow: true });
+    const servedContext = {
+      ...emptyCtx(),
+      sections: [{ heading: 'Memories', source_type: 'semantic' as const, items: [{
+        id: 'served-id', content: 'served evidence', score: 1, metadata: {},
+      }] }],
+    };
+    vi.mocked(assembler.assembleCandidateExecutionServed!).mockResolvedValue({ context: servedContext });
+    vi.mocked(assembler.askFromContext!).mockResolvedValue({
+      answer: 'served answer', cited_ids: ['served-id'],
+      evidence: [{ id: 'served-id', content: 'served evidence' }], level: 'high',
+    });
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+    const result = await handlers.get('berry_ask')!({
+      question: 'served?', reasoning_level: 'high', project_name: 'project:memberry', entity_scope: ['Resolver'],
+    }) as { content: Array<{ text: string }> };
+    expect(assembler.assembleCandidateExecutionServed).toHaveBeenCalledTimes(1);
+    expect(assembler.askFromContext).toHaveBeenCalledWith('served?', servedContext, 'high');
+    expect(assembler.assembleCandidateExecution).not.toHaveBeenCalled();
+    expect(result.content[0]!.text).toContain('served answer');
+    expect(result.content[0]!.text).toContain('served-id');
+    expect(result.content[0]!.text).toContain('served evidence');
   });
 
   it.each([
