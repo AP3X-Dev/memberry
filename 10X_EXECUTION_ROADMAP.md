@@ -26,30 +26,29 @@ details remain in
 ## Current program position
 
 - **Last updated:** 2026-08-21
-- **Exact remote master:** `d984c6b0900894333cc7e184760ca6cd1b3c1d98`
-- **Active critical-path phase:** Phase 6 — Identity, tenancy, privacy, and
-  providers; Retrieval 2.0 remains open but is parked at its declared escape
-  condition
+- **Exact remote master:** `3c623e84a313beb842c1a7ebd6adc0b9e3a08bd4`
+- **Active critical-path phase:** Phase 2 — Retrieval 2.0; the bounded SEC-001
+  security detour is complete, RET-007 remains parked at its declared escape
+  condition, and RET-010 is next
 - **Highest phase started:** Phase 9
 - **Closed phase gates:** G0, G1
 - **Open phase gates:** G2 through G9 and GF
 - **Program estimate:** approximately 20–25% complete
 - **Measured retrieval-quality improvement:** exactly zero so far
-- **Deployment state:** no deployment authorized or performed by the current
-  Retrieval 2.0 work
+- **Deployment state:** no deployment or capability-policy activation was
+  authorized or performed by the current Retrieval 2.0 or SEC-001 work
 
 ## NEXT ACTION
 
-1. Merge this roadmap update after exact-head CI. LAB-013 is terminally
-   unqualified; do not mutate v2, register or run a v2 candidate, or author an
-   additive v3 instrument without a separate owner decision.
-2. Resume the independent G6 lane at SEC-001. Trace the existing unwired
-   SEC-001A capability contract through the authenticated MCP composition root,
-   enumerate the complete deny-by-default actor/tenant/project/tool/operation
-   matrix, and bind the smallest reversible SEC-001B runtime packet.
-3. Keep deployment, live-service changes, credential handling, and destructive
-   tenant/data operations out of scope. The first SEC-001B deliverable is a
-   reviewed design/effect-chain binding, not a flag flip or deployment.
+1. Merge this roadmap-only status update after exact-head and post-master CI;
+   do not count the documentation packet as capability progress.
+2. Begin RET-010 from that fresh exact master. Freeze the real served-response
+   effect chain and ranking-model acceptance before implementation. A shadow
+   flag, identity provider, or flag flip does not satisfy RET-010.
+3. Keep RET-007 v2 permanently frozen. Do not register or run a v2 candidate or
+   author an additive v3 instrument without a separate owner decision.
+4. Keep deployment, live-service changes, credential handling, destructive
+   tenant/data operations, and capability-policy activation out of scope.
 
 ## Immediate Retrieval 2.0 exit checklist
 
@@ -73,6 +72,10 @@ details remain in
 - [x] Apply the declared escape condition: do not run either RET-007 v2
   hypothesis or the v2 candidate holdout; park RET-007 pending a separate owner
   decision on any additive v3 instrument and advance the independent G6 lane.
+- [x] Complete the bounded SEC-001 detour: strict SEC-001A contract commit
+  `660b2d26`, SEC-001B design merge `a43a3da`, runtime merge `3c623e8`, and exact
+  runtime post-master CI `32469628048` all passed without deployment or policy
+  activation. G6 and the remaining SEC packages stay open independently.
 - [ ] Implement RET-010: a real response-path reranker and real ranking model.
   A shadow-mode flag or identity provider does not satisfy this item.
 - [ ] Arm the previously declared G2 improvement threshold only when the
@@ -95,10 +98,9 @@ details remain in
 ## Topological route to the final gate
 
 ```text
+COMPLETED BOUNDED DETOUR: SEC-001 authenticated capability binding
+PARKED: RET-007 until a separate additive-v3 owner decision
 NOW
-  -> SEC-001 authenticated capability binding
-  -> G6 security/tenancy lane
-  -> return to RET-007 only after a separate additive-v3 owner decision
   -> RET-010 real response-path reranker
   -> G2 Retrieval 2.0
        |-> Lane A: G3 lifecycle -> G5 temporal -> G7 reliability
@@ -185,7 +187,9 @@ freeze G3, G6, or G8 indefinitely.
 
 ## Phase 6 — Identity, tenancy, privacy, and providers
 
-- [ ] SEC-001 — Actor/tenant/project capability model `(partial)`
+- [x] SEC-001 — Actor/tenant/project capability model `(SEC-001A contract
+  `660b2d26`; SEC-001B design/runtime merges `a43a3da` and `3c623e8`; exact
+  post-master run `32469628048` green; default-off and not activated)`
 - [ ] SEC-002 — JWT/OIDC verifier interface
 - [ ] SEC-003 — Per-tool and resource authorization
 - [ ] SEC-004 — Uniform mutation audit
