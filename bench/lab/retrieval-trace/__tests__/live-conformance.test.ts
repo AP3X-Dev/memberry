@@ -1065,6 +1065,16 @@ describe('RET-001D live composition harness', () => {
     expect(source).toContain('RET010D_DETERMINISTIC_BYPASS_MISMATCH');
     expect(source).toContain('ret010dCases.length !== 6');
     expect(source).toContain("as_of: '2026-08-01T00:00:00.000Z'");
+    expect(source).toContain('projectName: `ret010d-project-${run}`');
+    expect(source).toContain('projectScope: `project:ret010d-project-${run}`');
+    expect(source).toContain('project: fixture.projectName');
+    expect(source).toContain('scope: fixture.projectScope');
+    expect(source).toContain('project_name: fixture.projectScope');
+    expect(source).toContain('ret010dFixture.projectName, ret010dFixture.projectScope');
+    expect(source).toContain('tags:[$scope], scope:$scope');
+    expect(source).toContain('tags:[$foreignScope], scope:$foreignScope');
+    expect(source).not.toContain('project_name: fixture.project,');
+    expect(source).not.toContain('scope: `project:${fixture.project}`');
     for (const privateFixtureValue of [
       'run,',
       "'stable baseline memory'",

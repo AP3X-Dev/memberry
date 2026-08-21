@@ -1034,7 +1034,8 @@ interface FixtureIdentity {
 }
 
 interface Ret010dFixtureIdentity {
-  readonly project: string;
+  readonly projectName: string;
+  readonly projectScope: string;
   readonly target: string;
   readonly query: string;
   readonly baselineId: string;
@@ -1239,8 +1240,8 @@ async function seedRet010dFixtures(
        CREATE (foreignProject:Semantic {id:$foreignProjectId, content:$foreignProjectContent, confidence:1.0, signal_count:9, created_at:$now, updated_at:$now, decay_class:'stable', memory_type:'architecture', tags:[$foreignScope], scope:$foreignScope, tenant_id:'default', ret001d_run:$run})
        CREATE (foreignProject)-[:ABOUT {ret001d_run:$run, valid_at:'2026-01-01T00:00:00.000Z'}]->(oe)`,
       {
-        run, now: new Date().toISOString(), projectId: `ret010d-project-${run}`, project: fixture.project,
-        targetId: `ret010d-target-${run}`, target: fixture.target, scope: `project:${fixture.project}`,
+        run, now: new Date().toISOString(), projectId: `ret010d-project-${run}`, project: fixture.projectName,
+        targetId: `ret010d-target-${run}`, target: fixture.target, scope: fixture.projectScope,
         baselineId: fixture.baselineId, lexicalId: fixture.lexicalId,
         lexicalContent: fixture.query,
         foreignTenantId: fixture.foreignTenantId, foreignTenantContent: fixture.foreignTenantContent,
@@ -2214,7 +2215,7 @@ async function executeRet010dCase(
     include_arch: false,
     include_memory: true,
     max_tokens: 6,
-    project_name: fixture.project,
+    project_name: fixture.projectScope,
     entity_scope: [fixture.target],
   };
   const ordinaryResult = await atRet010dCaseStage(id, 'ordinary-call',
@@ -2330,7 +2331,8 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
     decoyContent: `RET001D ${run} cross-tenant decoy must never appear`,
   };
   const ret010dFixture: Ret010dFixtureIdentity = {
-    project: `ret010d-project-${run}`,
+    projectName: `ret010d-project-${run}`,
+    projectScope: `project:ret010d-project-${run}`,
     target: `ret010d-target-${run}`,
     query: 'cobalt',
     baselineId: `ret010d-baseline-${run}`,
@@ -2348,8 +2350,8 @@ export async function runTraceLiveConformanceEvidence(config: TraceConformanceCo
   );
   const allForbidden = Object.freeze([...new Set([...forbidden,
     run,
-    ret010dFixture.project, ret010dFixture.target, ret010dFixture.query,
-    `project:${ret010dFixture.project}`,
+    ret010dFixture.projectName, ret010dFixture.projectScope,
+    ret010dFixture.target, ret010dFixture.query,
     ret010dFixture.baselineId, ret010dFixture.lexicalId,
     'stable baseline memory',
     ret010dFixture.foreignTenantId, ret010dFixture.foreignProjectId, ret010dFixture.futureId,
