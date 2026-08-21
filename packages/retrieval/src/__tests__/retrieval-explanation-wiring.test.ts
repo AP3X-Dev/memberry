@@ -226,7 +226,7 @@ describe('UI-001B explanation view root exports', () => {
     expect(root.RETRIEVAL_EXPLANATION_TEXT_MAX_UTF8_BYTES).toBe(RETRIEVAL_EXPLANATION_TEXT_MAX_UTF8_BYTES);
   });
 
-  it('keeps RET-010B construction-only and leaves serving/tool wiring to later packets', async () => {
+  it('keeps RET-010 construction and application surfaces narrow after serving wiring', async () => {
     const root = await import('../index.js') as Record<string, unknown>;
     expect(root.SERVED_RERANKER_PROVIDER_IDENTITY).toEqual({
       providerId: 'memberry.local.lexical',
@@ -241,7 +241,10 @@ describe('UI-001B explanation view root exports', () => {
 
     const assemblerSource = readFileSync(new URL('../assembler.ts', import.meta.url), 'utf8');
     const toolsSource = readFileSync(new URL('../tools.ts', import.meta.url), 'utf8');
-    expect(assemblerSource).not.toMatch(/createServedReranker|applyServedReranker|ranked-v2/);
-    expect(toolsSource).not.toMatch(/createServedReranker|applyServedReranker|ranked-v2/);
+    expect(assemblerSource).not.toMatch(/\bcreateServedRerankerProviderV1\b/);
+    expect(assemblerSource.match(/\bapplyServedRerankerV1\s*\(/g)).toHaveLength(1);
+    expect(assemblerSource).toContain("servedAttempt ? 'ranked-v2' : 'ranked-v1'");
+    expect(toolsSource).not.toMatch(/\bcreateServedRerankerProviderV1\b/);
+    expect(toolsSource).not.toMatch(/\bapplyServedRerankerV1\b/);
   });
 });
