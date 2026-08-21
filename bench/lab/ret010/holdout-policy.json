@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "controlAdapterId": "memberry-retrieval-core-disabled-v1",
+  "candidateAdapterId": "memberry-retrieval-core-served-v1",
+  "dataset": { "id": "memberry-g2-holdout-holdout", "split": "holdout" },
+  "lanes": {
+    "recall": { "dimension": "recall", "probes": 10, "k": 10, "minimumDelta": 0 },
+    "precision": { "dimension": "precision", "probes": 10, "k": 5, "minimumDelta": 0 }
+  },
+  "safety": {
+    "maxStaleLeakRate": 0,
+    "maxIsolationLeakRate": 0,
+    "maxDuplicateRate": 0,
+    "maxUnknownResultRate": 0
+  },
+  "pairedVectorOrder": ["recall", "precision"],
+  "withinLaneSortKeys": ["scenarioId", "probeId"],
+  "efficiency": {
+    "outcome": "measured",
+    "method": "paired-bootstrap",
+    "confidenceLevel": 0.95,
+    "minimumPointDeltaInclusive": 0,
+    "minimumOneSided95LowerBound": 0,
+    "resamples": 2000,
+    "minimumPairedProbes": 10,
+    "seedRule": "vector-derived"
+  }
+}

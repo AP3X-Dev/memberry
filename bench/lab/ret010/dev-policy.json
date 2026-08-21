@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "controlAdapterId": "memberry-retrieval-core-disabled-v1",
+  "candidateAdapterId": "memberry-retrieval-core-served-v1",
+  "dataset": { "id": "memberry-ret010-dev-v1", "split": "dev" },
+  "lanes": {
+    "recall": { "dimension": "recall", "probes": 10, "k": 10, "minimumDelta": 0 },
+    "precision": { "dimension": "precision", "probes": 10, "k": 5, "minimumDelta": 0.05 }
+  },
+  "safety": {
+    "maxStaleLeakRate": 0,
+    "maxIsolationLeakRate": 0,
+    "maxDuplicateRate": 0,
+    "maxUnknownResultRate": 0
+  },
+  "pairedVectorOrder": ["recall", "precision"],
+  "withinLaneSortKeys": ["scenarioId", "probeId"],
+  "efficiency": {
+    "outcome": "measured",
+    "method": "paired-bootstrap",
+    "confidenceLevel": 0.95,
+    "minimumPointDeltaExclusive": 0,
+    "minimumOneSided95LowerBound": 0,
+    "resamples": 2000,
+    "minimumPairedProbes": 10,
+    "seedRule": "vector-derived"
+  }
+}

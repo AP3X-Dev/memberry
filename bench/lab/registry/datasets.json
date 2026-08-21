@@ -276,6 +276,29 @@
       ]
     },
     {
+      "id": "memberry-ret010-dev-v1",
+      "version": "ret010-dev-v1",
+      "suite": "ret010-development",
+      "kind": "repository",
+      "split": "dev",
+      "oracleAccess": "scorer-only",
+      "requiredInCi": false,
+      "source": { "url": null, "revision": "ret010-dev-v1", "path": "bench/lab/datasets/ret010/v1/dev" },
+      "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
+      "dataPolicy": {
+        "reviewStatus": "verified",
+        "containsPersonalData": false,
+        "containsSecrets": false,
+        "containsCustomerData": false,
+        "exclusions": ["real user memory", "credentials", "private customer data", "production tenant identifiers"]
+      },
+      "acquisition": { "status": "bundled" },
+      "artifacts": [
+        { "role": "input", "access": "adapter", "fileName": "input.jsonl", "repositoryPath": "bench/lab/datasets/ret010/v1/dev/input.jsonl", "hashMode": "text-lf", "sha256": "f0b73088d1dd552dcf8fbb88649321f33b9289bc8aad60cdf0f448fd98047562", "sizeBytes": 42067 },
+        { "role": "oracle", "access": "scorer", "fileName": "oracle.jsonl", "repositoryPath": "bench/lab/datasets/ret010/v1/dev/oracle.jsonl", "hashMode": "text-lf", "sha256": "76e9d4d82cb33a01f9bc0c0705e4f232b219c13830cae7f1a0d92409d567fef1", "sizeBytes": 4900 }
+      ]
+    },
+    {
       "id": "longmemeval-s-cleaned",
       "version": "2025-cleaned-unpinned",
       "kind": "external",
