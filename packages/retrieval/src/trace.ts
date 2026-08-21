@@ -2479,6 +2479,7 @@ export class RetrievalTraceCollector {
 
   finalize(): RetrievalTraceV1 {
     this.assertOpen();
+    if (this.algorithmVersion === 'ranked-v2') assertSecretRedactionIntrinsic();
     this.finalized = true;
     if (this.algorithmVersion === 'ranked-v2' && this.rerankerDraft === undefined) {
       TRACE_SET_ADD(this.incomplete, 'candidate-output-gap');
