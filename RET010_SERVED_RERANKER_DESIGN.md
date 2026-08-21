@@ -194,6 +194,25 @@ batch document frequencies and average lengths, and emits bytes only through
 `serializeRerankerProviderResponseV1`. Those parser/serializer helpers remain
 internal to the retrieval package and are not added to the root export.
 
+Before the served model is implemented, RET-010B hardens the shared canonical
+contract in `packages/retrieval/src/reranker.ts`. Exactly the six helper-owned
+array-write classes for dense input snapshots, parsed input candidates,
+response-feasibility scores, parsed request candidates, serialized response
+scores, and parsed response scores must construct every indexed entry with a
+captured `Object.defineProperty` own enumerable writable configurable data
+property. Safe null-prototype keyed writes remain unchanged. This hardening
+protects every canonical local, HTTPS, shadow, and new served consumer; it is
+not served-model-only behavior.
+
+Direct shared-contract tests in
+`packages/retrieval/src/__tests__/reranker.test.ts` install numeric setters on
+`Array.prototype`, `Object.prototype`, and an inserted prototype-chain object
+at indices `0` and `127` while exercising all six write classes. They require
+zero setter callbacks, zero getter invocation, exact serialized bytes, exact
+cardinality and order, and no dropped or substituted values. Any canonical
+helper path that cannot satisfy those invariants stops RET-010B before served
+model implementation.
+
 ## 5. Frozen application seam
 
 One internal async primitive accepts query, a post-dedup
@@ -672,6 +691,8 @@ existing holdout lane. It must reach green master before model work begins.
 
 ### RET-010B — model and ranked-v2 contract
 
+- `packages/retrieval/src/reranker.ts`
+- `packages/retrieval/src/__tests__/reranker.test.ts`
 - `packages/retrieval/src/served-reranker.ts` (new)
 - `packages/retrieval/src/index.ts`
 - `packages/retrieval/src/trace.ts`
@@ -682,6 +703,12 @@ existing holdout lane. It must reach green master before model work begins.
 - `packages/retrieval/src/__tests__/assembler.traced.test.ts`
 - `packages/retrieval/src/__tests__/retrieval-explanation-view.test.ts`
 - `packages/retrieval/src/__tests__/retrieval-explanation-wiring.test.ts`
+
+The RET-010B tracked path ceiling is twelve, raised from ten solely for the
+shared canonical-helper hardening and its direct contract tests above. The
+`reranker.ts` hardening and `reranker.test.ts` proof precede served-model work;
+the remaining RET-010B scope, formula, identities, limits, gates, and packet
+boundaries are unchanged.
 
 ### RET-010C — served assembly and tools
 
