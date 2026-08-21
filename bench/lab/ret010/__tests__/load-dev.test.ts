@@ -274,16 +274,28 @@ describe('RET-010A fixed development loader', () => {
     await saveRegistry(splitRoot, splitRegistry);
     await expect(loadRet010DevScenarios(splitRoot)).rejects.toThrow(/split must be dev/);
 
-    const pathRoot = await copyCustody();
-    const pathRegistry = await registry(pathRoot);
-    const entry = ret010Entry(pathRegistry);
-    const otherPath = 'bench/lab/datasets/ret010/v1/other/input.jsonl';
-    await mkdir(dirname(resolve(pathRoot, otherPath)), { recursive: true });
-    await writeFile(resolve(pathRoot, otherPath), await readFile(resolve(pathRoot, INPUT_RELATIVE)));
-    entry.artifacts[0].repositoryPath = otherPath;
-    await saveRegistry(pathRoot, pathRegistry);
-    await expect(loadRet010DevScenarios(pathRoot)).rejects.toThrow(/outside the frozen development root/);
-
+    const pathCases = [
+      {
+        artifactIndex: 0, source: INPUT_RELATIVE,
+        otherPath: 'bench/lab/datasets/ret010/v1/other/input.jsonl',
+        message: /RET-010 input artifact custody mismatch/,
+      },
+      {
+        artifactIndex: 1, source: ORACLE_RELATIVE,
+        otherPath: 'bench/lab/datasets/ret010/v1/other/oracle.jsonl',
+        message: /RET-010 oracle artifact custody mismatch/,
+      },
+    ];
+    for (const hostile of pathCases) {
+      const pathRoot = await copyCustody();
+      const pathRegistry = await registry(pathRoot);
+      const other = resolve(pathRoot, hostile.otherPath);
+      await mkdir(dirname(other), { recursive: true });
+      await writeFile(other, await readFile(resolve(pathRoot, hostile.source)));
+      ret010Entry(pathRegistry).artifacts[hostile.artifactIndex].repositoryPath = hostile.otherPath;
+      await saveRegistry(pathRoot, pathRegistry);
+      await expect(loadRet010DevScenarios(pathRoot)).rejects.toThrow(hostile.message);
+    }
   });
 
   it('rejects a fixed artifact symlink before generic verification can open its target', async () => {
