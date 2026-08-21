@@ -746,13 +746,22 @@ move into the tool layer.
 - `bench/lab/retrieval-trace/live-conformance.ts`
 - `bench/lab/retrieval-trace/__tests__/contract.test.ts`
 - `bench/lab/retrieval-trace/__tests__/live-conformance.test.ts`
+- `bench/lab/registry/experiments.json`
+
+The RET-010D tracked path ceiling is ten. Runtime composition and its registry
+truth advance atomically: the existing reranker experiment entry is
+superseded in place with ID `retrieval-reranker-v1`, flag
+`MEMBERRY_RERANKER_V1`, control `memberry-live-mcp`, `defaultEnabled: false`,
+and the exact rollback text frozen in section 3. Bootstrap regression evidence
+must reject the previous experiment ID, any claim that the flag is
+shadow-only, and the stale rollback claim that every configured response is
+baseline-controlled.
 
 ### RET-010E — production-path development evaluation
 
 - `bench/lab/adapters/memberry-retrieval-core.ts`
 - `bench/lab/registered-adapters.ts`
 - `bench/lab/registry/systems.json`
-- `bench/lab/registry/experiments.json`
 - `bench/lab/baselines/ci-gate.ts`
 - `bench/lab/ret010/dev-gate.ts` (new)
 - `bench/lab/ret010/holdout-gate.mts` (new)
@@ -761,6 +770,9 @@ move into the tool layer.
 - `bench/lab/baselines/__tests__/ci-gate-binding.test.ts`
 - `bench/lab/ret010/__tests__/dev-gate.test.ts` (new)
 - `bench/lab/ret010/__tests__/holdout-gate.test.ts` (new)
+
+The RET-010E tracked path ceiling is eleven. It consumes the experiment
+registry truth already promoted with RET-010D and must not rewrite that entry.
 
 ### RET-010F — independently approved development receipt
 
