@@ -10,6 +10,9 @@ import {
   type RetrievalTraceMmrPairwiseV1,
   type RetrievalTraceMmrRecordV1,
   type RetrievalTraceRequestShapeV1,
+  type RetrievalTraceRerankerProviderV2,
+  type RetrievalTraceRerankerCandidateV2,
+  type RetrievalTraceRerankerBaselineCandidateV2,
   type RetrievalTraceStageEventV1,
   type RetrievalTraceTerminalExclusionV1,
   type RetrievalTraceV1,
@@ -454,6 +457,38 @@ function copyMmrRecord(
   return finishRecord(output);
 }
 
+function copyRerankerProvider(
+  source: RetrievalTraceRerankerProviderV2,
+): RetrievalTraceRerankerProviderV2 {
+  const output = createRecord();
+  defineField(output, "providerId", source.providerId);
+  defineField(output, "modelId", source.modelId);
+  defineField(output, "calibrationId", source.calibrationId);
+  defineField(output, "locality", source.locality);
+  return finishRecord(output);
+}
+
+function copyRerankedCandidate(
+  source: RetrievalTraceRerankerCandidateV2,
+): RetrievalTraceRerankerCandidateV2 {
+  const output = createRecord();
+  defineField(output, "ref", source.ref);
+  defineField(output, "baselineRank", source.baselineRank);
+  defineField(output, "calibratedScore", source.calibratedScore);
+  defineField(output, "rerankedRank", source.rerankedRank);
+  return finishRecord(output);
+}
+
+function copyBaselineRerankerCandidate(
+  source: RetrievalTraceRerankerBaselineCandidateV2,
+): RetrievalTraceRerankerBaselineCandidateV2 {
+  const output = createRecord();
+  defineField(output, "ref", source.ref);
+  defineField(output, "baselineRank", source.baselineRank);
+  defineField(output, "rerankedRank", source.rerankedRank);
+  return finishRecord(output);
+}
+
 function copyEvent(source: TraceEvent): TraceEvent {
   const output = createRecord();
   defineField(output, "sequence", source.sequence);
@@ -482,6 +517,20 @@ function copyEvent(source: TraceEvent): TraceEvent {
       defineField(output, "round", source.round);
       defineField(output, "selectedRef", source.selectedRef);
       defineField(output, "records", copyArray(source.records, copyMmrRecord));
+      break;
+    case "reranker-stage":
+      defineField(output, "provider", copyRerankerProvider(source.provider));
+      defineField(output, "outcome", source.outcome);
+      if (source.outcome === "reranked") {
+        defineField(output, "candidates", copyArray(source.candidates, copyRerankedCandidate));
+      } else {
+        defineField(output, "reason", source.reason);
+        defineField(
+          output,
+          "candidates",
+          copyArray(source.candidates, copyBaselineRerankerCandidate),
+        );
+      }
       break;
     case "ranked-output":
     case "deterministic-output":

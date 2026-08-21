@@ -18,12 +18,17 @@ import {
   type RerankCandidateInputV1,
   type RerankerCancellationV1,
   type RerankerProviderIdentityV1,
+  type RerankerResultV1,
   type SerializedRerankerProviderRequestV1,
   baselineIdentityRerankerScoreV1,
   createHttpsRerankerProviderV1,
   createLocalRerankerProviderV1,
   type RerankerHttpsTransportV1,
 } from '../index.js';
+import {
+  parseSerializedRerankerProviderRequestV1,
+  serializeRerankerProviderResponseV1,
+} from '../reranker.js';
 
 const IDENTITY = Object.freeze({
   providerId: 'provider-a',
@@ -108,6 +113,64 @@ afterEach(() => {
 });
 
 describe('memberry.reranker v1 core boundary', () => {
+  it('uses own indexed data properties for all six canonical helper array-write classes', async () => {
+    const inputs = Array.from({ length: RERANKER_MAX_CANDIDATES }, (_, index) => candidate(index, {
+      title: `title-${index}`,
+      content: `content-${index}`,
+      baselineScore: index / RERANKER_MAX_CANDIDATES,
+    }));
+    const cases: Array<{ surface: 'array' | 'object' | 'inserted'; index: 0 | 127 }> = [];
+    for (const surface of ['array', 'object', 'inserted'] as const) {
+      cases.push({ surface, index: 0 }, { surface, index: 127 });
+    }
+    for (const testCase of cases) {
+      const scores = Array.from(
+        { length: RERANKER_MAX_CANDIDATES },
+        (_, index) => (RERANKER_MAX_CANDIDATES - index) / RERANKER_MAX_CANDIDATES,
+      );
+      let setters = 0;
+      let getters = 0;
+      const inserted = Object.create(Object.getPrototypeOf(Array.prototype)) as object;
+      const originalArrayParent = Object.getPrototypeOf(Array.prototype);
+      const host = testCase.surface === 'array'
+        ? Array.prototype
+        : testCase.surface === 'object' ? Object.prototype : inserted;
+      const originalHostDescriptor = Object.getOwnPropertyDescriptor(host, String(testCase.index));
+      let result: RerankerResultV1<number> | undefined;
+      try {
+        Object.defineProperty(host, String(testCase.index), {
+          configurable: true,
+          get: () => { getters += 1; return undefined; },
+          set: () => { setters += 1; },
+        });
+        if (testCase.surface === 'inserted') Object.setPrototypeOf(Array.prototype, inserted);
+        const provider = createRerankerProviderV1(IDENTITY, (serialized) => {
+          const request = parseSerializedRerankerProviderRequestV1(serialized);
+          return Promise.resolve(serializeRerankerProviderResponseV1(request, IDENTITY, scores));
+        });
+        result = await executeCalibratedRerankV1({ query: 'canonical helper', candidates: inputs }, provider);
+      } finally {
+        if (testCase.surface === 'inserted') Object.setPrototypeOf(Array.prototype, originalArrayParent);
+        if (originalHostDescriptor === undefined) {
+          delete (host as Record<string, unknown>)[String(testCase.index)];
+        } else {
+          Object.defineProperty(host, String(testCase.index), originalHostDescriptor);
+        }
+      }
+      expect({ surface: testCase.surface, index: testCase.index, setters, getters })
+        .toEqual({ surface: testCase.surface, index: testCase.index, setters: 0, getters: 0 });
+      expect(result?.outcome).toBe('reranked');
+      expect(result?.candidates).toHaveLength(RERANKER_MAX_CANDIDATES);
+      expect(result?.candidates.map((item) => item.value))
+        .toEqual(Array.from({ length: RERANKER_MAX_CANDIDATES }, (_, index) => index));
+      expect(JSON.stringify(result?.candidates.map((item) => item.score)))
+        .toBe(JSON.stringify(Array.from(
+          { length: RERANKER_MAX_CANDIDATES },
+          (_, index) => (RERANKER_MAX_CANDIDATES - index) / RERANKER_MAX_CANDIDATES,
+        )));
+    }
+  });
+
   it('exports the contract and empty input short-circuits without provider execution', async () => {
     expect(RERANKER_CONTRACT_ID).toBe('memberry.reranker');
     expect(RERANKER_CONTRACT_VERSION).toBe('1.0.0');

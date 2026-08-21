@@ -6,6 +6,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { UnifiedAssembler } from '../assembler.js';
 import { assertRetrievalTraceConformant, assertRetrievalTraceSecretSafe, replayRetrievalTrace } from '../trace.js';
 import type { RetrievalTraceV1 } from '../trace.js';
+import { RankedRuntimeTraceAdapter } from '../runtime-trace.js';
+import { applyServedRerankerV1, createServedRerankerProviderV1 } from '../served-reranker.js';
+import type { RetrievalResult } from '../types.js';
 
 const CANARY_ID = 'raw-private-sk_live_12345678901234567890';
 const ASSEMBLED_AT = '2026-08-18T00:00:00.000Z';
@@ -742,6 +745,277 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
       result.trace.events.filter((event) => event.kind === 'ranked-output')
         .sort((a, b) => a.rank - b.rank).map((event) => event.ref),
     );
+  });
+
+  it('binds ranked-v2 recording privately without changing the four-argument ranked-v1 default', async () => {
+    const baseline: RetrievalResult[] = [
+      { id: 'private-alpha', source_type: 'semantic', title: 'alpha', content: 'alpha evidence', score: 0.9, metadata: {} },
+      { id: 'private-beta', source_type: 'symbol', title: 'beta', content: 'beta evidence', score: 0.1, metadata: {} },
+    ];
+    const observations = [{
+      channels: [{ channel: 'memory.scope' as const, outcome: 'success' as const }],
+      candidates: baseline.map((item, index) => ({
+        privateId: item.id,
+        sourceType: item.source_type,
+        channels: [{ channel: 'memory.scope' as const, rank: index + 1, score: item.score }],
+        evidence: {},
+        estimatedTokens: 4,
+      })),
+      finalIds: baseline.map((item) => item.id),
+    }];
+    const facts = {
+      includeCode: false,
+      includeArchitecture: false,
+      includeMemory: true,
+      projectScopeApplied: false,
+      projectNameApplied: false,
+      memoryScopeApplied: true,
+      namedTenant: true,
+      entityCount: 0,
+      tagCount: 0,
+      temporalFilterApplied: false,
+      query: 'beta',
+      maxTokens: 1_000,
+    };
+    const legacy = new RankedRuntimeTraceAdapter(observations, [baseline], facts, []);
+    expect((legacy as unknown as { algorithmVersion: string }).algorithmVersion).toBe('ranked-v1');
+    for (const method of ['filter', 'some'] as const) {
+      const previous = Object.getOwnPropertyDescriptor(Array.prototype, method)!;
+      let callbacks = 0;
+      let failure: unknown;
+      try {
+        Reflect.defineProperty(Array.prototype, method, {
+          value: () => { callbacks += 1; throw new Error('runtime constructor intrinsic must not run'); },
+          configurable: true,
+          writable: true,
+        });
+        try { new RankedRuntimeTraceAdapter(observations, [baseline], facts, [], 'ranked-v2'); }
+        catch (error) { failure = error; }
+      } finally {
+        Reflect.defineProperty(Array.prototype, method, previous);
+      }
+      expect({ method, callbacks, failure: String(failure) }).toEqual({
+        method, callbacks: 0, failure: 'Error: ranked-v2 runtime intrinsic integrity check failed',
+      });
+    }
+
+    const adapter = new RankedRuntimeTraceAdapter(observations, [baseline], facts, [], 'ranked-v2');
+    baseline.forEach((item) => {
+      adapter.candidateWindow(item, true);
+      adapter.finalScore(item, item.score);
+    });
+    adapter.mmr({
+      round: 1,
+      selected: baseline[0]!,
+      lambda: 1,
+      records: [
+        { candidate: baseline[0]!, relevance: 0.9, pairwise: [] },
+        { candidate: baseline[1]!, relevance: 0.8, pairwise: [] },
+      ],
+    });
+    adapter.mmr({
+      round: 2,
+      selected: baseline[1]!,
+      lambda: 1,
+      records: [{
+        candidate: baseline[1]!,
+        relevance: 0.8,
+        pairwise: [{ selected: baseline[0]!, similarity: 0 }],
+      }],
+    });
+    adapter.recordDedup(baseline.map((item) => item.id), baseline.map((item) => item.id));
+    const outcome = await applyServedRerankerV1('beta', baseline, createServedRerankerProviderV1());
+    expect(outcome.outcome).toBe('reranked');
+    const includedIds = outcome.results.map((item) => item.id);
+    const collectionMutations = [
+      { target: Map.prototype, key: 'get', previous: Object.getOwnPropertyDescriptor(Map.prototype, 'get')! },
+      { target: Map.prototype, key: 'set', previous: Object.getOwnPropertyDescriptor(Map.prototype, 'set')! },
+      { target: Set.prototype, key: 'has', previous: Object.getOwnPropertyDescriptor(Set.prototype, 'has')! },
+      { target: Set.prototype, key: 'add', previous: Object.getOwnPropertyDescriptor(Set.prototype, 'add')! },
+    ];
+    let trace: RetrievalTraceV1 | undefined;
+    let replay: ReturnType<typeof replayRetrievalTrace> | undefined;
+    try {
+      for (let index = 0; index < collectionMutations.length; index += 1) {
+        const mutation = collectionMutations[index]!;
+        Reflect.defineProperty(mutation.target, mutation.key, {
+          value: () => { throw new Error('runtime collection intrinsic must not run'); },
+          configurable: true,
+          writable: true,
+        });
+      }
+      adapter.recordReranker(baseline, outcome);
+      adapter.recordBudget(includedIds);
+      trace = adapter.finalize();
+      replay = replayRetrievalTrace(trace);
+    } finally {
+      for (let index = collectionMutations.length - 1; index >= 0; index -= 1) {
+        const mutation = collectionMutations[index]!;
+        Reflect.defineProperty(mutation.target, mutation.key, mutation.previous);
+      }
+    }
+    expect(trace).toBeDefined();
+    if (!trace) throw new Error('ranked-v2 runtime trace was not finalized');
+    expect(trace.algorithmVersion).toBe('ranked-v2');
+    expect(trace.events.filter((event) => event.kind === 'reranker-stage')).toHaveLength(1);
+    expect(replay?.resultOrder).toEqual(trace.resultOrder);
+    const traceBytes = JSON.stringify(trace);
+    expect(traceBytes).not.toContain('private-alpha');
+    expect(traceBytes).not.toContain('private-beta');
+    expect(traceBytes).not.toContain('alpha evidence');
+    expect(traceBytes).not.toContain('beta evidence');
+    expect(traceBytes).not.toContain('"privateId"');
+    expect(traceBytes).not.toContain('"content"');
+    expect(traceBytes).not.toContain('"title"');
+    expect(traceBytes).not.toContain('"query"');
+    assertRetrievalTraceConformant(trace);
+
+    const missingBudget = new RankedRuntimeTraceAdapter(observations, [baseline], facts, [], 'ranked-v2');
+    baseline.forEach((item) => {
+      missingBudget.candidateWindow(item, true);
+      missingBudget.finalScore(item, item.score);
+    });
+    missingBudget.mmr({
+      round: 1,
+      selected: baseline[0]!,
+      lambda: 1,
+      records: [
+        { candidate: baseline[0]!, relevance: 0.9, pairwise: [] },
+        { candidate: baseline[1]!, relevance: 0.8, pairwise: [] },
+      ],
+    });
+    missingBudget.mmr({
+      round: 2,
+      selected: baseline[1]!,
+      lambda: 1,
+      records: [{
+        candidate: baseline[1]!, relevance: 0.8,
+        pairwise: [{ selected: baseline[0]!, similarity: 0 }],
+      }],
+    });
+    missingBudget.recordDedup(baseline.map((item) => item.id), baseline.map((item) => item.id));
+    missingBudget.recordReranker(baseline, outcome);
+    const incomplete = missingBudget.finalize();
+    expect(incomplete.complete).toBe(false);
+    expect(incomplete.incompleteReasons).toContain('candidate-output-gap');
+    expect(() => replayRetrievalTrace(incomplete)).toThrow(/incomplete/);
+
+    const late = new RankedRuntimeTraceAdapter(observations, [baseline], facts, [], 'ranked-v2');
+    baseline.forEach((item) => {
+      late.candidateWindow(item, true);
+      late.finalScore(item, item.score);
+    });
+    late.mmr({
+      round: 1,
+      selected: baseline[0]!,
+      lambda: 1,
+      records: [
+        { candidate: baseline[0]!, relevance: 0.9, pairwise: [] },
+        { candidate: baseline[1]!, relevance: 0.8, pairwise: [] },
+      ],
+    });
+    late.mmr({
+      round: 2,
+      selected: baseline[1]!,
+      lambda: 1,
+      records: [{
+        candidate: baseline[1]!, relevance: 0.8,
+        pairwise: [{ selected: baseline[0]!, similarity: 0 }],
+      }],
+    });
+    late.recordDedup(baseline.map((item) => item.id), baseline.map((item) => item.id));
+    late.recordBudget(outcome.results.map((item) => item.id));
+    const lateState = late as unknown as {
+      budgetRecorded: boolean;
+      rerankerRecorded: boolean;
+      failed: boolean;
+    };
+    expect(lateState).toMatchObject({ budgetRecorded: true, rerankerRecorded: false, failed: true });
+    late.recordReranker(baseline, outcome);
+    expect(lateState.rerankerRecorded).toBe(false);
+  });
+
+  it('merges repeated private IDs with exact ranked-v2 provenance under hostile numeric setters', () => {
+    const result: RetrievalResult = {
+      id: 'repeat-private-id', source_type: 'semantic', title: 'repeat', content: 'repeat evidence',
+      score: 0.9, metadata: {},
+    };
+    const baseline = [result];
+    const observations = [
+      {
+        channels: [{ channel: 'memory.scope' as const, outcome: 'success' as const }],
+        candidates: [{
+          privateId: result.id, sourceType: result.source_type,
+          channels: [{ channel: 'memory.scope' as const, rank: 1, score: 0.9 }],
+          evidence: {}, estimatedTokens: 4,
+        }],
+        finalIds: [result.id],
+      },
+      {
+        channels: [{ channel: 'memory.semantic-vector' as const, outcome: 'success' as const }],
+        candidates: [{
+          privateId: result.id, sourceType: result.source_type,
+          channels: [{ channel: 'memory.semantic-vector' as const, rank: 1, score: 0.8 }],
+          evidence: {}, estimatedTokens: 4,
+        }],
+        finalIds: [result.id],
+      },
+    ];
+    const facts = {
+      includeCode: false, includeArchitecture: false, includeMemory: true,
+      projectScopeApplied: false, projectNameApplied: false, memoryScopeApplied: true,
+      namedTenant: true, entityCount: 0, tagCount: 0, temporalFilterApplied: false,
+      query: 'repeat', maxTokens: 1_000,
+    };
+    for (const surface of ['array', 'object', 'inserted'] as const) {
+      for (const hostileIndex of [0, 1] as const) {
+        const inserted = Object.create(Object.getPrototypeOf(Array.prototype)) as object;
+        const originalArrayParent = Object.getPrototypeOf(Array.prototype);
+        const host = surface === 'array' ? Array.prototype : surface === 'object' ? Object.prototype : inserted;
+        const previous = Object.getOwnPropertyDescriptor(host, String(hostileIndex));
+        let callbacks = 0;
+        let adapter: RankedRuntimeTraceAdapter | undefined;
+        let failure: unknown;
+        try {
+          Object.defineProperty(host, String(hostileIndex), {
+            configurable: true,
+            get: () => { callbacks += 1; return { channel: 'code.fulltext', rank: 999 }; },
+            set: () => { callbacks += 1; },
+          });
+          if (surface === 'inserted') Object.setPrototypeOf(Array.prototype, inserted);
+          try { adapter = new RankedRuntimeTraceAdapter(observations, [baseline], facts, [], 'ranked-v2'); }
+          catch (error) { failure = error; }
+        } finally {
+          if (surface === 'inserted') Object.setPrototypeOf(Array.prototype, originalArrayParent);
+          if (previous) Object.defineProperty(host, String(hostileIndex), previous);
+          else delete (host as Record<string, unknown>)[String(hostileIndex)];
+        }
+        expect({ surface, hostileIndex, callbacks, failure }).toEqual({
+          surface, hostileIndex, callbacks: 0, failure: undefined,
+        });
+        if (!adapter) throw new Error('ranked-v2 repeated-ID adapter was not constructed');
+        adapter.candidateWindow(result, true);
+        adapter.finalScore(result, result.score);
+        adapter.mmr({
+          round: 1, selected: result, lambda: 1,
+          records: [{ candidate: result, relevance: 0.9, pairwise: [] }],
+        });
+        adapter.recordDedup([result.id], [result.id]);
+        adapter.recordReranker(baseline, {
+          outcome: 'baseline', reason: 'not-reranked', results: baseline,
+        });
+        adapter.recordBudget([result.id]);
+        const trace = adapter.finalize();
+        expect(trace.candidates).toHaveLength(1);
+        expect(trace.candidates[0]?.channels).toEqual([
+          { channel: 'memory.scope', rank: 1, score: 0.9 },
+          { channel: 'memory.semantic-vector', rank: 1, score: 0.8 },
+        ]);
+        expect(JSON.stringify(trace)).not.toContain(result.id);
+        expect(JSON.stringify(trace)).not.toContain('code.fulltext');
+        assertRetrievalTraceConformant(trace);
+      }
+    }
   });
 
   it('keeps trace-only allocation records behind observer guards', () => {

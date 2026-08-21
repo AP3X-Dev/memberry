@@ -101,6 +101,28 @@ function buildCompleteTrace(): RetrievalTraceV1 {
   return collector.finalize();
 }
 
+function buildRankedV2Trace(outcome: "reranked" | "baseline"): RetrievalTraceV1 {
+  const collector = new RetrievalTraceCollector("ranked-v2", {
+    ...request,
+    plannedChannels: ["memory.scope"],
+  });
+  collector.attemptChannel("memory.scope");
+  collector.settleChannel("memory.scope", { outcome: "success" });
+  const handle = collector.addCandidate(candidate("memory.scope", 1, 0.91));
+  collector.recordFilter(handle, { name: "mmr", outcome: "pass" });
+  collector.recordMmrRound(1, handle, [
+    { candidate: handle, relevance: 0.91, lambda: 1, pairwise: [] },
+  ]);
+  collector.recordFilter(handle, { name: "dedup", outcome: "pass" });
+  collector.recordRerankerStage([handle], outcome === "reranked"
+    ? { outcome: "reranked", candidates: [{ candidateHandle: handle, calibratedScore: 0.812345 }] }
+    : { outcome: "baseline" });
+  collector.recordFilter(handle, { name: "token-budget", outcome: "pass" });
+  collector.recordOutput(handle, 1);
+  collector.recordTerminal(handle, { outcome: "included", reasons: [] });
+  return collector.finalize();
+}
+
 function buildIncompleteTrace(): RetrievalTraceV1 {
   const collector = new RetrievalTraceCollector("ranked-v1", {
     ...request,
@@ -217,6 +239,42 @@ function errorSnapshot(action: () => unknown): {
 }
 
 describe("UI-001A retrieval explanation view", () => {
+  it.each(["reranked", "baseline"] as const)(
+    "roundtrips the complete ranked-v2 %s event through exact null-prototype copies",
+    (outcome) => {
+      const trace = buildRankedV2Trace(outcome);
+      const view = buildRetrievalExplanationViewV1(trace);
+      const source = trace.events.find((event) => event.kind === "reranker-stage")!;
+      const copied = view.events.find((event) => event.kind === "reranker-stage")!;
+      expect(copied).toEqual(source);
+      expect(copied).not.toBe(source);
+      expect(Object.getPrototypeOf(copied)).toBeNull();
+      if (copied.kind !== "reranker-stage" || source.kind !== "reranker-stage") {
+        throw new Error("missing reranker event");
+      }
+      expect(Object.getPrototypeOf(copied.provider)).toBeNull();
+      expect(copied.candidates).not.toBe(source.candidates);
+      expect(Object.getPrototypeOf(copied.candidates[0]!)).toBeNull();
+      expect(Object.keys(copied)).toEqual(outcome === "reranked"
+        ? ["sequence", "kind", "provider", "outcome", "candidates"]
+        : ["sequence", "kind", "provider", "outcome", "reason", "candidates"]);
+      if (copied.outcome === "baseline") {
+        expect(copied.reason).toBe("not-reranked");
+        expect(Object.hasOwn(copied.candidates[0]!, "calibratedScore")).toBe(false);
+      }
+      expect(view.replayReceipt).toEqual({
+        replayable: true,
+        resultOrder: trace.resultOrder,
+        terminalExclusions: trace.terminalExclusions,
+        replayStateDigest: trace.replayStateDigest,
+      });
+      expect(() => renderRetrievalExplanationTextV1(view)).not.toThrow();
+      const encoded = JSON.stringify(view);
+      for (const forbidden of [
+        "query text", "raw-id", "tenant-secret", "project-secret", "https://", "provider-response",
+      ]) expect(encoded).not.toContain(forbidden);
+    },
+  );
   it("builds the exact secret-safe view and independently binds complete replay", () => {
     const trace = buildCompleteTrace();
     const view = buildRetrievalExplanationViewV1(trace);
