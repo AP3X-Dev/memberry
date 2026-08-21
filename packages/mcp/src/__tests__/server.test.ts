@@ -202,6 +202,11 @@ describe('createAMPServer', () => {
     const baseUrl = `http://127.0.0.1:${address.port}`;
     try {
       const aliceHeaders = await initializeMcpSession(baseUrl, 'tok-alice', 100);
+      const aliceSessionServer = [...handle.streamableServers.values()][0]!;
+      const aliceRegistry = (aliceSessionServer as unknown as {
+        _registeredTools: Record<string, unknown>;
+      })._registeredTools;
+      expect(aliceRegistry.berry_research_init).toBeUndefined();
       const allowed = await callMcpTool(baseUrl, aliceHeaders, 101, 'berry_tools', { action: 'list' });
       expect(allowed).toMatchObject({ result: { content: [{ type: 'text' }] } });
       expect(JSON.stringify(allowed)).not.toContain('capability denied');
@@ -213,7 +218,13 @@ describe('createAMPServer', () => {
       const withheld = await callMcpTool(
         baseUrl, aliceHeaders, 105, 'berry_research_init', { campaign: 'must-not-run' },
       );
-      expect(withheld).toHaveProperty('error');
+      expect(aliceRegistry.berry_research_init).toBeUndefined();
+      expect(withheld).toMatchObject({
+        result: {
+          content: [{ type: 'text', text: expect.any(String) }],
+          isError: true,
+        },
+      });
       expect(JSON.stringify(withheld)).not.toContain('must-not-run');
 
       const enableAdmin = await callMcpTool(
