@@ -319,6 +319,22 @@ channel attempt, channel terminal, candidate filter, candidate score, MMR
 round, reranker stage, ranked output, candidate terminal, stage failure. No
 other event ordering changes.
 
+`packages/retrieval/src/retrieval-explanation-view.ts` is the explanation-view
+boundary for the new event. For each validated `reranker-stage` variant it
+constructs a new null-prototype event record containing exactly that variant's
+keys, a new null-prototype provider record containing exactly the four frozen
+provider keys, a new owned candidate array populated with own data-property
+definitions, and a new null-prototype record for every candidate. The
+`reranked` copy preserves `sequence`, `kind`, `provider`, `outcome`, and every
+candidate's `ref`, `baselineRank`, `calibratedScore`, and `rerankedRank`; the
+`baseline` copy additionally preserves `reason: 'not-reranked'`, preserves each
+candidate's three legal keys, and never synthesizes a score. No spread,
+`Object.assign`, inherited getter/setter, or prototype-bearing input is trusted
+to perform this copy. Explanation-view roundtrip and replay must therefore
+preserve the complete validated event while exposing no query, title, content,
+raw ID, tenant/project scope, secret, endpoint, exception, or provider response
+bytes.
+
 The reranker candidate array is capped at exactly 128 entries, matching
 `RERANKER_MAX_CANDIDATES`. `HARD_LIMITS` splits the current overloaded array
 cap into `genericArrayEntries: 8192` and `traceEvents: 8193`.
@@ -660,6 +676,7 @@ existing holdout lane. It must reach green master before model work begins.
 - `packages/retrieval/src/index.ts`
 - `packages/retrieval/src/trace.ts`
 - `packages/retrieval/src/runtime-trace.ts`
+- `packages/retrieval/src/retrieval-explanation-view.ts`
 - `packages/retrieval/src/__tests__/served-reranker.test.ts` (new)
 - `packages/retrieval/src/__tests__/trace.test.ts`
 - `packages/retrieval/src/__tests__/assembler.traced.test.ts`
