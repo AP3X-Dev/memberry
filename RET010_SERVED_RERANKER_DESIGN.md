@@ -718,6 +718,22 @@ boundaries are unchanged.
 - `packages/retrieval/src/__tests__/runtime-candidate-channel.test.ts`
 - `packages/retrieval/src/__tests__/tools.test.ts`
 - `packages/retrieval/src/__tests__/query-input-boundary.test.ts`
+- `packages/retrieval/src/__tests__/retrieval-explanation-wiring.test.ts`
+
+The RET-010C tracked path ceiling is seven, raised from six solely to advance
+the prior RET-010B construction-only phase-boundary assertion after intentional
+served response wiring. The revised
+`retrieval-explanation-wiring.test.ts` contract must continue to prove that
+`applyServedRerankerV1`,
+`parseSerializedRerankerProviderRequestV1`, and
+`serializeRerankerProviderResponseV1` remain absent from the package root.
+`assembler.ts` must not construct a served provider and must contain exactly
+one production invocation of `applyServedRerankerV1`. `tools.ts` must neither
+construct a served provider nor import or invoke `applyServedRerankerV1`.
+The stale blanket prohibition on `ranked-v2` is removed because RET-010C
+intentionally selects ranked-v2 inside the assembler for configured served
+attempts. No provider construction, application primitive, or model logic may
+move into the tool layer.
 
 ### RET-010D — runtime composition and disposable proof
 
