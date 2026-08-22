@@ -472,10 +472,189 @@ or more than 10 probes per lane, or any output field carrying
 scenario/probe/query/result/oracle IDs. This is a reviewed source boundary, not
 an operating-system sandbox claim.
 
-`runDeterministicCiGate` invokes the dev gate after registry validation while
-its existing G2 holdout calls continue to use disabled
-`memberry-retrieval-core-v1`. Thus every implementation push can produce hosted
-development evidence without exposing served bytes to holdout scoring.
+`runDeterministicCiGate` completes every pre-existing registry, baseline, and
+comparison gate first, including both existing G2 calls still bound to disabled
+`memberry-retrieval-core-v1`, and then makes RET-010 development its last
+operation. It launches `dev-gate.ts` in an isolated Node child process and does
+no further comparison, import, or evidence work after that child; it only
+propagates the child's exit status. The child entry module must clean and
+validate the current-run output boundary before dynamically importing any
+registered adapter, evaluation, model, dataset, oracle, or policy source. It
+may statically import only Node platform modules and the minimal custody code
+needed to perform that pre-import cleanup. Thus an earlier deterministic-gate
+failure cannot execute served development work, while ordinary CI still never
+exposes served bytes to holdout scoring.
+
+The dev gate writes its complete public evidence surface only below the
+isolated directory
+`node_modules/.cache/memberry-lab/runs/ret010-development/`. A successful
+directory contains exactly these five regular files and no tombstone:
+`recall-lane.json`, `precision-lane.json`, `efficiency-interval.json`,
+`aggregate-result.json`, and `custody-manifest.json`. A failed directory
+contains exactly `failure-tombstone.json` and no success or partial file.
+
+All six record types are closed; extra or missing keys reject. Keys appear in
+the order listed below, nested records follow their listed order, and arrays
+are forbidden:
+
+- each lane file has `schemaVersion: "1"`, `lane`
+  (`recall-at-10|precision-at-5`), the exact `datasetId`, `split: "dev"`, exact
+  `controlAdapterId` and `candidateAdapterId`, `scenarioCount: 10`,
+  `probeCount: 10`, exact `k` (`10|5`), `control`, `candidate`, `delta`, integer
+  `qualifyingCaseCount` in `[0,10]`, and `passed: true`; each arm has exactly
+  `recallAtK`, `precisionAtK`,
+  `staleLeakRate`, `isolationLeakRate`, `duplicateRate`, and
+  `unknownResultRate`, finite in `[0,1]`, while `delta` has exactly
+  `recallAtK` and `precisionAtK`, finite in `[-1,1]`;
+- `efficiency-interval.json` has `schemaVersion: "1"`,
+  `metric: "task-success-per-1k-tokens"`, `outcome: "measured"`,
+  `pairedProbes: 20`, `resamples: 2000`, `level: 0.95`, unsigned 32-bit
+  `seed`, and finite `point`, `lower`, `upper`, and `oneSidedLower`;
+- `aggregate-result.json` has `schemaVersion: "1"`, `decision: "passed"`,
+  the exact `datasetId`, `split: "dev"`, exact `controlAdapterId` and
+  `candidateAdapterId`, exact four-key `providerIdentity`, lowercase 40-hex
+  `sourceCommit`, `modelBlob`, `providerContractBlob`, and `adapterBlob`,
+  lowercase 64-hex `datasetDescriptorSha256`, `inputSha256`, `oracleSha256`,
+  `devPolicySha256`, `recallLaneSha256`, `precisionLaneSha256`, and
+  `efficiencyIntervalSha256`, the same unsigned 32-bit `seed`, `quality` with
+  exactly finite `recallDelta`, `precisionDelta`, `efficiencyPoint`, and
+  `efficiencyOneSidedLower`, `safety` with exactly the four finite leak/rate
+  values above and every value `0`, `responseEffect` with exactly
+  `sameCaseOrderAndSelectionChanged: true` and integer
+  `qualifyingCaseCount` in `[1,20]`, and
+  `passed: true`; the model, provider-contract, and adapter blobs are the Git
+  blobs for `packages/retrieval/src/served-reranker.ts`,
+  `packages/retrieval/src/reranker.ts`, and
+  `bench/lab/adapters/memberry-retrieval-core.ts` respectively;
+- `custody-manifest.json` has `schemaVersion: "1"`, `decision: "passed"`,
+  lowercase 40-hex `gitCommit`, `nodeMajor` (`20|22`), exact full
+  `nodeVersion` matching `^v(?:20|22)\.[0-9]+\.[0-9]+$`, decimal-string
+  `workflowRunId`, positive-integer `workflowRunAttempt`, and lowercase 64-hex
+  `recallLaneSha256`, `precisionLaneSha256`, `efficiencyIntervalSha256`, and
+  `aggregateResultSha256`;
+- `failure-tombstone.json` has `schemaVersion: "1"`, `decision: "failed"`,
+  `failureClass` (`harness|infrastructure|model|metric|safety|custody`),
+  `stage` (`source-integrity|registry|load-dev|recall-comparison|precision-comparison|efficiency|quality-policy|safety-policy|response-effect|artifact`),
+  and the same exact `gitCommit`, `nodeMajor`, `nodeVersion`, `workflowRunId`,
+  and `workflowRunAttempt` custody keys. It contains no exception text or
+  caller-controlled value.
+
+Every file is the UTF-8, no-BOM byte sequence `JSON.stringify(record) + "\n"`
+using the exact key order above, with finite `-0` normalized to `0`; the reader
+reconstructs those bytes and rejects any whitespace, ordering, encoding, or
+newline variant. SHA-256 is over those exact file bytes. Filenames and bytes
+may not contain scenario, probe, query, result, or oracle IDs, labels, per-case
+outcomes, timestamps, platform, filesystem paths, or dataset/oracle contents.
+The Node 20 and Node 22 executions must produce byte-identical
+`aggregate-result.json` and therefore the same SHA-256; node/run/attempt data
+exists only in the node-specific manifest or tombstone.
+
+All output operations start at the repository root and validate every path
+component from that root through the cache, runs, output-parent, and staging-
+parent directories with `lstat` and `realpath`. Every component must be a real
+directory and not a symbolic link, junction, mount point, or other reparse
+point; the canonical parent must have the exact expected component suffix
+`node_modules/.cache/memberry-lab/runs`, not merely a string prefix. The gate
+repeats this component-by-component check after creating any directory and
+immediately before either rename or publication. Cleanup may remove only the
+already-verified leaf output or leaf staging directory, without following a
+link, and must revalidate the leaf and all ancestors immediately before
+deletion. A link, reparse point, changed realpath, unexpected suffix, foreign
+entry, or validation race fails closed before reading, deleting, or publishing
+through that path.
+
+At executable-boundary entry, after those checks and before any served import
+or evaluation, the child removes every prior verified output and sibling
+staging leaf. Publication creates the staging leaf exclusively, revalidates its
+ancestors and newly created leaf, writes a complete bundle with exclusive file
+creation, verifies exact regular-file allowlist and canonical bytes, revalidates
+again, and atomically renames the staging leaf to the output leaf. It then
+revalidates the published leaf and its complete ancestor chain. No recursive
+operation may follow a link. Hosted Ubuntu tests use real POSIX symbolic links
+at each ancestor and leaf and real race substitutions between validation,
+creation, deletion, and rename; every case must leave foreign targets untouched
+and publish no success receipt. Dependency-injected filesystem-status fixtures
+independently classify Windows junctions and other reparse points and mount
+points at every component, exercise each corresponding fail-closed branch, and
+prove that none is treated as an ordinary directory. This fixture proof is
+classification-contract evidence, not a Windows execution gate; requiring a
+real Windows junction/reparse/mount execution gate needs a separate path,
+workflow, and approval. Runtime operation on every platform still rejects real
+symbolic links, junctions, mount points, and other reparse points.
+
+The executable boundary catches every synchronous throw, rejected promise,
+late internal failure, and nonzero internal outcome. It removes any current
+partial or success leaf and atomically publishes the closed current-run
+`failure-tombstone.json` bundle. It then writes exactly the fixed value-free
+message `RET010_DEV_GATE_FAILED` plus LF to stderr and exits nonzero; it never
+rethrows or logs the cause. No cause, name, message, stack, path, scenario,
+probe, query, result, oracle, adapter/provider output, or caller-controlled
+value may reach stdout, stderr, the tombstone, or any other artifact. If the
+filesystem itself prevents safe tombstone publication, the verified leaves are
+left absent, the same fixed message and nonzero exit are used, and artifact
+upload fails for missing files. Sentinel tests inject unique values through
+every failure stage, thrown value, rejected value, error field, path, and
+fixture field and require that none occurs in captured console bytes or any
+published byte. This replaces and supersedes any earlier rethrow wording.
+
+`bench/lab/ret010/dev-gate.ts` implements the development-bundle reader/verifier
+once behind a value-free custody CLI mode, and RET-010F must use that exact
+mode; no second parser, permissive JSON path, console transcription, or
+manifest-only shortcut is allowed. Given the two extracted matrix artifacts,
+the verifier requires
+exactly two success bundles and exactly the Node-major set `{20,22}`, with no
+tombstone, extra file, duplicate major, contradictory record, or third
+manifest. For every record it parses the closed shape, reconstructs the
+canonical UTF-8/no-BOM/one-LF bytes, requires byte equality, and recomputes
+every file SHA-256, Git blob, dataset descriptor, input, oracle, policy, lane,
+interval, aggregate, and manifest digest. It loads the unchanged
+`dev-policy.json` and independently re-evaluates only that policy's declared
+metric, safety, efficiency, and seed-rule thresholds rather than trusting
+`passed` or `decision` fields. It joins their mirrored values across the policy,
+reports, and aggregate, and joins provider/adapter/model identity, source
+commit, workflow run ID, attempt, and digests across the reports, aggregate,
+and both manifests. Separately from policy evaluation, it independently
+validates the hard-coded RET-010E custody invariant: it recomputes aggregate
+`qualifyingCaseCount` as the exact sum of the two lane counts, requires the sum
+to be in `[1,20]`, and derives
+`sameCaseOrderAndSelectionChanged === true` only from that positive sum. It
+never accepts independent any-order-change and any-selection-change facts as a
+qualification receipt. Both manifests must name the
+same exact lowercase source commit, workflow run ID, and attempt; their full
+Node versions must match their distinct majors; both must bind the same
+byte-identical aggregate and aggregate digest. Any mismatch or contradiction
+rejects the entire pair.
+
+Before the child imports executable evaluation or model code, it requires
+`git rev-parse HEAD` to be exactly 40 lowercase hexadecimal characters, requires
+both tracked and untracked status to be empty, and compares raw working-tree
+bytes with `git cat-file blob HEAD:<path>` for every one of the twelve RET-010E
+paths plus these immutable, directly security-critical dependencies:
+`bench/lab/stats.ts`, `bench/lab/baselines/canonical.ts`,
+`bench/lab/datasets/hash.ts`, `packages/retrieval/src/served-reranker.ts`,
+`packages/retrieval/src/reranker.ts`, and
+`packages/retrieval/src/assembler.ts`. Missing paths, non-blob entries, mode
+drift, byte drift, submodules, and untracked content reject. The same HEAD,
+status, path modes, and byte comparisons run again after evaluation and
+immediately before publication. These six paths are verification dependencies
+already promoted by earlier packets, not mutable RET-010E scope; the RET-010E
+tracked implementation ceiling remains exactly twelve.
+
+RET-010F additionally verifies immutable hosted workflow metadata after the run
+has completed: the parent workflow conclusion and the conclusions of exactly
+the Node 20 and Node 22 matrix jobs must all be `success`, and their repository,
+HEAD, run ID, attempt, and artifact identities must match the two bundles. A
+failed or cancelled parent, a failed or cancelled matrix job, a stale attempt,
+or a success bundle from any other run/attempt can never authorize
+`approved-dev.json`. Within each matrix job the deterministic-gate process is
+the final executable gate and its artifact publication is terminal. If that
+job fails or is cancelled before a valid current-run success publication, its
+always-running finalizer removes any verified stale/success leaf and may upload
+only a tombstone bearing that job's current commit/run/attempt identity; if it
+cannot safely do so, no artifact is uploaded. A success artifact remains
+provisional until RET-010F proves the parent and both jobs successful. RET-010F
+records the common aggregate digest plus both manifest digests, versions, run
+ID, and attempt; neither a lone manifest nor console output may substitute.
 
 ### 7.2 RET-010 development qualification
 
@@ -493,8 +672,27 @@ The development candidate must satisfy all of:
 - task-success-per-token point delta is positive and its paired one-sided 95%
   bootstrap lower bound is at least zero using the repository's frozen paired
   bootstrap method and seed.
-- at least one response-path case reverses baseline order and changes selected
-  evidence under a tight token budget.
+- at least one individual response-path probe both reverses baseline order and
+  changes selected evidence under a tight token budget.
+
+`dev-gate.ts` owns a separate closed, hard-coded RET-010E custody invariant; it
+is not a `dev-policy.json` field and cannot be supplied or changed through a
+policy, registry, environment value, or caller input. For each probe, the gate
+computes one qualifying boolean as the conjunction of that probe's
+order-reversal measurement and that same probe's selected-evidence change
+measurement before any lane or cross-lane aggregation. Each lane's
+`qualifyingCaseCount` is the count of its ten per-probe conjunctions; the
+aggregate count is the exact sum of those two lane counts, and the invariant's
+only qualification receipt is exactly
+`responseEffect: { sameCaseOrderAndSelectionChanged: true,
+qualifyingCaseCount: N }` with integer `N` in `[1,20]`. Lower-level order and
+selection measurements may exist only transiently to compute each conjunction;
+they are not published and cannot independently satisfy the gate. The
+fail-closed bundle verifier recomputes the aggregate count and boolean from the
+two canonical lane counts and rejects disagreement. Tests must include a
+negative vector in which one probe changes order and a different probe changes
+selection: every per-probe conjunction is false, the qualifying count is zero,
+and the gate and verifier must both reject it.
 
 `dev-policy.json` is a closed schema-v1 record that pins the two adapter IDs,
 dataset ID, split `dev`, lane counts `10/10`, Recall@10 minimum delta `0`,
@@ -503,7 +701,9 @@ leak, isolation leak, duplicate, and unknown result—to `0`, and the
 exact cross-lane order above. The 20-probe efficiency interval must be
 `measured`, with point delta strictly above `0`, one-sided 95% lower bound at
 least `0`, 2000 paired resamples, minimum 10 paired probes, and the repository's
-vector-derived seed rule. Extra or missing keys reject.
+vector-derived seed rule. Extra or missing keys reject. This existing policy
+schema contains no response-effect conjunction, response-effect receipt, or
+qualifying-count field and RET-010E must not modify it.
 
 If this development gate fails, reject the model without opening or changing
 the holdout oracle. Thresholds, corpus, scenarios, and seed may not be weakened
@@ -532,9 +732,11 @@ run on `push`, `pull_request`, `schedule`, or a mutable branch ref.
 After development approval, a separate approval-record commit adds exactly
 `bench/lab/ret010/approved-dev.json`. The closed record names the approved dev
 source commit, model/provider/adapter Git blob hashes, aggregate dev receipt
-SHA-256, frozen policy/dataset/input/oracle/seed digests, and decision
-`approved`. The model/provider/adapter bytes must be unchanged from the named
-dev source commit; the only intervening path may be that approval record.
+SHA-256, both Node 20 and Node 22 custody-manifest SHA-256 values, full Node
+versions, shared workflow run ID, workflow attempt, frozen
+policy/dataset/input/oracle/seed digests, and decision `approved`. The
+model/provider/adapter bytes must be unchanged from the named dev source
+commit; the only intervening path may be that approval record.
 
 `holdout-gate.mts` requires `qualification_sha === HEAD`, requires
 `approval_digest` to equal the canonical SHA-256 of that exact record, verifies
@@ -759,6 +961,7 @@ baseline-controlled.
 
 ### RET-010E — production-path development evaluation
 
+- `.github/workflows/ci.yml`
 - `bench/lab/adapters/memberry-retrieval-core.ts`
 - `bench/lab/registered-adapters.ts`
 - `bench/lab/registry/systems.json`
@@ -771,13 +974,49 @@ baseline-controlled.
 - `bench/lab/ret010/__tests__/dev-gate.test.ts` (new)
 - `bench/lab/ret010/__tests__/holdout-gate.test.ts` (new)
 
-The RET-010E tracked path ceiling is eleven. It consumes the experiment
+The RET-010E tracked path ceiling is twelve. It consumes the experiment
 registry truth already promoted with RET-010D and must not rewrite that entry.
+
+The workflow change is limited to the existing Node-matrix
+`Evaluation-lab deterministic gate`, one value-free finalizer immediately
+after it, and one terminal upload step. No other step may follow the upload.
+The deterministic-gate step runs RET-010 last in its isolated child as frozen
+in section 7.1. The finalizer uses only the custody boundary (it must not import
+evaluation, adapters, model code, datasets, policies, or oracles), runs with
+`if: always()`, and binds the leaf to the current HEAD/run/attempt. It preserves
+a success bundle only when the immediately preceding deterministic-gate step
+succeeded and the bundle has that exact current identity; otherwise it safely
+replaces any verified leaf with the current-run tombstone. A cancelled job that
+cannot execute the finalizer has no approving artifact because RET-010F rejects
+its job conclusion and any stale identity.
+
+The terminal upload uses
+`actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`,
+`if: always()`, `if-no-files-found: error`, `include-hidden-files: true`, and
+`retention-days: 14`. Its exact artifact name is
+`memberry-ret010-development-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}`;
+it uploads only
+`node_modules/.cache/memberry-lab/runs/ret010-development/`. No existing upload
+surface, workflow trigger, job dependency, permission, environment, secret, or
+configuration value changes. Ordinary CI still never imports or invokes the
+holdout gate and keeps both existing G2 calls bound to disabled
+`memberry-retrieval-core-v1`. The binding tests prove the RET-010 child is last,
+the finalizer and upload ordering is exact, every failure/cancellation path is
+non-approving, and no step can upload a stale success leaf.
 
 ### RET-010F — independently approved development receipt
 
 - `bench/lab/ret010/approved-dev.json` (new, only after exact-byte and
   aggregate-receipt approval)
+
+The independent RET-010F checker must invoke the single fail-closed bundle
+reader/verifier frozen in section 7.1 against exactly the two downloaded
+matrix artifacts and the completed hosted-workflow metadata. It may write the
+closed approval record only after that verifier returns the fully joined,
+policy-recomputed Node 20/22 result. RET-010F adds only the approval JSON; it
+does not add or modify a reader, schema, policy, workflow, model, or evaluation
+path. Any need to change verifier bytes starts a separately reviewed RET-010E
+revision and new hosted run.
 
 The later RET-006/G2 packet may change
 `bench/lab/baselines/comparison-policy.json` and the ordinary G2 binding only
