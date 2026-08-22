@@ -25,11 +25,11 @@ details remain in
 
 ## Current program position
 
-- **Last updated:** 2026-08-21
-- **Exact remote master:** `3c623e84a313beb842c1a7ebd6adc0b9e3a08bd4`
-- **Active critical-path phase:** Phase 2 — Retrieval 2.0; the bounded SEC-001
-  security detour is complete, RET-007 remains parked at its declared escape
-  condition, and RET-010 is next
+- **Last updated:** 2026-08-22
+- **Exact remote master:** `8fbaa24f2302ab185e868cfbcd661ce14a768512`
+- **Active critical-path phase:** Phase 2 — Retrieval 2.0; RET-010A through
+  RET-010D are promoted, the RET-010E verification design is promoted, and the
+  fresh thirteen-path RET-010E implementation is active
 - **Highest phase started:** Phase 9
 - **Closed phase gates:** G0, G1
 - **Open phase gates:** G2 through G9 and GF
@@ -40,15 +40,24 @@ details remain in
 
 ## NEXT ACTION
 
-1. Merge this roadmap-only status update after exact-head and post-master CI;
-   do not count the documentation packet as capability progress.
-2. Begin RET-010 from that fresh exact master. Freeze the real served-response
-   effect chain and ranking-model acceptance before implementation. A shadow
-   flag, identity provider, or flag flip does not satisfy RET-010.
-3. Keep RET-007 v2 permanently frozen. Do not register or run a v2 candidate or
-   author an additive v3 instrument without a separate owner decision.
-4. Keep deployment, live-service changes, credential handling, destructive
-   tenant/data operations, and capability-policy activation out of scope.
+1. Complete the fresh RET-010E implementation from exact master `8fbaa24f` in
+   exactly the frozen thirteen paths. Use one maker plus independent
+   specification and hostile/security checkers; preserve both rejected
+   implementation worktrees unchanged.
+2. Promote only zero-P0/P1 implementation bytes through a retained branch, PR,
+   exact-head Node 20/22 and integration/live CI, normal merge, and exact
+   post-master CI. Ledger only P2 findings that cannot affect evidence truth,
+   security, tenant isolation, holdout blindness, executable feasibility,
+   custody, thresholds, or measured outcomes.
+3. Run one decisive hosted development qualification. If the frozen metric,
+   safety, isolation, source, custody, or reproducibility gate rejects, preserve
+   the evidence and stop model iteration instead of redesigning the instrument.
+4. If development qualifies, complete RET-010F from independently authenticated
+   hosted evidence, commit the canonical approval record, then dispatch the one
+   authorized holdout and decide G2 from its measured aggregate evidence.
+5. Keep RET-007 v2 permanently frozen. Keep deployment, activation, threshold
+   changes, sealed holdout inspection, new credentials/permissions, destructive
+   Git, tenant/data mutation, and live-service changes out of scope.
 
 ## Immediate Retrieval 2.0 exit checklist
 
@@ -76,8 +85,19 @@ details remain in
   `660b2d26`, SEC-001B design merge `a43a3da`, runtime merge `3c623e8`, and exact
   runtime post-master CI `32469628048` all passed without deployment or policy
   activation. G6 and the remaining SEC packages stay open independently.
-- [ ] Implement RET-010: a real response-path reranker and real ranking model.
-  A shadow-mode flag or identity provider does not satisfy this item.
+- [x] Promote RET-010A through RET-010D: qualification instrument, ranked-v2
+  model, real served-response wiring, and runtime composition.
+- [x] Promote the RET-010E verification design through PR #68 as merge
+  `8fbaa24f`; exact-head CI `32564371580` passed, and post-master CI
+  `32564828382` closed on exact-SHA attempt 2 after attempt 1 hit an unrelated
+  transient wiki-viewer port collision.
+- [ ] Implement and qualify RET-010E in the frozen thirteen paths on Node 20 and
+  Node 22. `(active: fresh worktree at exact master 8fbaa24f)`
+- [ ] Close RET-010F by independently authenticating the hosted development
+  evidence and committing the canonical approval record.
+- [ ] Close RET-010: qualify and independently approve the real served reranker.
+  A shadow-mode flag or identity provider does not satisfy this item; the
+  parent remains open until RET-010E and RET-010F close.
 - [ ] Arm the previously declared G2 improvement threshold only when the
   qualifying capabilities exist.
 - [ ] Pass G2: Recall@10 not below baseline, Precision@5 materially improved,
@@ -101,7 +121,11 @@ details remain in
 COMPLETED BOUNDED DETOUR: SEC-001 authenticated capability binding
 PARKED: RET-007 until a separate additive-v3 owner decision
 NOW
-  -> RET-010 real response-path reranker
+  -> fresh thirteen-path RET-010E implementation
+  -> implementation review, PR, and exact post-master CI
+  -> one decisive hosted development qualification
+  -> RET-010F authenticated approval record
+  -> one authorized holdout
   -> G2 Retrieval 2.0
        |-> Lane A: G3 lifecycle -> G5 temporal -> G7 reliability
        |-> Lane B: G4 Git-native coding memory
@@ -138,8 +162,8 @@ freeze G3, G6, or G8 indefinitely.
 - [x] RET-001 — Secret-safe retrieval trace model
 - [x] RET-002 — Entity/scope/time-aware query planner
 - [x] RET-003 — Multi-channel candidate contract
-- [ ] RET-004 — Calibrated reranker provider interface `(partial: bounded
-  shadow/provider foundations exist; no served reranking effect)`
+- [ ] RET-004 — Calibrated reranker provider interface `(partial: served
+  provider/reranker foundations exist; hosted qualification remains open)`
 - [x] RET-005 — Contradiction/stale/dedup post-filter
 - [ ] RET-006 — Token-budget evidence optimizer `(partial: budget evidence
   advanced; material utility gate remains open)`
@@ -148,6 +172,9 @@ freeze G3, G6, or G8 indefinitely.
 - [x] RET-008 — Tenant-scoped learned routing and feedback
 - [x] RET-009 — Caching, timeout, and provider fallback
 - [ ] RET-010 — Real reranker promotion into the served response path
+  `(partial: RET-010A through RET-010D and the RET-010E verification design are
+  promoted; RET-010E implementation is active; RET-010F and measured holdout
+  evidence remain open)`
 - [ ] G2 — Retrieval holdout quality and safety gate
 
 ## Phase 3 — Admission and lifecycle intelligence
@@ -292,6 +319,11 @@ freeze G3, G6, or G8 indefinitely.
    dependency-ready work in G3, G6, or G8.
 8. **No silent replanning:** source drift or a concrete P0/P1 may change the
    route; difficulty, boredom, or a new session may not.
+9. **RET-010 fast path:** promotion blocks on P0/P1. Record non-safety P2
+   findings in implementation acceptance instead of reopening the design; one
+   hosted development qualification and one authorized holdout decide the
+   route. A frozen-gate failure stops iteration rather than changing the
+   instrument, thresholds, or sealed evidence.
 
 ## New-session restart protocol
 
