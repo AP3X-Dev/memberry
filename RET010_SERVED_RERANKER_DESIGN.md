@@ -472,18 +472,20 @@ or more than 10 probes per lane, or any output field carrying
 scenario/probe/query/result/oracle IDs. This is a reviewed source boundary, not
 an operating-system sandbox claim.
 
-`runDeterministicCiGate` completes every pre-existing registry, baseline, and
-comparison gate first, including both existing G2 calls still bound to disabled
-`memberry-retrieval-core-v1`, and then makes RET-010 development its last
-operation. It launches `dev-gate.ts` in an isolated Node child process and does
-no further comparison, import, or evidence work after that child; it only
-propagates the child's exit status. The child entry module must validate the
+`runDeterministicCiGate` completes only the pre-existing registry, baseline, and
+comparison gates, including both existing G2 calls still bound to disabled
+`memberry-retrieval-core-v1`. It never imports, launches, or otherwise invokes
+`dev-gate.ts` and can never create or reserve a RET-010 evaluation root. The
+workflow's exact fail-fast Bash block invokes the baseline first and invokes
+`dev-gate.ts run` directly only after the baseline succeeds. The direct child
+entry module must validate the
 output boundary and exclusively create the current run/attempt/Node-major
 evaluation root before dynamically importing any registered adapter,
 evaluation, model, dataset, oracle, or policy source. It may statically import
 only Node platform modules and the minimal custody code
 needed to perform that pre-import containment and exclusive creation. Thus an
-earlier deterministic-gate failure cannot execute served development work,
+earlier baseline failure terminates the Bash block before any served development
+work, and only the final direct command can create authoritative evidence,
 while ordinary CI still never exposes served bytes to holdout scoring.
 
 The dev gate writes its complete evidence surface only below one evaluation
@@ -530,7 +532,8 @@ are forbidden:
 - `aggregate-result.json` has `schemaVersion: "1"`, `decision: "passed"`,
   the exact `datasetId`, `split: "dev"`, exact `controlAdapterId` and
   `candidateAdapterId`, exact four-key `providerIdentity`, lowercase 40-hex
-  `sourceCommit`, `modelBlob`, `providerContractBlob`, and `adapterBlob`,
+  `sourceCommit`, `modelBlob`, `providerContractBlob`, `adapterBlob`, and
+  `statisticsBlob`,
   lowercase 64-hex `datasetDescriptorSha256`, `inputSha256`, `oracleSha256`,
   `devPolicySha256`, `recallLaneSha256`, `precisionLaneSha256`, and
   `efficiencyIntervalSha256`, the same unsigned 32-bit `seed`, `quality` with
@@ -539,10 +542,12 @@ are forbidden:
   values above and every value `0`, `responseEffect` with exactly
   `sameCaseOrderAndSelectionChanged: true` and integer
   `qualifyingCaseCount` in `[1,20]`, and
-  `passed: true`; the model, provider-contract, and adapter blobs are the Git
+  `passed: true`; the model, provider-contract, adapter, and statistics blobs
+  are the Git
   blobs for `packages/retrieval/src/served-reranker.ts`,
   `packages/retrieval/src/reranker.ts`, and
-  `bench/lab/adapters/memberry-retrieval-core.ts` respectively;
+  `bench/lab/adapters/memberry-retrieval-core.ts`, and `bench/lab/stats.ts`
+  respectively;
 - `custody-manifest.json` has `schemaVersion: "1"`, `decision: "passed"`,
   lowercase 40-hex `gitCommit`, `nodeMajor` (`20|22`), exact full
   `nodeVersion` matching `^v(?:20|22)\.[0-9]+\.[0-9]+$`, canonical positive
@@ -619,21 +624,221 @@ quarantine, replacement, rename-publication, rethrow, or unconditional-upload
 wording.
 
 `bench/lab/ret010/dev-gate.ts` implements the development-bundle reader/verifier
-once behind a closed receipt custody CLI mode, and RET-010F must use that exact
-mode; no second parser, permissive JSON path, console transcription, or
-manifest-only shortcut is allowed. Given the two extracted matrix artifacts,
-the verifier requires
+once behind the one production CLI mode
+`node bench/lab/ret010/dev-gate.ts verify-hosted <40-lowercase-head> <canonical-run-id>`,
+and RET-010F must use that exact command. Immediately before launch, with no
+intervening command, RET-010F runs a trusted system/PATH `git` preflight with
+`shell: false`, ignored stdin, and separate bounded stdout/stderr pipes. It
+requires exact `git rev-parse HEAD` stdout to be the requested lowercase
+40-hex HEAD plus LF; exact `git status --porcelain=v1 --untracked-files=all`
+stdout to be empty; and exact
+`git ls-tree -z HEAD -- bench/lab/ret010/dev-gate.ts` stdout to be one and only
+one NUL-terminated record `100644 blob <40-lowercase-hex><TAB>bench/lab/ret010/dev-gate.ts<NUL>`.
+Using a component-contained no-follow handle, it requires the working script to
+be a regular non-link/non-reparse/non-mount file, reads its pinned bytes, and
+requires byte equality with exact no-shell
+`git cat-file blob HEAD:bench/lab/ret010/dev-gate.ts`. It independently computes
+Git SHA-1 over `"blob " + decimalByteLength + NUL + exactBytes` and requires the
+result to equal the `ls-tree` blob ID. Every command must exit zero with its
+required exact channels and every acquired handle must close successfully; the
+next and only command is then the exact plain-Node launch above.
+
+`dev-gate.ts`, despite its suffix, is
+valid plain Node 20 and Node 22 CommonJS: only Node built-ins, `require`,
+`module.exports`, and an explicitly invoked async `main` are permitted. It has
+no ESM syntax, TypeScript-only syntax, JSX, decorator, top-level await,
+`import.meta`, loader, or loader flag. The `verify-hosted` branch uses only Node
+built-ins and executable definitions in that same file; before or during
+verification it never loads `tsx`, imports, executes, or compiles another source,
+uses `eval`/dynamic code, or invokes a model or evaluation implementation. Its
+only additional repository-file access is the closed pinned read-only allowlist
+below; those read bytes are evidence, never imported, executed, or compiled. The
+development workflow's separate `run` command may retain its frozen `tsx`
+invocation.
+
+At entry, production `verify-hosted` requires `process.execArgv` to be exactly
+the empty array and `process.argv` to contain exactly the runtime-owned Node
+executable path, the invoked `bench/lab/ret010/dev-gate.ts` script path,
+`verify-hosted`, HEAD, and run ID in that order. It rejects any missing, extra,
+or reordered element and rejects the presence, including an empty value, of
+`NODE_OPTIONS` or `NODE_PATH`. These entry checks do not claim to detect or undo
+a malicious preload or other mutation that occurred before JavaScript entry.
+
+The mode hard-codes repository `AP3X-Dev/memberry`, uses only the operator's
+existing authenticated `github.com` CLI session, and owns every acquisition.
+The token itself is not asserted to be read-only; least use here is enforced by
+issuing only the fixed GET requests below. It accepts no
+caller REST or ZIP transcript, extracted path/root, token, authorization header,
+endpoint, origin, repository, owner, job/artifact ID, artifact name, attempt,
+page number, redirect, or session override; it creates no authentication and
+requests no new credential or permission. No second parser, permissive JSON
+path, console transcription, or manifest-only shortcut is allowed.
+
+This boundary explicitly trusts the fresh RET-010F host environment, the
+system/PATH-selected `git`, `node`, and `gh` executables, the OS process launcher,
+the CLI's default existing session/configuration, DNS, TLS, kernel, the external
+preflight's verified `dev-gate.ts` bytes, and any same-UID process action before
+verifier entry. The already-running verifier cannot attest itself or those
+pre-entry roots. RET-010F must run from a fresh trusted environment or stop.
+RET-010E adds no attestation, clean-room launcher, new executable-discovery
+mechanism, path pinning scheme, or protection against a hostile same-UID
+pre-entry actor.
+
+The verifier validates its HEAD argument against `^[0-9a-f]{40}$` and its run-ID
+argument against `^[1-9][0-9]*$`. Before acquiring a token it enumerates every
+environment key as an own ASCII string, folds each ASCII letter to uppercase,
+and rejects any two raw keys that fold to the same name. Only after that complete
+collision check does it apply denials to the folded names. It rejects every
+folded name beginning `GH_` or `GITHUB_`, plus exact folded names `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`,
+`NODE_TLS_REJECT_UNAUTHORIZED`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_OPTIONS`,
+`NODE_PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, and
+`DYLD_LIBRARY_PATH`, each even when its value is empty. Thus mixed-case spellings
+and case-fold collisions reject before any denial can be bypassed. It preserves ordinary OS
+configuration environment needed by the trusted system executables rather than
+constructing a new home/config/session. It starts system/PATH executable `gh`
+with `shell: false`, stdin ignored, stdout and stderr as separate pipes, and the
+exact argv `auth token --hostname github.com`. It never runs login, refresh, or
+any configuration-writing command. The child has one 30,000 ms deadline from
+spawn through stdout/stderr EOF; the deadline never resets. A missing executable,
+spawn failure, timeout, signal, nonzero exit, or malformed output rejects, and
+the verifier never retries.
+
+Successful token stdout is exactly 1 through 4,096 visible ASCII bytes
+(`0x21..0x7e`) followed by one LF and EOF: the stdout collector's fixed maximum
+is 4,097 bytes total. Receipt of byte 4,098 terminates the child immediately.
+Receipt of the first stderr byte also terminates it immediately. After either
+limit/failure trigger, define `drainDeadline = min(triggerMonotonicTime + 5000
+ms, spawnMonotonicTime + 30000 ms)`. If the overall deadline is already
+exhausted, the owner force-terminates immediately. After the trigger it discards
+rather than buffers every subsequent stdout/stderr byte. At `drainDeadline` it
+force-terminates if needed and performs exactly one disposal attempt. The
+operation never completes after the original 30,000 ms deadline, which never
+resets. CR, space or other whitespace, BOM, NUL/control/non-ASCII byte,
+empty token, a 4,097th token byte before the LF, missing/extra LF, second line,
+trailing byte, or any stderr rejects.
+
+The application owns exactly one mutable token `Buffer`, strips only the one LF,
+and in `finally` makes a best-effort `fill(0)` on that buffer before releasing
+its reference. Runtime, child-process, HTTP, and TLS implementations may retain
+copies outside that application buffer, so this is not a zeroization guarantee.
+The enforceable guarantee is that no token byte is intentionally logged, emitted
+on any success/failure channel, written to a file, persisted, returned, or sent
+to the artifact redirect; it is used only in the fixed authenticated GitHub API
+Authorization headers during its one in-memory ownership lifetime.
+
+During `verify-hosted`, the application's direct repository working-tree
+source/data reads are closed to exactly these thirteen paths and no other such
+filesystem path; trusted `git` may read its own object database to serve the
+fixed tree/blob commands:
+
+1. `bench/lab/ret010/dev-gate.ts`
+2. `packages/retrieval/src/served-reranker.ts`
+3. `packages/retrieval/src/reranker.ts`
+4. `packages/retrieval/src/assembler.ts`
+5. `bench/lab/adapters/memberry-retrieval-core.ts`
+6. `bench/lab/stats.ts`
+7. `bench/lab/baselines/canonical.ts`
+8. `bench/lab/datasets/hash.ts`
+9. `bench/lab/registry/datasets.json`
+10. `bench/lab/ret010/load-dev.ts`
+11. `bench/lab/datasets/ret010/v1/dev/input.jsonl`
+12. `bench/lab/datasets/ret010/v1/dev/oracle.jsonl`
+13. `bench/lab/ret010/dev-policy.json`
+
+For each allowlisted path, the verifier repeatedly validates every ancestor and
+component, requires the trusted Git tree to contain exactly one `100644 blob`
+entry at HEAD, and rejects a symlink, junction, reparse point, mount point
+(including a same-device bind mount), non-regular file, alias, alternate path,
+or component substitution. It opens the working file with a no-follow handle,
+requires size at most `4,194,304` bytes and the thirteen-file aggregate at most
+`33,554,432` bytes, and compares the pinned working bytes to exact no-shell
+trusted-Git `cat-file blob HEAD:<path>` bytes. Over the same pinned working bytes
+it computes raw SHA-256 and Git SHA-1 over
+`"blob " + decimalByteLength + NUL + bytes`, requiring that SHA-1 to equal the
+tree entry. It retains the pinned bytes and handle through every source-derived
+join. Immediately before success stdout, it performs a final `fstat`, reread,
+byte-equality, raw-SHA-256, and Git-SHA-1/tree equality check on all thirteen
+handles together, then requires exactly one successful close attempt per handle
+before output. Any unavailable no-follow/component/mount classification, size,
+read, Git, hash, final-check, or close condition fails value-free. None of these
+bytes is imported, executed, compiled, or exposed as a path/content channel.
+
+The only authenticated metadata requests are fixed GETs to the completed run at
+`https://api.github.com/repos/AP3X-Dev/memberry/actions/runs/<run-id>`, jobs at
+that endpoint plus `/jobs?per_page=100&page=<n>`, artifacts at that endpoint
+plus `/artifacts?per_page=100&page=<n>`, and a selected archive redirect at
+`https://api.github.com/repos/AP3X-Dev/memberry/actions/artifacts/<artifact-id>/zip`.
+Every metadata GET has exactly these headers and no cookie or extra authority:
+`Authorization: Bearer <memory-token>`, `Accept:
+application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`, `User-Agent:
+memberry-ret010-receipt-verifier/1`, and `Accept-Encoding: identity`.
+Each run, jobs-page, artifacts-page, and authenticated artifact-API request has
+one 30,000 ms deadline from request start through complete response EOF. No
+request retries, and no redirect, byte arrival, page, or phase resets a deadline.
+
+Each run/jobs/artifacts metadata response must be status `200`, not a redirect,
+have no raw `Location` or `Content-Encoding`, reach complete EOF, and contain at
+most `8,388,608` body bytes. It has exactly one raw `Content-Type`, whose value
+is `application/json` or `application/json; charset=utf-8`. Repeated or
+conflicting raw `Content-Type`, `Content-Length`, `Transfer-Encoding`,
+`Location`, or `Link` fields reject. If `Content-Length` is present, it is one
+canonical nonnegative safe-decimal integer and equals the complete body length;
+it cannot coexist with `Transfer-Encoding`. If transfer encoding is present, it
+is exactly one `chunked` field and complete decoding/EOF is required.
+
+The selected artifact API GET uses the same authenticated metadata headers and
+must return exactly `302`, exactly one absolute raw `Location`, no raw
+`Set-Cookie`, `Content-Encoding`, or `Transfer-Encoding`, and exactly zero raw
+body bytes through EOF. `Content-Length` is absent or occurs exactly once as the
+canonical value `0`. Repeated or conflicting raw Location, length, cookie,
+encoding, or transfer fields reject.
+Its redirect URL must be absolute HTTPS, contain
+no userinfo or fragment, use no port or default port `443`, and resolve only to
+public, nonprivate addresses; private, loopback, link-local, reserved, multicast,
+unspecified, mixed-public/private, or resolution-changing destinations reject.
+The verifier performs exactly one redirect GET with one 120,000 ms deadline
+from request start through complete EOF, and pins the validated host and
+public address through TLS. That GET has only `User-Agent:
+memberry-ret010-receipt-verifier/1`, `Accept: application/octet-stream`, and
+`Accept-Encoding: identity`: no authorization, cookie, API-version header,
+GitHub session, or other metadata header crosses the redirect.
+
+The redirect response must be status `200`, have no redirect or raw `Location`,
+`Set-Cookie`, or `Content-Encoding`, reach complete EOF, and contain at most
+`67,108,864` bytes. Repeated/conflicting length, transfer, location, cookie, or
+encoding fields reject. A present `Content-Length` is one canonical nonnegative
+safe-decimal integer equal to the complete bytes and cannot coexist with the
+single allowed `Transfer-Encoding: chunked`. No second redirect, retry, or
+deadline reset is allowed. The verifier authenticates the complete service bytes against the
+selected artifact-service digest before inspecting any ZIP byte.
+
+From those authenticated acquisitions the verifier itself owns extraction into
+fresh exclusive roots and constructs the only approved bundle roots. It requires
 exactly two marked success upload leaves and exactly the Node-major set
 `{20,22}`, with no tombstone, extra file, duplicate major, contradictory
 record, third manifest, or missing/invalid completion marker. It verifies each
 marker's exact allowlist and payload digest map before trusting any payload. For
 every record it parses the closed shape, reconstructs the canonical
-UTF-8/no-BOM/one-LF bytes, requires byte equality, and recomputes every file
-SHA-256, Git blob, dataset descriptor, input, oracle, policy, lane, interval,
-aggregate, manifest, and exact-byte `completionMarkerSha256`. It loads the
-unchanged `dev-policy.json` and independently re-evaluates only that policy's declared
-metric, safety, efficiency, and seed-rule thresholds rather than trusting
-`passed` or `decision` fields. It joins their mirrored values across the policy,
+UTF-8/no-BOM/one-LF bytes, requires byte equality, and recomputes every present
+file SHA-256, Git blob, dataset descriptor, input, oracle, policy, lane,
+interval, aggregate, manifest, and exact-byte `completionMarkerSha256`. It reads
+only the pinned allowlisted repository bytes above and implements all parsing,
+canonicalization, hashing, and threshold logic with Node built-ins and constants
+in its own already-running CommonJS file. It requires every canonical record's
+source and policy identities and digests to equal the independently derived
+values and reapplies the frozen thresholds rather than trusting `passed` or
+`decision` fields. It
+recomputes source-bound lane and aggregate arithmetic, validates the stored
+interval shape and thresholds, and requires exact stored-seed equality across
+the interval, aggregate, both Nodes, and approval. Because the intentionally
+sealed per-case paired vector is absent from every published record, RET-010F
+does not and cannot independently reconstruct that vector, prove that the stored
+seed is the output of the policy's vector-derived seed rule, derive that seed,
+or recompute the bootstrap interval. It instead verifies that the policy still
+declares the frozen rule, verifies the exact source-bound statistics
+implementation identity, and validates the canonical stored seed/interval joins.
+It joins their mirrored values across the policy,
 reports, and aggregate, and joins provider/adapter/model identity, source
 commit, canonical positive-decimal workflow run ID and attempt,
 basename-only `uploadLeafName` binding, and digests across the
@@ -660,8 +865,28 @@ progress byte. The top-level keys occur in this exact order:
 `decision` is exactly `"approved"`.
 
 `source` is closed and has keys in this exact order: `gitCommit`, `modelBlob`,
-`providerContractBlob`, `adapterBlob`, `providerIdentity`. The first four values
-are lowercase 40-hex Git object identities. `providerIdentity` is closed and
+`providerContractBlob`, `adapterBlob`, `statisticsBlob`, `providerIdentity`.
+The first five values are lowercase 40-hex Git object identities, and
+the derivation is frozen: `modelBlob` is the pinned
+`packages/retrieval/src/served-reranker.ts` Git blob, `providerContractBlob` is
+the pinned `packages/retrieval/src/reranker.ts` Git blob, `adapterBlob` is the
+pinned `bench/lab/adapters/memberry-retrieval-core.ts` Git blob, and
+`statisticsBlob` is the pinned `bench/lab/stats.ts` Git blob, all at
+`gitCommit`. The independently pinned `assembler.ts`, `canonical.ts`,
+`datasets/hash.ts`, `datasets.json`, `load-dev.ts`, input, oracle, policy, and
+self bytes must simultaneously remain at that same commit and satisfy every
+derived join below; omission from the closed stdout shape does not make them
+optional evidence.
+The frozen statistics identity is Git blob
+`8840c2dd159837e9f26cdd9644162095bbae0bea` and raw-byte SHA-256
+`2ff0eaa1a6608c7e640a8833257fa23f86aed686cb37c4fefa5325a842391644`.
+The frozen policy identity is Git blob
+`eed832c23638cdc05f0318b475a6b159ca357996` and exact raw-byte SHA-256
+`1d5ca94ab459f538088de784c39ccdc862a605fc13f65d2639b73db7f42dc7df`.
+Production verification requires all four literals against the same pinned
+bytes used for parsing and joining; the policy SHA-256 is exactly
+`development.devPolicySha256`.
+`providerIdentity` is closed and
 has keys in this exact order with these exact values: `providerId:
 "memberry.local.lexical"`, `modelId: "bm25f-query-v1"`, `calibrationId:
 "fixed-blend-v1"`, and `locality: "local"`.
@@ -690,14 +915,42 @@ The top-level `node20` record must precede `node22`; swapping the records or
 their identities rejects even if their values are otherwise internally
 consistent.
 
+The dataset digest domain is independent and exact. The verifier parses the
+pinned `bench/lab/registry/datasets.json` bytes with duplicate-key detection at
+every nesting depth, validates the registry's closed own-data schema while
+allowing unrelated valid dataset entries, and selects exactly one descriptor
+whose ID is `memberry-ret010-dev-v1`. Missing, duplicate-ID, accessor,
+prototype/inherited, noncanonical, or extra descriptor data rejects. It rebuilds
+that selected descriptor in the registry schema's declared key order and defines
+`datasetDescriptorSha256` as SHA-256 of exactly the UTF-8/no-BOM bytes
+`JSON.stringify(closedDescriptor)`, with no terminal LF. No ambient serializer,
+source JSON whitespace, or property insertion order participates in the domain.
+
+The selected descriptor must bind exactly the allowlisted dev input and oracle
+paths, roles, `hashMode: "text-lf"`, normalized sizes, and hashes. For each file,
+the verifier strictly decodes its pinned bytes as UTF-8, replaces every CRLF and
+remaining lone CR with LF, re-encodes UTF-8, and hashes those exact normalized
+bytes; those values are `inputSha256` and `oracleSha256` and their normalized
+lengths must equal the descriptor sizes. `devPolicySha256` is SHA-256 of the
+exact pinned `dev-policy.json` bytes with no newline or text normalization. The
+verifier duplicate-key parses and closed-validates those policy bytes, requires
+the exact frozen schema/thresholds/seed-rule identities, and joins the four
+derived SHA-256 values, four source blobs, remaining pinned dependency blobs,
+provider identity, dataset ID/split/adapter IDs, lane/aggregate records,
+manifests, markers, and both Node receipts. No per-case input/oracle content,
+scenario/probe/result identity, or holdout byte is emitted or accepted through
+stdout, stderr, logs, approval, or artifacts.
+
 The only accepted hosted artifact API/service `digest` representation is a JSON
 string matching `^sha256:[0-9a-f]{64}$` byte for byte. RET-010F rejects a missing
 prefix, repeated prefix, uppercase hexadecimal, whitespace, base64, a bare
 digest, any other algorithm, or a missing/non-string service value. The
 canonical Node record stores only the exact 64-hex suffix as
-`artifactServiceSha256`. It recomputes SHA-256 over the exact downloaded
-artifact-service bytes and requires that suffix before extraction. Each
-extracted marker and manifest must then bind that Node's exact payload hashes to
+`artifactServiceSha256`. It pins the complete downloaded archive, recomputes
+SHA-256 over its exact artifact-service bytes, and requires that suffix before
+reading even a ZIP signature, header, name, directory, or compression field and
+before allocating an extraction root. Each extracted marker and manifest must
+then bind that Node's exact payload hashes to
 the common `development.aggregateResultSha256`; both aggregate payloads must be
 byte-identical. Thus the service digest binds downloaded container bytes, the
 marker binds extracted payload bytes, and the manifest plus common aggregate
@@ -726,7 +979,130 @@ parser, rejects. When the later holdout reads stored approval strings, it
 accepts only `^[1-9][0-9]*$` and rejects leading-zero, exponent, fractional,
 signed, whitespace, or other nondecimal forms without numeric coercion.
 
-This success record contains only the frozen source/blob/provider identity,
+The authenticated raw GitHub REST responses are the actual workflow-run object
+and actual jobs/artifacts supersets acquired under the fixed production contract
+above, not caller transcripts or synthetic already-selected records. The run
+object and every sequential collection page are decoded from raw bytes with
+duplicate-key detection before property selection. Required properties are
+validated without rejecting documented or unrelated superset properties.
+The completed-run response has no `Link` field.
+
+For each jobs/artifacts collection the verifier fetches page 1 first and
+requires raw `total_count` to be a safe nonnegative JSON integer. It computes
+`lastPage = max(1, ceil(total_count / 100))` and rejects `total_count > 1000` or
+`lastPage > 10` before issuing another page request. It then fetches each exact
+page `1..lastPage` sequentially once. Every page repeats the same raw
+`total_count`; each nonfinal page contains exactly 100 collection records and
+the final page contains exactly
+`total_count - 100 * (lastPage - 1)` records, so zero total means page 1 contains
+zero and a positive multiple of 100 means the final page contains 100.
+
+Each page has at most one raw `Link` field. Its parser accepts only the relation
+names `next`, `first`, `prev`, and `last`. Every comma-separated relation has
+exactly one angle-bracketed absolute target followed by exactly one parameter,
+the literal quoted form `rel="<one-name>"`; an unquoted value, multiple relation
+tokens, an unknown/case-variant name, an extra parameter, an extra target,
+duplicate relation, empty member, or alternate syntax rejects. A single
+`rel="next"` relation is present if and only if another page is required and
+targets exactly HTTPS origin `https://api.github.com`, the same hard-coded
+repository/run collection path, and only canonical query keys
+`per_page=100&page=<current+1>`; it is absent on the final page. Duplicate raw
+fields, a cycle, gap, repeat, page 0 or 11, alternate query/path/origin keys, and
+contradictory `first`, `prev`, or `last` relations reject. Any present `first`,
+`prev`, or `last` target must use that same exact origin/path/query form and the
+mathematically correct page 1, previous page, or `lastPage`. After the final
+page, the accumulated record count and the count of unique normalized record
+IDs must each equal `total_count`.
+The verifier never stops because selected records appeared early.
+
+It selects the one requested completed workflow run by repository, exact HEAD,
+canonical run ID, and attempt; then exactly one successful job named `unit (20)`
+and exactly one named `unit (22)` from that run/attempt; then exactly one artifact
+named `memberry-ret010-development-node-20-${workflowRunId}-${workflowRunAttempt}`
+and exactly one corresponding Node 22 artifact. Other jobs and artifacts are
+allowed. A second exact-name match, a matching name on another run/attempt, an
+ambiguous renamed matrix job, or any missing, stale, duplicate, contradictory,
+or cross-resource selected identity rejects. Node major is derived only from
+those two exact frozen job and artifact names, never from a caller label.
+
+After authenticating the service digest, the verifier applies this exact
+GitHub-compatible ZIP32 profile. The complete archive is at most 64 MiB
+(`67,108,864` bytes), uses one disk, contains exactly one ZIP32 EOCD ending at
+EOF, and has zero archive comment, entry comment, and local or central extra
+field bytes. ZIP64 sentinels/records, encryption, multi-disk fields, prefixes,
+suffixes, and unparsed data reject. Every local and central version-needed field
+is exactly decimal `20`. Every central version-made-by field is exactly `0x0014`
+(DOS 2.0) or `0x0314` (Unix 2.0), and every internal attribute field is `0`.
+For DOS, external attributes are exactly `0` or archive bit `0x20`. For Unix,
+the upper 16-bit mode is exactly regular-file type `0100000` plus permissions
+from `0000..0777`, with no other type or special bit, and the lower attributes
+are exactly `0` or archive bit `0x20`.
+
+Each entry uses method `0` or `8`; its local and central names, methods, and
+flags always match exactly. Flags
+contain only optional UTF-8 bit `0x0800` and optional data-descriptor bit
+`0x0008`. When bit `0x0008` is clear, no descriptor exists and the local CRC-32,
+compressed size, and uncompressed size equal the central values. When it is
+set, all three local CRC/size fields are zero, are not compared to the nonzero
+central fields, and cannot be an alternate authority; the central fields plus
+the validated descriptor are the sole CRC/size authority. The descriptor starts
+immediately after the compressed range. If its first little-endian word is signature
+`0x08074b50`, only the exact 16-byte signed ZIP32 form is accepted; otherwise
+only the exact 12-byte unsigned form is accepted. An unsigned entry whose actual
+CRC-32 equals `0x08074b50` is ambiguous and rejects. Every accepted descriptor's
+CRC-32 and two sizes equal the central values exactly.
+
+The only entries are exactly these six root ASCII regular filenames, once each:
+`recall-lane.json`, `precision-lane.json`, `efficiency-interval.json`,
+`aggregate-result.json`, `custody-manifest.json`, and `upload-complete.json`.
+Directories, links, device/special types, non-ASCII names, nested or empty
+components, alternate separators, aliases, and extra entries reject. Each
+uncompressed entry is at most `2,000,000` bytes and the aggregate uncompressed
+size is at most `12,000,000` bytes. CRC-32 and sizes have the bit-specific
+authority above; no generic local/central equality is imposed when the
+descriptor bit is set. Each central local-header offset must equal the parser-
+derived start byte of its corresponding local header; names and derived local
+starts are unique. Every local header, compressed-data
+range, optional descriptor, central record, central-directory range, and EOCD
+range is in bounds, pairwise nonoverlapping, and accounts for every archive byte
+exactly once. Inflation is bounded by the declared per-entry and aggregate
+limits, must end at the exact declared output length, and must match the exact
+central CRC-32. Any integer overflow, ambiguous range, overlap, gap, duplicate,
+contradiction, overrun, underrun, or trailing compressed output rejects.
+
+Only after that exhaustive authenticated walk may the verifier size-bound,
+inflate, pin in memory, canonicalize, and parse the root-level
+`upload-complete.json`. It then exclusively creates beneath a fresh
+verifier-owned parent one directory named by the validated marker
+`uploadLeafName`, which must match `^ret010-upload-[0-9a-f]{64}$`, and extracts
+every allowlisted root entry into that directory. Thus extraction reconstructs
+and preserves the marker-bound upload leaf instead of flattening the payloads
+into a caller root, renaming the leaf, or accepting a caller-selected extracted
+directory. For every file the verifier retains the
+pinned archive source and exclusive no-follow destination handle together,
+reconstructs and authenticates the source entry bytes, then rereads the pinned
+destination and requires exact byte equality with that source before trusting a
+digest. The CRC, canonical digest, and pinned destination comparison all apply
+to the exact same bounded source bytes.
+
+Across every RET-010E evaluator, finalizer, hosted verifier, and fixture reader,
+each file, directory, child-process pipe, HTTP body/response stream, or socket
+handle the code explicitly acquires has exactly one lexical owner. That owner
+makes exactly one close/disposal attempt on every exit path,
+including when the attempt fails; ownership is never copied, a failed close is
+never retried, and no second cleanup layer closes the same handle. Every
+required close/disposal attempt must complete successfully before verifier success stdout
+or a finalizer structured-output write begins. A close-attempt failure converts
+the operation to its fixed value-free failure after all other owners have made
+their one close/disposal attempt. No exception, secondary close error, handle identity,
+or caller value changes the frozen sentinel, and no success record or
+`upload_path` is emitted unless all required closes succeeded. The one standard
+structured-output append occurs only after that point; its own short, failed,
+partial, or close failure still makes the step fail under the output-channel
+rules below.
+
+This success record contains only the frozen source, model, provider, adapter,
+and statistics blob identity,
 development dataset/input/oracle/policy/seed evidence, common aggregate digest,
 distinct Node 20/22 versions, manifest/marker digests, derived artifact names,
 canonical artifact IDs, artifact-service digests, and common run ID/attempt
@@ -742,10 +1118,30 @@ nonzero. All verifier logs, diagnostics, exception paths, and failure channels
 are value-free; no caller-controlled or bundle-derived value may accompany or
 replace that sentinel.
 
-Hosted subprocess fixtures invoke the actual custody CLI rather than a direct
-library helper. The valid two-artifact fixture requires exit zero, empty stderr,
-and stdout byte-equal to the independently constructed canonical record above.
-Failure fixtures cover every missing, extra, reordered, duplicated,
+`dev-gate.ts` exports exactly the testable construction boundary
+`createVerifyHostedVerifier({ transport })`. The supplied transport receives
+only closed request descriptors internally constructed by the verifier after
+argument, repository, identity, endpoint, page, header, and redirect policy
+validation; it cannot accept a caller URL, header map, token, ID, page, archive
+path, or transcript. Hermetic transport, pagination, raw-response, ZIP, bundle,
+and lifecycle matrices import that factory in-process with a recording fake.
+
+Production `main` always constructs the one fixed GitHub-CLI/session transport.
+It has no transport selector through an argument, environment key, inherited fd,
+path, module/preload hook, global, or mutable export. Subprocess fixtures are
+limited to `node --check bench/lab/ret010/dev-gate.ts` under both Node 20 and 22,
+the exact plain-Node command and `process.execArgv === []`/`process.argv`
+grammar, proof of the fixed production binding, invalid/missing/extra arguments,
+the forbidden entry environment, and the fixed success/failure channel contract.
+They invoke no loader or `--import` flag and never claim to substitute a fake
+authenticated session in a production subprocess. Source-binding checks reject
+ESM, TypeScript-only, JSX, decorator, top-level-await, `import.meta`, loader,
+dynamic-code, or verify-hosted executable/import/compile cross-file dependencies;
+they allow only the closed pinned read-only evidence list above. The first
+real positive production CLI execution is the later authorized RET-010F run,
+not an implementation test.
+
+In-process failure matrices cover every missing, extra, reordered, duplicated,
 non-canonical, wrong-Node, wrong-run, wrong-attempt, wrong-source, wrong-policy,
 wrong-digest, tombstone, partial, stale, unmarked, and contradictory bundle or
 hosted-metadata variant. They explicitly cover each wrong/derived artifact name,
@@ -753,15 +1149,11 @@ zero/signed/leading-zero/non-decimal/duplicate artifact ID, malformed or
 mismatched service digest representation, swapped Node record order, Node
 major/full-version disagreement, run/attempt disagreement, duplicate artifact,
 and cross-artifact name/ID/digest/download/manifest/marker substitution. Every
-case requires empty stdout, the exact sentinel on stderr, and nonzero exit.
-Sentinel values injected through paths, JSON fields, thrown or
-rejected values, exception metadata, and subprocess environment must occur in
-neither channel. Output-fault fixtures inject serializer/encoder failure,
-non-canonical candidate success bytes, an unexpected logging attempt, and a
-stdout sink failure before it accepts the single success record; each must take
-the same closed failure path. The fixtures also reject a second stdout record,
-missing LF, extra LF, BOM, partial JSON, wrong key order, and any success byte on
-stderr or a log channel.
+failure produces the exact closed failure result that `main` maps to empty
+stdout, the fixed stderr sentinel, and nonzero exit. Injected sentinel values may
+occur in neither channel. Serializer/encoder/logging/stdout-sink matrices reject
+a second record, BOM, wrong key order, partial JSON, missing/extra LF, and any
+success byte on stderr or a log channel.
 
 The hostile raw-response matrix applies independently to every run, attempt,
 job, artifact, and nested reference identity. It accepts
@@ -775,10 +1167,114 @@ must reject even when each individual number is otherwise valid. Separate
 approval-reader fixtures reject stored leading-zero, exponent, fraction,
 signed, whitespace, hexadecimal, or other nondecimal strings without coercion.
 
+The in-process factory matrix is executable and complete rather than parser-only:
+each row uses the exact `verify-hosted <head> <run-id>` semantic inputs with no
+transcript path, URL, artifact/job ID, page, token, or ZIP input, and the
+recording transport proves the verifier internally created every closed request
+descriptor. Production-binding subprocess rows independently reject every
+attempt to route those descriptors to a fake.
+
+Positive rows prove only the four hard-coded endpoint shapes are requested,
+authentication is present, pages are sequential with `per_page=100`, unrelated
+jobs/artifacts are tolerated on all pages, selected records may appear after
+page one, safe exponent-form raw identities normalize, artifact downloads use
+the selected normalized API IDs, and the two exact leaves are reconstructed.
+Authentication rows set every forbidden environment key above independently to
+empty and nonempty values, including mixed-case and arbitrary `GH_`/`GITHUB_`
+suffixes and all LD/DYLD/Node/proxy/TLS keys; cover ASCII-uppercase folding,
+every two-key fold collision, non-ASCII key rejection, and denial only after a
+complete collision pass; prove system/PATH `gh`, `shell: false`, ignored
+stdin, separate output pipes, exact argv, ordinary environment preservation, and
+no login/refresh/config write; and cover missing executable, spawn error, timeout,
+signal, nonzero, token lengths 0/1/4,096/4,097, total stdout bounds 4,097/4,098,
+first stderr byte termination, bounded 5,000 ms drain/force termination, exactly
+one disposal, visible-ASCII
+endpoints, space and every whitespace/control class, CR/LF/BOM/non-ASCII,
+missing/extra newline, second line, trailing byte, token logging/persistence,
+one owned mutable Buffer, best-effort `fill(0)` in `finally`, honest runtime/TLS
+copy limits, the exact 30,000 ms spawn-to-EOF deadline with no reset/retry,
+and any token/header/cookie leak to the redirect.
+
+Metadata response rows cover exact request headers; status `200`, redirect and
+raw `Location`; encoded/truncated/non-EOF bodies at `8,388,608` and `8,388,609`;
+both allowed content types and every spelling/charset/extra-parameter variant;
+duplicate/conflicting raw type/length/transfer/location/Link fields; missing,
+leading-zero/signed/whitespace/unsafe/mismatched length; length plus transfer;
+and transfer other than one `chunked`; they also freeze each 30,000 ms request-
+through-EOF deadline and no retry/reset. Artifact redirect rows cover exact
+`302`, Location cardinality, forbidden Set-Cookie/encoding/transfer, absent or
+canonical-zero length, zero body versus any body byte, and every
+relative/non-HTTPS/userinfo/fragment/nondefault-port/private/loopback/link-local/
+reserved/multicast/unspecified/mixed or rebinding destination. Download rows
+prove exactly one sanitized GET, public-address pinning, exact three headers,
+status `200`, no second redirect/retry, no auth/session/API-version/cookie leak,
+no `Set-Cookie`/encoding, complete EOF at `67,108,864` and `67,108,865`, and all
+length/transfer inconsistencies, with the exact 120,000 ms request-through-EOF
+deadline and no reset.
+
+Pagination rows cover totals `0`, `1`, `99`, `100`, `101`, `999`, `1000`, and
+`1001`; unsafe/fractional/negative/string/null/missing/duplicate totals; exact
+page cardinality and final remainder; stable totals; unique normalized IDs;
+at-most-one raw Link; next present exactly when required and absent finally;
+correct optional first/prev/last; unknown/case-variant/multitoken/unquoted/empty
+relations, extra relation parameters or targets, duplicate relations, wrong
+origin/repository/run/path/query key, page 0/11, duplicate header, cycle, gap,
+repeat, unstable order/total,
+early/late termination, extra or missing record, and appearance of both selected
+records before the required final page. Other hostile rows cover every caller
+override, duplicate JSON key at every nesting depth/page, renamed jobs,
+duplicate selected matches, and cross-run/job/artifact substitution. A service-
+digest mismatch paired with malformed ZIP must trip an ordering witness proving
+no ZIP byte was inspected first.
+
+ZIP rows exercise archive lengths `67,108,864` and `67,108,865`, entry lengths
+`2,000,000` and `2,000,001`, aggregate lengths `12,000,000` and `12,000,001`,
+version-needed 19/20/21, both exact made-by values and every other host/version,
+internal attributes, DOS external `0`/`0x20` and other bits, Unix regular modes
+at permissions `0000`/`0777` plus directory/link/device/special/type bits and
+lower-attribute variants, both allowed methods, every allowed flag combination
+and forbidden bit. Every row checks local/central name/method/flag equality.
+Descriptor rows cover bit-clear absence and local CRC/size equality; bit-set
+local zeroes, central-plus-descriptor sole authority, immediate placement, exact
+signed/unsigned forms, every length/value mismatch, and ambiguous unsigned CRC
+`0x08074b50`. Remaining rows
+cover ZIP64/multi-disk, EOCD placement/count, comments/extras, ASCII names/types,
+each central offset versus its parser-derived local start, duplicate names/starts,
+overlap/gap/prefix/suffix, bounded inflate under/overrun, CRC mismatch, marker
+leaf substitution, extraction collision, and source/destination byte mismatch.
+Source-evidence rows independently cover every one of the thirteen exact read
+paths; missing/extra/alias paths; mode other than `100644`; tree cardinality;
+symlink/junction/reparse/mount and same-device bind classifications; unavailable
+no-follow support; component substitution before each operation; file sizes
+`4,194,304`/`4,194,305`; aggregate sizes `33,554,432`/`33,554,433`; working/Git
+byte mismatch; Git blob-header length, SHA-1, and raw SHA-256 mismatch; mutation
+before the final simultaneous `fstat`/reread; and each close failure. Dataset
+rows cover duplicate keys at every depth, zero/one/two selected descriptors,
+closed canonical descriptor order/domain, unrelated valid descriptors,
+input/oracle path/role/text-lf normalized-size/hash joins, invalid UTF-8, CRLF,
+lone CR, and exact policy-byte hashing. Independent constants use the frozen
+statistics/policy blob and SHA-256 literals above; one-byte mutations and every
+path/blob/raw-hash swap reject. Threshold rows use every exact independent
+boundary literal frozen in section 7.2 rather than implementation predicates.
+External-launch rows record the exact no-shell `git` argv/channel sequence,
+lowercase requested HEAD equality, empty porcelain-v1 all status, one exact
+NUL-terminated `100644 blob` tree record, no-follow regular working-script bytes,
+`cat-file` equality, blob-header SHA-1 equality, successful close, no intervening
+command, and the immediately following exact plain-Node argv. Dirty/untracked,
+uppercase/malformed HEAD, extra/missing tree records, mode/path/type drift,
+working/tree byte drift, incorrect blob length/hash, any stderr/nonzero exit, or
+an inserted command rejects before Node launch.
+Resource-lifecycle rows inject
+failure after every file/directory/child-pipe/metadata-body/redirect-body/socket
+acquisition and on every close/disposal attempt, assert one owner and exactly
+one attempt per acquired resource with no retry, and require all
+attempts successful before the canonical approval. Every negative row has no
+approval bytes and the one fixed value-free failure surface.
+
 Before the child imports executable evaluation or model code, it requires
 `git rev-parse HEAD` to be exactly 40 lowercase hexadecimal characters, requires
 both tracked and untracked status to be empty, and compares raw working-tree
-bytes with `git cat-file blob HEAD:<path>` for every one of the twelve RET-010E
+bytes with `git cat-file blob HEAD:<path>` for every one of the thirteen RET-010E
 paths plus these immutable, directly security-critical dependencies:
 `bench/lab/stats.ts`, `bench/lab/baselines/canonical.ts`,
 `bench/lab/datasets/hash.ts`, `packages/retrieval/src/served-reranker.ts`,
@@ -788,14 +1284,20 @@ drift, byte drift, submodules, and untracked content reject. The same HEAD,
 status, path modes, and byte comparisons run again after evaluation and
 immediately before evaluator record creation; the finalizer independently
 reacquires them before upload-leaf creation, before marker creation, and in the
-final post-injection whole-bundle sweep immediately before output. These
+final post-injection whole-bundle sweep followed only by the required successful
+close attempts and output. These
 six paths are verification dependencies
 already promoted by earlier packets, not mutable RET-010E scope; the RET-010E
-tracked implementation ceiling remains exactly twelve.
+tracked implementation ceiling remains exactly thirteen.
 
-RET-010F additionally verifies immutable hosted workflow metadata after the run
-has completed: the parent workflow conclusion and the conclusions of exactly
-the Node 20 and Node 22 matrix jobs must all be `success`, and their repository,
+RET-010F additionally invokes the production `verify-hosted <head> <run-id>`
+mode after the run has completed; that mode alone acquires and verifies immutable
+hosted workflow metadata and archives through the existing authenticated
+session. The paged jobs and artifacts collections may contain unrelated
+records; the exact selected set is one `unit (20)` job, one `unit (22)` job, and
+the two exact derived RET-010 artifacts, with no duplicate selected match. The
+parent workflow conclusion and the conclusions of those two selected matrix
+jobs must all be `success`, and their repository,
 HEAD, canonical run ID and attempt, job Node major, artifact names, canonical
 artifact IDs, and exact service digests must match the two downloaded upload
 leaves, their completion markers, and their manifests. For each Node, RET-010F
@@ -812,9 +1314,12 @@ the approval record. A
 failed or cancelled parent, a failed or cancelled matrix job, a stale attempt,
 or any missing, duplicate, stale, malformed, cross-run, cross-job, cross-Node,
 or cross-artifact identity/substitution can never authorize `approved-dev.json`.
-Within each matrix job the deterministic-gate process is
-the final executable gate and its conditionally selected artifact publication
-is terminal. Its always-running finalizer may succeed only for one exact,
+Within each matrix job the RET-010 development evaluation is invoked directly,
+not through `bench/lab/baselines/ci-gate.ts`, as the final authoritative workflow
+command before finalization. The baseline test process must never import, spawn,
+or invoke `dev-gate.ts`, so it cannot precreate, reserve, collide with, or mutate
+the authoritative evaluation root. The conditionally selected artifact
+publication is terminal. Its always-running finalizer may succeed only for one exact,
 complete current-identity success bundle or one exact, complete current-identity
 tombstone bundle in that job's exclusive evaluation root. It then creates a
 separate cryptographically unpredictable upload leaf, copies and verifies the
@@ -878,6 +1383,23 @@ vector-derived seed rule. Extra or missing keys reject. This existing policy
 schema contains no response-effect conjunction, response-effect receipt, or
 qualifying-count field and RET-010E must not modify it.
 
+Verifier tests freeze independent expectation literals rather than importing,
+deriving, or copying the implementation predicates. Recall delta `-0.001`
+rejects while `0` and `0.001` accept. Precision delta `0.049` rejects while
+`0.05` and `0.051` accept. Efficiency point is strict: `-0.001` and `0` reject,
+while `0.001` accepts. Efficiency one-sided lower `-0.001` rejects while `0`
+and `0.001` accept. Every safety value first has domain `[0,1]`: `-0.001`
+rejects as out of domain, `0` accepts, and `0.001` rejects the zero maximum.
+Response-effect count `0` rejects, `1` and `20` accept, and `21` rejects. At
+exact design base `48b6a462895b5c0629efa44493c5f917dd58ba57`, the independently
+verified source-literal fixtures use exactly statistics blob
+`8840c2dd159837e9f26cdd9644162095bbae0bea` with SHA-256
+`2ff0eaa1a6608c7e640a8833257fa23f86aed686cb37c4fefa5325a842391644`
+and policy blob `eed832c23638cdc05f0318b475a6b159ca357996` with SHA-256
+`1d5ca94ab459f538088de784c39ccdc862a605fc13f65d2639b73db7f42dc7df`.
+Any one-byte mutation, Git/raw-hash swap, path/blob swap, or value copied from
+the implementation under test rejects and cannot update an expectation.
+
 If this development gate fails, reject the model without opening or changing
 the holdout oracle. Thresholds, corpus, scenarios, and seed may not be weakened
 after seeing results. A different model or coefficient set is a new version and
@@ -892,22 +1414,28 @@ exact aggregate development receipt.
 ### 7.3 One-shot holdout qualification
 
 Ordinary CI never points either existing G2 holdout call at
-`memberry-retrieval-core-served-v1` during RET-010. Before model implementation,
-a separate harness-only packet adds
-`.github/workflows/ret010-holdout-qualification.yml` to master. It has only a
+`memberry-retrieval-core-served-v1` during RET-010. RET-010A originally creates
+`.github/workflows/ret010-holdout-qualification.yml` as the disabled-by-default
+harness workflow before model work; RET-010E later modifies that existing file
+as the thirteenth path in its closed implementation ceiling to add the finalized
+publication contract below. It exists before approval but is never automatically
+invoked. It has only a
 `workflow_dispatch` trigger, `contents: read`, no environment/secrets, no write
 permission, and exact string inputs `qualification_sha` and
 `approval_digest`. It checks out that exact 40-lowercase-hex SHA with
 `persist-credentials: false`, verifies `git rev-parse HEAD`, installs/builds,
-and runs `bench/lab/ret010/holdout-gate.mts` under Node 20 and Node 22. It cannot
-run on `push`, `pull_request`, `schedule`, or a mutable branch ref.
+and invokes exactly
+`node --import tsx bench/lab/ret010/holdout-gate.mts run` under Node 20 and Node
+22. It cannot run on `push`, `pull_request`, or `schedule`; `master` selects the
+committed workflow, while only the joined immutable `qualification_sha`
+authorizes checkout and qualification bytes.
 
-After RET-010F alone downloads and verifies the development artifacts and
-hosted metadata, it is the only stage allowed to write
+After RET-010F alone invokes the authenticated production verifier and reviews
+its development artifact/hosted-metadata result, it is the only stage allowed to write
 `bench/lab/ret010/approved-dev.json`; a separate approval-record commit then
 adds exactly the verifier's reviewed canonical success-stdout bytes. The record
 schema and byte form are the closed contract frozen in section 7.1: approved
-development source and model/provider/adapter identities, frozen
+development source and model/provider/adapter/statistics identities, frozen
 dataset/input/oracle/policy/seed evidence, common aggregate digest, distinct
 Node 20/22 versions, manifest/marker digests, exact derived artifact names,
 canonical artifact IDs, artifact-service digests, and the common canonical run
@@ -915,13 +1443,27 @@ ID and attempt. The artifact values are both independently verified RET-010F
 workflow evidence and fields in the corresponding frozen Node record. The run
 ID and attempt are the exact strings frozen in the two markers and manifests,
 never coerced numbers. The
-model/provider/adapter bytes must be unchanged from the named dev source
+model/provider/adapter/statistics bytes must be unchanged from the named dev source
 commit; the only intervening path may be that approval record.
 
-`holdout-gate.mts` requires `qualification_sha === HEAD`, requires
-`approval_digest` to equal the canonical SHA-256 of that exact record, verifies
+The workflow accepts a dispatch only on branch `master`, binds exactly
+`RET010_HOLDOUT_QUALIFICATION_SHA: ${{ inputs.qualification_sha }}` and
+`RET010_HOLDOUT_APPROVAL_DIGEST: ${{ inputs.approval_digest }}`, and provides no
+second input channel. Before model or holdout import, `holdout-gate.mts` reads
+the raw bytes at `GITHUB_EVENT_PATH` with duplicate-key detection and requires:
+`GITHUB_EVENT_NAME === "workflow_dispatch"`; `GITHUB_REPOSITORY ===
+"AP3X-Dev/memberry"`; `GITHUB_REF === "refs/heads/master"`; raw event
+`repository.full_name === "AP3X-Dev/memberry"`; raw event `ref === "master"`;
+the raw event's exact two input strings equal their one named environment
+bindings; and
+`rawEvent.inputs.qualification_sha === RET010_HOLDOUT_QUALIFICATION_SHA ===
+GITHUB_SHA === git rev-parse HEAD`. The joined SHA must match
+`^[0-9a-f]{40}$`, and the checkout must be detached at that exact commit. It
+requires `RET010_HOLDOUT_APPROVAL_DIGEST` to match `^[0-9a-f]{64}$` and equal
+the canonical SHA-256 of that exact committed approval record, verifies
 the committed approval bytes and declared digests, verifies the exact approved
-development source lineage and all named model/provider/adapter blobs, verifies
+development source lineage and all named model/provider/adapter/statistics
+blobs, verifies
 the frozen qualification inputs named by that committed approval, and then
 loads the existing G2 scorer-only holdout lanes. It never downloads or receives
 a development artifact, reads a completion marker, queries hosted workflow/job
@@ -945,12 +1487,236 @@ paired-probe vectors in the same recall-then-precision order as development;
 the resulting 20-probe efficiency interval must be `measured`, with point
 delta and one-sided 95% lower bound both at least `0`, 2000 resamples, minimum
 10 paired probes, and the same vector-derived seed rule. It deliberately does
-not arm or claim the later material `+0.05` G2 threshold. The gate writes only
-closed aggregate reports and custody manifests to the workflow artifact;
+not arm or claim the later material `+0.05` G2 threshold. The gate writes the
+closed aggregates and custody identity only inside its single canonical receipt;
 scenario/probe/query/result/oracle IDs, labels, and per-case outcomes are
 forbidden. The automatic `bench:lab:ci` continues to evaluate disabled
 `memberry-retrieval-core-v1`, so no push or PR can accidentally invoke this
 lane.
+
+Each holdout matrix job freezes the evaluator step ID `ret010_holdout_gate` and
+the immediately following finalizer step ID `ret010_holdout_finalize`. The
+finalizer has exact condition `if: ${{ always() }}` and receives the evaluator
+outcome only through
+`RET010_HOLDOUT_GATE_OUTCOME: ${{ steps.ret010_holdout_gate.outcome }}`. Exact
+`success` accepts only one complete current-identity holdout success bundle;
+exact `failure` accepts only one newly exclusively created current-identity
+holdout tombstone. `cancelled`, `skipped`, missing, empty, extra, duplicated, or
+contradictory outcomes, a success/tombstone mismatch, and every partial or stale
+root reject without a structured path output. Filesystem contents never upgrade
+the bound outcome.
+
+The two exact commands are
+`node --import tsx bench/lab/ret010/holdout-gate.mts run` and
+`node --import tsx bench/lab/ret010/holdout-gate.mts finalize`; neither accepts
+an argument. There is no `RET010_HOLDOUT_RECEIPT_PATH` or other caller path. Each
+mode independently validates `RUNNER_TEMP`, repository, HEAD, full Node version,
+Node major, workflow run ID, and attempt, then derives the only evaluation root
+as
+`<validated-RUNNER_TEMP>/memberry-ret010-holdout/runs/ret010-holdout-run-${workflowRunId}-attempt-${workflowRunAttempt}-node-${nodeMajor}`
+and the only receipt as its child `holdout-receipt.json`. The evaluator
+exclusively creates that file; a collision or partial write remains untouched
+and is not repairable evidence.
+
+The success receipt is closed and ordered exactly:
+`schemaVersion`, `decision`, `gitCommit`, `nodeMajor`, `nodeVersion`,
+`workflowRunId`, `workflowRunAttempt`, `approvalSha256`, `datasetId`, `split`,
+`controlAdapterId`, `candidateAdapterId`, `recall`, `precision`, `efficiency`,
+`safety`. Its fixed values are `schemaVersion: "1"`, `decision: "passed"`,
+`datasetId: "memberry-g2-holdout-holdout"`, `split: "holdout"`, control
+`memberry-retrieval-core-disabled-v1`, and candidate
+`memberry-retrieval-core-served-v1`. `gitCommit` matches `^[0-9a-f]{40}$`;
+`nodeMajor` is exactly `20|22`; `nodeVersion` matches that exact major;
+`workflowRunId` and `workflowRunAttempt` are canonical positive-decimal strings;
+and `approvalSha256` matches `^[0-9a-f]{64}$`. `recall` and `precision` are each closed and
+ordered `scenarioCount`, `probeCount`, `k`, `metric`, `control`, `candidate`,
+`delta`: both counts are exactly `10`; recall is `k: 10`, `metric:
+"recallAtK"`; precision is `k: 5`, `metric: "precisionAtK"`; control and
+candidate are finite in `[0,1]`, delta is finite in `[-1,1]`, equals exact
+canonical candidate minus control, and is at least `0`.
+
+`efficiency` is closed and ordered `outcome`, `pairedProbes`, `resamples`,
+`level`, `seed`, `point`, `lower`, `upper`, `oneSidedLower`, with exact
+`"measured"`, `20`, `2000`, `0.95`, an unsigned 32-bit seed, finite values,
+`lower <= point <= upper`, `oneSidedLower <= point`, and both `point` and
+`oneSidedLower` at least `0`. `safety` is closed and ordered `staleLeakRate`,
+`isolationLeakRate`, `duplicateRate`, `unknownResultRate`, each exactly `0`.
+
+The failure receipt is closed and ordered exactly `schemaVersion`, `decision`,
+`failureClass`, `stage`, `gitCommit`, `nodeMajor`, `nodeVersion`,
+`workflowRunId`, `workflowRunAttempt`, with exact `schemaVersion: "1"`,
+`decision: "failed"`; `failureClass` is exactly one of
+`harness|infrastructure|model|metric|safety|custody`; and `stage` is exactly one
+of
+`source-integrity|approval|load-holdout|recall-comparison|precision-comparison|efficiency|quality-policy|safety-policy|artifact`.
+Its commit, Node, version, run, and attempt fields use the same exact grammars
+and current hosted identities as the success arm.
+No receipt arm permits an extra/missing/reordered key, array, path, exception,
+per-case identity/outcome, label, timestamp, or caller-controlled value.
+Both arms' exact bytes are UTF-8 without BOM,
+`JSON.stringify(closedRecord) + "\n"`, in the top-level and nested order above,
+with finite `-0` normalized to `0`; any whitespace, spelling, ordering, encoding,
+or newline variant rejects. The receipt SHA-256 and completion marker bind those
+exact bytes.
+
+The evaluator writes stdout exactly empty on success and failure. Success has
+empty stderr and exit zero; any failure writes only the UTF-8/no-BOM bytes
+`RET010_HOLDOUT_GATE_FAILED\n` to stderr after all close attempts and exits
+nonzero. Its logs, exceptions, and every other channel are empty and value-free.
+The finalizer likewise has empty stdout/stderr/logs on success and exits zero
+only after its structured output succeeds; any failure emits only
+`RET010_HOLDOUT_FINALIZE_FAILED\n` on stderr after all close attempts, emits no
+successful `upload_path`, and exits nonzero.
+
+The holdout finalizer uses the same exclusive no-follow publication,
+simultaneous source/destination pinning, exact canonical completion-marker,
+marker-last, whole-bundle final-sweep, value-free failure, and handle-close
+rules frozen for the development finalizer, with a distinct cryptographically
+unpredictable holdout upload leaf named
+`ret010-holdout-upload-<64-lowercase-hex>` and matching
+`^ret010-holdout-upload-[0-9a-f]{64}$`; one exclusive-creation collision fails
+closed. Its
+sole intentional value-bearing output is `upload_path`, emitted only after the
+completion marker and every source/destination byte and identity pass the final
+sweep. The terminal upload uses the same pinned upload-artifact action and
+settings, uploads exactly
+`${{ steps.ret010_holdout_finalize.outputs.upload_path }}`, and has the exact
+authorization predicate
+`if: ${{ always() && steps.ret010_holdout_finalize.outcome == 'success' && steps.ret010_holdout_finalize.outputs.upload_path != '' }}`.
+Nothing follows it. A partial structured-output write from a failed finalizer
+cannot authorize upload. The artifact name is exactly
+`memberry-ret010-holdout-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}`.
+The completion marker is `upload-complete.json`, is created last, and uses the
+same closed identity fields and canonical-byte rules as the development marker,
+except its `uploadLeafName` has the exact holdout grammar above.
+For either holdout union arm its allowlist is exactly
+`["holdout-receipt.json","upload-complete.json"]` and its closed payload map
+contains only `holdoutReceiptSha256`; `bundleKind` must equal `success` or
+`failure` consistently with the bound outcome and receipt decision. The
+finalizer size-bounds, pins, canonicalizes, and validates the receipt before
+copy, pins source and destination together, requires their bytes equal, and
+revalidates both plus the last-written marker before the required successful
+close attempts and output.
+
+Holdout tests execute the exact `run` and `finalize` CLIs and do not merely call
+policy or serialization helpers. The only injected-scorer surface is a sealed
+test-fixture branch on inherited file descriptor 3. It is selected only when
+`RET010_HOLDOUT_TEST_FIXTURE === "1"`, `NODE_ENV === "test"`,
+`GITHUB_ACTIONS` is exactly absent (any present value, including empty,
+`"false"`, or `"true"`, rejects), every production event/approval/session binding is
+absent, and fd 3 is the one readable inherited fixture pipe. The complete fd 3
+payload is at most `65,536` bytes including exactly one terminal LF followed by
+EOF. It must be canonical UTF-8 without BOM or CR; invalid encoding, whitespace
+variation, duplicate key, a second record/LF, or any trailing byte rejects. Its
+bytes must equal `JSON.stringify(the closed record in the order below) + "\n"`.
+
+The fd 3 record is closed with exact top-level key order `schemaVersion`,
+`recall`, `precision` and exact `schemaVersion: "1"`. Each lane is an array of
+exactly ten distinct, non-shared ordinary own-property records. Every record has
+this exact key order: `scenarioId`, `probeId`, `controlMetric`,
+`candidateMetric`, `controlCoverage`, `controlTokens`, `candidateCoverage`,
+`candidateTokens`, `staleLeakRate`, `isolationLeakRate`, `duplicateRate`,
+`unknownResultRate`. Recall IDs are exactly ordinal pairs
+`fixture-recall-01`/`fixture-probe-01` through
+`fixture-recall-10`/`fixture-probe-10`; precision IDs are exactly
+`fixture-precision-01`/`fixture-probe-01` through
+`fixture-precision-10`/`fixture-probe-10`, in that order.
+
+Metric, coverage, and safety values are finite JSON numbers in `[0,1]`.
+Token values are safe JSON integers in `[0,1000000]`. Coercion and `-0` reject.
+The module exports the pure test boundary
+`validateHoldoutFixtureRecord(value)`. It performs no filesystem, environment,
+network, clock, random, model, oracle, or holdout access. JSON production input
+cannot encode a JavaScript Proxy. For ordinary object graphs the validator
+rejects accessor properties, non-ordinary or inherited/prototype data
+properties, extra/missing/reordered keys, duplicate or shared object identities,
+wrong ordinals, observable mutation/reentrancy, and cross-lane reuse; and returns a newly owned, deeply immutable
+closed record so mutation of the caller's graph cannot change validated bytes or
+later arithmetic. The production fd 3 fixture parser sends its duplicate-aware
+canonical decoded value through this exact validator, then sends only the
+returned closed record through the real production aggregation and policy path.
+The record permits no aggregate, delta, qualifying count, seed, interval,
+receipt, path, approval, dataset/oracle, endpoint, module, credential, exception,
+or production identity. It owns fd 3 and makes its one close attempt under the
+universal handle rule.
+
+The shared production aggregation path—not a fixture-supplied aggregate—derives
+each lane's control and candidate metric as the arithmetic mean of its ten
+records, derives each delta, and derives each of the four safety rates as the
+arithmetic mean across all twenty nonnegative record values (therefore each must
+be zero). It forms the 20-pair task-success-per-
+token vector in recall-then-precision ordinal order from coverage and token
+fields, and calls the production `pairedEfficiencyInterval` exactly once. The
+fixture cannot supply or override an aggregate, delta, seed, interval, policy
+decision, or receipt field.
+
+Beyond the selector and `NODE_ENV`, the only six fixture identity/environment
+keys are `RET010_HOLDOUT_TEST_RUNNER_TEMP`,
+`RET010_HOLDOUT_TEST_GIT_COMMIT`, `RET010_HOLDOUT_TEST_RUN_ID`,
+`RET010_HOLDOUT_TEST_RUN_ATTEMPT`, `RET010_HOLDOUT_TEST_APPROVAL_SHA256`, and,
+for finalize only, `RET010_HOLDOUT_TEST_GATE_OUTCOME`. Their corresponding
+production keys `RUNNER_TEMP`, `GITHUB_SHA`, `GITHUB_RUN_ID`,
+`GITHUB_RUN_ATTEMPT`, `RET010_HOLDOUT_APPROVAL_DIGEST`, and
+`RET010_HOLDOUT_GATE_OUTCOME` must all be absent. The fixture modes apply the production
+commit/digest/positive-decimal/Node/outcome grammars, derive the receipt path
+internally beneath the validated isolated test runner root, require that root
+fresh and exclusively owned, and accept only the same closed success/failure
+outcome mapping; no caller receipt path is introduced.
+
+Production `run` requires the fixture selector absent and rejects a readable fd
+3; the workflow never sets the selector or inherits fd 3, and its binding tests
+freeze both facts. Before selecting the fixture branch, the module imports no G2
+loader, scorer, oracle, model, adapter, approval, or filesystem fixture path.
+After selecting it, the fixture branch is statically and dynamically incapable
+of importing or reading the real holdout dataset/oracle or making network calls;
+tests make those imports, reads, and calls throw and require zero attempts. Thus
+the production workflow cannot select test scoring and the executable hostile
+matrix consumes zero real-holdout bytes.
+
+The complete positive matrix proves exact 10+10 unique scenario/probe
+cardinality, recall-then-precision 20-pair ordering, the frozen
+seed/resample/interval arithmetic, every cross-file mirror join, the exact
+HEAD/event/input SHA join, canonical success publication, and exactly one
+successful close attempt per handle for both Nodes. The negative matrix
+independently covers every missing, duplicate, extra, reordered, or cross-lane
+scenario/probe identity; all policy, seed, count, arithmetic, digest,
+source-lineage, approval, event, repository, ref, input, `GITHUB_SHA`, and HEAD
+mismatches; evaluator success/failure/throw and each finalizer outcome
+contradiction; partial/tombstone/marker/allowlist and source/destination
+mutation; every handle acquisition/close-attempt failure; fixture selection
+under any production identity, readable production fd 3, fixture-mode
+real-holdout import/read/network access; malformed, partial, failed, or extra
+structured output; and attempted upload under each failed conjunction. Every
+negative row is non-approving and invokes no uploader.
+
+Subprocess fd 3 rows are limited to executable byte, duplicate-key/schema,
+cardinality/ordinal, numeric-value, derived-arithmetic, and environment/channel
+behavior. They cover payload sizes `65,536` and `65,537`, early EOF, missing
+or extra LF, second record, trailing byte, BOM/CR/invalid UTF-8/whitespace,
+duplicate keys at every depth, top/lane/record key order and extras, schema
+variants, lane counts 9/10/11, every wrong/duplicate/reordered/cross-lane ordinal
+ID, finite-number and `-0` boundaries, token values `-1`, `0`, `1000000`, `1000001`, fractional,
+string, null, and unsafe integer, plus every individually forbidden aggregate,
+delta, seed, interval, receipt, path, approval, dataset, oracle, endpoint,
+module, and credential field. Environment rows cover each allowed fixture key,
+every extra RET010/GitHub identity or fixture-input key, each production counterpart alone and combined, production
+`GITHUB_ACTIONS` absent as the sole accepted state and present as empty/false/
+true/arbitrary rejection states, missing/readable fd 3 in each mode, stale/nonexclusive test
+roots, identity grammars, and all closed outcomes. Positive witnesses assert the
+derived lane means/safety values, exact recall-then-precision vector, and exactly
+one call to the production interval helper while all real holdout loaders,
+oracles, files, and networks remain at zero calls.
+
+Separate in-process tests call `validateHoldoutFixtureRecord(value)` directly
+with accessor-bearing, inherited-property, non-ordinary-prototype, Proxy, shared-
+identity, cross-lane-reuse, reentrant, thrown-trap, and mutation-during/after-
+validation graphs. Every accessor/trap throw or reentrant/observable mutation is
+caught and mapped to the fixed sanitized failure, never rethrown or logged; the
+tests prove a single owned immutable returned graph and prove later caller
+mutation cannot alter canonical fixture bytes or derived arithmetic. The design
+does not claim universal detection of a behaviorally transparent Proxy, and
+subprocess tests make no claim that JSON bytes can carry JavaScript accessor,
+prototype, Proxy, shared-identity, or post-parse mutation semantics.
 
 One explicitly authorized dispatch on the exact approval-record SHA is the
 qualification event. Its required Node 20 and Node 22 jobs are reproducibility
@@ -1153,6 +1919,8 @@ baseline-controlled.
 ### RET-010E — production-path development evaluation
 
 - `.github/workflows/ci.yml`
+- `.github/workflows/ret010-holdout-qualification.yml` (created by RET-010A;
+  modified by RET-010E)
 - `bench/lab/adapters/memberry-retrieval-core.ts`
 - `bench/lab/registered-adapters.ts`
 - `bench/lab/registry/systems.json`
@@ -1165,18 +1933,32 @@ baseline-controlled.
 - `bench/lab/ret010/__tests__/dev-gate.test.ts` (new)
 - `bench/lab/ret010/__tests__/holdout-gate.test.ts` (new)
 
-The RET-010E tracked path ceiling is twelve. It consumes the experiment
+The RET-010E tracked path ceiling is thirteen. It consumes the experiment
 registry truth already promoted with RET-010D and must not rewrite that entry.
 
-The workflow change is limited to the existing Node-matrix
+In `.github/workflows/ci.yml`, the workflow change is limited to the existing Node-matrix
 `Evaluation-lab deterministic gate`, one finalizer immediately after it, and
 one terminal upload step. The finalizer's logs, stdout, stderr, and all failure
 channels are fixed and value-free. Its sole intentional value-bearing success
 output is the structured `upload_path` frozen below; it emits no other
-value-bearing output. No other step may follow the upload.
+value-bearing output. No other step may follow the upload. The second workflow
+path is limited to the independently frozen holdout job/finalizer/upload contract
+in section 7.3.
 The deterministic-gate step has the unique stable step ID
-`ret010_development_gate` and runs RET-010 last in its isolated child as frozen
-in section 7.1. The finalizer has the unique stable step ID `ret010_finalize`,
+`ret010_development_gate`, exact `shell: bash`, and this exact run block:
+
+```bash
+set -euo pipefail
+npm run bench:lab:ci
+node --import tsx bench/lab/ret010/dev-gate.ts run
+```
+
+The fail-fast Bash semantics prevent the direct evaluator from running if the
+baseline command fails; the direct `dev-gate.ts run` invocation is the final
+authoritative command. `bench/lab/baselines/ci-gate.ts` and its nested baseline
+tests must never import, spawn, or invoke `dev-gate.ts`; only the direct final
+workflow command may create the authoritative evaluation root. The finalizer
+has the unique stable step ID `ret010_finalize`,
 uses only the custody boundary (it must not import evaluation, adapters, model
 code, datasets, policies, or oracles), and has the exact condition
 `if: ${{ always() }}`. Its only gate-status input is the one exact fixed env
@@ -1215,11 +1997,21 @@ pinned canonical bytes into the new leaf with exclusive no-follow file
 creation. The finalizer retains open no-follow handles and immutable identity
 snapshots for the upload directory and every destination payload, so the source
 root/files and destination root/files are pinned simultaneously before marker
-creation. It revalidates the repository/runtime identity, evaluation root,
+creation. It rereads each pinned destination through its retained handle and
+requires exact byte-for-byte equality with the corresponding pinned source, in
+addition to canonical-byte and digest equality. It revalidates the
+repository/runtime identity, evaluation root,
 every source path and open source handle, upload directory, every destination
 path and open destination handle, destination allowlist, canonical bytes, and
 every digest as one bundle. Any identity change at any point fails closed and
 leaves the partial upload leaf untouched.
+
+Every evaluator/finalizer archive, ancestor, directory, source, destination,
+marker, and temporary handle follows the single-owner, exactly-one-close-
+attempt rule above on success, rejection, throw, cancellation observation, and
+structured-output failure. All attempts must succeed before output; any close
+error is a finalizer failure with the fixed value-free sentinel and no successful
+`upload_path`.
 
 The final write inside the upload leaf is an exclusively created
 `upload-complete.json`. It is a closed canonical record with keys in this exact
@@ -1259,13 +2051,14 @@ open no-follow marker handle and pins the marker identity immediately after its
 exclusive last-in-leaf creation. It recomputes
 `completionMarkerSha256 = SHA-256(exact upload-complete.json bytes)` and then
 invokes the single deterministic `beforeUploadPathOutput` injection seam.
-Immediately after that seam and immediately before producing any step output,
-it performs one final read-only whole-bundle sweep of repository/runtime
+Immediately after that seam, it performs the last read-only whole-bundle sweep
+of repository/runtime
 identity, the evaluation directory, all source paths and handles, the upload
 directory, all destination payload paths and handles, the marker path and
 handle, exact allowlist, every canonical byte sequence, every payload digest,
-and `completionMarkerSha256`. Only after that sweep passes does it use the
-standard hosted structured-output channel to write the exact contained leaf
+and `completionMarkerSha256`. After that sweep passes, every handle owner makes
+its one close attempt and every attempt must succeed. Only then does the
+finalizer use the standard hosted structured-output channel to write the exact contained leaf
 path as the `upload_path` step output. That value must equal the frozen validated
 `runs` parent joined with the exact marker-bound `uploadLeafName`; any other
 path, basename, encoding, output key, or channel rejects. `upload_path` is the
@@ -1371,10 +2164,15 @@ downloaded artifact bytes.
 - `bench/lab/ret010/approved-dev.json` (new, only after exact-byte and
   aggregate-receipt approval)
 
-The independent RET-010F checker must invoke the single fail-closed bundle
-reader/verifier frozen in section 7.1 against exactly the two downloaded
-matrix artifacts and the completed immutable hosted-workflow metadata. RET-010F
-is the sole development-artifact downloader/verifier and the sole writer of the
+The independent RET-010F checker must complete the exact external trusted-Git
+HEAD/status/tree/working-byte/cat-file/blob-SHA preflight frozen in section 7.1
+and, with no intervening command, launch the single fail-closed production
+command `node bench/lab/ret010/dev-gate.ts verify-hosted <40-lowercase-head> <canonical-run-id>`.
+That mode, not RET-010F caller input, acquires the completed immutable
+hosted-workflow metadata and exactly two GitHub archives through the existing
+authenticated session, authenticates and extracts those bytes, and constructs
+the approved bundle roots. RET-010F is the sole authorized invoker/reviewer of
+that acquisition-verifier mode and the sole writer of the
 approval JSON. Before trusting either manifest, it independently verifies each
 extracted artifact's
 exact allowlist, canonical bytes, every payload digest, last-written
@@ -1390,11 +2188,17 @@ partial, unmarked, mixed, duplicated, malformed, cross-run, cross-job,
 cross-Node, or cross-artifact-substituted artifact. It then requires both nodes'
 aggregate bytes and aggregate SHA-256 to be identical and joins every marker,
 manifest, report, source, provider, adapter, model, policy, dataset, input,
-oracle, seed, run, attempt, artifact API identity, downloaded bytes, and
-workflow/job fact before independently
-recomputing policy and the hard-coded response-effect invariant. It may write
-the closed approval record only when that verifier exits zero with empty stderr
-and returns the exact canonical fully joined, policy-recomputed Node 20/22
+oracle, seed, run, attempt, artifact API identity, downloaded bytes,
+source-bound statistics-module identity, and workflow/job fact before
+independently reapplying policy and the hard-coded response-effect invariant to
+the canonical aggregate-only records. It recomputes all lane/aggregate
+arithmetic available from those records, rechecks threshold comparisons,
+zero-safety facts, provenance, exact seed equality, and two-Node byte
+reproducibility. It explicitly does not claim to reconstruct the sealed per-case
+paired vector, derive its vector seed, or recompute the stored bootstrap
+interval. It may write the closed approval record only when that verifier exits
+zero with empty stderr and returns the exact canonical fully joined,
+policy-reapplied Node 20/22
 approval bytes on stdout. RET-010F copies those bytes without parsing,
 reserializing, extending, or transcribing them. RET-010F adds only the approval JSON; it
 does not add or modify a reader, schema, policy, workflow, model, or evaluation
@@ -1402,9 +2206,67 @@ path. Any need to change verifier bytes starts a separately reviewed RET-010E
 revision and new hosted run. The later holdout gate consumes only the committed
 expanded approval record, its artifact-name/ID/service-digest receipts, declared
 payload digests, approved source lineage, and frozen qualification inputs; it
-never repeats or substitutes any RET-010F download, hosted-metadata verification,
+never repeats or substitutes any RET-010F verifier acquisition, hosted-metadata verification,
 marker verification, or approval write, and remains valid after development
 artifact expiry.
+
+This Decision 32 boundary incorporates and supersedes Decisions 28-31 and every
+older clause that could be read to authorize caller-provided REST/ZIP bytes,
+caller-selected extraction or holdout receipt paths, unauthenticated or
+caller-selected GitHub acquisition, synthetic preselected production metadata,
+exact-two total jobs/artifacts rather than exact selection from bounded paged
+supersets, vague or unbounded ZIP parsing, ZIP inspection before service-digest
+authentication, flattened archive extraction, nested baseline invocation of the
+authoritative development gate, independent recomputation of an unpublished
+paired vector/seed/interval, a production-reachable scorer fixture, multi-owner
+or retried handle cleanup, an unfinalized holdout upload, loss of the RET-010A
+workflow history, or a twelve-path RET-010E ceiling. Those readings are deleted:
+only the authenticated `verify-hosted` acquisition, exact fail-fast direct
+command, aggregate-honest, single-owner, sealed-fd3-test-only,
+always-finalized, exact thirteen-path contracts above are authoritative.
+
+Decision 32 additionally replaces every contrary reading that would let
+RET-010F launch without the immediate trusted-Git self-byte preflight, claim the
+running verifier can attest its own pre-entry roots, forbid all repository reads
+or permit an open-ended read/import/execute surface, hash unpinned or unjoined
+source/data/policy bytes, derive test expectations from implementation
+predicates, claim guaranteed token zeroization or allow unbounded token pipes,
+apply environment denials before ASCII case-fold collision rejection, permit any
+present `GITHUB_ACTIONS` fixture value, or claim universal transparent-Proxy
+detection. Those readings are deleted. The external no-intervening-command
+launch check, thirteen-path pinned read-only evidence allowlist, exact source and
+dataset/policy domains/literals, independent threshold boundaries, bounded
+best-effort token handling, folded environment policy, absent-only fixture
+binding, and honest ordinary-object/Proxy boundary above are authoritative.
+
+Decision 31 additionally replaces every contrary reading that would require a
+`tsx`/ESM/TypeScript loader for approval verification, let `verify-hosted`
+import, execute, or compile another source or evaluation dependency, tolerate exec arguments or
+Node/preload environment hooks, claim pre-entry hostile-code detection, attest
+or replace the stated RET-010F host trust roots, call `gh` with a shell or vague
+stdio/deadline semantics, call the GitHub transport with retries or resettable
+deadlines, accept a framed or nonempty artifact-redirect body, parse permissive
+Link relations, make bit-set local ZIP CRC/size fields co-authoritative, treat a
+central ZIP offset as self-authenticating, use bare holdout test identity keys,
+claim JavaScript object-hostility coverage through JSON subprocess bytes, or
+bypass the one pure fixture validator before production aggregation. Those
+readings are deleted; the exact plain-Node, transport, ZIP, six-key fixture, and
+split in-process/subprocess contracts above are authoritative.
+
+Four Decision 29 readings are explicitly replaced: generic "existing session"
+or safe-download wording is replaced by the exact no-shell `gh auth token` and
+two-hop header/response transport; generic pages `1..10`/Link exhaustion is
+replaced by total-derived exact pagination; the loose ZIP32/descriptor/type
+profile is replaced by the exact version, attribute, descriptor, and numeric
+profile; and fake-session production subprocess or vague fd3 scorer wording is
+replaced by the in-process verifier factory plus the exact sealed raw-lane fd3
+schema. No contrary portion of those four clauses survives.
+
+Decision 32 authorizes this design-file correction only. It authorizes no
+implementation, staging, commit, CI, GitHub REST call, artifact download,
+RET-010F approval write, real holdout read or dispatch, deployment, activation,
+threshold change, credential creation/use beyond the future existing
+authenticated `github.com` CLI session, or permission change.
 
 The later RET-006/G2 packet may change
 `bench/lab/baselines/comparison-policy.json` and the ordinary G2 binding only
