@@ -21,6 +21,26 @@
       "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
     },
     {
+      "id": "memberry-retrieval-core-disabled-v1",
+      "displayName": "MemBerry production retrieval core (reranker disabled)",
+      "mode": "fixture",
+      "fidelity": "fixture",
+      "fidelityDetail": "production-retrieval / fixture-persistence / reranker-disabled",
+      "requiredInCi": true,
+      "adapter": "bench/lab/adapters/memberry-retrieval-core.ts",
+      "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
+    },
+    {
+      "id": "memberry-retrieval-core-served-v1",
+      "displayName": "MemBerry production retrieval core (served reranker)",
+      "mode": "fixture",
+      "fidelity": "fixture",
+      "fidelityDetail": "production-retrieval / fixture-persistence / served-reranker-v1",
+      "requiredInCi": true,
+      "adapter": "bench/lab/adapters/memberry-retrieval-core.ts",
+      "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
+    },
+    {
       "id": "scope-aware-bm25-control-v1",
       "displayName": "Scope-aware BM25 control",
       "mode": "fixture",

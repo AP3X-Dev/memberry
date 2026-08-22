@@ -1,10 +1,57 @@
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
+import { finalizeFailureBoundaryForTest } from '../../ret010/dev-gate.js';
+
 const REPO_ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
 const CI_GATE = resolve(REPO_ROOT, 'bench/lab/baselines/ci-gate.ts');
+
+interface ParsedStep {
+  fields: Record<string, string>;
+  nested: Record<string, Record<string, string>>;
+}
+
+function parseUnitSteps(workflow: string): ParsedStep[] {
+  const unit = workflow.slice(workflow.indexOf('\n  unit:'), workflow.indexOf('\n  integration:'));
+  const lines = unit.split(/\r?\n/);
+  const steps: ParsedStep[] = [];
+  let current: ParsedStep | undefined;
+  let nestedKey: string | undefined;
+  let blockKey: string | undefined;
+  for (const line of lines) {
+    const start = /^      - (\S[^:]*):(?:\s*(.*))?$/.exec(line);
+    if (start) {
+      current = { fields: {}, nested: {} }; steps.push(current); nestedKey = undefined; blockKey = undefined;
+      current.fields[start[1]!] = start[2] ?? '';
+      continue;
+    }
+    if (!current) continue;
+    if (blockKey && /^          /.test(line)) {
+      current.fields[blockKey] += `${current.fields[blockKey] ? '\n' : ''}${line.slice(10)}`;
+      continue;
+    }
+    const field = /^        ([A-Za-z0-9_-]+):(?:\s*(.*))?$/.exec(line);
+    if (field) {
+      const key = field[1]!; const value = field[2] ?? '';
+      if (Object.hasOwn(current.fields, key)) throw new Error(`duplicate step key ${key}`);
+      current.fields[key] = value === '|' ? '' : value;
+      nestedKey = value === '' ? key : undefined;
+      blockKey = value === '|' ? key : undefined;
+      if (nestedKey) current.nested[nestedKey] = {};
+      continue;
+    }
+    const nested = /^          ([A-Za-z0-9_-]+):(?:\s*(.*))?$/.exec(line);
+    if (nested && nestedKey) {
+      const key = nested[1]!;
+      if (Object.hasOwn(current.nested[nestedKey]!, key)) throw new Error(`duplicate nested key ${key}`);
+      current.nested[nestedKey]![key] = nested[2] ?? '';
+    }
+  }
+  return steps;
+}
 
 function namedProperty(object: ts.ObjectLiteralExpression, name: string): ts.PropertyAssignment {
   const property = object.properties.find((candidate): candidate is ts.PropertyAssignment => {
@@ -169,5 +216,179 @@ describe('LAB-011 G2 production binding', () => {
       expect(failureIndex).toBeGreaterThanOrEqual(0);
       expect(logIndex).toBe(failureIndex + 1);
     }
+  });
+});
+
+describe('RET-010E terminal development custody binding', () => {
+  it('launches the isolated development gate only after every existing comparison and artifact', async () => {
+    const source = await readFile(CI_GATE, 'utf8');
+    const launch = source.indexOf("resolve(REPO_ROOT, 'bench', 'lab', 'ret010', 'dev-gate.ts'), 'run'");
+    expect(launch).toBeGreaterThan(source.lastIndexOf('writeRequiredCiComparisonArtifacts'));
+    expect(launch).toBeGreaterThan(source.lastIndexOf('Evaluation-lab deterministic gate passed'));
+    expect(source.slice(launch)).not.toContain('compareRegisteredAdapters');
+    expect(source.slice(launch)).not.toContain('loadG2HoldoutScenariosForScoring');
+    expect(source).toContain("if (development.status !== 0) process.exit(development.status ?? 1)");
+  });
+
+  it('keeps both ordinary G2 lanes bound to the disabled legacy production path', async () => {
+    const source = await readFile(CI_GATE, 'utf8');
+    const sourceFile = ts.createSourceFile(CI_GATE, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    const calls = callsNamed(sourceFile, 'compareRegisteredAdapters').map(callObject);
+    const holdout = calls.filter((object) => object.getText(sourceFile).includes("splits: ['holdout']"));
+    expect(holdout).toHaveLength(2);
+    for (const object of holdout) {
+      expect(stringProperty(object, 'candidateId')).toBe('memberry-retrieval-core-v1');
+      expect(object.getText(sourceFile)).not.toContain('memberry-retrieval-core-served-v1');
+    }
+  });
+
+  it('binds the finalizer and pinned terminal upload to each exact matrix run', async () => {
+    const workflow = await readFile(resolve(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+    const steps = parseUnitSteps(workflow);
+    const gateIndex = steps.findIndex((step) => step.fields.id === 'ret010_development_gate');
+    const finalizerIndex = steps.findIndex((step) => step.fields.name === 'Finalize RET-010 development custody');
+    const uploadIndex = steps.findIndex((step) => step.fields.name === 'Upload RET-010 development custody');
+    expect([gateIndex, finalizerIndex, uploadIndex]).toEqual([steps.length - 3, steps.length - 2, steps.length - 1]);
+    const gate = steps[gateIndex]!; const finalizer = steps[finalizerIndex]!; const upload = steps[uploadIndex]!;
+    expect(workflow.match(/^        id: ret010_development_gate$/gm)).toHaveLength(1);
+    expect(workflow.match(/^        id: ret010_finalize$/gm)).toHaveLength(1);
+    expect(Object.keys(gate.fields)).toEqual(['name', 'id', 'run', 'env']);
+    expect(gate.fields.run).toBe('npm run bench:lab:ci');
+    expect(Object.keys(finalizer.fields)).toEqual(['name', 'id', 'if', 'shell', 'run']);
+    expect(finalizer.fields.id).toBe('ret010_finalize');
+    expect(finalizer.fields.if).toBe('always()');
+    expect(finalizer.fields.shell).toBe('bash');
+    expect(finalizer.fields).not.toHaveProperty('continue-on-error');
+    expect(finalizer.fields.run.split('\n')).toEqual([
+      'set -euo pipefail',
+      "outcome='${{ steps.ret010_development_gate.outcome }}'",
+      'if [[ "$outcome" == \'success\' ]]; then',
+      '  node --import tsx bench/lab/ret010/dev-gate.ts finalize success',
+      'else',
+      '  node --import tsx bench/lab/ret010/dev-gate.ts finalize failure',
+      'fi',
+    ]);
+    expect(Object.keys(upload.fields)).toEqual(['name', 'if', 'uses', 'with']);
+    expect(upload.fields.if).toBe("always() && steps.ret010_finalize.outcome == 'success'");
+    expect(upload.fields.uses).toBe('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02');
+    expect(upload.fields).not.toHaveProperty('continue-on-error');
+    expect(upload.nested.with).toEqual({
+      name: 'memberry-ret010-development-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}',
+      path: 'node_modules/.cache/memberry-lab/runs/ret010-development/',
+      'if-no-files-found': 'error',
+      'include-hidden-files': 'true',
+      'retention-days': '14',
+    });
+    expect(Object.keys(upload.nested.with!)).toHaveLength(5);
+  });
+
+  it('rejects duplicate finalizer IDs and duplicate or additional upload paths in parsed YAML', async () => {
+    const workflow = await readFile(resolve(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+    const duplicateId = workflow.replace('        id: ret010_finalize', '        id: ret010_finalize\n        id: forged_finalize');
+    expect(() => parseUnitSteps(duplicateId)).toThrow('duplicate step key id');
+    const duplicatePath = workflow.replace(
+      '          path: node_modules/.cache/memberry-lab/runs/ret010-development/',
+      '          path: node_modules/.cache/memberry-lab/runs/ret010-development/\n          path: node_modules/.cache/memberry-lab/runs/forged/',
+    );
+    expect(() => parseUnitSteps(duplicatePath)).toThrow('duplicate nested key path');
+    const additionalPathKey = workflow.replace(
+      '          path: node_modules/.cache/memberry-lab/runs/ret010-development/',
+      '          path: node_modules/.cache/memberry-lab/runs/ret010-development/\n          artifact-path: node_modules/.cache/memberry-lab/runs/forged/',
+    );
+    const upload = parseUnitSteps(additionalPathKey).find((step) => step.fields.name === 'Upload RET-010 development custody')!;
+    expect(Object.keys(upload.nested.with!)).not.toEqual(['name', 'path', 'if-no-files-found', 'include-hidden-files', 'retention-days']);
+  });
+
+  it('maps gate failure plus finalizer custody outcomes to the exact artifact sink', async () => {
+    const finalizerArgument = (outcome: 'success' | 'failure' | 'cancelled' | 'skipped') => (
+      outcome === 'success' ? 'success' : 'failure'
+    );
+    expect(finalizerArgument('success')).toBe('success');
+    for (const outcome of ['failure', 'cancelled', 'skipped'] as const) expect(finalizerArgument(outcome)).toBe('failure');
+    const uploadRuns = (finalizerOutcome: 'success' | 'failure' | 'cancelled' | 'skipped') => finalizerOutcome === 'success';
+    expect(uploadRuns('success')).toBe(true);
+    for (const outcome of ['failure', 'cancelled', 'skipped'] as const) expect(uploadRuns(outcome)).toBe(false);
+    const execute = async (failure?: 'public-cleanup' | 'gate-cleanup' | 'finalizer-cleanup' | 'all-cleanup' | 'publication' | 'verification' | 'absence') => {
+      const root = await mkdtemp(join(tmpdir(), 'ret010-upload-outcome-'));
+      const publicLeaf = join(root, 'public'); const gateStage = join(root, 'gate-stage');
+      const finalizerStage = join(root, 'finalizer-stage'); const artifactSink = join(root, 'sink');
+      for (const path of [publicLeaf, gateStage, finalizerStage]) { await mkdir(path); await writeFile(join(path, 'STALE'), 'STALE-SUCCESS'); }
+      await mkdir(artifactSink);
+      const cleanup = async (target: 'public' | 'gate' | 'finalizer', path: string) => {
+        if (failure === 'all-cleanup' || failure === `${target}-cleanup`) throw new Error(`${target}-cleanup`);
+        await rm(path, { recursive: true, force: true });
+      };
+      const absent = async (...paths: string[]) => {
+        for (const path of paths) {
+          try { await lstat(path); throw new Error('not-absent'); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        }
+      };
+      let finalizerOutcome: 'success' | 'failure' = 'success';
+      try {
+        await finalizeFailureBoundaryForTest({
+          cleanupPublic: async () => cleanup('public', publicLeaf), cleanupGateStage: async () => cleanup('gate', gateStage),
+          cleanupFinalizerStage: async () => cleanup('finalizer', finalizerStage),
+          publishCurrentTombstone: async () => {
+            if (failure === 'publication') throw new Error('publication');
+            await mkdir(publicLeaf); await writeFile(join(publicLeaf, 'failure-tombstone.json'), 'CURRENT-TOMBSTONE\n');
+          },
+          verifyCurrentTombstone: async () => {
+            if (failure === 'verification') throw new Error('canonical-verification');
+            expect(await readFile(join(publicLeaf, 'failure-tombstone.json'), 'utf8')).toBe('CURRENT-TOMBSTONE\n');
+          },
+          proveAllStagingAbsent: async () => { await absent(gateStage, finalizerStage); if (failure === 'absence') throw new Error('absence'); },
+          proveAllAbsent: async () => { await absent(publicLeaf, gateStage, finalizerStage); if (failure === 'absence') throw new Error('absence'); },
+        });
+      } catch { finalizerOutcome = 'failure'; }
+      if (uploadRuns(finalizerOutcome)) await cp(publicLeaf, join(artifactSink, 'ret010-development'), { recursive: true });
+      const sinkEntries = await readdir(artifactSink);
+      const result = { root, artifactSink, finalizerOutcome, sinkEntries };
+      return result;
+    };
+
+    const valid = await execute();
+    expect(valid.finalizerOutcome).toBe('success'); expect(valid.sinkEntries).toEqual(['ret010-development']);
+    expect(await readdir(join(valid.artifactSink, 'ret010-development'))).toEqual(['failure-tombstone.json']);
+    expect(await readFile(join(valid.artifactSink, 'ret010-development/failure-tombstone.json'), 'utf8')).toBe('CURRENT-TOMBSTONE\n');
+    await rm(valid.root, { recursive: true, force: true });
+
+    for (const failure of ['public-cleanup', 'gate-cleanup', 'finalizer-cleanup', 'all-cleanup', 'publication', 'verification', 'absence'] as const) {
+      const failed = await execute(failure);
+      expect(failed.finalizerOutcome).toBe('failure'); expect(failed.sinkEntries).toEqual([]);
+      await rm(failed.root, { recursive: true, force: true });
+    }
+  });
+
+  it('joins workflow failure cases to the custody finalizer fail-closed behavior', async () => {
+    const source = await readFile(resolve(REPO_ROOT, 'bench/lab/ret010/dev-gate.ts'), 'utf8');
+    const finalizer = source.slice(source.indexOf('export async function finalizeCurrentRun'), source.indexOf('async function main'));
+    expect(finalizer).toContain('if (!gateSucceeded) {');
+    expect(finalizer).toContain("await finalizeCurrentFailure(identity, { failureClass: 'custody', stage: 'artifact' })");
+    expect(finalizer).toContain('validateDirectoryChain(OUTPUT_LEAF, false)');
+    expect(finalizer).toContain('validateCurrentHeadSuccessBundle(OUTPUT_LEAF, identity)');
+    expect(finalizer).toContain('await finalizeCurrentFailure(identity, failureContext(error');
+    expect(finalizer).not.toContain('process.stderr.write(SAFE_FAILURE)');
+    expect(finalizer).not.toContain('process.exitCode = 1');
+    const main = source.slice(source.indexOf('async function main'));
+    expect(main).toContain("catch { process.stderr.write(SAFE_FAILURE); process.exitCode = 1; }");
+    const publication = source.slice(source.indexOf('async function publishFailure'), source.indexOf('async function runDevelopment'));
+    expect(publication).toContain('cleanBoundary()');
+    expect(publication).toContain('[FAILURE_FILE]: tombstone(identity, context)');
+    // A stale success is removed before the current tombstone; a current success
+    // is preserved only after full identity validation. The upload predicate,
+    // rather than if-no-files-found, prevents any skipped or failed finalizer
+    // from reaching the artifact sink.
+    expect(source).toContain("const FINALIZER_STAGING_LEAF = resolve(RUNS_ROOT, 'ret010-development.finalizer-staging')");
+    expect(source).toContain('await absentPath(STAGING_LEAF); await absentPath(FINALIZER_STAGING_LEAF);');
+    expect(source).toContain('manifest.workflowRunId !== identity.workflowRunId');
+    expect(source).toContain('manifest.workflowRunAttempt !== identity.workflowRunAttempt');
+    expect(source).toContain("aggregate.modelBlob !== gitBlobAt(identity.gitCommit, 'packages/retrieval/src/served-reranker.ts')");
+    expect(source).toContain("aggregate.providerContractBlob !== gitBlobAt(identity.gitCommit, 'packages/retrieval/src/reranker.ts')");
+    expect(source).toContain("aggregate.adapterBlob !== gitBlobAt(identity.gitCommit, 'bench/lab/adapters/memberry-retrieval-core.ts')");
+    expect(source).toContain('aggregate.datasetDescriptorSha256 !== dataset.descriptorSha256');
+    expect(source).toContain('aggregate.inputSha256 !== dataset.inputSha256');
+    expect(source).toContain('aggregate.oracleSha256 !== dataset.oracleSha256');
+    expect(source).toContain("aggregate.devPolicySha256 !== sha256(gitBytesAt(identity.gitCommit, 'bench/lab/ret010/dev-policy.json'))");
   });
 });

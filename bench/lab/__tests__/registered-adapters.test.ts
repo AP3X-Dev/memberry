@@ -36,6 +36,33 @@ function manifest(runId: string) {
 }
 
 describe('registered adapter evidence boundary', () => {
+  it('registers both RET-010E production-path development arms', async () => {
+    const root = resolve(import.meta.dirname, '..', '..', '..');
+    const source = JSON.parse(await readFile(resolve(root, 'bench/lab/registry/systems.json'), 'utf8')) as {
+      systems: Array<{ id: string; adapter: string; requiredInCi: boolean }>;
+    };
+    for (const id of ['memberry-retrieval-core-disabled-v1', 'memberry-retrieval-core-served-v1']) {
+      expect(source.systems).toContainEqual(expect.objectContaining({
+        id,
+        adapter: 'bench/lab/adapters/memberry-retrieval-core.ts',
+        requiredInCi: true,
+      }));
+    }
+    const options = {
+      scenarios: TEMPORAL_ISOLATION_SCENARIOS.slice(0, 1),
+      repoRoot: root,
+    };
+    const disabled = await compareRegisteredAdapters({
+      ...options, runId: 'ret010e-disabled-registration',
+      controlId: 'scope-aware-bm25-control-v1', candidateId: 'memberry-retrieval-core-disabled-v1',
+    });
+    const served = await compareRegisteredAdapters({
+      ...options, runId: 'ret010e-served-registration',
+      controlId: 'scope-aware-bm25-control-v1', candidateId: 'memberry-retrieval-core-served-v1',
+    });
+    expect(disabled.candidate.adapterId).toBe('memberry-retrieval-core-disabled-v1');
+    expect(served.candidate.adapterId).toBe('memberry-retrieval-core-served-v1');
+  });
   it('audits the real candidate graph without granting oracle or filesystem access', async () => {
     const root = resolve(import.meta.dirname, '..', '..', '..');
     const audit = await auditAdapterDependencies(resolve(root, 'bench/lab/adapters/memberry-proxy.ts'), root);

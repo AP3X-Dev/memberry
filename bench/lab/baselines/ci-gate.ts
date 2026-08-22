@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -228,6 +228,12 @@ export async function runDeterministicCiGate(
   console.log(`Holdout precision@5 artifact: ${holdoutPrecisionPaths.manifest}`);
   console.log(`Admission structural artifact: ${admission.artifacts.manifest}`);
   console.log(`Known retrieval answer coverage remains visible at ${retrievalComparison.candidate.metrics.answerCoverage}; promotion work must improve it without regressing safety.`);
+  const development = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', resolve(REPO_ROOT, 'bench', 'lab', 'ret010', 'dev-gate.ts'), 'run'],
+    { cwd: REPO_ROOT, stdio: 'inherit', env: process.env },
+  );
+  if (development.status !== 0) process.exit(development.status ?? 1);
   return { passed: true, artifacts: [goldenPaths.manifest, protectedPaths.manifest, retrievalPaths.manifest, holdoutRecallPaths.manifest, holdoutPrecisionPaths.manifest, admission.artifacts.manifest] };
 }
 

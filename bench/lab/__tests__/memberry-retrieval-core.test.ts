@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { LabMemory, LabNamespace, LabQueryResult } from '../contracts/adapter.js';
 import { MemBerryProxyAdapter } from '../adapters/memberry-proxy.js';
-import { MemBerryRetrievalCoreAdapter } from '../adapters/memberry-retrieval-core.js';
+import { MemBerryRetrievalCoreAdapter, projectAssemblyResults } from '../adapters/memberry-retrieval-core.js';
 import { loadG2HoldoutScenarioInputs } from '../datasets/load-suite.js';
 import { TEMPORAL_ISOLATION_SCENARIOS } from '../fixtures/temporal-isolation.js';
 import { auditAdapterDependencies, compareRegisteredAdapters } from '../registered-adapters.js';
@@ -210,6 +210,42 @@ describe('LAB-010 production retrieval adapter', () => {
     const second = (await adapter.query(request)).results;
     assertNonVacuous(first);
     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+  });
+
+  it('RET-010E binds distinct disabled and served identities to the production path', async () => {
+    const disabled = new MemBerryRetrievalCoreAdapter('disabled');
+    const served = new MemBerryRetrievalCoreAdapter('served');
+    expect(disabled.id).toBe('memberry-retrieval-core-disabled-v1');
+    expect(served.id).toBe('memberry-retrieval-core-served-v1');
+    const distinguishingCorpus: readonly LabMemory[] = [
+      { id: 'alpha-first', content: 'noise', kind: 'fact', recordedAt: '2026-08-01T00:00:00.000Z' },
+      { id: 'target-second', content: 'zebra', kind: 'fact', recordedAt: '2026-08-01T00:00:01.000Z' },
+    ];
+    await disabled.ingest({ namespace: NAMESPACE, memories: distinguishingCorpus });
+    await served.ingest({ namespace: NAMESPACE, memories: distinguishingCorpus });
+    const request = { namespace: NAMESPACE, query: 'zebra', limit: 2 };
+    const control = await disabled.query(request);
+    const candidate = await served.query(request);
+    expect(control.results).toEqual([
+      { id: 'alpha-first', score: 1 / 61 },
+      { id: 'target-second', score: 1 / 62 },
+    ]);
+    expect(candidate.results).toEqual([
+      { id: 'target-second', score: 0.29842 },
+      { id: 'alpha-first', score: 0.002459 },
+    ]);
+  });
+
+  it('RET-010E preserves interleaved-source presentation and equal-score cutoffs exactly', () => {
+    const projected = projectAssemblyResults([
+      { items: [{ id: 'memory-z', score: 0.5 }, { id: 'memory-a', score: 0.5 }] },
+      { items: [{ id: 'code-first', score: 0.9 }, { id: 'code-second', score: 0.4 }] },
+    ], 3);
+    expect(projected).toEqual([
+      { id: 'memory-z', score: 0.5 },
+      { id: 'memory-a', score: 0.5 },
+      { id: 'code-first', score: 0.9 },
+    ]);
   });
 
   it('LAB-011 keeps code retrieval enabled for a named namespace through default-tenant assembly', async () => {

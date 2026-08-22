@@ -56,6 +56,20 @@ const CANONICAL_FACTORIES: Readonly<Record<string, CanonicalFactory>> = Object.f
       return new MemBerryRetrievalCoreAdapter();
     },
   },
+  'memberry-retrieval-core-disabled-v1': {
+    entry: 'bench/lab/adapters/memberry-retrieval-core.ts',
+    create: async () => {
+      const { MemBerryRetrievalCoreAdapter } = await import('./adapters/memberry-retrieval-core.js');
+      return new MemBerryRetrievalCoreAdapter('disabled');
+    },
+  },
+  'memberry-retrieval-core-served-v1': {
+    entry: 'bench/lab/adapters/memberry-retrieval-core.ts',
+    create: async () => {
+      const { MemBerryRetrievalCoreAdapter } = await import('./adapters/memberry-retrieval-core.js');
+      return new MemBerryRetrievalCoreAdapter('served');
+    },
+  },
   'scope-aware-bm25-control-v1': {
     entry: 'bench/lab/adapters/baselines.ts',
     create: async () => {
