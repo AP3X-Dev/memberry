@@ -590,12 +590,15 @@ message `RET010_DEV_GATE_FAILED` plus LF to stderr and exits nonzero; it never
 rethrows or logs the cause. No cause, name, message, stack, path, scenario,
 probe, query, result, oracle, adapter/provider output, or caller-controlled
 value may reach stdout, stderr, the tombstone, or any other artifact. If the
-filesystem itself prevents safe tombstone publication, the verified leaves are
-left absent, the same fixed message and nonzero exit are used, and artifact
-upload fails for missing files. Sentinel tests inject unique values through
-every failure stage, thrown value, rejected value, error field, path, and
-fixture field and require that none occurs in captured console bytes or any
-published byte. This replaces and supersedes any earlier rethrow wording.
+filesystem itself prevents safe tombstone publication, the executable boundary
+makes only its bounded no-follow cleanup attempts, uses the same fixed message
+and nonzero exit, and leaves absence to be proved by the finalizer. If cleanup
+or absence cannot be proved, finalization fails; the terminal upload condition
+is then false and upload is skipped entirely. Sentinel tests inject unique
+values through every failure
+stage, thrown value, rejected value, error field, path, and fixture field and
+require that none occurs in captured console bytes or any published byte. This
+replaces and supersedes any earlier rethrow or unconditional-upload wording.
 
 `bench/lab/ret010/dev-gate.ts` implements the development-bundle reader/verifier
 once behind a value-free custody CLI mode, and RET-010F must use that exact
@@ -647,14 +650,17 @@ HEAD, run ID, attempt, and artifact identities must match the two bundles. A
 failed or cancelled parent, a failed or cancelled matrix job, a stale attempt,
 or a success bundle from any other run/attempt can never authorize
 `approved-dev.json`. Within each matrix job the deterministic-gate process is
-the final executable gate and its artifact publication is terminal. If that
-job fails or is cancelled before a valid current-run success publication, its
-always-running finalizer removes any verified stale/success leaf and may upload
-only a tombstone bearing that job's current commit/run/attempt identity; if it
-cannot safely do so, no artifact is uploaded. A success artifact remains
-provisional until RET-010F proves the parent and both jobs successful. RET-010F
-records the common aggregate digest plus both manifest digests, versions, run
-ID, and attempt; neither a lone manifest nor console output may substitute.
+the final executable gate and its conditionally selected artifact publication
+is terminal. If that gate fails, its always-running finalizer may succeed only
+after ensuring every verified partial/stale leaf has been replaced by, and then
+fully verifying, the single canonical current-run tombstone; the terminal
+upload then contains only that tombstone. If the finalizer cannot publish or
+verify that tombstone, clean verified transient leaves, or prove the required leaves
+absent, it fails and no artifact upload is attempted. A success artifact
+remains provisional until RET-010F proves the parent and both jobs successful.
+RET-010F records the common aggregate digest plus both manifest digests,
+versions, run ID, and attempt; neither a lone manifest nor console output may
+substitute.
 
 ### 7.2 RET-010 development qualification
 
@@ -981,28 +987,59 @@ The workflow change is limited to the existing Node-matrix
 `Evaluation-lab deterministic gate`, one value-free finalizer immediately
 after it, and one terminal upload step. No other step may follow the upload.
 The deterministic-gate step runs RET-010 last in its isolated child as frozen
-in section 7.1. The finalizer uses only the custody boundary (it must not import
-evaluation, adapters, model code, datasets, policies, or oracles), runs with
-`if: always()`, and binds the leaf to the current HEAD/run/attempt. It preserves
-a success bundle only when the immediately preceding deterministic-gate step
-succeeded and the bundle has that exact current identity; otherwise it safely
-replaces any verified leaf with the current-run tombstone. A cancelled job that
-cannot execute the finalizer has no approving artifact because RET-010F rejects
-its job conclusion and any stale identity.
+in section 7.1. The finalizer has the stable step ID `ret010_finalize`, uses only
+the custody boundary (it must not import evaluation, adapters, model code,
+datasets, policies, or oracles), and has the exact condition
+`if: ${{ always() }}`.
+
+The finalizer succeeds only after component-by-component no-follow containment
+validation and canonical-byte verification of the final public leaf. It binds
+that leaf to the current exact lowercase HEAD, matrix Node major and full Node
+version, workflow run ID, and workflow run attempt. When the deterministic gate
+succeeded, the public leaf must be exactly the five-file success bundle; when
+the gate failed, it must be exactly the one-file current-run tombstone bundle.
+The finalizer reconstructs every closed record's canonical bytes, recomputes
+the required digests, verifies the exact allowlist, rejects mixed/partial/stale
+content, and proves that no gate-staging or finalizer-staging leaf remains. Its
+cleanup covers three distinct targets: the pre-existing public output leaf, the
+gate staging leaf, and the finalizer staging leaf. Before replacement it must
+delete only each verified target leaf; after replacement it must revalidate the
+new public leaf and prove both staging leaves absent. Failure to publish, clean
+any target, verify canonical bytes or current identity, or establish the
+required absence proof makes `ret010_finalize` fail. A cancellation that
+prevents a successful finalizer is non-uploading and remains non-approving under
+RET-010F's workflow-conclusion checks.
 
 The terminal upload uses
 `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`,
-`if: always()`, `if-no-files-found: error`, `include-hidden-files: true`, and
+the exact condition
+`if: ${{ always() && steps.ret010_finalize.outcome == 'success' }}`,
+`if-no-files-found: error`, `include-hidden-files: true`, and
 `retention-days: 14`. Its exact artifact name is
 `memberry-ret010-development-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}`;
 it uploads only
-`node_modules/.cache/memberry-lab/runs/ret010-development/`. No existing upload
-surface, workflow trigger, job dependency, permission, environment, secret, or
-configuration value changes. Ordinary CI still never imports or invokes the
+`node_modules/.cache/memberry-lab/runs/ret010-development/`. No pre-existing
+unrelated upload surface, workflow trigger, job dependency, permission,
+environment, secret, or configuration value changes. Ordinary CI still never
+imports or invokes the
 holdout gate and keeps both existing G2 calls bound to disabled
-`memberry-retrieval-core-v1`. The binding tests prove the RET-010 child is last,
-the finalizer and upload ordering is exact, every failure/cancellation path is
-non-approving, and no step can upload a stale success leaf.
+`memberry-retrieval-core-v1`.
+
+Binding tests require the stable finalizer ID, both exact GitHub expressions,
+the pinned action and frozen upload settings, finalizer-before-upload ordering,
+and upload as the terminal step. Executable custody fixtures prove both closed
+branches: a deterministic-gate failure that publishes a canonical current
+tombstone makes `ret010_finalize` succeed and selects an upload containing that
+tombstone and no other byte; a finalizer verification failure, a cleanup
+failure injected independently at each of the three cleanup targets, or an
+absence-proof failure makes `ret010_finalize` fail, makes the terminal upload
+predicate false, invokes no uploader, and places no stale or partial byte in
+the artifact sink. A triple-cleanup fixture makes all three target cleanups fail
+in one execution and requires that same no-upload/no-artifact-byte outcome. The
+fixtures also require that safely removable stale bytes are absent from the
+public leaf and that unremovable or unprovable bytes can never cross the skipped
+upload boundary. Every failure/cancellation path is non-approving, and no step
+can upload a stale success leaf.
 
 ### RET-010F — independently approved development receipt
 
