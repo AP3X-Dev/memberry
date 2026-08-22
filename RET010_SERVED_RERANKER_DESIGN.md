@@ -628,7 +628,27 @@ once behind the one production CLI mode
 `node bench/lab/ret010/dev-gate.ts verify-hosted <40-lowercase-head> <canonical-run-id>`,
 and RET-010F must use that exact command. Immediately before launch, with no
 intervening command, RET-010F runs a trusted system/PATH `git` preflight with
-`shell: false`, ignored stdin, and separate bounded stdout/stderr pipes. It
+`shell: false`, ignored stdin, and separate bounded stdout/stderr pipes. Every
+Git child receives a freshly constructed environment that first removes every
+inherited key whose ASCII-case-folded name begins `GIT_`, then sets exactly
+`GIT_NO_REPLACE_OBJECTS=1`, `GIT_NO_LAZY_FETCH=1`,
+`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` on POSIX or
+`GIT_CONFIG_GLOBAL=NUL` on Windows, `GIT_OPTIONAL_LOCKS=0`, and
+`GIT_TERMINAL_PROMPT=0`; ordinary non-Git OS environment is preserved. Every
+Git command begins with the exact common arguments `--no-replace-objects
+--no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false` before
+its subcommand and accepts no caller Git argument, config, path, ref, or
+environment extension.
+
+Before the existing proof, the preflight requires exact
+`git rev-parse --show-object-format` stdout `sha1\n`, exact
+`git rev-parse --is-shallow-repository` stdout `false\n`, and empty exact
+`git for-each-ref --format=%(refname) refs/replace` stdout. It enumerates local
+configuration only with the same hardened Git environment/arguments, rejects
+any `extensions.partialClone` key, any `remote.<name>.promisor` whose Git-boolean
+value is true, and any `remote.<name>.partialCloneFilter` key, and rejects a
+missing promised object rather than fetching it. No preflight command may make
+a network or lazy-fetch attempt. It then
 requires exact `git rev-parse HEAD` stdout to be the requested lowercase
 40-hex HEAD plus LF; exact `git status --porcelain=v1 --untracked-files=all`
 stdout to be empty; and exact
@@ -673,10 +693,16 @@ endpoint, origin, repository, owner, job/artifact ID, artifact name, attempt,
 page number, redirect, or session override; it creates no authentication and
 requests no new credential or permission. No second parser, permissive JSON
 path, console transcription, or manifest-only shortcut is allowed.
+`verify-hosted` is the sole executable parser and verifier for raw REST
+metadata, artifact-service archives, ZIP structure, extracted bundle roots,
+completion markers, manifests, every source/payload/workflow/job join, all
+threshold and custody decisions, and the canonical approval-record bytes.
+RET-010F does not implement or invoke a second internal-evidence parser.
 
 This boundary explicitly trusts the fresh RET-010F host environment, the
 system/PATH-selected `git`, `node`, and `gh` executables, the OS process launcher,
-the CLI's default existing session/configuration, DNS, TLS, kernel, the external
+the CLI's default existing session/configuration and frozen absolute config root,
+DNS, TLS, kernel, the external
 preflight's verified `dev-gate.ts` bytes, and any same-UID process action before
 verifier entry. The already-running verifier cannot attest itself or those
 pre-entry roots. RET-010F must run from a fresh trusted environment or stop.
@@ -689,7 +715,8 @@ argument against `^[1-9][0-9]*$`. Before acquiring a token it enumerates every
 environment key as an own ASCII string, folds each ASCII letter to uppercase,
 and rejects any two raw keys that fold to the same name. Only after that complete
 collision check does it apply denials to the folded names. It rejects every
-folded name beginning `GH_` or `GITHUB_`, plus exact folded names `HTTP_PROXY`,
+folded name beginning `GH_` or `GITHUB_`—explicitly including
+`GH_CONFIG_DIR`—plus exact folded names `HTTP_PROXY`,
 `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`,
 `NODE_TLS_REJECT_UNAUTHORIZED`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_OPTIONS`,
 `NODE_PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, and
@@ -703,6 +730,21 @@ any configuration-writing command. The child has one 30,000 ms deadline from
 spawn through stdout/stderr EOF; the deadline never resets. A missing executable,
 spawn failure, timeout, signal, nonzero exit, or malformed output rejects, and
 the verifier never retries.
+
+`HOME`, `APPDATA`, and `XDG_CONFIG_HOME` are not denied. At RET-010F entry, the
+checker freezes the applicable variables and one absolute, lexically and
+physically resolved trusted GitHub CLI config root: on POSIX it is absolute
+`XDG_CONFIG_HOME/gh` when `XDG_CONFIG_HOME` is set, otherwise absolute
+`HOME/.config/gh`; on Windows it is absolute `APPDATA/GitHub CLI`. A missing,
+non-absolute, unresolvable, changed, or platform-contradictory required binding
+rejects. RET-010F passes the same frozen ordinary environment to the immediate
+Node launch; `verify-hosted` recomputes the same absolute root at entry and
+requires the underlying variables and resolved root to remain byte-for-byte
+unchanged immediately before spawning `gh`. These trusted host values are never
+CLI arguments, verifier-factory inputs, transport descriptors, outputs, or
+caller-selected paths. `GH_CONFIG_DIR` remains forbidden, so the CLI uses only
+the frozen default root. The honest token-scope and host-trust limitations above
+remain unchanged.
 
 Successful token stdout is exactly 1 through 4,096 visible ASCII bytes
 (`0x21..0x7e`) followed by one LF and EOF: the stdout collector's fixed maximum
@@ -832,7 +874,7 @@ values and reapplies the frozen thresholds rather than trusting `passed` or
 recomputes source-bound lane and aggregate arithmetic, validates the stored
 interval shape and thresholds, and requires exact stored-seed equality across
 the interval, aggregate, both Nodes, and approval. Because the intentionally
-sealed per-case paired vector is absent from every published record, RET-010F
+sealed per-case paired vector is absent from every published record, the verifier
 does not and cannot independently reconstruct that vector, prove that the stored
 seed is the output of the policy's vector-derived seed rule, derive that seed,
 or recompute the bootstrap interval. It instead verifies that the policy still
@@ -846,10 +888,16 @@ reports, aggregate, both manifests, and both markers. Separately from policy
 evaluation, it independently
 validates the hard-coded RET-010E custody invariant: it recomputes aggregate
 `qualifyingCaseCount` as the exact sum of the two lane counts, requires the sum
-to be in `[1,20]`, and derives
-`sameCaseOrderAndSelectionChanged === true` only from that positive sum. It
-never accepts independent any-order-change and any-selection-change facts as a
-qualification receipt. Both manifests must name the
+to be in `[1,20]`, recomputes the aggregate-contract boolean from that bounded
+positive sum, requires stored
+`sameCaseOrderAndSelectionChanged === true` to equal it, and joins both values through the
+lane, aggregate, manifest, marker, Node, source, and approval contracts. It never
+accepts independent any-order-change and any-selection-change facts as a
+qualification receipt. Exact pinned source binds the provenance of the
+evaluator's same-probe conjunction computation. The aggregate-only lane/result
+records cannot independently prove the unpublished per-probe conjunctions or
+paired vector, derive or prove the vector-derived seed, or recompute the stored
+bootstrap interval; the verifier makes no such claim. Both manifests must name the
 same exact lowercase source commit, workflow run ID, and attempt; their full
 Node versions must match their distinct majors; both must bind the same
 byte-identical aggregate and aggregate digest. Any mismatch or contradiction
@@ -942,7 +990,7 @@ scenario/probe/result identity, or holdout byte is emitted or accepted through
 stdout, stderr, logs, approval, or artifacts.
 
 The only accepted hosted artifact API/service `digest` representation is a JSON
-string matching `^sha256:[0-9a-f]{64}$` byte for byte. RET-010F rejects a missing
+string matching `^sha256:[0-9a-f]{64}$` byte for byte. The verifier rejects a missing
 prefix, repeated prefix, uppercase hexadecimal, whitespace, base64, a bare
 digest, any other algorithm, or a missing/non-string service value. The
 canonical Node record stores only the exact 64-hex suffix as
@@ -1257,6 +1305,18 @@ statistics/policy blob and SHA-256 literals above; one-byte mutations and every
 path/blob/raw-hash swap reject. Threshold rows use every exact independent
 boundary literal frozen in section 7.2 rather than implementation predicates.
 External-launch rows record the exact no-shell `git` argv/channel sequence,
+fresh environment stripping every inherited mixed-case `GIT_*` key, the exact
+six replacement environment bindings, both POSIX `/dev/null` and Windows `NUL`
+config branches, and the exact common hardening arguments on every command.
+They reject replacement refs, a shallow repository, non-SHA-1 object format,
+local `extensions.partialClone`, true `remote.*.promisor`, any remote partial-
+clone filter, a missing promisor object, any lazy-fetch or network attempt, a
+lying fsmonitor, enabled/stale untracked cache, global/system config injection,
+an inherited Git environment value, a wrong null device, or an omitted/reordered
+hardening argument. They also record the frozen POSIX and Windows GitHub CLI
+config-root derivations, mixed-case `GH_CONFIG_DIR` denial, preservation of
+`HOME`/`APPDATA`/`XDG_CONFIG_HOME`, and root/binding immutability through `gh`
+spawn. The positive rows then require the
 lowercase requested HEAD equality, empty porcelain-v1 all status, one exact
 NUL-terminated `100644 blob` tree record, no-follow regular working-script bytes,
 `cat-file` equality, blob-header SHA-1 equality, successful close, no intervening
@@ -1290,8 +1350,8 @@ six paths are verification dependencies
 already promoted by earlier packets, not mutable RET-010E scope; the RET-010E
 tracked implementation ceiling remains exactly thirteen.
 
-RET-010F additionally invokes the production `verify-hosted <head> <run-id>`
-mode after the run has completed; that mode alone acquires and verifies immutable
+RET-010F invokes the production `verify-hosted <head> <run-id>` mode after the
+run has completed; that mode alone acquires, parses, and verifies immutable
 hosted workflow metadata and archives through the existing authenticated
 session. The paged jobs and artifacts collections may contain unrelated
 records; the exact selected set is one `unit (20)` job, one `unit (22)` job, and
@@ -1300,7 +1360,7 @@ parent workflow conclusion and the conclusions of those two selected matrix
 jobs must all be `success`, and their repository,
 HEAD, canonical run ID and attempt, job Node major, artifact names, canonical
 artifact IDs, and exact service digests must match the two downloaded upload
-leaves, their completion markers, and their manifests. For each Node, RET-010F
+leaves, their completion markers, and their manifests. For each Node, the verifier
 joins the immutable artifact API metadata to the repository and exact HEAD, the
 one successful matrix job, expected derived artifact name, artifact ID, raw
 `sha256:<64-lowercase-hex>` service digest, recomputed downloaded-byte digest,
@@ -1327,7 +1387,8 @@ canonical payload under exclusive creation, and writes its completion marker
 last. A partial, stale, contradictory, foreign, raced, or unverifiable
 evaluation or upload leaf makes the finalizer fail without exposing a path, so
 no artifact upload is attempted. A success artifact remains provisional until
-RET-010F proves the parent and both jobs successful. RET-010F records the common
+`verify-hosted` proves the parent and both jobs successful and RET-010F reviews
+its canonical approval result. The verifier records the common
 aggregate digest plus both manifest digests, both recomputed exact-byte
 `completionMarkerSha256` values, both expected artifact names, canonical
 artifact IDs and service digests, both full versions, and the common run ID and
@@ -1366,8 +1427,11 @@ only qualification receipt is exactly
 qualifyingCaseCount: N }` with integer `N` in `[1,20]`. Lower-level order and
 selection measurements may exist only transiently to compute each conjunction;
 they are not published and cannot independently satisfy the gate. The
-fail-closed bundle verifier recomputes the aggregate count and boolean from the
-two canonical lane counts and rejects disagreement. Tests must include a
+fail-closed bundle verifier recomputes the two-lane count sum, enforces its
+`[1,20]` range, recomputes and matches the aggregate-contract boolean, and rejects any mirror/join or
+aggregate-contract disagreement. Pinned exact source proves which same-probe
+conjunction implementation produced the aggregate, but the aggregate-only bytes
+cannot independently prove the unpublished per-probe facts. Tests must include a
 negative vector in which one probe changes order and a different probe changes
 selection: every per-probe conjunction is false, the qualifying count is zero,
 and the gate and verifier must both reject it.
@@ -1439,8 +1503,9 @@ development source and model/provider/adapter/statistics identities, frozen
 dataset/input/oracle/policy/seed evidence, common aggregate digest, distinct
 Node 20/22 versions, manifest/marker digests, exact derived artifact names,
 canonical artifact IDs, artifact-service digests, and the common canonical run
-ID and attempt. The artifact values are both independently verified RET-010F
-workflow evidence and fields in the corresponding frozen Node record. The run
+ID and attempt. The artifact values are verifier-authenticated workflow evidence
+and fields in the corresponding frozen Node record; RET-010F does not separately
+parse or verify them. The run
 ID and attempt are the exact strings frozen in the two markers and manifests,
 never coerced numbers. The
 model/provider/adapter/statistics bytes must be unchanged from the named dev source
@@ -1467,8 +1532,9 @@ blobs, verifies
 the frozen qualification inputs named by that committed approval, and then
 loads the existing G2 scorer-only holdout lanes. It never downloads or receives
 a development artifact, reads a completion marker, queries hosted workflow/job
-metadata, or writes/revises the approval record; those are exclusively RET-010F
-responsibilities. It validates the expanded committed Node records' closed
+metadata, or writes/revises the approval record. Acquisition and internal-
+evidence verification belong only to `verify-hosted`; RET-010F only launches,
+reviews, and writes its accepted stdout bytes. It validates the expanded committed Node records' closed
 shape, Node 20-then-Node 22 order, artifact-name derivation, artifact-ID grammar,
 service-digest grammar, common run/attempt, approved source lineage, and declared
 digest bindings without requiring the expired development artifacts or live
@@ -2072,17 +2138,19 @@ This protocol contains portable path collision, link, reparse, mount, and
 substitution races at the evidence boundary. It is not a sandbox against a
 hostile process running concurrently as the same operating-system identity;
 the disposable isolated hosted runner, least-privilege workflow, exact-source
-checks, and RET-010F's independent downloaded-byte verification are explicit
+checks, and `verify-hosted`'s downloaded-byte verification invoked and reviewed
+by RET-010F are explicit
 parts of that trust boundary. A cancellation or any contradiction prevents a
 successful finalizer, exposes no upload path, and remains non-approving under
-RET-010F's workflow-conclusion checks. Identity, path, or byte mutation after
+the verifier's workflow-conclusion checks. Identity, path, or byte mutation after
 the final sweep has completed is explicitly outside this portable verifier: it
 is the hostile same-UID post-verification window, including the interval after
 structured output and before or during the uploader's read. No executable
 fixture claims to close that operating-system race. RET-010F's independent
-download and exact-byte, marker, allowlist, digest, workflow, and job
-verification is the approval boundary for whatever bytes the uploader actually
-stored; any post-sweep substitution remains non-approving.
+launch and review of `verify-hosted` leaves that sole verifier's download and
+exact-byte, marker, allowlist, digest, workflow, and job verification the
+approval boundary for whatever bytes the uploader actually stored; RET-010F
+does not repeat it. Any post-sweep substitution remains non-approving.
 
 The terminal upload uses
 `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`,
@@ -2156,8 +2224,9 @@ assertion for the output channel. Each static or permitted
 dynamic contradiction remains untouched, makes `ret010_finalize` fail, and
 places no stale or partial byte in the artifact sink. Every failure or
 cancellation path is non-approving. The excluded hostile same-UID
-post-verification window is judged only by RET-010F against the independently
-downloaded artifact bytes.
+post-verification window is judged only by the `verify-hosted` result that
+RET-010F launches and reviews against the verifier's independently downloaded
+artifact bytes.
 
 ### RET-010F — independently approved development receipt
 
@@ -2168,49 +2237,36 @@ The independent RET-010F checker must complete the exact external trusted-Git
 HEAD/status/tree/working-byte/cat-file/blob-SHA preflight frozen in section 7.1
 and, with no intervening command, launch the single fail-closed production
 command `node bench/lab/ret010/dev-gate.ts verify-hosted <40-lowercase-head> <canonical-run-id>`.
-That mode, not RET-010F caller input, acquires the completed immutable
-hosted-workflow metadata and exactly two GitHub archives through the existing
-authenticated session, authenticates and extracts those bytes, and constructs
-the approved bundle roots. RET-010F is the sole authorized invoker/reviewer of
-that acquisition-verifier mode and the sole writer of the
-approval JSON. Before trusting either manifest, it independently verifies each
-extracted artifact's
-exact allowlist, canonical bytes, every payload digest, last-written
-`upload-complete.json` marker, recomputed exact-byte `completionMarkerSha256`,
-expected artifact name, canonical artifact ID, exact service-digest
-representation and recomputed downloaded-byte digest, repository, source HEAD,
-run ID/attempt, corresponding successful job conclusion, and matching full Node
-version/major. It requires exactly
-one Node 20 leaf and one Node 22 leaf from the same successful workflow attempt,
-requires the parent workflow and both corresponding matrix jobs to have
-conclusion `success`, and rejects any third, missing, failed, cancelled, stale,
-partial, unmarked, mixed, duplicated, malformed, cross-run, cross-job,
-cross-Node, or cross-artifact-substituted artifact. It then requires both nodes'
-aggregate bytes and aggregate SHA-256 to be identical and joins every marker,
-manifest, report, source, provider, adapter, model, policy, dataset, input,
-oracle, seed, run, attempt, artifact API identity, downloaded bytes,
-source-bound statistics-module identity, and workflow/job fact before
-independently reapplying policy and the hard-coded response-effect invariant to
-the canonical aggregate-only records. It recomputes all lane/aggregate
-arithmetic available from those records, rechecks threshold comparisons,
-zero-safety facts, provenance, exact seed equality, and two-Node byte
-reproducibility. It explicitly does not claim to reconstruct the sealed per-case
-paired vector, derive its vector seed, or recompute the stored bootstrap
-interval. It may write the closed approval record only when that verifier exits
-zero with empty stderr and returns the exact canonical fully joined,
-policy-reapplied Node 20/22
-approval bytes on stdout. RET-010F copies those bytes without parsing,
-reserializing, extending, or transcribing them. RET-010F adds only the approval JSON; it
-does not add or modify a reader, schema, policy, workflow, model, or evaluation
-path. Any need to change verifier bytes starts a separately reviewed RET-010E
-revision and new hosted run. The later holdout gate consumes only the committed
-expanded approval record, its artifact-name/ID/service-digest receipts, declared
-payload digests, approved source lineage, and frozen qualification inputs; it
-never repeats or substitutes any RET-010F verifier acquisition, hosted-metadata verification,
-marker verification, or approval write, and remains valid after development
-artifact expiry.
+That mode, not RET-010F, acquires and duplicate-key parses the immutable hosted
+metadata, downloads and authenticates the two archives, verifies ZIPs and bundle
+roots, validates markers/manifests/payloads/source, performs every identity and
+digest join, applies thresholds/custody rules, and serializes the canonical
+approval record. RET-010F performs none of those internal evidence operations
+and has no second REST, archive, ZIP, extraction, marker, manifest, join,
+threshold, or approval serializer/parser.
 
-This Decision 32 boundary incorporates and supersedes Decisions 28-31 and every
+RET-010F requires the child to exit exactly zero, stderr to contain exactly zero
+bytes, and stdout to contain exactly one verifier-produced canonical
+UTF-8/no-BOM approval record with exactly one terminal LF and no other byte. It
+reviews that result under maker/checker separation, then writes the stdout bytes
+byte-for-byte as `bench/lab/ret010/approved-dev.json`; it does not parse,
+reserialize, extend, drop, reorder, or transcribe a field. Those external
+preflight, exact launch, channel/cardinality requirement, review, and byte copy
+are RET-010F's complete responsibilities. RET-010F remains the sole authorized
+invoker/reviewer of the acquisition-verifier mode and sole writer of the
+approval JSON, but `verify-hosted` remains the sole executable evidence parser
+and verifier. RET-010F adds only the approval JSON and does not add or modify a
+reader, schema, policy, workflow, model, or evaluation path. Any need to change
+verifier bytes starts a separately reviewed RET-010E revision and new hosted
+run.
+
+The later holdout gate consumes only the committed expanded approval record,
+its artifact-name/ID/service-digest receipts, declared payload digests, approved
+source lineage, and frozen qualification inputs. It never repeats or substitutes
+the `verify-hosted` acquisition/internal verification or RET-010F approval
+write, and remains valid after development artifact expiry.
+
+This Decision 34 boundary incorporates and supersedes Decisions 28-33 and every
 older clause that could be read to authorize caller-provided REST/ZIP bytes,
 caller-selected extraction or holdout receipt paths, unauthenticated or
 caller-selected GitHub acquisition, synthetic preselected production metadata,
@@ -2224,6 +2280,17 @@ workflow history, or a twelve-path RET-010E ceiling. Those readings are deleted:
 only the authenticated `verify-hosted` acquisition, exact fail-fast direct
 command, aggregate-honest, single-owner, sealed-fd3-test-only,
 always-finalized, exact thirteen-path contracts above are authoritative.
+
+Decision 34 additionally replaces every contrary reading that assigns RET-010F
+a second executable hosted-evidence parser/verifier, claims aggregate-only bytes
+independently prove unpublished per-probe conjunctions/vector/seed/interval,
+allows ambient Git replacement/config/promisor/shallow/fsmonitor/lazy-fetch
+state into the external preflight, or treats the default GitHub CLI config root
+as caller input or allows it to change before `gh` spawn. Those readings are
+deleted. The sole `verify-hosted` parser/verifier, aggregate-honest response-
+effect claim, hardened fresh-environment Git preflight, frozen trusted config
+root, and RET-010F preflight/launch/channel-review/byte-copy-only contracts above
+are authoritative.
 
 Decision 32 additionally replaces every contrary reading that would let
 RET-010F launch without the immediate trusted-Git self-byte preflight, claim the
@@ -2262,7 +2329,7 @@ profile; and fake-session production subprocess or vague fd3 scorer wording is
 replaced by the in-process verifier factory plus the exact sealed raw-lane fd3
 schema. No contrary portion of those four clauses survives.
 
-Decision 32 authorizes this design-file correction only. It authorizes no
+Decision 34 authorizes this design-file correction only. It authorizes no
 implementation, staging, commit, CI, GitHub REST call, artifact download,
 RET-010F approval write, real holdout read or dispatch, deployment, activation,
 threshold change, credential creation/use beyond the future existing
