@@ -451,7 +451,7 @@ limit counts above, requires every selected input and oracle record to be
 artifact. It does not import `datasets/load-suite.ts` and contains no G2 or
 holdout dataset ID/path.
 
-`bench/lab/ret010/dev-gate.ts` can receive scenarios only from that loader. It
+`bench/lab/ret010/dev-gate.cjs` can receive scenarios only from that loader. It
 calls `compareRegisteredAdapters` twice with exact IDs
 `memberry-retrieval-core-disabled-v1` and
 `memberry-retrieval-core-served-v1` and exact `splits: ['dev']`: once with only
@@ -465,7 +465,7 @@ manifest below `node_modules/.cache/memberry-lab/runs`; neither per-case oracle
 labels nor result IDs are published.
 
 The dependency/binding test reads the complete static graph of `load-dev.ts`
-and `dev-gate.ts` before execution and fails on `memberry-g2`, `holdout`,
+and `dev-gate.cjs` before execution and fails on `memberry-g2`, `holdout`,
 `datasets/g2`, `loadG2HoldoutScenariosForScoring`, `datasets/load-suite`, a
 variable dataset ID/split, an unregistered adapter, a mixed-k comparison, fewer
 or more than 10 probes per lane, or any output field carrying
@@ -475,9 +475,9 @@ an operating-system sandbox claim.
 `runDeterministicCiGate` completes only the pre-existing registry, baseline, and
 comparison gates, including both existing G2 calls still bound to disabled
 `memberry-retrieval-core-v1`. It never imports, launches, or otherwise invokes
-`dev-gate.ts` and can never create or reserve a RET-010 evaluation root. The
+`dev-gate.cjs` and can never create or reserve a RET-010 evaluation root. The
 workflow's exact fail-fast Bash block invokes the baseline first and invokes
-`dev-gate.ts run` directly only after the baseline succeeds. The direct child
+`dev-gate.cjs run` directly only after the baseline succeeds. The direct child
 entry module must validate the
 output boundary and exclusively create the current run/attempt/Node-major
 evaluation root before dynamically importing any registered adapter,
@@ -623,9 +623,9 @@ exclusive immutable-leaf protocol replaces and supersedes all earlier cleanup,
 quarantine, replacement, rename-publication, rethrow, or unconditional-upload
 wording.
 
-`bench/lab/ret010/dev-gate.ts` implements the development-bundle reader/verifier
+`bench/lab/ret010/dev-gate.cjs` implements the development-bundle reader/verifier
 once behind the one production CLI mode
-`node bench/lab/ret010/dev-gate.ts verify-hosted <40-lowercase-head> <canonical-run-id>`,
+`node bench/lab/ret010/dev-gate.cjs verify-hosted <40-lowercase-head> <canonical-run-id>`,
 and RET-010F must use that exact command. Immediately before launch, with no
 intervening command, RET-010F runs a trusted system/PATH `git` preflight with
 `shell: false`, ignored stdin, and separate bounded stdout/stderr pipes. Every
@@ -652,37 +652,46 @@ a network or lazy-fetch attempt. It then
 requires exact `git rev-parse HEAD` stdout to be the requested lowercase
 40-hex HEAD plus LF; exact `git status --porcelain=v1 --untracked-files=all`
 stdout to be empty; and exact
-`git ls-tree -z HEAD -- bench/lab/ret010/dev-gate.ts` stdout to be one and only
-one NUL-terminated record `100644 blob <40-lowercase-hex><TAB>bench/lab/ret010/dev-gate.ts<NUL>`.
+`git ls-tree -z HEAD -- bench/lab/ret010/dev-gate.cjs` stdout to be one and only
+one NUL-terminated record `100644 blob <40-lowercase-hex><TAB>bench/lab/ret010/dev-gate.cjs<NUL>`.
 Using a component-contained no-follow handle, it requires the working script to
 be a regular non-link/non-reparse/non-mount file, reads its pinned bytes, and
 requires byte equality with exact no-shell
-`git cat-file blob HEAD:bench/lab/ret010/dev-gate.ts`. It independently computes
+`git cat-file blob HEAD:bench/lab/ret010/dev-gate.cjs`. It independently computes
 Git SHA-1 over `"blob " + decimalByteLength + NUL + exactBytes` and requires the
 result to equal the `ls-tree` blob ID. Every command must exit zero with its
 required exact channels and every acquired handle must close successfully; the
 next and only command is then the exact plain-Node launch above.
 
-`dev-gate.ts`, despite its suffix, is
-valid plain Node 20 and Node 22 CommonJS: only Node built-ins, `require`,
-`module.exports`, and an explicitly invoked async `main` are permitted. It has
-no ESM syntax, TypeScript-only syntax, JSX, decorator, top-level await,
-`import.meta`, loader, or loader flag. The `verify-hosted` branch uses only Node
-built-ins and executable definitions in that same file; before or during
-verification it never loads `tsx`, imports, executes, or compiles another source,
-uses `eval`/dynamic code, or invokes a model or evaluation implementation. Its
-only additional repository-file access is the closed pinned read-only allowlist
-below; those read bytes are evidence, never imported, executed, or compiled. The
-development workflow's separate `run` command may retain its frozen `tsx`
-invocation.
+`dev-gate.cjs` has a pure CommonJS entry, dispatcher, custody boundary, and
+hosted verifier directly loadable by Node 20 and Node 22. Before loading any
+TypeScript source, the entry uses only Node built-ins, `require`,
+`module.exports`, and an explicitly invoked async `main`; it contains no ESM
+syntax, TypeScript-only syntax, JSX, decorator, top-level await, or `import.meta`.
+It first selects exactly one mode and validates that mode's complete argv,
+execArgv, and environment contract. Only the validated `run` branch may then
+load the frozen repository TypeScript evaluation graph through the already
+active exact `tsx` hook, and only after the output boundary has been validated
+and its current exclusive evaluation root created. The `verify-hosted` branch
+uses only Node built-ins and executable definitions in the same CommonJS file;
+before or during verification it never loads `tsx`, imports, executes, or
+compiles another source, uses `eval`/dynamic code, or invokes a model or
+evaluation implementation. Its only additional repository-file access is the
+closed pinned read-only allowlist below; those read bytes are evidence, never
+imported, executed, or compiled.
 
-At entry, production `verify-hosted` requires `process.execArgv` to be exactly
-the empty array and `process.argv` to contain exactly the runtime-owned Node
-executable path, the invoked `bench/lab/ret010/dev-gate.ts` script path,
-`verify-hosted`, HEAD, and run ID in that order. It rejects any missing, extra,
-or reordered element and rejects the presence, including an empty value, of
-`NODE_OPTIONS` or `NODE_PATH`. These entry checks do not claim to detect or undo
-a malicious preload or other mutation that occurred before JavaScript entry.
+At entry, `run` requires `process.execArgv` to equal exactly
+`["--import","tsx"]` and `process.argv` to contain exactly the runtime-owned
+Node executable path, the invoked `bench/lab/ret010/dev-gate.cjs` script path,
+and `run`, in that order. Production `verify-hosted` instead requires
+`process.execArgv` to be exactly the empty array and `process.argv` to contain
+exactly the same runtime and script paths followed by `verify-hosted`, HEAD,
+and run ID, in that order. Both modes reject any missing, extra, reordered, or
+alternate mode/argument; any extra, reordered, or substituted loader/preload
+argument; and the presence, including an empty value, of `NODE_OPTIONS` or
+`NODE_PATH`. Mode selection and these complete checks finish before the run
+branch imports TypeScript or the verifier acquires a token. These entry checks do
+not claim to detect or undo malicious code that executed before JavaScript entry.
 
 The mode hard-codes repository `AP3X-Dev/memberry`, uses only the operator's
 existing authenticated `github.com` CLI session, and owns every acquisition.
@@ -703,7 +712,7 @@ This boundary explicitly trusts the fresh RET-010F host environment, the
 system/PATH-selected `git`, `node`, and `gh` executables, the OS process launcher,
 the CLI's default existing session/configuration and frozen absolute config root,
 DNS, TLS, kernel, the external
-preflight's verified `dev-gate.ts` bytes, and any same-UID process action before
+preflight's verified `dev-gate.cjs` bytes, and any same-UID process action before
 verifier entry. The already-running verifier cannot attest itself or those
 pre-entry roots. RET-010F must run from a fresh trusted environment or stop.
 RET-010E adds no attestation, clean-room launcher, new executable-discovery
@@ -774,7 +783,7 @@ source/data reads are closed to exactly these thirteen paths and no other such
 filesystem path; trusted `git` may read its own object database to serve the
 fixed tree/blob commands:
 
-1. `bench/lab/ret010/dev-gate.ts`
+1. `bench/lab/ret010/dev-gate.cjs`
 2. `packages/retrieval/src/served-reranker.ts`
 3. `packages/retrieval/src/reranker.ts`
 4. `packages/retrieval/src/assembler.ts`
@@ -1166,7 +1175,7 @@ nonzero. All verifier logs, diagnostics, exception paths, and failure channels
 are value-free; no caller-controlled or bundle-derived value may accompany or
 replace that sentinel.
 
-`dev-gate.ts` exports exactly the testable construction boundary
+`dev-gate.cjs` exports exactly the testable construction boundary
 `createVerifyHostedVerifier({ transport })`. The supplied transport receives
 only closed request descriptors internally constructed by the verifier after
 argument, repository, identity, endpoint, page, header, and redirect policy
@@ -1176,12 +1185,20 @@ and lifecycle matrices import that factory in-process with a recording fake.
 
 Production `main` always constructs the one fixed GitHub-CLI/session transport.
 It has no transport selector through an argument, environment key, inherited fd,
-path, module/preload hook, global, or mutable export. Subprocess fixtures are
-limited to `node --check bench/lab/ret010/dev-gate.ts` under both Node 20 and 22,
-the exact plain-Node command and `process.execArgv === []`/`process.argv`
-grammar, proof of the fixed production binding, invalid/missing/extra arguments,
-the forbidden entry environment, and the fixed success/failure channel contract.
-They invoke no loader or `--import` flag and never claim to substitute a fake
+path, module/preload hook, global, or mutable export. Under both Node 20 and Node
+22, executable subprocess proof runs
+`node --check bench/lab/ret010/dev-gate.cjs`, the exact
+`node --import tsx bench/lab/ret010/dev-gate.cjs run` fixture matrix, and the exact
+`node bench/lab/ret010/dev-gate.cjs verify-hosted <head> <run-id>` fixture
+matrix. Positive Node 20/22 run fixtures require exact
+`process.execArgv === ["--import","tsx"]`, pass through the real frozen
+TypeScript evaluation graph where applicable, and reject a missing, extra,
+reordered, duplicated, or alternate loader/preload. Positive Node 20/22
+verify-hosted fixtures require `process.execArgv === []` and prove that no
+`tsx`, loader, repository TypeScript executable, or alternate entry loads.
+Both matrices cover exact `process.argv` grammar, fixed production binding,
+invalid/missing/extra or cross-mode arguments, forbidden entry environment, and
+fixed success/failure channels. No fixture claims to substitute a fake
 authenticated session in a production subprocess. Source-binding checks reject
 ESM, TypeScript-only, JSX, decorator, top-level-await, `import.meta`, loader,
 dynamic-code, or verify-hosted executable/import/compile cross-file dependencies;
@@ -1377,7 +1394,7 @@ or cross-artifact identity/substitution can never authorize `approved-dev.json`.
 Within each matrix job the RET-010 development evaluation is invoked directly,
 not through `bench/lab/baselines/ci-gate.ts`, as the final authoritative workflow
 command before finalization. The baseline test process must never import, spawn,
-or invoke `dev-gate.ts`, so it cannot precreate, reserve, collide with, or mutate
+or invoke `dev-gate.cjs`, so it cannot precreate, reserve, collide with, or mutate
 the authoritative evaluation root. The conditionally selected artifact
 publication is terminal. Its always-running finalizer may succeed only for one exact,
 complete current-identity success bundle or one exact, complete current-identity
@@ -1414,7 +1431,7 @@ The development candidate must satisfy all of:
 - at least one individual response-path probe both reverses baseline order and
   changes selected evidence under a tight token budget.
 
-`dev-gate.ts` owns a separate closed, hard-coded RET-010E custody invariant; it
+`dev-gate.cjs` owns a separate closed, hard-coded RET-010E custody invariant; it
 is not a `dev-policy.json` field and cannot be supplied or changed through a
 policy, registry, environment value, or caller input. For each probe, the gate
 computes one qualifying boolean as the conjunction of that probe's
@@ -1991,7 +2008,7 @@ baseline-controlled.
 - `bench/lab/registered-adapters.ts`
 - `bench/lab/registry/systems.json`
 - `bench/lab/baselines/ci-gate.ts`
-- `bench/lab/ret010/dev-gate.ts` (new)
+- `bench/lab/ret010/dev-gate.cjs` (new)
 - `bench/lab/ret010/holdout-gate.mts` (new)
 - `bench/lab/__tests__/memberry-retrieval-core.test.ts`
 - `bench/lab/__tests__/registered-adapters.test.ts`
@@ -2016,13 +2033,13 @@ The deterministic-gate step has the unique stable step ID
 ```bash
 set -euo pipefail
 npm run bench:lab:ci
-node --import tsx bench/lab/ret010/dev-gate.ts run
+node --import tsx bench/lab/ret010/dev-gate.cjs run
 ```
 
 The fail-fast Bash semantics prevent the direct evaluator from running if the
-baseline command fails; the direct `dev-gate.ts run` invocation is the final
+baseline command fails; the direct `dev-gate.cjs run` invocation is the final
 authoritative command. `bench/lab/baselines/ci-gate.ts` and its nested baseline
-tests must never import, spawn, or invoke `dev-gate.ts`; only the direct final
+tests must never import, spawn, or invoke `dev-gate.cjs`; only the direct final
 workflow command may create the authoritative evaluation root. The finalizer
 has the unique stable step ID `ret010_finalize`,
 uses only the custody boundary (it must not import evaluation, adapters, model
@@ -2236,7 +2253,7 @@ artifact bytes.
 The independent RET-010F checker must complete the exact external trusted-Git
 HEAD/status/tree/working-byte/cat-file/blob-SHA preflight frozen in section 7.1
 and, with no intervening command, launch the single fail-closed production
-command `node bench/lab/ret010/dev-gate.ts verify-hosted <40-lowercase-head> <canonical-run-id>`.
+command `node bench/lab/ret010/dev-gate.cjs verify-hosted <40-lowercase-head> <canonical-run-id>`.
 That mode, not RET-010F, acquires and duplicate-key parses the immutable hosted
 metadata, downloads and authenticates the two archives, verifies ZIPs and bundle
 roots, validates markers/manifests/payloads/source, performs every identity and
@@ -2291,6 +2308,17 @@ deleted. The sole `verify-hosted` parser/verifier, aggregate-honest response-
 effect claim, hardened fresh-environment Git preflight, frozen trusted config
 root, and RET-010F preflight/launch/channel-review/byte-copy-only contracts above
 are authoritative.
+
+Decision 38 replaces the proven-inexecutable TypeScript-suffixed development-gate
+boundary by substitution with `bench/lab/ret010/dev-gate.cjs`. It does not add
+a fourteenth RET-010E path. Every development `run`, hosted verification,
+workflow binding, argv check, trusted-Git tree/blob proof, source allowlist,
+digest join, and fixture now names that one CommonJS path. The two entry modes
+are deliberately distinct: `run` uses only the exact `--import tsx` hook
+needed for the frozen TypeScript evaluation graph, while `verify-hosted` uses
+plain Node with empty execArgv and can never load that graph. Every contrary
+TypeScript-suffixed path, loader-free run claim, loader-enabled verify-hosted
+claim, or shared/ambiguous mode contract is deleted.
 
 Decision 32 additionally replaces every contrary reading that would let
 RET-010F launch without the immediate trusted-Git self-byte preflight, claim the
