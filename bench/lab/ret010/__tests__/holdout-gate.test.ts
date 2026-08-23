@@ -90,10 +90,13 @@ type SyncChildOptions = Readonly<{
   cwd: string;
   encoding: 'utf8';
   env: NodeJS.ProcessEnv;
+  reserveFd3?: boolean;
 }>;
 function spawnBounded(args: readonly string[], options: SyncChildOptions) {
+  const { reserveFd3, ...childOptions } = options;
   const result = spawnSync(process.execPath, [...args], {
-    ...options, timeout: 3_000, killSignal: 'SIGKILL',
+    ...childOptions, ...(reserveFd3 ? { stdio: ['ignore', 'pipe', 'pipe', 'ignore'] } : {}),
+    timeout: 3_000, killSignal: 'SIGKILL',
   });
   expect(result.error).toBeUndefined();
   expect(result.signal).toBeNull();
@@ -1576,6 +1579,7 @@ describe('RET-010 holdout fixture boundary', () => {
     const instrumented = await holdoutRunFixture(2);
     const guarded = spawnBounded(['--import', 'tsx', harness, 'run-fixture'], {
       cwd: ROOT, encoding: 'utf8',
+      reserveFd3: true,
       env: { ...instrumented.environment, HARNESS_PAYLOAD_BASE64: payload.toString('base64') },
     });
     expect(guarded.status).toBe(0);
@@ -1720,13 +1724,11 @@ describe('RET-010 holdout fixture boundary', () => {
     expect(result).toMatchObject({ stdout: '', stderr: 'RET010_HOLDOUT_GATE_FAILED\n' });
   });
 
-  it('rejects missing fixture fd3', async () => {
-    const payload = Buffer.from(`${JSON.stringify(fixture())}\n`);
+  it('rejects an empty sealed fixture fd3', async () => {
     const missing = await holdoutRunFixture(30);
-    expect(await spawnGate('run', missing.environment)).toMatchObject({
+    expect(await spawnGate('run', missing.environment, Buffer.alloc(0))).toMatchObject({
       status: 1, stdout: '', stderr: 'RET010_HOLDOUT_GATE_FAILED\n',
     });
-    expect(payload.length).toBeGreaterThan(0);
   });
 
   it('freezes fixture crossing and identity table labels', () => {
