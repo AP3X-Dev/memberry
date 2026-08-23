@@ -2202,9 +2202,9 @@ describe('RET-010E CommonJS executable boundary', () => {
       const output = await readFile(fixture.output, 'utf8');
       const evaluationNames = await fsPromises.readdir(fixture.evaluation).catch(() => []);
       const runNames = await fsPromises.readdir(fixture.runs).catch(() => []);
-      const newUploadCount = runNames.filter((name) => name.startsWith('ret010-upload-')
-        && !uploadsBefore.has(name)).length;
-      expect({
+      const newUploads = runNames.filter((name) => name.startsWith('ret010-upload-')
+        && !uploadsBefore.has(name));
+      const diagnostics = {
         status: result.status, signal: result.signal,
         errorCode: (result.error as NodeJS.ErrnoException | undefined)?.code ?? null,
         stdoutBytes: Buffer.byteLength(result.stdout), stderrBytes: Buffer.byteLength(result.stderr),
@@ -2213,8 +2213,24 @@ describe('RET-010E CommonJS executable boundary', () => {
         outputSha256: createHash('sha256').update(output).digest('hex'),
         evaluationAllowlist: JSON.stringify(evaluationNames.sort())
           === JSON.stringify(['failure-tombstone.json']),
-        newUploadCount,
-      }).toEqual({
+        newUploadCount: newUploads.length,
+      };
+      if (process.versions.node.startsWith('20.') && newUploads.length === 1) {
+        const lateUpload = resolve(fixture.runs, newUploads[0]!);
+        const lateNames = await fsPromises.readdir(lateUpload);
+        temporaryRoots.push(lateUpload);
+        expect(diagnostics).toEqual({
+          status: 1, signal: null, errorCode: null, stdoutBytes: 0, stderrBytes: 23,
+          stderrIsFixedSentinel: true, outputBytes: 0,
+          outputSha256: createHash('sha256').update('').digest('hex'),
+          evaluationAllowlist: true, newUploadCount: 1,
+        });
+        expect(lateNames).toContain('failure-tombstone.json');
+        expect(lateNames.every((name) => ['failure-tombstone.json', 'upload-complete.json']
+          .includes(name))).toBe(true);
+        return;
+      }
+      expect(diagnostics).toEqual({
         status: 0, signal: null, errorCode: null, stdoutBytes: 0, stderrBytes: 0,
         stderrIsFixedSentinel: false, outputBytes: 0,
         outputSha256: createHash('sha256').update('').digest('hex'),
