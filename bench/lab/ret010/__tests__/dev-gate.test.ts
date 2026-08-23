@@ -325,12 +325,34 @@ async function developmentFailureFixture(ordinal: number) {
   await writeFile(output, '');
   return {
     evaluation, output, runs,
-    environment: {
-      ...process.env, GITHUB_RUN_ID: workflowRunId, GITHUB_RUN_ATTEMPT: workflowRunAttempt,
+    environment: developmentFinalizerEnvironment(process.env, {
+      GITHUB_RUN_ID: workflowRunId, GITHUB_RUN_ATTEMPT: workflowRunAttempt,
       RET010_DEVELOPMENT_GATE_OUTCOME: 'failure', GITHUB_OUTPUT: output,
-      NODE_OPTIONS: undefined, NODE_PATH: undefined,
-    },
+    }),
   };
+}
+
+function developmentFinalizerEnvironment(source: NodeJS.ProcessEnv, required: Readonly<{
+  GITHUB_RUN_ID: string;
+  GITHUB_RUN_ATTEMPT: string;
+  RET010_DEVELOPMENT_GATE_OUTCOME: 'failure';
+  GITHUB_OUTPUT: string;
+}>): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = Object.create(null) as NodeJS.ProcessEnv;
+  for (const [name, value] of Object.entries(source)) {
+    const folded = name.toUpperCase();
+    if (folded.startsWith('NODE_') || folded.startsWith('GITHUB_')
+      || folded.startsWith('RET010_') || folded === 'RUNNER_TEMP'
+      || folded === 'VITEST' || folded.startsWith('VITEST_')
+      || folded === 'TINIPOOL' || folded.startsWith('TINIPOOL_')) continue;
+    Object.defineProperty(environment, name, {
+      value, enumerable: true, writable: true, configurable: true,
+    });
+  }
+  for (const [name, value] of Object.entries(required)) Object.defineProperty(environment, name, {
+    value, enumerable: true, writable: true, configurable: true,
+  });
+  return environment;
 }
 
 const HOSTED_HEAD = 'a'.repeat(40);
@@ -666,6 +688,25 @@ async function postCloseAuditFixture() {
 }
 
 describe('RET-010E CommonJS executable boundary', () => {
+  it('isolates the exact finalizer child from worker bootstrap and hosted identity controls', () => {
+    const environment = developmentFinalizerEnvironment({
+      PATH: 'safe-path', HOME: 'safe-home', NODE_CHANNEL_FD: '3', Node_Options: '--inspect',
+      VITEST: 'true', VITEST_POOL_ID: '7', TINIPOOL_WORKER_ID: '4',
+      GITHUB_SHA: 'hosted-sha', RUNNER_TEMP: '/hosted', RET010_OTHER: 'hosted-control',
+    }, {
+      GITHUB_RUN_ID: '17', GITHUB_RUN_ATTEMPT: '2',
+      RET010_DEVELOPMENT_GATE_OUTCOME: 'failure', GITHUB_OUTPUT: '/safe/output',
+    });
+    expect(Object.keys(environment)).toEqual([
+      'PATH', 'HOME', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
+      'RET010_DEVELOPMENT_GATE_OUTCOME', 'GITHUB_OUTPUT',
+    ]);
+    expect(environment).toMatchObject({
+      PATH: 'safe-path', HOME: 'safe-home', GITHUB_RUN_ID: '17', GITHUB_RUN_ATTEMPT: '2',
+      RET010_DEVELOPMENT_GATE_OUTCOME: 'failure', GITHUB_OUTPUT: '/safe/output',
+    });
+  });
+
   it('is accepted by plain Node syntax checking and exports only the hosted factory', () => {
     expect(() => execFileSync(process.execPath, ['--check', GATE], {
       cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], timeout: 3_000, killSignal: 'SIGKILL',
@@ -2149,11 +2190,37 @@ describe('RET-010E CommonJS executable boundary', () => {
 
   it('runs the exact production finalize CLI and emits only its validated upload path', async () => {
     const fixture = await developmentFailureFixture(1);
+    const uploadsBefore = new Set((await fsPromises.readdir(fixture.runs))
+      .filter((name) => name.startsWith('ret010-upload-')));
     const result = spawnSync(process.execPath, [GATE, 'finalize'], {
       cwd: ROOT, encoding: 'utf8', env: fixture.environment, timeout: 3_000, killSignal: 'SIGKILL',
+      stdio: ['ignore', 'pipe', 'pipe', 'ignore'],
     });
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
+    if (result.status !== 0) {
+      const output = await readFile(fixture.output, 'utf8');
+      const evaluationNames = await fsPromises.readdir(fixture.evaluation).catch(() => []);
+      const runNames = await fsPromises.readdir(fixture.runs).catch(() => []);
+      const newUploadCount = runNames.filter((name) => name.startsWith('ret010-upload-')
+        && !uploadsBefore.has(name)).length;
+      expect({
+        status: result.status, signal: result.signal,
+        errorCode: (result.error as NodeJS.ErrnoException | undefined)?.code ?? null,
+        stdoutBytes: Buffer.byteLength(result.stdout), stderrBytes: Buffer.byteLength(result.stderr),
+        stderrIsFixedSentinel: result.stderr === 'RET010_DEV_GATE_FAILED\n',
+        outputBytes: Buffer.byteLength(output),
+        outputSha256: createHash('sha256').update(output).digest('hex'),
+        evaluationAllowlist: JSON.stringify(evaluationNames.sort())
+          === JSON.stringify(['failure-tombstone.json']),
+        newUploadCount,
+      }).toEqual({
+        status: 0, signal: null, errorCode: null, stdoutBytes: 0, stderrBytes: 0,
+        stderrIsFixedSentinel: false, outputBytes: 0,
+        outputSha256: createHash('sha256').update('').digest('hex'),
+        evaluationAllowlist: true, newUploadCount: 0,
+      });
+    }
     expect(result.status).toBe(0);
     expect(result.stdout).toBe('');
     expect(result.stderr).toBe('');
