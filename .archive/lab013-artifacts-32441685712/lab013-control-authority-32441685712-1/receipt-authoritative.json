@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "lab013-control-qualification-failure",
+  "outcome": "rejected",
+  "failureCode": "control-headroom-rejected",
+  "executedSourceSha": "d984c6b0900894333cc7e184760ca6cd1b3c1d98",
+  "workflowRefSha": "d984c6b0900894333cc7e184760ca6cd1b3c1d98",
+  "workflowRun": {
+    "id": "32441685712",
+    "url": "https://github.com/AP3X-Dev/memberry/actions/runs/32441685712",
+    "attempt": 1
+  },
+  "runtime": {
+    "execution": "hosted",
+    "platform": "linux",
+    "nodeMajor": 22
+  },
+  "disclosure": "closed-aggregate-only"
+}

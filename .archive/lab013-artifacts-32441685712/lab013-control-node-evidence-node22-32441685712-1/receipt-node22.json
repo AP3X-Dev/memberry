@@ -1,0 +1,141 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "lab013-control-qualification-node-evidence",
+  "receipt": {
+    "schemaVersion": "1.0.0",
+    "kind": "lab013-control-qualification-node-evidence",
+    "instrument": "memberry-multihop-v2",
+    "instrumentVersion": "2.0.0",
+    "exactBaseCommit": "a90d8a91aa0ec5f10796938798537aafc2ed0b9c",
+    "seedCommitmentSha256": "8a405c6921dc3e5790f0df6054620099ed98bf54767637229c5544f2e54e241a",
+    "receiptId": "lab013-32441685712-attempt1-node22",
+    "createdAt": "2026-08-21T02:58:24.881Z",
+    "executedSourceSha": "d984c6b0900894333cc7e184760ca6cd1b3c1d98",
+    "workflowRefSha": "d984c6b0900894333cc7e184760ca6cd1b3c1d98",
+    "workflowRun": {
+      "id": "32441685712",
+      "url": "https://github.com/AP3X-Dev/memberry/actions/runs/32441685712",
+      "attempt": 1
+    },
+    "producer": "independent-scorer-custodian",
+    "runtime": {
+      "execution": "hosted",
+      "platform": "linux",
+      "nodeMajor": 22
+    },
+    "controlAdapterId": "memberry-retrieval-core-v1",
+    "controlAdapterClass": "production-core-fixture-adapter",
+    "controlExecutionMode": "fixture",
+    "qualificationRuns": {
+      "dev": {
+        "id": "lab013-32441685712-attempt1-node22-dev-control"
+      },
+      "holdout": {
+        "id": "lab013-32441685712-attempt1-node22-holdout-control"
+      }
+    },
+    "controlSourceIdentity": {
+      "controlAdapterPath": "bench/lab/adapters/memberry-retrieval-core.ts",
+      "controlAdapterGitBlob": "3ceda0bcc44a5e7a8d79356c5ec909451d426a02",
+      "registeredAdaptersGitBlob": "752bc02e4ef5aabe99a5c52699c2ead6e6395f83",
+      "runnerGitBlob": "c0b885845d117f1d6e7a25bbfc87832e97ddee77",
+      "systemsRegistryGitBlob": "41ccf2b5e8a6c90d5f675d56c2b641126d151f82",
+      "experimentsRegistryGitBlob": "9dda1d33d84611cdc9c388fb81df5d8a678798a2"
+    },
+    "candidateAbsentAtQualification": true,
+    "candidateArtifactsObserved": false,
+    "candidateExecutionObserved": false,
+    "disclosure": "closed-aggregate-only",
+    "artifactBindings": {
+      "dev": {
+        "input": {
+          "sha256": "7ea7b54899bf5e99905487d71da503667425ecff85aaa2d2c954640aa708d7d0",
+          "sizeBytes": 84500
+        },
+        "oracle": {
+          "sha256": "25f9969a48ea4f30561e5bbd857aab10c3cb87422295842006e427dcbac70d64",
+          "sizeBytes": 4860
+        }
+      },
+      "holdout": {
+        "input": {
+          "sha256": "c4484005b4e0349da4018ec2ab6a4e3278fdbde3a964eb9fedad4f5ca1a68bc1",
+          "sizeBytes": 84238
+        },
+        "oracle": {
+          "sha256": "58a68db01cf237e0153c5055bab172483c4cb5e66363bfa3c721b2d45214cfb1",
+          "sizeBytes": 4860
+        }
+      }
+    },
+    "splits": {
+      "dev": {
+        "n": 20,
+        "successes": 5,
+        "successRate": 0.25,
+        "strata": {
+          "low": {
+            "n": 7,
+            "successes": 1,
+            "failures": 6
+          },
+          "medium": {
+            "n": 7,
+            "successes": 3,
+            "failures": 4
+          },
+          "high": {
+            "n": 6,
+            "successes": 1,
+            "failures": 5
+          }
+        }
+      },
+      "holdout": {
+        "n": 20,
+        "successes": 3,
+        "successRate": 0.15,
+        "strata": {
+          "low": {
+            "n": 7,
+            "successes": 0,
+            "failures": 7
+          },
+          "medium": {
+            "n": 7,
+            "successes": 0,
+            "failures": 7
+          },
+          "high": {
+            "n": 6,
+            "successes": 3,
+            "failures": 3
+          }
+        }
+      }
+    }
+  },
+  "qualification": {
+    "outcome": "rejected",
+    "instrument": "memberry-multihop-v2",
+    "instrumentVersion": "2.0.0",
+    "receiptId": "lab013-32441685712-attempt1-node22",
+    "controlAdapterId": "memberry-retrieval-core-v1",
+    "dev": {
+      "n": 20,
+      "successRate": 0.25,
+      "strataQualified": true
+    },
+    "holdout": {
+      "n": 20,
+      "successRate": 0.15,
+      "strataQualified": false
+    },
+    "failures": [
+      "dev:success-rate-outside-headroom",
+      "holdout:low:missing-success-or-failure",
+      "holdout:medium:missing-success-or-failure",
+      "holdout:success-rate-outside-headroom"
+    ]
+  }
+}
