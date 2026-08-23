@@ -157,7 +157,7 @@ async function instrumentedHoldoutHarness(): Promise<string> {
   const statsPath = resolve(root, 'bench/lab/stats.ts');
   await mkdir(resolve(root, 'bench/lab/ret010'), { recursive: true });
   const source = await readFile(GATE, 'utf8');
-  const testExport = '\nexport { aggregateFixture as __testAggregateFixture, approvalLineage as __testApprovalLineage, bindApprovalCommit as __testBindApprovalCommit, failureReceipt as __testFailureReceipt, finalizeGate as __testFinalizeGate, fixtureBytes as __testFixtureBytes, gitBlob as __testGitBlob, hardenedGit as __testHardenedGit, productionApprovalBeforeImports as __testProductionApprovalBeforeImports, retainedCustody as __testRetainedCustody, runGate as __testRunGate, validateProductionApproval as __testValidateProductionApproval };\n';
+  const testExport = '\nexport { aggregateFixture as __testAggregateFixture, approvalLineage as __testApprovalLineage, bindApprovalCommit as __testBindApprovalCommit, closeInheritedFd3 as __testCloseInheritedFd3, failureReceipt as __testFailureReceipt, finalizeGate as __testFinalizeGate, fixtureBytes as __testFixtureBytes, gitBlob as __testGitBlob, hardenedGit as __testHardenedGit, productionApprovalBeforeImports as __testProductionApprovalBeforeImports, retainedCustody as __testRetainedCustody, runGate as __testRunGate, validateProductionApproval as __testValidateProductionApproval };\n';
   expect(source).not.toContain(testExport.trim());
   const statsImport = "import { pairedEfficiencyInterval } from '../stats.js';";
   const statsInstrumentation = `import { pairedEfficiencyInterval as __rawPairedEfficiencyInterval } from '../stats.js';
@@ -345,8 +345,8 @@ if (typeof originalWebSocket === 'function') {
   restorers.unshift(() => defineOwn(globalThis, 'WebSocket', descriptor));
 }
 syncBuiltinESMExports();
-const { __testAggregateFixture, __testFailureReceipt, __testFinalizeGate, __testFixtureBytes,
-  __testRetainedCustody, __testRunGate } = await import(
+const { __testAggregateFixture, __testCloseInheritedFd3, __testFailureReceipt,
+  __testFinalizeGate, __testFixtureBytes, __testRetainedCustody, __testRunGate } = await import(
   ${JSON.stringify(pathToFileURL(gatePath).href)});
 const readFile = originalFs.readFile;
 const writeFile = originalFs.writeFile;
@@ -372,6 +372,8 @@ let cursor = 0;
 let fstats = 0;
 let readCalls = 0;
 let fixtureCloseAttempts = 0;
+let inheritedFstats = 0;
+let inheritedCloseAttempts = 0;
 let realImports = 0;
 let fixtureForbiddenFileAttempts = 0;
 let fixtureNetworkAttempts = 0;
@@ -477,6 +479,22 @@ try {
     scope.owners.push({ absolute: '<test>', handle: {}, kind: 'file', maximum: 1, closeAttempted: false });
     throw null;
   }, { closeHandle: async () => { throw false; } });
+  else if (action.startsWith('inherited-fd3-')) __testCloseInheritedFd3({
+    fstat: () => {
+      inheritedFstats += 1;
+      if (action === 'inherited-fd3-ebadf') throw Object.assign(new Error('closed'), { code: 'EBADF' });
+      if (action === 'inherited-fd3-fstat-failure') throw new Error('fstat');
+      if (action === 'inherited-fd3-untyped') return {
+        mode: 0, isFIFO: () => false, isSocket: () => false, isFile: () => false,
+        isDirectory: () => false, isCharacterDevice: () => false, isBlockDevice: () => false,
+      };
+      return { mode: 4096, isFIFO: () => true };
+    },
+    close: () => {
+      inheritedCloseAttempts += 1;
+      if (action === 'inherited-fd3-close-failure') throw new Error('close');
+    },
+  });
   else if (action.startsWith('fd-')) acceptedLength = (await __testFixtureBytes(fixtureIo)).length;
   else if (action === 'aggregate-fixture') {
     const fixtureValue = JSON.parse(Buffer.from(process.env.HARNESS_PAYLOAD_BASE64, 'base64').toString('utf8'));
@@ -612,6 +630,8 @@ process.stdout.write(JSON.stringify({
   fstats,
   readCalls,
   fixtureCloseAttempts,
+  inheritedFstats,
+  inheritedCloseAttempts,
   realImports,
   fixtureForbiddenFileAttempts,
   fixtureNetworkAttempts,
@@ -1688,6 +1708,11 @@ describe('RET-010 holdout fixture boundary', () => {
     expect(source).not.toMatch(/error\.(?:message|name|stack).*failureReceipt/);
     const run = source.slice(source.indexOf('async function runGate('),
       source.indexOf('\nfunction checkpointIdentity('));
+    expect(run).toContain("if (!test) closeInheritedFd3();");
+    expect(run.indexOf("let stage: keyof typeof FAILURE_CLASS_BY_STAGE = 'source-integrity';"))
+      .toBeLessThan(run.indexOf("if (!test) closeInheritedFd3();"));
+    expect(run.indexOf("if (!test) closeInheritedFd3();"))
+      .toBeLessThan(run.indexOf('const dispatch = test ? undefined : await validateHostedDispatch();'));
     for (const [stage, branch] of [
       ["stage = 'recall-comparison';", 'if (recall.delta < 0) reject();'],
       ["stage = 'precision-comparison';", 'if (precision.delta < 0) reject();'],
@@ -2034,13 +2059,32 @@ describe('RET-010 holdout fixture boundary', () => {
     expect(await readFile(input.output, 'utf8')).toBe('');
   });
 
-  it('rejects inherited fd3 in exact finalize mode', async () => {
+  it('closes inherited fd3 and finalizes the exact failure receipt', async () => {
     const open = await holdoutFailureFixture(200);
     const openResult = await spawnGate('finalize', open.environment, Buffer.from('readable'));
-    expect(openResult.status).not.toBe(0);
-    expect(openResult.stdout).toBe('');
-    expect(openResult.stderr).toBe('RET010_HOLDOUT_FINALIZE_FAILED\n');
-    expect(await readFile(open.output, 'utf8')).toBe('');
+    expect(openResult).toEqual({ status: 0, stdout: '', stderr: '' });
+    expect(await readFile(open.output, 'utf8'))
+      .toMatch(/^upload_path=.*ret010-holdout-upload-[0-9a-f]{64}\n$/);
+  });
+
+  it.each([
+    { action: 'inherited-fd3-open', rejected: false, fstats: 1, closes: 1, failureShape: [] },
+    { action: 'inherited-fd3-untyped', rejected: false, fstats: 1, closes: 0, failureShape: [] },
+    { action: 'inherited-fd3-ebadf', rejected: false, fstats: 1, closes: 0, failureShape: [] },
+    { action: 'inherited-fd3-fstat-failure', rejected: true, fstats: 1, closes: 0, failureShape: ['Error'] },
+    { action: 'inherited-fd3-close-failure', rejected: true, fstats: 1, closes: 1, failureShape: ['Error'] },
+  ])('settles production fd3 safely: $action', async ({
+    action, rejected, fstats, closes, failureShape,
+  }) => {
+    const harness = await instrumentedHoldoutHarness();
+    const result = spawnBounded(['--import', 'tsx', harness, action], {
+      cwd: ROOT, encoding: 'utf8', env: cleanEnvironment(),
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      rejected, inheritedFstats: fstats, inheritedCloseAttempts: closes, failureShape,
+    });
   });
 
   it('freezes finalize crossing table cardinality and labels', () => {
