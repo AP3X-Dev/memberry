@@ -1,0 +1,2222 @@
+diff --git a/packages/retrieval/src/__tests__/retrieval-explanation-view.test.ts b/packages/retrieval/src/__tests__/retrieval-explanation-view.test.ts
+new file mode 100644
+index 0000000..0ef0f42
+--- /dev/null
++++ b/packages/retrieval/src/__tests__/retrieval-explanation-view.test.ts
+@@ -0,0 +1,1174 @@
++import { readFileSync } from "node:fs";
++import crypto from "node:crypto";
++import { syncBuiltinESMExports } from "node:module";
++import { types as nodeUtilTypes } from "node:util";
++
++import { describe, expect, it, vi } from "vitest";
++
++import {
++  RETRIEVAL_EXPLANATION_VIEW_CONTRACT_ID,
++  RETRIEVAL_EXPLANATION_VIEW_CONTRACT_VERSION,
++  RetrievalExplanationViewContractError,
++  buildRetrievalExplanationViewV1,
++  renderRetrievalExplanationTextV1,
++} from "../retrieval-explanation-view.js";
++import {
++  RetrievalTraceCollector,
++  computeRetrievalTraceReplayStateDigest,
++  type RetrievalTraceCandidateDraft,
++  type RetrievalTraceCandidateHandle,
++  type RetrievalTraceRequestShapeV1,
++  type RetrievalTraceV1,
++} from "../trace.js";
++
++const request: RetrievalTraceRequestShapeV1 = {
++  sources: { code: true, architecture: false, memory: true },
++  projectScopeApplied: true,
++  tenantScope: "named",
++  entityScope: "few",
++  tagScope: "one",
++  temporalFilterApplied: true,
++  queryLength: "short",
++  queryForm: "identifier-heavy",
++  tokenBudget: "medium",
++  diversification: "mmr",
++  plannedChannels: ["memory.scope", "memory.semantic-vector", "memory.fact"],
++};
++
++function candidate(
++  channel: "memory.scope" | "memory.semantic-vector",
++  rank: number,
++  score: number,
++): RetrievalTraceCandidateDraft {
++  return {
++    sourceType: "semantic",
++    channels: [{ channel, rank, score }],
++    evidence: {
++      confidence: score,
++      sourceCount: rank,
++      superseded: false,
++      invalidated: false,
++    },
++    estimatedTokens: 40 + rank,
++  };
++}
++
++function buildCompleteTrace(): RetrievalTraceV1 {
++  const collector = new RetrievalTraceCollector("ranked-v1", request);
++  collector.attemptChannel("memory.scope");
++  collector.settleChannel("memory.scope", { outcome: "success" });
++  collector.attemptChannel("memory.semantic-vector");
++  collector.settleChannel("memory.semantic-vector", { outcome: "success" });
++  collector.attemptChannel("memory.fact");
++  collector.settleChannel("memory.fact", {
++    outcome: "safe-failure",
++    code: "query-failed",
++  });
++
++  const first = collector.addCandidate(candidate("memory.scope", 1, 0.91));
++  const second = collector.addCandidate(
++    candidate("memory.semantic-vector", 2, 0.81),
++  );
++  collector.recordFilter(first, { name: "tenant", outcome: "pass" });
++  collector.recordFilter(first, { name: "project", outcome: "pass" });
++  collector.recordFilter(first, { name: "mmr", outcome: "pass" });
++  collector.recordFilter(second, { name: "dedup", outcome: "fail" });
++  collector.recordFilter(second, { name: "mmr", outcome: "pass" });
++  collector.recordScore(first, { name: "input", value: 0.91 });
++  collector.recordScore(first, { name: "final", value: 0.91 });
++  collector.recordScore(second, { name: "input", value: 0.81 });
++  collector.recordScore(second, { name: "final", value: 0.81 });
++  collector.recordMmrRound(1, first, [
++    { candidate: first, relevance: 0.91, lambda: 0.6, pairwise: [] },
++    { candidate: second, relevance: 0.81, lambda: 0.6, pairwise: [] },
++  ]);
++  collector.recordMmrRound(2, second, [
++    {
++      candidate: second,
++      relevance: 0.81,
++      lambda: 0.6,
++      pairwise: [{ selected: first, similarity: 0.1 }],
++    },
++  ]);
++  collector.recordOutput(first, 1);
++  collector.recordTerminal(first, { outcome: "included", reasons: [] });
++  collector.recordTerminal(second, {
++    outcome: "excluded",
++    reasons: ["duplicate"],
++    duplicateOf: first,
++  });
++  collector.recordStageFailure("feedback", "timeout");
++  return collector.finalize();
++}
++
++function buildIncompleteTrace(): RetrievalTraceV1 {
++  const collector = new RetrievalTraceCollector("ranked-v1", {
++    ...request,
++    diversification: "none",
++    plannedChannels: ["memory.scope"],
++  });
++  return collector.finalize();
++}
++
++function buildArchitectureTrace(): RetrievalTraceV1 {
++  const collector = new RetrievalTraceCollector("deterministic-v2", {
++    sources: { code: false, architecture: true, memory: false },
++    projectScopeApplied: true,
++    tenantScope: "default",
++    entityScope: "none",
++    tagScope: "none",
++    temporalFilterApplied: false,
++    queryLength: "empty",
++    queryForm: "identifier-heavy",
++    tokenBudget: "small",
++    diversification: "none",
++    plannedChannels: ["arch.fulltext", "arch.entity"],
++  });
++  collector.attemptChannel("arch.fulltext");
++  collector.settleChannel("arch.fulltext", { outcome: "success" });
++  collector.attemptChannel("arch.entity");
++  collector.settleChannel("arch.entity", { outcome: "success" });
++  const handle = collector.addCandidate({
++    sourceType: "arch_entity",
++    channels: [{ channel: "arch.entity", rank: 1 }],
++    evidence: {},
++    estimatedTokens: 1,
++  });
++  collector.recordTerminal(handle, { outcome: "included", reasons: [] });
++  return collector.finalize();
++}
++
++function buildIncompleteArchitectureTrace(): RetrievalTraceV1 {
++  const collector = new RetrievalTraceCollector("deterministic-v2", {
++    sources: { code: false, architecture: true, memory: false },
++    projectScopeApplied: true,
++    tenantScope: "default",
++    entityScope: "none",
++    tagScope: "none",
++    temporalFilterApplied: false,
++    queryLength: "empty",
++    queryForm: "identifier-heavy",
++    tokenBudget: "small",
++    diversification: "none",
++    plannedChannels: ["arch.fulltext", "arch.entity"],
++  });
++  collector.attemptChannel("arch.entity");
++  collector.settleChannel("arch.entity", { outcome: "success" });
++  const handle = collector.addCandidate({
++    sourceType: "arch_entity",
++    channels: [{ channel: "arch.entity", rank: 1 }],
++    evidence: {},
++    estimatedTokens: 1,
++  });
++  collector.recordTerminal(handle, { outcome: "included", reasons: [] });
++  return collector.finalize();
++}
++
++function buildEmptyCompleteTrace(): RetrievalTraceV1 {
++  return new RetrievalTraceCollector("ranked-v1", {
++    ...request,
++    sources: { code: false, architecture: false, memory: false },
++    diversification: "none",
++    plannedChannels: [],
++  }).finalize();
++}
++
++function mutableCopy<T>(value: T): T {
++  return structuredClone(value);
++}
++
++function assertDeeplyFrozen(value: unknown, seen = new Set<object>()): void {
++  if (
++    (typeof value !== "object" && typeof value !== "function") ||
++    value === null
++  )
++    return;
++  if (seen.has(value)) return;
++  seen.add(value);
++  expect(Object.isFrozen(value)).toBe(true);
++  if (!Array.isArray(value)) expect(Object.getPrototypeOf(value)).toBeNull();
++  for (const key of Reflect.ownKeys(value)) {
++    if (key === "length") continue;
++    const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
++    expect(descriptor.get).toBeUndefined();
++    expect(descriptor.set).toBeUndefined();
++    expect(descriptor.enumerable).toBe(true);
++    assertDeeplyFrozen(descriptor.value, seen);
++  }
++}
++
++function errorSnapshot(action: () => unknown): {
++  name: string;
++  message: string;
++  code: string;
++} {
++  try {
++    action();
++    throw new Error("expected contract error");
++  } catch (error) {
++    expect(error).toBeInstanceOf(RetrievalExplanationViewContractError);
++    const contractError = error as RetrievalExplanationViewContractError;
++    return {
++      name: contractError.name,
++      message: contractError.message,
++      code: contractError.code,
++    };
++  }
++}
++
++describe("UI-001A retrieval explanation view", () => {
++  it("builds the exact secret-safe view and independently binds complete replay", () => {
++    const trace = buildCompleteTrace();
++    const view = buildRetrievalExplanationViewV1(trace);
++
++    expect(Object.keys(view)).toEqual([
++      "contractId",
++      "contractVersion",
++      "traceSchemaVersion",
++      "algorithmVersion",
++      "requestShape",
++      "complete",
++      "incompleteReasons",
++      "candidates",
++      "events",
++      "replayReceipt",
++    ]);
++    expect(view.contractId).toBe(RETRIEVAL_EXPLANATION_VIEW_CONTRACT_ID);
++    expect(view.contractVersion).toBe(
++      RETRIEVAL_EXPLANATION_VIEW_CONTRACT_VERSION,
++    );
++    expect(view.replayReceipt).toEqual({
++      replayable: true,
++      resultOrder: trace.resultOrder,
++      terminalExclusions: trace.terminalExclusions,
++      replayStateDigest: trace.replayStateDigest,
++    });
++    expect(view.requestShape).toEqual(trace.requestShape);
++    expect(view.candidates).toEqual(trace.candidates);
++    expect(view.events).toEqual(trace.events);
++    expect(view.candidates).not.toBe(trace.candidates);
++    expect(view.events).not.toBe(trace.events);
++    if (!view.replayReceipt.replayable)
++      throw new Error("expected replayable receipt");
++    expect(view.replayReceipt.resultOrder).not.toBe(trace.resultOrder);
++    assertDeeplyFrozen(view);
++  });
++
++  it("preserves caller order for candidates, channels, events, MMR records, pairwise, and outputs", () => {
++    const trace = buildCompleteTrace();
++    const view = buildRetrievalExplanationViewV1(trace);
++    expect(view.candidates.map((item) => item.ref)).toEqual(
++      trace.candidates.map((item) => item.ref),
++    );
++    expect(view.candidates[0]!.channels).toEqual(trace.candidates[0]!.channels);
++    expect(view.events.map((event) => event.sequence)).toEqual(
++      trace.events.map((event) => event.sequence),
++    );
++    const sourceMmr = trace.events.filter(
++      (event) => event.kind === "mmr-round",
++    );
++    const viewMmr = view.events.filter((event) => event.kind === "mmr-round");
++    expect(viewMmr).toEqual(sourceMmr);
++    expect(viewMmr[1]!.records[0]!.pairwise).toEqual(
++      sourceMmr[1]!.records[0]!.pairwise,
++    );
++    expect(
++      view.replayReceipt.replayable && view.replayReceipt.resultOrder,
++    ).toEqual(["c0001"]);
++  });
++
++  it("exposes every selection-affecting category but no original identities or content", () => {
++    const view = buildRetrievalExplanationViewV1(buildCompleteTrace());
++    const encoded = JSON.stringify(view);
++    for (const expected of [
++      "projectScopeApplied",
++      "tenantScope",
++      "entityScope",
++      "tagScope",
++      "temporalFilterApplied",
++      "queryLength",
++      "queryForm",
++      "tokenBudget",
++      "plannedChannels",
++      "sourceType",
++      "channels",
++      "rank",
++      "score",
++      "evidence",
++      "estimatedTokens",
++      "candidate-filter",
++      "candidate-score",
++      "mmr-round",
++      "pairwise",
++      "ranked-output",
++      "candidate-terminal",
++      "duplicateOfRef",
++      "stage-failure",
++      "query-failed",
++      "replayStateDigest",
++    ])
++      expect(encoded).toContain(expected);
++    for (const forbidden of [
++      "queryText",
++      "content",
++      "tenantId",
++      "projectId",
++      "sourceId",
++      "task",
++      "tags",
++      "metadata",
++      "entityId",
++      "credential",
++    ])
++      expect(encoded).not.toContain(forbidden);
++  });
++
++  it("represents incomplete traces without claiming reproduced selection", () => {
++    const trace = buildIncompleteTrace();
++    const view = buildRetrievalExplanationViewV1(trace);
++    expect(view.complete).toBe(false);
++    expect(view.incompleteReasons).toEqual(trace.incompleteReasons);
++    expect(view.replayReceipt).toEqual({
++      replayable: false,
++      incompleteReasons: trace.incompleteReasons,
++      replayStateDigest: trace.replayStateDigest,
++    });
++    expect(Object.keys(view.replayReceipt)).not.toContain("resultOrder");
++    expect(Object.keys(view.replayReceipt)).not.toContain("terminalExclusions");
++    assertDeeplyFrozen(view);
++  });
++
++  it("rejects complete traces whose stored result echo is not independently replayable", () => {
++    const trace = mutableCopy(buildCompleteTrace());
++    trace.resultOrder = ["c0002"];
++    expect(errorSnapshot(() => buildRetrievalExplanationViewV1(trace))).toEqual(
++      {
++        name: "RetrievalExplanationViewContractError",
++        message: "Retrieval explanation view contract error: invalid-trace",
++        code: "invalid-trace",
++      },
++    );
++  });
++
++  it("rejects malformed, decorated, secret-bearing, and digest-tampered traces with fixed errors", () => {
++    const cases: unknown[] = [
++      null,
++      [],
++      { ...buildCompleteTrace(), query: "private question" },
++      { ...buildCompleteTrace(), credential: "Bearer abcdefghijklmnop" },
++      { ...buildCompleteTrace(), replayStateDigest: "sha256:".padEnd(71, "0") },
++    ];
++    for (const value of cases) {
++      expect(
++        errorSnapshot(() => buildRetrievalExplanationViewV1(value)),
++      ).toEqual({
++        name: "RetrievalExplanationViewContractError",
++        message: "Retrieval explanation view contract error: invalid-trace",
++        code: "invalid-trace",
++      });
++    }
++  });
++
++  it("rejects oversized scalar values and property keys before measuring their UTF-8 bytes", async () => {
++    const hostileValue = `${"v".repeat(4 * 1024 * 1024)}\ud800`;
++    const hostileKey = `${"k".repeat(4 * 1024 * 1024)}\ud800`;
++    const scalarTrace = mutableCopy(buildCompleteTrace());
++    scalarTrace.algorithmVersion = hostileValue;
++    const keyTrace = mutableCopy(buildCompleteTrace());
++    Object.defineProperty(keyTrace.requestShape, hostileKey, {
++      value: true,
++      enumerable: true,
++      writable: true,
++      configurable: true,
++    });
++    const baseView = mutableCopy(
++      buildRetrievalExplanationViewV1(buildCompleteTrace()),
++    );
++    const scalarView = mutableCopy(baseView);
++    scalarView.algorithmVersion = hostileValue;
++    const keyView = mutableCopy(baseView);
++    Object.defineProperty(keyView.requestShape, hostileKey, {
++      value: true,
++      enumerable: true,
++      writable: true,
++      configurable: true,
++    });
++    const originalDescriptor = Object.getOwnPropertyDescriptor(
++      Buffer,
++      "byteLength",
++    )!;
++    const originalByteLength = Buffer.byteLength;
++    let hostileValueScans = 0;
++    let hostileKeyScans = 0;
++    let positiveControlScans = 0;
++
++    Object.defineProperty(Buffer, "byteLength", {
++      ...originalDescriptor,
++      value: ((value, encoding) => {
++        if (value === hostileValue) hostileValueScans += 1;
++        else if (value === hostileKey) hostileKeyScans += 1;
++        else positiveControlScans += 1;
++        return Reflect.apply(originalByteLength, Buffer, [value, encoding]);
++      }) satisfies typeof Buffer.byteLength,
++    });
++    vi.resetModules();
++
++    try {
++      const instrumented = await import("../retrieval-explanation-view.js");
++      for (const action of [
++        () => instrumented.buildRetrievalExplanationViewV1(scalarTrace),
++        () => instrumented.buildRetrievalExplanationViewV1(keyTrace),
++        () => instrumented.renderRetrievalExplanationTextV1(scalarView),
++        () => instrumented.renderRetrievalExplanationTextV1(keyView),
++      ]) {
++        let outcome: unknown;
++        try {
++          action();
++        } catch (error) {
++          outcome = error;
++        }
++        expect(outcome).toMatchObject({
++          name: "RetrievalExplanationViewContractError",
++        });
++      }
++
++      instrumented.buildRetrievalExplanationViewV1(buildCompleteTrace());
++      expect(positiveControlScans).toBeGreaterThan(0);
++      expect(hostileValueScans).toBe(0);
++      expect(hostileKeyScans).toBe(0);
++    } finally {
++      Object.defineProperty(Buffer, "byteLength", originalDescriptor);
++      vi.resetModules();
++    }
++  });
++
++  it("rejects proxies, revoked proxies, accessors, symbols, sparse arrays, aliases, and cycles without hooks", () => {
++    let hooks = 0;
++    const getterTrace = mutableCopy(
++      buildCompleteTrace(),
++    ) as RetrievalTraceV1 & { query?: string };
++    Object.defineProperty(getterTrace, "query", {
++      enumerable: true,
++      get() {
++        hooks += 1;
++        return "secret";
++      },
++    });
++    const proxy = new Proxy(buildCompleteTrace(), {
++      ownKeys() {
++        hooks += 1;
++        return [];
++      },
++    });
++    const revoked = Proxy.revocable(buildCompleteTrace(), {});
++    revoked.revoke();
++    const symbolTrace = mutableCopy(
++      buildCompleteTrace(),
++    ) as RetrievalTraceV1 & { [key: symbol]: unknown };
++    symbolTrace[Symbol("secret")] = "hidden";
++    const sparse = mutableCopy(buildCompleteTrace());
++    sparse.events = new Array(1);
++    const alias = mutableCopy(buildCompleteTrace());
++    alias.events = alias.candidates as unknown as typeof alias.events;
++    const cycle = mutableCopy(buildCompleteTrace()) as RetrievalTraceV1 & {
++      self?: unknown;
++    };
++    cycle.self = cycle;
++
++    for (const value of [
++      getterTrace,
++      proxy,
++      revoked.proxy,
++      symbolTrace,
++      sparse,
++      alias,
++      cycle,
++    ]) {
++      expect(() => buildRetrievalExplanationViewV1(value)).toThrow(
++        RetrievalExplanationViewContractError,
++      );
++    }
++    expect(hooks).toBe(0);
++  });
++
++  it("does not mutate, freeze, or alias any caller-owned trace data", () => {
++    const trace = mutableCopy(buildCompleteTrace());
++    const before = structuredClone(trace);
++    buildRetrievalExplanationViewV1(trace);
++    expect(trace).toEqual(before);
++    expect(Object.isFrozen(trace)).toBe(false);
++    expect(Object.isFrozen(trace.requestShape)).toBe(false);
++    expect(Object.isFrozen(trace.candidates)).toBe(false);
++  });
++
++  it("renders deterministic bounded plain text containing the complete explanation", () => {
++    const view = buildRetrievalExplanationViewV1(buildCompleteTrace());
++    const first = renderRetrievalExplanationTextV1(view);
++    const second = renderRetrievalExplanationTextV1(view);
++    expect(second).toBe(first);
++    expect(Buffer.byteLength(first, "utf8")).toBeLessThanOrEqual(
++      8 * 1024 * 1024,
++    );
++    expect(first).toContain("contractId=memberry.retrieval-explanation-view");
++    expect(first).toContain("requestShape.tenantScope=named");
++    expect(first).toContain("events[0].kind=channel-attempt");
++    expect(first).toContain("events[6].kind=candidate-filter");
++    expect(first).toContain("replayReceipt.replayable=true");
++    expect(first).toContain("replayReceipt.resultOrder[0]=c0001");
++    expect(first).toContain(
++      "replayReceipt.terminalExclusions[0].duplicateOfRef=c0001",
++    );
++    expect(first).not.toMatch(/[<>&`*#]/);
++  });
++
++  it("renders incomplete reasons while omitting reproduced result and exclusion lines", () => {
++    const text = renderRetrievalExplanationTextV1(
++      buildRetrievalExplanationViewV1(buildIncompleteTrace()),
++    );
++    expect(text).toContain("replayReceipt.replayable=false");
++    expect(text).toContain("replayReceipt.incompleteReasons[0]=channel-gap");
++    expect(text).not.toContain("replayReceipt.resultOrder");
++    expect(text).not.toContain("replayReceipt.terminalExclusions");
++  });
++
++  it("revalidates the view before rendering and transactionally rejects every tamper class", () => {
++    const base = buildRetrievalExplanationViewV1(buildCompleteTrace());
++    const extra = mutableCopy(base) as typeof base & { content?: string };
++    extra.content = "private";
++    const receipt = mutableCopy(base);
++    if (receipt.replayReceipt.replayable) {
++      (
++        receipt.replayReceipt as unknown as { resultOrder: string[] }
++      ).resultOrder = ["c0002"];
++    }
++    const event = mutableCopy(base);
++    event.events[0]!.sequence = 2;
++    const sparse = mutableCopy(base);
++    (sparse as unknown as { candidates: unknown[] }).candidates = new Array(1);
++    const alias = mutableCopy(base);
++    (alias as unknown as { events: unknown }).events = alias.candidates;
++    const proxy = new Proxy(base, { ownKeys: () => [] });
++    const accessor = mutableCopy(base);
++    let hooks = 0;
++    Object.defineProperty(accessor, "complete", {
++      enumerable: true,
++      get() {
++        hooks += 1;
++        return true;
++      },
++    });
++
++    for (const value of [
++      extra,
++      receipt,
++      event,
++      sparse,
++      alias,
++      proxy,
++      accessor,
++    ]) {
++      expect(
++        errorSnapshot(() => renderRetrievalExplanationTextV1(value)),
++      ).toEqual({
++        name: "RetrievalExplanationViewContractError",
++        message: "Retrieval explanation view contract error: invalid-view",
++        code: "invalid-view",
++      });
++    }
++    expect(hooks).toBe(0);
++  });
++
++  it("uses no caller toJSON or iterator behavior in either public operation", () => {
++    let hooks = 0;
++    const trace = mutableCopy(buildCompleteTrace()) as RetrievalTraceV1 & {
++      toJSON?: () => never;
++    };
++    trace.toJSON = () => {
++      hooks += 1;
++      throw new Error("must not run");
++    };
++    expect(() => buildRetrievalExplanationViewV1(trace)).toThrow(
++      RetrievalExplanationViewContractError,
++    );
++
++    const view = mutableCopy(
++      buildRetrievalExplanationViewV1(buildCompleteTrace()),
++    );
++    Object.defineProperty(view.events, Symbol.iterator, {
++      configurable: true,
++      value() {
++        hooks += 1;
++        throw new Error("must not run");
++      },
++    });
++    expect(() => renderRetrievalExplanationTextV1(view)).toThrow(
++      RetrievalExplanationViewContractError,
++    );
++    expect(hooks).toBe(0);
++  });
++
++  it("fails closed before inherited numeric setter dispatch", () => {
++    const trace = buildCompleteTrace();
++    const previous = Object.getOwnPropertyDescriptor(Array.prototype, "0");
++    let hooks = 0;
++    let view: ReturnType<typeof buildRetrievalExplanationViewV1> | undefined;
++    try {
++      Object.defineProperty(Array.prototype, "0", {
++        configurable: true,
++        set(value: unknown) {
++          hooks += 1;
++          Object.defineProperty(this, "0", {
++            value,
++            enumerable: true,
++            writable: true,
++            configurable: true,
++          });
++        },
++      });
++      expect(() => buildRetrievalExplanationViewV1(trace)).toThrow(
++        RetrievalExplanationViewContractError,
++      );
++    } finally {
++      if (previous === undefined) delete Array.prototype["0"];
++      else Object.defineProperty(Array.prototype, "0", previous);
++    }
++    expect(hooks).toBe(0);
++    expect(view).toBeUndefined();
++  });
++
++  it("rejects an inherited Object.prototype confidence getter with zero hooks", () => {
++    const trace = mutableCopy(buildIncompleteArchitectureTrace());
++    trace.replayStateDigest = "sha256:".padEnd(71, "0");
++    const previous = Object.getOwnPropertyDescriptor(
++      Object.prototype,
++      "confidence",
++    );
++    let hooks = 0;
++    let outcome: unknown;
++    try {
++      Object.defineProperty(Object.prototype, "confidence", {
++        configurable: true,
++        get() {
++          hooks += 1;
++          return 0.75;
++        },
++      });
++      try {
++        outcome = buildRetrievalExplanationViewV1(trace);
++      } catch (error) {
++        outcome = error;
++      }
++    } finally {
++      if (previous === undefined)
++        Reflect.deleteProperty(Object.prototype, "confidence");
++      else Object.defineProperty(Object.prototype, "confidence", previous);
++    }
++    expect(hooks).toBe(0);
++    expect(outcome).toMatchObject({
++      name: "RetrievalExplanationViewContractError",
++      code: "invalid-trace",
++    });
++  });
++
++  it("guards numeric setters across the complete Array prototype chain", () => {
++    const trace = buildIncompleteTrace();
++    const previous = Object.getOwnPropertyDescriptor(Object.prototype, "0");
++    let hooks = 0;
++    let outcome: unknown;
++    try {
++      Object.defineProperty(Object.prototype, "0", {
++        configurable: true,
++        set(value: unknown) {
++          hooks += 1;
++          Object.defineProperty(this, "0", {
++            value,
++            enumerable: true,
++            writable: true,
++            configurable: true,
++          });
++        },
++      });
++      try {
++        outcome = buildRetrievalExplanationViewV1(trace);
++      } catch (error) {
++        outcome = error;
++      }
++    } finally {
++      if (previous === undefined) Reflect.deleteProperty(Object.prototype, "0");
++      else Object.defineProperty(Object.prototype, "0", previous);
++    }
++    expect(hooks).toBe(0);
++    expect(outcome).toMatchObject({
++      name: "RetrievalExplanationViewContractError",
++      code: "invalid-trace",
++    });
++  });
++
++  it("guards an inserted Array prototype-chain numeric setter with zero hooks", () => {
++    const trace = buildIncompleteTrace();
++    const getPrototypeOf = Object.getPrototypeOf;
++    const setPrototypeOf = Object.setPrototypeOf;
++    const previous = getPrototypeOf(Array.prototype);
++    const sibling = Object.create(previous) as object;
++    let hooks = 0;
++    let outcome: unknown;
++    Object.defineProperty(sibling, "0", {
++      configurable: true,
++      set(value: unknown) {
++        hooks += 1;
++        Object.defineProperty(this, "0", {
++          value,
++          enumerable: true,
++          writable: true,
++          configurable: true,
++        });
++      },
++    });
++    try {
++      setPrototypeOf(Array.prototype, sibling);
++      try {
++        outcome = buildRetrievalExplanationViewV1(trace);
++      } catch (error) {
++        outcome = error;
++      }
++    } finally {
++      setPrototypeOf(Array.prototype, previous);
++    }
++    expect(hooks).toBe(0);
++    expect(outcome).toMatchObject({
++      name: "RetrievalExplanationViewContractError",
++      code: "invalid-trace",
++    });
++  });
++
++  it("guards the topology of every trace runtime surface", () => {
++    const trace = buildIncompleteTrace();
++    const getPrototypeOf = Object.getPrototypeOf;
++    const setPrototypeOf = Object.setPrototypeOf;
++    const create = Object.create;
++    const targets: Array<{ name: string; target: object }> = [
++      { name: "Object.prototype", target: Object.prototype },
++      { name: "Array.prototype", target: Array.prototype },
++      { name: "Object", target: Object },
++      { name: "Array", target: Array },
++      { name: "Reflect", target: Reflect },
++      { name: "JSON", target: JSON },
++      { name: "Number", target: Number },
++      { name: "Number.prototype", target: Number.prototype },
++      { name: "Math", target: Math },
++      { name: "String", target: String },
++      { name: "String.prototype", target: String.prototype },
++      { name: "RegExp.prototype", target: RegExp.prototype },
++      { name: "Set", target: Set },
++      { name: "Set.prototype", target: Set.prototype },
++      { name: "Map", target: Map },
++      { name: "Map.prototype", target: Map.prototype },
++      { name: "WeakSet", target: WeakSet },
++      { name: "WeakSet.prototype", target: WeakSet.prototype },
++      { name: "Buffer", target: Buffer },
++      {
++        name: "Hash.prototype",
++        target: getPrototypeOf(crypto.createHash("sha256")) as object,
++      },
++      {
++        name: "ArrayIterator.prototype",
++        target: getPrototypeOf([][Symbol.iterator]()) as object,
++      },
++      {
++        name: "SetIterator.prototype",
++        target: getPrototypeOf(new Set()[Symbol.iterator]()) as object,
++      },
++      {
++        name: "MapIterator.prototype",
++        target: getPrototypeOf(new Map().entries()) as object,
++      },
++      { name: "nodeUtilTypes", target: nodeUtilTypes },
++    ];
++    const results: Array<{
++      name: string;
++      mutable: boolean;
++      hooks: number;
++      outcome: unknown;
++    }> = [];
++
++    for (const item of targets) {
++      const previous = getPrototypeOf(item.target);
++      const sibling = create(previous) as object;
++      let hooks = 0;
++      let mutable = false;
++      let outcome: unknown;
++      Object.defineProperty(sibling, "topologyProbe", {
++        configurable: true,
++        get() {
++          hooks += 1;
++          throw new Error("must not run");
++        },
++      });
++      try {
++        try {
++          setPrototypeOf(item.target, sibling);
++          mutable = true;
++        } catch {
++          // Object.prototype has an immutable [[Prototype]] by specification.
++        }
++        if (mutable) {
++          try {
++            outcome = buildRetrievalExplanationViewV1(trace);
++          } catch (error) {
++            outcome = error;
++          }
++        }
++      } finally {
++        if (mutable) setPrototypeOf(item.target, previous);
++      }
++      results.push({ name: item.name, mutable, hooks, outcome });
++    }
++
++    expect(results).toHaveLength(targets.length);
++    for (const result of results) {
++      expect(result.hooks, result.name).toBe(0);
++      if (!result.mutable) {
++        expect(result.name).toBe("Object.prototype");
++        continue;
++      }
++      expect(result.outcome, result.name).toMatchObject({
++        name: "RetrievalExplanationViewContractError",
++        code: "invalid-trace",
++      });
++    }
++  });
++
++  it("guards ambient Object.values before trace secret scanning", () => {
++    const trace = buildEmptyCompleteTrace();
++    const view = buildRetrievalExplanationViewV1(trace);
++    const original = Object.values;
++    let hooks = 0;
++    let outcome: unknown;
++    let renderOutcome: unknown;
++    try {
++      Object.values = ((value: object) => {
++        hooks += 1;
++        return original(value);
++      }) as typeof Object.values;
++      try {
++        outcome = buildRetrievalExplanationViewV1(trace);
++      } catch (error) {
++        outcome = error;
++      }
++      try {
++        renderOutcome = renderRetrievalExplanationTextV1(view);
++      } catch (error) {
++        renderOutcome = error;
++      }
++    } finally {
++      Object.values = original;
++    }
++    expect(hooks).toBe(0);
++    expect(outcome).toMatchObject({
++      name: "RetrievalExplanationViewContractError",
++      code: "invalid-trace",
++    });
++    expect(renderOutcome).toMatchObject({
++      name: "RetrievalExplanationViewContractError",
++      code: "invalid-view",
++    });
++  });
++
++  it("guards post-import Array.isArray replacement", () => {
++    const trace = new Array(1);
++    const original = Array.isArray;
++    let hooks = 0;
++    let outcome: unknown;
++    try {
++      Array.isArray = ((value: unknown) => {
++        hooks += 1;
++        return original(value);
++      }) as typeof Array.isArray;
++      try {
++        outcome = buildRetrievalExplanationViewV1(trace);
++      } catch (error) {
++        outcome = error;
++      }
++    } finally {
++      Array.isArray = original;
++    }
++    expect(hooks).toBe(0);
++    expect(outcome).toMatchObject({
++      name: "RetrievalExplanationViewContractError",
++      code: "invalid-trace",
++    });
++  });
++
++  it("guards the global Array binding without invoking an inherited getter", () => {
++    const trace = buildIncompleteTrace();
++    const globalObject = globalThis;
++    const defineProperty = Object.defineProperty;
++    const previous = Object.getOwnPropertyDescriptor(globalObject, "Array")!;
++    const original = Array;
++    let hooks = 0;
++    let outcome: unknown;
++    try {
++      defineProperty(globalObject, "Array", {
++        configurable: previous.configurable,
++        enumerable: previous.enumerable,
++        get() {
++          hooks += 1;
++          return original;
++        },
++      });
++      try {
++        outcome = buildRetrievalExplanationViewV1(trace);
++      } catch (error) {
++        outcome = error;
++      }
++    } finally {
++      defineProperty(globalObject, "Array", previous);
++    }
++    expect(hooks).toBe(0);
++    expect(outcome).toMatchObject({
++      name: "RetrievalExplanationViewContractError",
++      code: "invalid-trace",
++    });
++  });
++
++  it("guards every global binding read by the trace integrity boundary", () => {
++    const trace = buildIncompleteTrace();
++    const globalObject = globalThis;
++    const defineProperty = Object.defineProperty;
++    const getDescriptor = Object.getOwnPropertyDescriptor;
++    const cases: Array<{ name: string; value: unknown }> = [
++      { name: "Array", value: Array },
++      { name: "Object", value: Object },
++      { name: "Reflect", value: Reflect },
++      { name: "JSON", value: JSON },
++      { name: "Number", value: Number },
++      { name: "Math", value: Math },
++      { name: "String", value: String },
++      { name: "Set", value: Set },
++      { name: "Map", value: Map },
++      { name: "WeakSet", value: WeakSet },
++      { name: "Buffer", value: Buffer },
++    ];
++    const results: Array<{
++      name: string;
++      hooks: number;
++      outcome: unknown;
++    }> = [];
++
++    for (const item of cases) {
++      const previous = getDescriptor(globalObject, item.name)!;
++      let hooks = 0;
++      let outcome: unknown;
++      try {
++        defineProperty(globalObject, item.name, {
++          configurable: previous.configurable,
++          enumerable: previous.enumerable,
++          get() {
++            hooks += 1;
++            return item.value;
++          },
++        });
++        try {
++          outcome = buildRetrievalExplanationViewV1(trace);
++        } catch (error) {
++          outcome = error;
++        }
++      } finally {
++        defineProperty(globalObject, item.name, previous);
++      }
++      results.push({ name: item.name, hooks, outcome });
++    }
++
++    for (const result of results) {
++      expect(result.hooks, result.name).toBe(0);
++      expect(result.outcome, result.name).toMatchObject({
++        name: "RetrievalExplanationViewContractError",
++        code: "invalid-trace",
++      });
++    }
++  });
++
++  it("guards node crypto createHash live-binding replacement", () => {
++    const trace = buildIncompleteTrace();
++    const original = crypto.createHash;
++    let hooks = 0;
++    let outcome: unknown;
++    try {
++      crypto.createHash = ((...args: Parameters<typeof crypto.createHash>) => {
++        hooks += 1;
++        return original(...args);
++      }) as typeof crypto.createHash;
++      syncBuiltinESMExports();
++      try {
++        outcome = buildRetrievalExplanationViewV1(trace);
++      } catch (error) {
++        outcome = error;
++      }
++    } finally {
++      crypto.createHash = original;
++      syncBuiltinESMExports();
++    }
++    expect(hooks).toBe(0);
++    expect(outcome).toMatchObject({
++      name: "RetrievalExplanationViewContractError",
++      code: "invalid-trace",
++    });
++  });
++
++  it("guards sibling mutable ambient methods reachable through trace validation and replay", () => {
++    const trace = buildCompleteTrace();
++    const hashPrototype = Object.getPrototypeOf(
++      crypto.createHash("sha256"),
++    ) as object;
++    const arrayIteratorPrototype = Object.getPrototypeOf(
++      [][Symbol.iterator](),
++    ) as object;
++    const setIteratorPrototype = Object.getPrototypeOf(
++      new Set()[Symbol.iterator](),
++    ) as object;
++    const cases: Array<{ target: object; key: PropertyKey }> = [
++      ...[
++        "every",
++        "filter",
++        "forEach",
++        "includes",
++        "map",
++        "pop",
++        "push",
++        "some",
++        "sort",
++        Symbol.iterator,
++      ].map((key) => ({ target: Array.prototype, key })),
++      ...[
++        "create",
++        "entries",
++        "getOwnPropertyDescriptor",
++        "getPrototypeOf",
++        "hasOwn",
++        "is",
++      ].map((key) => ({ target: Object, key })),
++      { target: Reflect, key: "ownKeys" },
++      { target: JSON, key: "stringify" },
++      { target: Number, key: "isFinite" },
++      { target: Number, key: "isSafeInteger" },
++      { target: Number.prototype, key: "toFixed" },
++      { target: Math, key: "abs" },
++      { target: String.prototype, key: "padStart" },
++      { target: RegExp.prototype, key: "test" },
++      { target: Set.prototype, key: "add" },
++      { target: Set.prototype, key: "has" },
++      { target: Set.prototype, key: Symbol.iterator },
++      { target: Map.prototype, key: "get" },
++      { target: Map.prototype, key: "has" },
++      { target: WeakSet.prototype, key: "add" },
++      { target: WeakSet.prototype, key: "delete" },
++      { target: WeakSet.prototype, key: "has" },
++      { target: Buffer, key: "byteLength" },
++      { target: hashPrototype, key: "update" },
++      { target: hashPrototype, key: "digest" },
++      { target: arrayIteratorPrototype, key: "next" },
++      { target: setIteratorPrototype, key: "next" },
++    ];
++
++    for (const item of cases) {
++      const previous = Object.getOwnPropertyDescriptor(item.target, item.key)!;
++      let hooks = 0;
++      let outcome: unknown;
++      Object.defineProperty(item.target, item.key, {
++        ...previous,
++        value: function hostileAmbientMethod() {
++          hooks += 1;
++          throw new Error("must not run");
++        },
++      });
++      try {
++        try {
++          outcome = buildRetrievalExplanationViewV1(trace);
++        } catch (error) {
++          outcome = error;
++        }
++      } finally {
++        Object.defineProperty(item.target, item.key, previous);
++      }
++      expect(hooks, String(item.key)).toBe(0);
++      expect(outcome, String(item.key)).toMatchObject({
++        name: "RetrievalExplanationViewContractError",
++        code: "invalid-trace",
++      });
++    }
++  });
++
++  it("renders fixed underscore-bearing source categories as plain text", () => {
++    const text = renderRetrievalExplanationTextV1(
++      buildRetrievalExplanationViewV1(buildArchitectureTrace()),
++    );
++    expect(text).toContain("candidates[0].sourceType=arch_entity");
++  });
++
++  it("keeps errors value-free and stable for late invalid data", () => {
++    const early = errorSnapshot(() => buildRetrievalExplanationViewV1(null));
++    const late = mutableCopy(buildCompleteTrace());
++    const lateEvents =
++      late.events as unknown as RetrievalTraceV1["events"][number][];
++    lateEvents[lateEvents.length - 1] = {
++      ...late.events[late.events.length - 1]!,
++      code: "private-cause",
++    } as unknown as RetrievalTraceV1["events"][number];
++    expect(errorSnapshot(() => buildRetrievalExplanationViewV1(late))).toEqual(
++      early,
++    );
++  });
++
++  it("keeps source and rendered output stable across property insertion order", () => {
++    const trace = buildCompleteTrace();
++    const reordered = {
++      replayStateDigest: trace.replayStateDigest,
++      terminalExclusions: trace.terminalExclusions,
++      resultOrder: trace.resultOrder,
++      events: trace.events,
++      candidates: trace.candidates,
++      incompleteReasons: trace.incompleteReasons,
++      complete: trace.complete,
++      requestShape: trace.requestShape,
++      algorithmVersion: trace.algorithmVersion,
++      schemaVersion: trace.schemaVersion,
++    };
++    const a = buildRetrievalExplanationViewV1(trace);
++    const b = buildRetrievalExplanationViewV1(reordered);
++    expect(b).toEqual(a);
++    expect(renderRetrievalExplanationTextV1(b)).toBe(
++      renderRetrievalExplanationTextV1(a),
++    );
++  });
++
++  it("statically remains a pure unwired explanation module", () => {
++    const source = readFileSync(
++      new URL("../retrieval-explanation-view.ts", import.meta.url),
++      "utf8",
++    );
++    expect(source).toMatch(/from ["']\.\/trace\.js["']/);
++    expect(source).not.toMatch(/@memberry\//);
++    expect(source).not.toMatch(
++      /from ['"](?:node:)?(?:fs|http|https|net|tls|async_hooks)/,
++    );
++    expect(source).not.toMatch(
++      /fetch\(|axios|process\.|Date\.|Math\.random|randomUUID/,
++    );
++    expect(source.match(/\bglobalThis\b/g)).toHaveLength(1);
++    expect(source).not.toMatch(
++      /\b(?:viewer|wiki|telemetry|database|neo4j|redis|mcp)\b/i,
++    );
++    expect(source).not.toMatch(/JSON\.|\.toJSON\(|localeCompare|normalize\(/);
++  });
++
++  it("detects replay digest tampering even when other trace fields are unchanged", () => {
++    const trace = mutableCopy(buildCompleteTrace());
++    trace.candidates[0]!.estimatedTokens += 1;
++    expect(trace.replayStateDigest).not.toBe(
++      computeRetrievalTraceReplayStateDigest(trace),
++    );
++    expect(() => buildRetrievalExplanationViewV1(trace)).toThrow(
++      RetrievalExplanationViewContractError,
++    );
++  });
++});
+diff --git a/packages/retrieval/src/retrieval-explanation-view.ts b/packages/retrieval/src/retrieval-explanation-view.ts
+new file mode 100644
+index 0000000..1014518
+--- /dev/null
++++ b/packages/retrieval/src/retrieval-explanation-view.ts
+@@ -0,0 +1,1036 @@
++import { createHash } from "node:crypto";
++import { types as nodeUtilTypes } from "node:util";
++
++import {
++  assertRetrievalTraceSecretSafe,
++  replayRetrievalTrace,
++  type RetrievalTraceCandidateV1,
++  type RetrievalTraceChannelStateV1,
++  type RetrievalTraceEvidenceStateV1,
++  type RetrievalTraceMmrPairwiseV1,
++  type RetrievalTraceMmrRecordV1,
++  type RetrievalTraceRequestShapeV1,
++  type RetrievalTraceStageEventV1,
++  type RetrievalTraceTerminalExclusionV1,
++  type RetrievalTraceV1,
++} from "./trace.js";
++
++export const RETRIEVAL_EXPLANATION_VIEW_CONTRACT_ID =
++  "memberry.retrieval-explanation-view" as const;
++export const RETRIEVAL_EXPLANATION_VIEW_CONTRACT_VERSION = "1.0.0" as const;
++export const RETRIEVAL_EXPLANATION_TEXT_MAX_UTF8_BYTES = 8 * 1024 * 1024;
++
++const GLOBAL_THIS = globalThis;
++const ARRAY_CONSTRUCTOR = Array;
++const ARRAY_IS_ARRAY = Array.isArray;
++const ARRAY_PROTOTYPE = Array.prototype;
++const ARRAY_ITERATOR = Array.prototype[Symbol.iterator];
++const BUFFER_CONSTRUCTOR = Buffer;
++const BUFFER_BYTE_LENGTH = Buffer.byteLength;
++const CREATE_HASH = createHash;
++const ERROR_CONSTRUCTOR = Error;
++const JSON_OBJECT = JSON;
++const MAP_CONSTRUCTOR = Map;
++const MAP_PROTOTYPE = Map.prototype;
++const MATH_OBJECT = Math;
++const NUMBER_CONSTRUCTOR = Number;
++const NUMBER_IS_FINITE = Number.isFinite;
++const NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
++const NUMBER_PROTOTYPE = Number.prototype;
++const NUMBER_TO_STRING = Number.prototype.toString;
++const OBJECT_CONSTRUCTOR = Object;
++const OBJECT_CREATE = Object.create;
++const OBJECT_DEFINE_PROPERTY = Object.defineProperty;
++const OBJECT_FREEZE = Object.freeze;
++const OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
++const OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
++const OBJECT_IS = Object.is;
++const OBJECT_PROTOTYPE = Object.prototype;
++const REFLECT_OBJECT = Reflect;
++const REFLECT_APPLY = Reflect.apply;
++const REFLECT_OWN_KEYS = Reflect.ownKeys;
++const REGEXP_PROTOTYPE = RegExp.prototype;
++const SET_CONSTRUCTOR = Set;
++const SET_PROTOTYPE = Set.prototype;
++const SET_ITERATOR = Set.prototype[Symbol.iterator];
++const STRING_CONSTRUCTOR = String;
++const STRING_CHAR_CODE_AT = String.prototype.charCodeAt;
++const STRING_PROTOTYPE = String.prototype;
++const WEAK_SET_CONSTRUCTOR = WeakSet;
++const WEAK_SET_PROTOTYPE = WeakSet.prototype;
++const WEAK_SET_ADD = WeakSet.prototype.add;
++const WEAK_SET_HAS = WeakSet.prototype.has;
++const NODE_IS_PROXY = nodeUtilTypes.isProxy;
++const NODE_UTIL_TYPES = nodeUtilTypes;
++const HASH_PROTOTYPE = OBJECT_GET_PROTOTYPE_OF(CREATE_HASH("sha256"));
++const ARRAY_ITERATOR_PROTOTYPE = OBJECT_GET_PROTOTYPE_OF(
++  REFLECT_APPLY(ARRAY_ITERATOR, [], []),
++);
++const SET_ITERATOR_PROTOTYPE = OBJECT_GET_PROTOTYPE_OF(
++  REFLECT_APPLY(SET_ITERATOR, new SET_CONSTRUCTOR(), []),
++);
++const MAP_ITERATOR_PROTOTYPE = OBJECT_GET_PROTOTYPE_OF(
++  new MAP_CONSTRUCTOR().entries(),
++);
++const ASSERT_TRACE_SECRET_SAFE: (
++  value: unknown,
++) => asserts value is RetrievalTraceV1 = assertRetrievalTraceSecretSafe;
++const REPLAY_TRACE = replayRetrievalTrace;
++
++const MAX_VIEW_GRAPH_ENTRIES = 200_000;
++const MAX_VIEW_GRAPH_DEPTH = 24;
++const MAX_VIEW_GRAPH_SCALAR_UTF8_BYTES = 4 * 1024 * 1024;
++
++type TraceEvent = RetrievalTraceStageEventV1;
++
++export type RetrievalExplanationReplayReceiptV1 =
++  | {
++      readonly replayable: true;
++      readonly resultOrder: readonly string[];
++      readonly terminalExclusions: readonly RetrievalTraceTerminalExclusionV1[];
++      readonly replayStateDigest: string;
++    }
++  | {
++      readonly replayable: false;
++      readonly incompleteReasons: RetrievalTraceV1["incompleteReasons"];
++      readonly replayStateDigest: string;
++    };
++
++export interface RetrievalExplanationViewV1 {
++  readonly contractId: typeof RETRIEVAL_EXPLANATION_VIEW_CONTRACT_ID;
++  readonly contractVersion: typeof RETRIEVAL_EXPLANATION_VIEW_CONTRACT_VERSION;
++  readonly traceSchemaVersion: RetrievalTraceV1["schemaVersion"];
++  readonly algorithmVersion: RetrievalTraceV1["algorithmVersion"];
++  readonly requestShape: RetrievalTraceRequestShapeV1;
++  readonly complete: boolean;
++  readonly incompleteReasons: RetrievalTraceV1["incompleteReasons"];
++  readonly candidates: readonly RetrievalTraceCandidateV1[];
++  readonly events: readonly RetrievalTraceStageEventV1[];
++  readonly replayReceipt: RetrievalExplanationReplayReceiptV1;
++}
++
++export type RetrievalExplanationViewErrorCode =
++  "invalid-trace" | "invalid-view" | "text-budget-exceeded";
++
++export class RetrievalExplanationViewContractError extends ERROR_CONSTRUCTOR {
++  readonly code!: RetrievalExplanationViewErrorCode;
++
++  constructor(code: RetrievalExplanationViewErrorCode) {
++    super(`Retrieval explanation view contract error: ${code}`);
++    OBJECT_DEFINE_PROPERTY(this, "name", {
++      value: "RetrievalExplanationViewContractError",
++      enumerable: false,
++      writable: true,
++      configurable: true,
++    });
++    OBJECT_DEFINE_PROPERTY(this, "code", {
++      value: code,
++      enumerable: true,
++      writable: false,
++      configurable: false,
++    });
++  }
++}
++
++type MutableRecord = Record<string, unknown>;
++
++function createRecord(): MutableRecord {
++  return OBJECT_CREATE(null) as MutableRecord;
++}
++
++function defineField(record: MutableRecord, key: string, value: unknown): void {
++  OBJECT_DEFINE_PROPERTY(record, key, {
++    value,
++    enumerable: true,
++    writable: true,
++    configurable: true,
++  });
++}
++
++function finishRecord<T>(record: MutableRecord): T {
++  return OBJECT_FREEZE(record) as T;
++}
++
++function createDenseArray<T>(length: number): T[] {
++  return new ARRAY_CONSTRUCTOR<T>(length);
++}
++
++function defineArrayItem<T>(target: T[], index: number, value: T): void {
++  OBJECT_DEFINE_PROPERTY(target, index, {
++    value,
++    enumerable: true,
++    writable: true,
++    configurable: true,
++  });
++}
++
++function copyArray<T, U>(
++  source: readonly T[],
++  copy: (value: T, index: number) => U,
++): readonly U[] {
++  const target = createDenseArray<U>(source.length);
++  for (let index = 0; index < source.length; index += 1) {
++    defineArrayItem(target, index, copy(source[index]!, index));
++  }
++  return OBJECT_FREEZE(target);
++}
++
++function copyStringArray(source: readonly string[]): readonly string[] {
++  return copyArray(source, (value) => value);
++}
++
++interface CapturedSurfaceEntry {
++  readonly key: PropertyKey;
++  readonly data: boolean;
++  readonly value: unknown;
++  readonly writable: boolean | undefined;
++  readonly get: (() => unknown) | undefined;
++  readonly set: ((value: unknown) => void) | undefined;
++  readonly enumerable: boolean;
++  readonly configurable: boolean;
++}
++
++interface CapturedSurface {
++  readonly target: object;
++  readonly prototype: object | null;
++  readonly entries: readonly CapturedSurfaceEntry[];
++}
++
++function captureSurfaceEntry(
++  key: PropertyKey,
++  descriptor: PropertyDescriptor,
++): CapturedSurfaceEntry {
++  const output = createRecord();
++  const data = "value" in descriptor;
++  defineField(output, "key", key);
++  defineField(output, "data", data);
++  defineField(output, "value", data ? descriptor.value : undefined);
++  defineField(output, "writable", data ? descriptor.writable : undefined);
++  defineField(output, "get", data ? undefined : descriptor.get);
++  defineField(output, "set", data ? undefined : descriptor.set);
++  defineField(output, "enumerable", descriptor.enumerable === true);
++  defineField(output, "configurable", descriptor.configurable === true);
++  return finishRecord(output);
++}
++
++function captureSurface(target: object): CapturedSurface {
++  const keys = REFLECT_OWN_KEYS(target);
++  const entries = createDenseArray<CapturedSurfaceEntry>(keys.length);
++  for (let index = 0; index < keys.length; index += 1) {
++    const key = keys[index]!;
++    const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(target, key)!;
++    defineArrayItem(entries, index, captureSurfaceEntry(key, descriptor));
++  }
++  const output = createRecord();
++  defineField(output, "target", target);
++  defineField(output, "prototype", OBJECT_GET_PROTOTYPE_OF(target));
++  defineField(output, "entries", OBJECT_FREEZE(entries));
++  return finishRecord(output);
++}
++
++function captureSurfaces(
++  targets: readonly object[],
++): readonly CapturedSurface[] {
++  const surfaces = createDenseArray<CapturedSurface>(targets.length);
++  for (let index = 0; index < targets.length; index += 1) {
++    defineArrayItem(surfaces, index, captureSurface(targets[index]!));
++  }
++  return OBJECT_FREEZE(surfaces);
++}
++
++const CAPTURED_RUNTIME_SURFACES = captureSurfaces([
++  OBJECT_PROTOTYPE,
++  ARRAY_PROTOTYPE,
++  OBJECT_CONSTRUCTOR,
++  ARRAY_CONSTRUCTOR,
++  REFLECT_OBJECT,
++  JSON_OBJECT,
++  NUMBER_CONSTRUCTOR,
++  NUMBER_PROTOTYPE,
++  MATH_OBJECT,
++  STRING_CONSTRUCTOR,
++  STRING_PROTOTYPE,
++  REGEXP_PROTOTYPE,
++  SET_CONSTRUCTOR,
++  SET_PROTOTYPE,
++  MAP_CONSTRUCTOR,
++  MAP_PROTOTYPE,
++  WEAK_SET_CONSTRUCTOR,
++  WEAK_SET_PROTOTYPE,
++  BUFFER_CONSTRUCTOR,
++  HASH_PROTOTYPE,
++  ARRAY_ITERATOR_PROTOTYPE,
++  SET_ITERATOR_PROTOTYPE,
++  MAP_ITERATOR_PROTOTYPE,
++  NODE_UTIL_TYPES,
++]);
++
++function captureGlobalBindings(
++  names: readonly string[],
++): readonly CapturedSurfaceEntry[] {
++  const bindings = createDenseArray<CapturedSurfaceEntry>(names.length);
++  for (let index = 0; index < names.length; index += 1) {
++    const name = names[index]!;
++    const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(GLOBAL_THIS, name);
++    if (!descriptor) {
++      throw new RetrievalExplanationViewContractError("invalid-trace");
++    }
++    defineArrayItem(bindings, index, captureSurfaceEntry(name, descriptor));
++  }
++  return OBJECT_FREEZE(bindings);
++}
++
++const CAPTURED_GLOBAL_BINDINGS = captureGlobalBindings([
++  "Array",
++  "Object",
++  "Reflect",
++  "JSON",
++  "Number",
++  "Math",
++  "String",
++  "Set",
++  "Map",
++  "WeakSet",
++  "Buffer",
++]);
++
++function descriptorMatches(
++  current: PropertyDescriptor,
++  expected: CapturedSurfaceEntry,
++  ignoreDataValue: boolean,
++): boolean {
++  const data = "value" in current;
++  return (
++    data === expected.data &&
++    current.enumerable === expected.enumerable &&
++    current.configurable === expected.configurable &&
++    (data
++      ? current.writable === expected.writable &&
++        (ignoreDataValue || OBJECT_IS(current.value, expected.value))
++      : OBJECT_IS(current.get, expected.get) &&
++        OBJECT_IS(current.set, expected.set))
++  );
++}
++
++function surfaceMatches(surface: CapturedSurface): boolean {
++  if (!OBJECT_IS(OBJECT_GET_PROTOTYPE_OF(surface.target), surface.prototype)) {
++    return false;
++  }
++  const keys = REFLECT_OWN_KEYS(surface.target);
++  if (keys.length !== surface.entries.length) return false;
++  for (let index = 0; index < keys.length; index += 1) {
++    const expected = surface.entries[index]!;
++    if (!OBJECT_IS(keys[index], expected.key)) return false;
++    const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
++      surface.target,
++      expected.key,
++    );
++    if (
++      !descriptor ||
++      !descriptorMatches(
++        descriptor,
++        expected,
++        surface.target === ARRAY_PROTOTYPE && expected.key === "length",
++      )
++    )
++      return false;
++  }
++  return true;
++}
++
++function assertTraceRuntimeIntegrity(): void {
++  for (let index = 0; index < CAPTURED_GLOBAL_BINDINGS.length; index += 1) {
++    const expected = CAPTURED_GLOBAL_BINDINGS[index]!;
++    const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
++      GLOBAL_THIS,
++      expected.key,
++    );
++    if (!descriptor || !descriptorMatches(descriptor, expected, false)) {
++      throw new RetrievalExplanationViewContractError("invalid-trace");
++    }
++  }
++  if (createHash !== CREATE_HASH) {
++    throw new RetrievalExplanationViewContractError("invalid-trace");
++  }
++  for (let index = 0; index < CAPTURED_RUNTIME_SURFACES.length; index += 1) {
++    if (!surfaceMatches(CAPTURED_RUNTIME_SURFACES[index]!)) {
++      throw new RetrievalExplanationViewContractError("invalid-trace");
++    }
++  }
++  if (nodeUtilTypes.isProxy !== NODE_IS_PROXY) {
++    throw new RetrievalExplanationViewContractError("invalid-trace");
++  }
++}
++
++function copySources(
++  source: RetrievalTraceRequestShapeV1["sources"],
++): RetrievalTraceRequestShapeV1["sources"] {
++  const output = createRecord();
++  defineField(output, "code", source.code);
++  defineField(output, "architecture", source.architecture);
++  defineField(output, "memory", source.memory);
++  return finishRecord(output);
++}
++
++function copyRequestShape(
++  source: RetrievalTraceRequestShapeV1,
++): RetrievalTraceRequestShapeV1 {
++  const output = createRecord();
++  defineField(output, "sources", copySources(source.sources));
++  defineField(output, "projectScopeApplied", source.projectScopeApplied);
++  defineField(output, "tenantScope", source.tenantScope);
++  defineField(output, "entityScope", source.entityScope);
++  defineField(output, "tagScope", source.tagScope);
++  defineField(output, "temporalFilterApplied", source.temporalFilterApplied);
++  defineField(output, "queryLength", source.queryLength);
++  defineField(output, "queryForm", source.queryForm);
++  defineField(output, "tokenBudget", source.tokenBudget);
++  defineField(output, "diversification", source.diversification);
++  defineField(
++    output,
++    "plannedChannels",
++    copyStringArray(source.plannedChannels),
++  );
++  return finishRecord(output);
++}
++
++function copyChannel(
++  source: RetrievalTraceChannelStateV1,
++): RetrievalTraceChannelStateV1 {
++  const output = createRecord();
++  defineField(output, "channel", source.channel);
++  defineField(output, "rank", source.rank);
++  if (source.score !== undefined) defineField(output, "score", source.score);
++  return finishRecord(output);
++}
++
++function copyEvidence(
++  source: RetrievalTraceEvidenceStateV1,
++): RetrievalTraceEvidenceStateV1 {
++  const output = createRecord();
++  if (source.confidence !== undefined)
++    defineField(output, "confidence", source.confidence);
++  if (source.sourceCount !== undefined)
++    defineField(output, "sourceCount", source.sourceCount);
++  if (source.superseded !== undefined)
++    defineField(output, "superseded", source.superseded);
++  if (source.invalidated !== undefined)
++    defineField(output, "invalidated", source.invalidated);
++  return finishRecord(output);
++}
++
++function copyCandidate(
++  source: RetrievalTraceCandidateV1,
++): RetrievalTraceCandidateV1 {
++  const output = createRecord();
++  defineField(output, "ref", source.ref);
++  defineField(output, "sourceType", source.sourceType);
++  defineField(output, "channels", copyArray(source.channels, copyChannel));
++  defineField(output, "evidence", copyEvidence(source.evidence));
++  defineField(output, "estimatedTokens", source.estimatedTokens);
++  return finishRecord(output);
++}
++
++function copyPairwise(
++  source: RetrievalTraceMmrPairwiseV1,
++): RetrievalTraceMmrPairwiseV1 {
++  const output = createRecord();
++  defineField(output, "selectedRef", source.selectedRef);
++  defineField(output, "similarity", source.similarity);
++  return finishRecord(output);
++}
++
++function copyMmrRecord(
++  source: RetrievalTraceMmrRecordV1,
++): RetrievalTraceMmrRecordV1 {
++  const output = createRecord();
++  defineField(output, "ref", source.ref);
++  defineField(output, "relevance", source.relevance);
++  defineField(output, "maxSimilarity", source.maxSimilarity);
++  defineField(output, "lambda", source.lambda);
++  defineField(output, "objective", source.objective);
++  defineField(output, "againstRef", source.againstRef);
++  defineField(output, "pairwise", copyArray(source.pairwise, copyPairwise));
++  return finishRecord(output);
++}
++
++function copyEvent(source: TraceEvent): TraceEvent {
++  const output = createRecord();
++  defineField(output, "sequence", source.sequence);
++  defineField(output, "kind", source.kind);
++  switch (source.kind) {
++    case "channel-attempt":
++      defineField(output, "channel", source.channel);
++      break;
++    case "channel-terminal":
++      defineField(output, "channel", source.channel);
++      defineField(output, "outcome", source.outcome);
++      if (source.outcome === "safe-failure")
++        defineField(output, "code", source.code);
++      break;
++    case "candidate-filter":
++      defineField(output, "ref", source.ref);
++      defineField(output, "name", source.name);
++      defineField(output, "outcome", source.outcome);
++      break;
++    case "candidate-score":
++      defineField(output, "ref", source.ref);
++      defineField(output, "name", source.name);
++      defineField(output, "value", source.value);
++      break;
++    case "mmr-round":
++      defineField(output, "round", source.round);
++      defineField(output, "selectedRef", source.selectedRef);
++      defineField(output, "records", copyArray(source.records, copyMmrRecord));
++      break;
++    case "ranked-output":
++    case "deterministic-output":
++      defineField(output, "ref", source.ref);
++      defineField(output, "rank", source.rank);
++      break;
++    case "candidate-terminal":
++      defineField(output, "ref", source.ref);
++      defineField(output, "outcome", source.outcome);
++      defineField(output, "reasons", copyStringArray(source.reasons));
++      if (source.duplicateOfRef !== undefined) {
++        defineField(output, "duplicateOfRef", source.duplicateOfRef);
++      }
++      break;
++    case "stage-failure":
++      defineField(output, "stage", source.stage);
++      defineField(output, "code", source.code);
++      break;
++  }
++  return finishRecord(output);
++}
++
++function copyTerminalExclusion(
++  source: RetrievalTraceTerminalExclusionV1,
++): RetrievalTraceTerminalExclusionV1 {
++  const output = createRecord();
++  defineField(output, "ref", source.ref);
++  defineField(output, "outcome", source.outcome);
++  defineField(output, "reasons", copyStringArray(source.reasons));
++  if (source.duplicateOfRef !== undefined) {
++    defineField(output, "duplicateOfRef", source.duplicateOfRef);
++  }
++  return finishRecord(output);
++}
++
++function incompleteReceipt(
++  trace: RetrievalTraceV1,
++): RetrievalExplanationReplayReceiptV1 {
++  const output = createRecord();
++  defineField(output, "replayable", false);
++  defineField(
++    output,
++    "incompleteReasons",
++    copyStringArray(trace.incompleteReasons),
++  );
++  defineField(output, "replayStateDigest", trace.replayStateDigest);
++  return finishRecord(output);
++}
++
++function completeReceipt(
++  trace: RetrievalTraceV1,
++): RetrievalExplanationReplayReceiptV1 {
++  const replay = REPLAY_TRACE(trace);
++  const output = createRecord();
++  defineField(output, "replayable", true);
++  defineField(output, "resultOrder", copyStringArray(replay.resultOrder));
++  defineField(
++    output,
++    "terminalExclusions",
++    copyArray(replay.terminalExclusions, copyTerminalExclusion),
++  );
++  defineField(output, "replayStateDigest", replay.replayStateDigest);
++  return finishRecord(output);
++}
++
++function buildValidatedView(
++  trace: RetrievalTraceV1,
++): RetrievalExplanationViewV1 {
++  const output = createRecord();
++  defineField(output, "contractId", RETRIEVAL_EXPLANATION_VIEW_CONTRACT_ID);
++  defineField(
++    output,
++    "contractVersion",
++    RETRIEVAL_EXPLANATION_VIEW_CONTRACT_VERSION,
++  );
++  defineField(output, "traceSchemaVersion", trace.schemaVersion);
++  defineField(output, "algorithmVersion", trace.algorithmVersion);
++  defineField(output, "requestShape", copyRequestShape(trace.requestShape));
++  defineField(output, "complete", trace.complete);
++  defineField(
++    output,
++    "incompleteReasons",
++    copyStringArray(trace.incompleteReasons),
++  );
++  defineField(output, "candidates", copyArray(trace.candidates, copyCandidate));
++  defineField(output, "events", copyArray(trace.events, copyEvent));
++  defineField(
++    output,
++    "replayReceipt",
++    trace.complete ? completeReceipt(trace) : incompleteReceipt(trace),
++  );
++  return finishRecord(output);
++}
++
++function utf8Length(value: string): number {
++  return REFLECT_APPLY(BUFFER_BYTE_LENGTH, BUFFER_CONSTRUCTOR, [
++    value,
++    "utf8",
++  ]) as number;
++}
++
++function snapshotTraceInput(value: unknown): unknown {
++  const seen = new WEAK_SET_CONSTRUCTOR<object>();
++  let entries = 0;
++  let scalarBytes = 0;
++
++  const addScalar = (text: string): void => {
++    const remainingBytes = MAX_VIEW_GRAPH_SCALAR_UTF8_BYTES - scalarBytes;
++    if (text.length > remainingBytes) {
++      throw new RetrievalExplanationViewContractError("invalid-trace");
++    }
++    const bytes = utf8Length(text);
++    if (bytes > remainingBytes) {
++      throw new RetrievalExplanationViewContractError("invalid-trace");
++    }
++    scalarBytes += bytes;
++  };
++
++  const visit = (current: unknown, depth: number): unknown => {
++    if (current === null || typeof current === "boolean") return current;
++    if (typeof current === "string") {
++      addScalar(current);
++      return current;
++    }
++    if (typeof current === "number") {
++      if (!NUMBER_IS_FINITE(current)) {
++        throw new RetrievalExplanationViewContractError("invalid-trace");
++      }
++      return current;
++    }
++    if (
++      typeof current !== "object" ||
++      depth > MAX_VIEW_GRAPH_DEPTH ||
++      NODE_IS_PROXY(current) ||
++      weakSetHas(seen, current)
++    ) {
++      throw new RetrievalExplanationViewContractError("invalid-trace");
++    }
++    weakSetAdd(seen, current);
++
++    const array = ARRAY_IS_ARRAY(current);
++    const prototype = OBJECT_GET_PROTOTYPE_OF(current);
++    if (
++      array
++        ? prototype !== ARRAY_PROTOTYPE
++        : prototype !== OBJECT_PROTOTYPE && prototype !== null
++    ) {
++      throw new RetrievalExplanationViewContractError("invalid-trace");
++    }
++    const keys = REFLECT_OWN_KEYS(current);
++    if (entries + keys.length > MAX_VIEW_GRAPH_ENTRIES) {
++      throw new RetrievalExplanationViewContractError("invalid-trace");
++    }
++    entries += keys.length;
++
++    if (array) {
++      const lengthDescriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
++        current,
++        "length",
++      );
++      const length = lengthDescriptor?.value;
++      if (
++        !lengthDescriptor ||
++        !("value" in lengthDescriptor) ||
++        typeof length !== "number" ||
++        !NUMBER_IS_SAFE_INTEGER(length) ||
++        length < 0 ||
++        keys.length !== length + 1 ||
++        keys[length] !== "length"
++      ) {
++        throw new RetrievalExplanationViewContractError("invalid-trace");
++      }
++      const output = createDenseArray<unknown>(length);
++      for (let index = 0; index < length; index += 1) {
++        const key = `${index}`;
++        if (keys[index] !== key) {
++          throw new RetrievalExplanationViewContractError("invalid-trace");
++        }
++        const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(current, key);
++        if (
++          !descriptor ||
++          !("value" in descriptor) ||
++          descriptor.enumerable !== true
++        ) {
++          throw new RetrievalExplanationViewContractError("invalid-trace");
++        }
++        defineArrayItem(output, index, visit(descriptor.value, depth + 1));
++      }
++      return OBJECT_FREEZE(output);
++    }
++
++    const output = createRecord();
++    for (let index = 0; index < keys.length; index += 1) {
++      const key = keys[index];
++      if (typeof key !== "string") {
++        throw new RetrievalExplanationViewContractError("invalid-trace");
++      }
++      addScalar(key);
++      const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(current, key);
++      if (
++        !descriptor ||
++        !("value" in descriptor) ||
++        descriptor.enumerable !== true
++      ) {
++        throw new RetrievalExplanationViewContractError("invalid-trace");
++      }
++      defineField(output, key, visit(descriptor.value, depth + 1));
++    }
++    return finishRecord(output);
++  };
++
++  return visit(value, 0);
++}
++
++export function buildRetrievalExplanationViewV1(
++  trace: unknown,
++): RetrievalExplanationViewV1 {
++  try {
++    assertTraceRuntimeIntegrity();
++    const snapshot = snapshotTraceInput(trace);
++    ASSERT_TRACE_SECRET_SAFE(snapshot);
++    return buildValidatedView(snapshot);
++  } catch {
++    throw new RetrievalExplanationViewContractError("invalid-trace");
++  }
++}
++
++function weakSetHas(set: WeakSet<object>, value: object): boolean {
++  return REFLECT_APPLY(WEAK_SET_HAS, set, [value]) as boolean;
++}
++
++function weakSetAdd(set: WeakSet<object>, value: object): void {
++  REFLECT_APPLY(WEAK_SET_ADD, set, [value]);
++}
++
++function preflightViewGraph(value: unknown): void {
++  const seen = new WEAK_SET_CONSTRUCTOR<object>();
++  let entries = 0;
++
++  const visit = (current: unknown, depth: number): void => {
++    if (
++      current === null ||
++      typeof current === "string" ||
++      typeof current === "boolean" ||
++      (typeof current === "number" && NUMBER_IS_FINITE(current))
++    )
++      return;
++    if (
++      typeof current !== "object" ||
++      depth > MAX_VIEW_GRAPH_DEPTH ||
++      NODE_IS_PROXY(current)
++    ) {
++      throw new RetrievalExplanationViewContractError("invalid-view");
++    }
++    if (weakSetHas(seen, current)) {
++      throw new RetrievalExplanationViewContractError("invalid-view");
++    }
++    weakSetAdd(seen, current);
++
++    const array = ARRAY_IS_ARRAY(current);
++    const prototype = OBJECT_GET_PROTOTYPE_OF(current);
++    if (
++      array
++        ? prototype !== ARRAY_PROTOTYPE
++        : prototype !== OBJECT_PROTOTYPE && prototype !== null
++    ) {
++      throw new RetrievalExplanationViewContractError("invalid-view");
++    }
++    const keys = REFLECT_OWN_KEYS(current);
++    if (entries + keys.length > MAX_VIEW_GRAPH_ENTRIES) {
++      throw new RetrievalExplanationViewContractError("invalid-view");
++    }
++    entries += keys.length;
++
++    if (array) {
++      const lengthDescriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
++        current,
++        "length",
++      );
++      if (
++        !lengthDescriptor ||
++        !("value" in lengthDescriptor) ||
++        typeof lengthDescriptor.value !== "number" ||
++        keys.length !== lengthDescriptor.value + 1
++      )
++        throw new RetrievalExplanationViewContractError("invalid-view");
++      for (let index = 0; index < lengthDescriptor.value; index += 1) {
++        const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
++          current,
++          `${index}`,
++        );
++        if (
++          !descriptor ||
++          !("value" in descriptor) ||
++          descriptor.enumerable !== true
++        ) {
++          throw new RetrievalExplanationViewContractError("invalid-view");
++        }
++        visit(descriptor.value, depth + 1);
++      }
++      for (let index = 0; index < lengthDescriptor.value; index += 1) {
++        if (keys[index] !== `${index}`) {
++          throw new RetrievalExplanationViewContractError("invalid-view");
++        }
++      }
++      if (keys[lengthDescriptor.value] !== "length") {
++        throw new RetrievalExplanationViewContractError("invalid-view");
++      }
++      return;
++    }
++
++    for (let index = 0; index < keys.length; index += 1) {
++      const key = keys[index];
++      if (typeof key !== "string")
++        throw new RetrievalExplanationViewContractError("invalid-view");
++      const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(current, key);
++      if (
++        !descriptor ||
++        !("value" in descriptor) ||
++        descriptor.enumerable !== true
++      ) {
++        throw new RetrievalExplanationViewContractError("invalid-view");
++      }
++      visit(descriptor.value, depth + 1);
++    }
++  };
++
++  visit(value, 0);
++}
++
++function hasExactKeys(value: object, expected: readonly string[]): boolean {
++  const keys = REFLECT_OWN_KEYS(value);
++  if (keys.length !== expected.length) return false;
++  for (
++    let expectedIndex = 0;
++    expectedIndex < expected.length;
++    expectedIndex += 1
++  ) {
++    let found = false;
++    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
++      if (keys[keyIndex] === expected[expectedIndex]) {
++        found = true;
++        break;
++      }
++    }
++    if (!found) return false;
++  }
++  return true;
++}
++
++function traceFromView(value: unknown): RetrievalTraceV1 {
++  preflightViewGraph(value);
++  if (
++    value === null ||
++    typeof value !== "object" ||
++    ARRAY_IS_ARRAY(value) ||
++    !hasExactKeys(value, [
++      "contractId",
++      "contractVersion",
++      "traceSchemaVersion",
++      "algorithmVersion",
++      "requestShape",
++      "complete",
++      "incompleteReasons",
++      "candidates",
++      "events",
++      "replayReceipt",
++    ])
++  )
++    throw new RetrievalExplanationViewContractError("invalid-view");
++
++  const view = value as unknown as RetrievalExplanationViewV1;
++  if (
++    view.contractId !== RETRIEVAL_EXPLANATION_VIEW_CONTRACT_ID ||
++    view.contractVersion !== RETRIEVAL_EXPLANATION_VIEW_CONTRACT_VERSION ||
++    typeof view.complete !== "boolean" ||
++    view.replayReceipt === null ||
++    typeof view.replayReceipt !== "object" ||
++    ARRAY_IS_ARRAY(view.replayReceipt)
++  )
++    throw new RetrievalExplanationViewContractError("invalid-view");
++
++  const receipt = view.replayReceipt;
++  if (view.complete) {
++    if (
++      receipt.replayable !== true ||
++      !hasExactKeys(receipt, [
++        "replayable",
++        "resultOrder",
++        "terminalExclusions",
++        "replayStateDigest",
++      ])
++    )
++      throw new RetrievalExplanationViewContractError("invalid-view");
++    return {
++      schemaVersion: view.traceSchemaVersion,
++      algorithmVersion: view.algorithmVersion,
++      requestShape: view.requestShape,
++      complete: view.complete,
++      incompleteReasons: view.incompleteReasons,
++      candidates: view.candidates,
++      events: view.events,
++      resultOrder: receipt.resultOrder,
++      terminalExclusions: receipt.terminalExclusions,
++      replayStateDigest: receipt.replayStateDigest,
++    };
++  }
++
++  if (
++    receipt.replayable !== false ||
++    !hasExactKeys(receipt, [
++      "replayable",
++      "incompleteReasons",
++      "replayStateDigest",
++    ]) ||
++    !deepEqual(receipt.incompleteReasons, view.incompleteReasons)
++  )
++    throw new RetrievalExplanationViewContractError("invalid-view");
++  return {
++    schemaVersion: view.traceSchemaVersion,
++    algorithmVersion: view.algorithmVersion,
++    requestShape: view.requestShape,
++    complete: view.complete,
++    incompleteReasons: view.incompleteReasons,
++    candidates: view.candidates,
++    events: view.events,
++    resultOrder: [],
++    terminalExclusions: [],
++    replayStateDigest: receipt.replayStateDigest,
++  };
++}
++
++function deepEqual(left: unknown, right: unknown): boolean {
++  if (OBJECT_IS(left, right)) return true;
++  if (
++    left === null ||
++    right === null ||
++    typeof left !== "object" ||
++    typeof right !== "object"
++  ) {
++    return false;
++  }
++  const leftArray = ARRAY_IS_ARRAY(left);
++  if (leftArray !== ARRAY_IS_ARRAY(right)) return false;
++  const leftKeys = REFLECT_OWN_KEYS(left);
++  const rightKeys = REFLECT_OWN_KEYS(right);
++  if (leftKeys.length !== rightKeys.length) return false;
++  for (let index = 0; index < leftKeys.length; index += 1) {
++    const key = leftKeys[index];
++    if (typeof key !== "string") return false;
++    const leftDescriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(left, key);
++    const rightDescriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(right, key);
++    if (
++      !leftDescriptor ||
++      !rightDescriptor ||
++      !("value" in leftDescriptor) ||
++      !("value" in rightDescriptor) ||
++      !deepEqual(leftDescriptor.value, rightDescriptor.value)
++    )
++      return false;
++  }
++  return true;
++}
++
++function canonicalViewFromUnknown(value: unknown): RetrievalExplanationViewV1 {
++  try {
++    assertTraceRuntimeIntegrity();
++    const trace = traceFromView(value);
++    const snapshot = snapshotTraceInput(trace);
++    ASSERT_TRACE_SECRET_SAFE(snapshot);
++    const canonical = buildValidatedView(snapshot);
++    if (!deepEqual(canonical, value)) {
++      throw new RetrievalExplanationViewContractError("invalid-view");
++    }
++    return canonical;
++  } catch {
++    throw new RetrievalExplanationViewContractError("invalid-view");
++  }
++}
++
++function safeNumberText(value: number): string {
++  return REFLECT_APPLY(NUMBER_TO_STRING, value, []) as string;
++}
++
++function assertSafeTextAtom(value: string): void {
++  for (let index = 0; index < value.length; index += 1) {
++    const code = REFLECT_APPLY(STRING_CHAR_CODE_AT, value, [index]) as number;
++    if (
++      code < 0x20 ||
++      code > 0x7e ||
++      code === 0x23 ||
++      code === 0x26 ||
++      code === 0x2a ||
++      code === 0x3c ||
++      code === 0x3e ||
++      code === 0x60
++    )
++      throw new RetrievalExplanationViewContractError("invalid-view");
++  }
++}
++
++export function renderRetrievalExplanationTextV1(view: unknown): string {
++  const canonical = canonicalViewFromUnknown(view);
++  let text = "";
++
++  const append = (path: string, value: string): void => {
++    assertSafeTextAtom(path);
++    assertSafeTextAtom(value);
++    const line = `${path}=${value}\n`;
++    if (text.length + line.length > RETRIEVAL_EXPLANATION_TEXT_MAX_UTF8_BYTES) {
++      throw new RetrievalExplanationViewContractError("text-budget-exceeded");
++    }
++    text += line;
++  };
++
++  const render = (value: unknown, path: string): void => {
++    if (value === null) {
++      append(path, "null");
++      return;
++    }
++    if (typeof value === "string") {
++      append(path, value);
++      return;
++    }
++    if (typeof value === "boolean") {
++      append(path, value ? "true" : "false");
++      return;
++    }
++    if (typeof value === "number") {
++      append(path, safeNumberText(value));
++      return;
++    }
++    if (ARRAY_IS_ARRAY(value)) {
++      for (let index = 0; index < value.length; index += 1) {
++        render(value[index], `${path}[${index}]`);
++      }
++      return;
++    }
++    const keys = REFLECT_OWN_KEYS(value as object);
++    for (let index = 0; index < keys.length; index += 1) {
++      const key = keys[index] as string;
++      const descriptor = OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
++        value as object,
++        key,
++      )!;
++      render(descriptor.value, path.length === 0 ? key : `${path}.${key}`);
++    }
++  };
++
++  render(canonical, "");
++  return text;
++}

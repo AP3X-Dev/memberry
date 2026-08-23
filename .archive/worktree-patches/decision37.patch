@@ -1,0 +1,319 @@
+diff --git a/packages/core/src/__tests__/service.observed.test.ts b/packages/core/src/__tests__/service.observed.test.ts
+index 596833b..131b116 100644
+--- a/packages/core/src/__tests__/service.observed.test.ts
++++ b/packages/core/src/__tests__/service.observed.test.ts
+@@ -1,5 +1,6 @@
+ import { readFileSync } from 'node:fs';
+ import { resolve } from 'node:path';
++import { int } from 'neo4j-driver';
+ import { describe, expect, it, vi } from 'vitest';
+ 
+ import { AMPService } from '../service.js';
+@@ -15,12 +16,12 @@ const config: AMPConfig = {
+   exportPath: '',
+ };
+ 
+-function semantic(id: string): SemanticNode {
++function semantic(id: string, signalCount: unknown = 2): SemanticNode {
+   return {
+     id,
+     content: `content-${id}`,
+     confidence: 0.9,
+-    signal_count: 2,
++    signal_count: signalCount as number,
+     created_at: '2026-08-14T00:00:00.000Z',
+     updated_at: '2026-08-14T00:00:00.000Z',
+     decay_class: 'stable',
+@@ -54,6 +55,188 @@ function fixture() {
+ }
+ 
+ describe('AMPService.loadFreshObserved', () => {
++  it('normalizes a Neo4j Integer source count before the strict retrieval observation seam', async () => {
++    const { service, byScope, byVector } = fixture();
++    byScope.mockResolvedValueOnce([
++      { ...semantic('sem-neo4j-count'), signal_count: int(1) } as never,
++    ]);
++    byVector.mockResolvedValueOnce([]);
++
++    const observed = await service.loadFreshObserved({ task: 'trace integer', tags: ['project:test'] });
++    const sourceCount = observed.observation.candidates.find(
++      (candidate) => candidate.privateId === 'sem-neo4j-count',
++    )?.evidence.sourceCount;
++
++    expect(sourceCount).toBe(1);
++    expect(Number.isSafeInteger(sourceCount)).toBe(true);
++  });
++
++  it('preserves primitive counts and normalizes every accepted Neo4j Integer boundary exactly', async () => {
++    const { service, byScope, byVector } = fixture();
++    const accepted = [
++      ['primitive-zero', 0, 0],
++      ['primitive-one', 1, 1],
++      ['primitive-max', 64, 64],
++      ['neo4j-zero', int(0), 0],
++      ['neo4j-one', int(1), 1],
++      ['neo4j-max', int(64), 64],
++    ] as const;
++    byScope.mockResolvedValueOnce(accepted.map(([id, value]) => semantic(id, value)));
++    byVector.mockResolvedValueOnce([]);
++
++    const observed = await service.loadFreshObserved({ task: 'accepted counts', tags: ['project:test'] });
++    const counts = new Map(observed.observation.candidates.map(
++      (candidate) => [candidate.privateId, candidate.evidence.sourceCount],
++    ));
++
++    for (const [id, , expected] of accepted) {
++      expect(counts.get(id), id).toBe(expected);
++    }
++  });
++
++  it('omits every out-of-range or non-integral source count without clamping, rounding, stringifying, or fabricating', async () => {
++    const { service, byScope, byVector } = fixture();
++    const rejected = [
++      ['primitive-negative', -1],
++      ['primitive-fractional', 1.5],
++      ['primitive-over-max', 65],
++      ['primitive-unsafe', Number.MAX_SAFE_INTEGER + 1],
++      ['primitive-nan', Number.NaN],
++      ['primitive-infinity', Number.POSITIVE_INFINITY],
++      ['string-count', '1'],
++      ['bigint-count', 1n],
++      ['neo4j-negative', int(-1)],
++      ['neo4j-over-max', int(65)],
++      ['neo4j-unsafe', int('9007199254740992')],
++    ] as const;
++    byScope.mockResolvedValueOnce(rejected.map(([id, value]) => semantic(id, value)));
++    byVector.mockResolvedValueOnce([]);
++
++    const observed = await service.loadFreshObserved({ task: 'rejected counts', tags: ['project:test'] });
++    const candidates = new Map(observed.observation.candidates.map(
++      (candidate) => [candidate.privateId, candidate],
++    ));
++
++    for (const [id] of rejected) {
++      expect(candidates.get(id)?.evidence, id).not.toHaveProperty('sourceCount');
++    }
++  });
++
++  it('omits malformed, accessor-backed, proxied, revoked, and throwing Integer-like values without throwing', async () => {
++    const { service, byScope, byVector } = fixture();
++    const canary = 'core-sk_live_decision37_source_count';
++    let accessorCalls = 0;
++    const accessorLike = Object.create(null) as Record<string, unknown>;
++    Object.defineProperty(accessorLike, '__isInteger__', {
++      enumerable: true,
++      get() {
++        accessorCalls += 1;
++        throw new Error(canary);
++      },
++    });
++    const proxied = new Proxy(int(1), {
++      get() { throw new Error(canary); },
++    });
++    const revokedPair = Proxy.revocable(int(1), {});
++    revokedPair.revoke();
++    const throwingInteger = int(1);
++    Object.defineProperty(throwingInteger, 'low', {
++      configurable: true,
++      enumerable: true,
++      get() { throw new Error(canary); },
++    });
++    const malformed = Object.create(Object.getPrototypeOf(int(1))) as Record<string, unknown>;
++    Object.defineProperties(malformed, {
++      low: { enumerable: true, value: 1.5 },
++      high: { enumerable: true, value: 0 },
++    });
++    const rejected = [
++      ['plain-object', { low: 1, high: 0 }],
++      ['forged-marker', { __isInteger__: true, low: 1, high: 0 }],
++      ['accessor-like', accessorLike],
++      ['proxied-integer', proxied],
++      ['revoked-integer', revokedPair.proxy],
++      ['throwing-integer', throwingInteger],
++      ['malformed-integer', malformed],
++    ] as const;
++    byScope.mockResolvedValueOnce(rejected.map(([id, value]) => semantic(id, value)));
++    byVector.mockResolvedValueOnce([]);
++    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
++
++    const observed = await service.loadFreshObserved({ task: 'hostile counts', tags: ['project:test'] });
++    const candidates = new Map(observed.observation.candidates.map(
++      (candidate) => [candidate.privateId, candidate],
++    ));
++
++    for (const [id] of rejected) {
++      expect(candidates.get(id)?.evidence, id).not.toHaveProperty('sourceCount');
++    }
++    expect(accessorCalls).toBe(0);
++    expect(JSON.stringify(observed)).not.toContain(canary);
++    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(canary);
++    errorSpy.mockRestore();
++  });
++
++  it('never trusts or invokes inherited Integer markers or alternate prototype chains', async () => {
++    const { service, byScope, byVector } = fixture();
++    const officialPrototype = Object.getPrototypeOf(int(0));
++    let returningGetterCalls = 0;
++    let throwingGetterCalls = 0;
++    const returningMarkerPrototype = Object.create(null) as Record<string, unknown>;
++    Object.defineProperty(returningMarkerPrototype, '__isInteger__', {
++      get() {
++        returningGetterCalls += 1;
++        return true;
++      },
++    });
++    const throwingMarkerPrototype = Object.create(null) as Record<string, unknown>;
++    Object.defineProperty(throwingMarkerPrototype, '__isInteger__', {
++      get() {
++        throwingGetterCalls += 1;
++        throw new Error('core-sk_live_inherited_integer_marker');
++      },
++    });
++    const mutatedOfficial = int(1);
++    Object.setPrototypeOf(mutatedOfficial, Object.create(officialPrototype));
++    const rejected = [
++      ['inherited-data-marker', Object.assign(Object.create({ __isInteger__: true }), { low: 1, high: 0 })],
++      ['inherited-returning-getter', Object.assign(Object.create(returningMarkerPrototype), { low: 1, high: 0 })],
++      ['inherited-throwing-getter', Object.assign(Object.create(throwingMarkerPrototype), { low: 1, high: 0 })],
++      ['alternate-prototype', Object.assign(Object.create({}), { low: 1, high: 0 })],
++      ['null-prototype', Object.assign(Object.create(null), { low: 1, high: 0 })],
++      ['same-shape-lookalike', { low: 1, high: 0 }],
++      ['prototype-spoof', Object.assign(Object.create(Object.create(officialPrototype)), { low: 1, high: 0 })],
++      ['mutated-official-prototype', mutatedOfficial],
++    ] as const;
++    byScope.mockResolvedValueOnce(rejected.map(([id, value]) => semantic(id, value)));
++    byVector.mockResolvedValueOnce([]);
++
++    const observed = await service.loadFreshObserved({ task: 'prototype markers', tags: ['project:test'] });
++    const candidates = new Map(observed.observation.candidates.map(
++      (candidate) => [candidate.privateId, candidate],
++    ));
++
++    for (const [id] of rejected) {
++      expect(candidates.get(id)?.evidence, id).not.toHaveProperty('sourceCount');
++    }
++    expect(returningGetterCalls).toBe(0);
++    expect(throwingGetterCalls).toBe(0);
++  });
++
++  it('keeps ordinary load output and cache behavior unchanged for Neo4j Integer-backed semantics', async () => {
++    const ordinary = fixture();
++    ordinary.byScope.mockResolvedValueOnce([semantic('sem-integer', int(1))]);
++    ordinary.byVector.mockResolvedValueOnce([]);
++    const scope = { task: 'ordinary integer', tags: ['project:test'] };
++
++    const value = await ordinary.service.load(scope);
++
++    expect(value.sources).toEqual(['sem-integer']);
++    expect(value.markdown).toContain('content-sem-integer');
++    expect(ordinary.cache.get).toHaveBeenCalledOnce();
++    expect(ordinary.cache.set).toHaveBeenCalledOnce();
++  });
++
+   it('shares the ordinary assembly implementation but bypasses cache get/set and reports settled source-final provenance', async () => {
+     const { service, cache, byScope, byVector } = fixture();
+     const scope = { task: 'trace this', tags: ['project:test'], max_tokens: 1000 };
+diff --git a/packages/core/src/service.ts b/packages/core/src/service.ts
+index d2d17f3..42854fe 100644
+--- a/packages/core/src/service.ts
++++ b/packages/core/src/service.ts
+@@ -1,6 +1,8 @@
+ // packages/core/src/service.ts
+ import { createHash } from 'crypto';
+ import { nanoid } from 'nanoid';
++import { int } from 'neo4j-driver';
++import { isProxy } from 'node:util/types';
+ import type {
+   LoadScope,
+   MemoryContext,
+@@ -615,18 +617,21 @@ export class AMPService {
+ 
+     if (observation) {
+       const finalIds = new Set(sources);
+-      const memoryCandidates = merged.map((node) => ({
+-        privateId: node.id,
++      const memoryCandidates = merged.map((node) => {
++        const sourceCount = normalizeObservedSourceCount(node.signal_count);
++        return {
++          privateId: node.id,
+           sourceType: sourceTypeById!.get(node.id) ?? 'semantic',
+           channels: candidateChannels!.get(node.id) ?? [],
+-        evidence: {
+-          confidence: node.confidence,
+-          sourceCount: node.signal_count,
+-          ...(('superseded' in node) ? { superseded: Boolean((node as unknown as { superseded?: boolean }).superseded) } : {}),
+-          ...(('invalidated' in node) ? { invalidated: Boolean((node as unknown as { invalidated?: boolean }).invalidated) } : {}),
+-        },
+-        estimatedTokens: estimateTokens(node.content),
+-      } satisfies InternalRetrievalCandidateObservation));
++          evidence: {
++            confidence: node.confidence,
++            ...(sourceCount === undefined ? {} : { sourceCount }),
++            ...(('superseded' in node) ? { superseded: Boolean((node as unknown as { superseded?: boolean }).superseded) } : {}),
++            ...(('invalidated' in node) ? { invalidated: Boolean((node as unknown as { invalidated?: boolean }).invalidated) } : {}),
++          },
++          estimatedTokens: estimateTokens(node.content),
++        } satisfies InternalRetrievalCandidateObservation;
++      });
+       const factCandidates = facts.map((fact, index) => ({
+         privateId: fact.id,
+         sourceType: 'fact' as const,
+@@ -1465,6 +1470,58 @@ function extractEntityNames(nodes: Array<SemanticNode & { relevanceScore?: numbe
+   return Array.from(names);
+ }
+ 
++const NEO4J_INT32_MIN = -0x8000_0000;
++const NEO4J_INT32_MAX = 0x7fff_ffff;
++const NEO4J_UINT32_FACTOR = 0x1_0000_0000;
++const OBSERVED_SOURCE_COUNT_MAX = 64;
++const KNOWN_NEO4J_INTEGER = int(0);
++const KNOWN_NEO4J_INTEGER_PROTOTYPE = Object.getPrototypeOf(KNOWN_NEO4J_INTEGER);
++const KNOWN_NEO4J_LOW_DESCRIPTOR = Object.getOwnPropertyDescriptor(KNOWN_NEO4J_INTEGER, 'low')!;
++const KNOWN_NEO4J_HIGH_DESCRIPTOR = Object.getOwnPropertyDescriptor(KNOWN_NEO4J_INTEGER, 'high')!;
++
++function exactNeo4jWordDescriptor(
++  descriptor: PropertyDescriptor | undefined,
++  known: PropertyDescriptor,
++): descriptor is PropertyDescriptor & { value: unknown } {
++  return descriptor !== undefined
++    && 'value' in descriptor
++    && descriptor.enumerable === known.enumerable
++    && descriptor.configurable === known.configurable
++    && descriptor.writable === known.writable;
++}
++
++/** Normalize trace-only evidence without invoking caller-controlled conversion hooks. */
++function normalizeObservedSourceCount(value: unknown): number | undefined {
++  if (typeof value === 'number') {
++    return Number.isSafeInteger(value) && value >= 0 && value <= OBSERVED_SOURCE_COUNT_MAX
++      ? value
++      : undefined;
++  }
++  if (typeof value !== 'object' || value === null || isProxy(value)) return undefined;
++
++  try {
++    if (Object.getPrototypeOf(value) !== KNOWN_NEO4J_INTEGER_PROTOTYPE) return undefined;
++    const lowDescriptor = Object.getOwnPropertyDescriptor(value, 'low');
++    const highDescriptor = Object.getOwnPropertyDescriptor(value, 'high');
++    if (!exactNeo4jWordDescriptor(lowDescriptor, KNOWN_NEO4J_LOW_DESCRIPTOR)
++      || !exactNeo4jWordDescriptor(highDescriptor, KNOWN_NEO4J_HIGH_DESCRIPTOR)) return undefined;
++    const low = lowDescriptor.value;
++    const high = highDescriptor.value;
++    if (!Number.isSafeInteger(low) || low < NEO4J_INT32_MIN || low > NEO4J_INT32_MAX
++      || !Number.isSafeInteger(high) || high < NEO4J_INT32_MIN || high > NEO4J_INT32_MAX) {
++      return undefined;
++    }
++    const normalized = high * NEO4J_UINT32_FACTOR + (low >>> 0);
++    return Number.isSafeInteger(normalized)
++      && normalized >= 0
++      && normalized <= OBSERVED_SOURCE_COUNT_MAX
++      ? normalized
++      : undefined;
++  } catch {
++    return undefined;
++  }
++}
++
+ function truncateBlocksToTokenBudget(blocks: MemoryBlock[], budget: number): MemoryBlock[] {
+   const result: MemoryBlock[] = [];
+   let tokensUsed = 0;

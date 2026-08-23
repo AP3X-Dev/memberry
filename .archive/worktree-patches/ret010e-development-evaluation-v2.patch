@@ -1,0 +1,1446 @@
+diff --git a/bench/lab/__tests__/memberry-retrieval-core.test.ts b/bench/lab/__tests__/memberry-retrieval-core.test.ts
+index bf74d7a..e005e9c 100644
+--- a/bench/lab/__tests__/memberry-retrieval-core.test.ts
++++ b/bench/lab/__tests__/memberry-retrieval-core.test.ts
+@@ -227,13 +227,14 @@ describe('LAB-010 production retrieval adapter', () => {
+     const control = await disabled.query(request);
+     const candidate = await served.query(request);
+     expect(control.results).toEqual([
+-      { id: 'alpha-first', score: 1 / 61 },
+-      { id: 'target-second', score: 1 / 62 },
++      { id: 'target-second', score: 0.016450541918145017 },
++      { id: 'alpha-first', score: 0.01639344262295082 },
+     ]);
+     expect(candidate.results).toEqual([
+       { id: 'target-second', score: 0.29842 },
+       { id: 'alpha-first', score: 0.002459 },
+     ]);
++    expect(candidate.results).not.toEqual(control.results);
+   });
+ 
+   it('RET-010E preserves interleaved-source presentation and equal-score cutoffs exactly', () => {
+diff --git a/bench/lab/baselines/__tests__/ci-gate-binding.test.ts b/bench/lab/baselines/__tests__/ci-gate-binding.test.ts
+index 956fcb8..59864bc 100644
+--- a/bench/lab/baselines/__tests__/ci-gate-binding.test.ts
++++ b/bench/lab/baselines/__tests__/ci-gate-binding.test.ts
+@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
+ import ts from 'typescript';
+ import { describe, expect, it } from 'vitest';
+ 
+-import { finalizeFailureBoundaryForTest } from '../../ret010/dev-gate.js';
++import { finalizeFailureBoundaryForTest, validateFailureTombstoneForTest } from '../../ret010/dev-gate.js';
+ 
+ const REPO_ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
+ const CI_GATE = resolve(REPO_ROOT, 'bench/lab/baselines/ci-gate.ts');
+@@ -249,6 +249,8 @@ describe('RET-010E terminal development custody binding', () => {
+     const finalizerIndex = steps.findIndex((step) => step.fields.name === 'Finalize RET-010 development custody');
+     const uploadIndex = steps.findIndex((step) => step.fields.name === 'Upload RET-010 development custody');
+     expect([gateIndex, finalizerIndex, uploadIndex]).toEqual([steps.length - 3, steps.length - 2, steps.length - 1]);
++    expect(steps.filter((step) => step.fields.id === 'ret010_development_gate')).toHaveLength(1);
++    expect(steps.filter((step) => step.fields.id === 'ret010_finalize')).toHaveLength(1);
+     const gate = steps[gateIndex]!; const finalizer = steps[finalizerIndex]!; const upload = steps[uploadIndex]!;
+     expect(workflow.match(/^        id: ret010_development_gate$/gm)).toHaveLength(1);
+     expect(workflow.match(/^        id: ret010_finalize$/gm)).toHaveLength(1);
+@@ -312,6 +314,11 @@ describe('RET-010E terminal development custody binding', () => {
+       const root = await mkdtemp(join(tmpdir(), 'ret010-upload-outcome-'));
+       const publicLeaf = join(root, 'public'); const gateStage = join(root, 'gate-stage');
+       const finalizerStage = join(root, 'finalizer-stage'); const artifactSink = join(root, 'sink');
++      const currentTombstone = `${JSON.stringify({
++        schemaVersion: '1', decision: 'failed', failureClass: 'custody', stage: 'artifact',
++        gitCommit: 'a'.repeat(40), nodeMajor: '20', nodeVersion: 'v20.19.0', workflowRunId: '77', workflowRunAttempt: 1,
++      })}\n`;
++      validateFailureTombstoneForTest(JSON.parse(currentTombstone));
+       for (const path of [publicLeaf, gateStage, finalizerStage]) { await mkdir(path); await writeFile(join(path, 'STALE'), 'STALE-SUCCESS'); }
+       await mkdir(artifactSink);
+       const cleanup = async (target: 'public' | 'gate' | 'finalizer', path: string) => {
+@@ -331,11 +338,12 @@ describe('RET-010E terminal development custody binding', () => {
+           cleanupFinalizerStage: async () => cleanup('finalizer', finalizerStage),
+           publishCurrentTombstone: async () => {
+             if (failure === 'publication') throw new Error('publication');
+-            await mkdir(publicLeaf); await writeFile(join(publicLeaf, 'failure-tombstone.json'), 'CURRENT-TOMBSTONE\n');
++            await mkdir(publicLeaf); await writeFile(join(publicLeaf, 'failure-tombstone.json'), currentTombstone);
+           },
+           verifyCurrentTombstone: async () => {
+             if (failure === 'verification') throw new Error('canonical-verification');
+-            expect(await readFile(join(publicLeaf, 'failure-tombstone.json'), 'utf8')).toBe('CURRENT-TOMBSTONE\n');
++            const observed = await readFile(join(publicLeaf, 'failure-tombstone.json'), 'utf8');
++            expect(observed).toBe(currentTombstone); validateFailureTombstoneForTest(JSON.parse(observed));
+           },
+           proveAllStagingAbsent: async () => { await absent(gateStage, finalizerStage); if (failure === 'absence') throw new Error('absence'); },
+           proveAllAbsent: async () => { await absent(publicLeaf, gateStage, finalizerStage); if (failure === 'absence') throw new Error('absence'); },
+@@ -350,7 +358,9 @@ describe('RET-010E terminal development custody binding', () => {
+     const valid = await execute();
+     expect(valid.finalizerOutcome).toBe('success'); expect(valid.sinkEntries).toEqual(['ret010-development']);
+     expect(await readdir(join(valid.artifactSink, 'ret010-development'))).toEqual(['failure-tombstone.json']);
+-    expect(await readFile(join(valid.artifactSink, 'ret010-development/failure-tombstone.json'), 'utf8')).toBe('CURRENT-TOMBSTONE\n');
++    const uploaded = await readFile(join(valid.artifactSink, 'ret010-development/failure-tombstone.json'), 'utf8');
++    validateFailureTombstoneForTest(JSON.parse(uploaded));
++    expect(JSON.parse(uploaded)).toMatchObject({ decision: 'failed', gitCommit: 'a'.repeat(40), workflowRunId: '77', workflowRunAttempt: 1 });
+     await rm(valid.root, { recursive: true, force: true });
+ 
+     for (const failure of ['public-cleanup', 'gate-cleanup', 'finalizer-cleanup', 'all-cleanup', 'publication', 'verification', 'absence'] as const) {
+@@ -364,23 +374,34 @@ describe('RET-010E terminal development custody binding', () => {
+     const source = await readFile(resolve(REPO_ROOT, 'bench/lab/ret010/dev-gate.ts'), 'utf8');
+     const finalizer = source.slice(source.indexOf('export async function finalizeCurrentRun'), source.indexOf('async function main'));
+     expect(finalizer).toContain('if (!gateSucceeded) {');
+-    expect(finalizer).toContain("await finalizeCurrentFailure(identity, { failureClass: 'custody', stage: 'artifact' })");
+-    expect(finalizer).toContain('validateDirectoryChain(OUTPUT_LEAF, false)');
+-    expect(finalizer).toContain('validateCurrentHeadSuccessBundle(OUTPUT_LEAF, identity)');
++    expect(finalizer).toContain("await finalizeCurrentFailure(identity, { failureClass: 'custody', stage: 'artifact' }, boundary)");
++    expect(finalizer).toContain('validateDirectoryChain(boundary.outputLeaf, false, boundary.custodyRoot)');
++    expect(finalizer).toContain('validateCurrentHeadSuccessBundle(boundary.outputLeaf, identity)');
+     expect(finalizer).toContain('await finalizeCurrentFailure(identity, failureContext(error');
+     expect(finalizer).not.toContain('process.stderr.write(SAFE_FAILURE)');
+     expect(finalizer).not.toContain('process.exitCode = 1');
++    const firstSourceCheck = finalizer.indexOf('assertSourceIntegrity(identity.gitCommit)');
++    const firstPreservationCheck = finalizer.indexOf('validateCurrentHeadSuccessBundle(boundary.outputLeaf, identity)');
++    const runtimeRecheck = finalizer.indexOf('const currentIdentity = environmentIdentity()');
++    const finalSourceCheck = finalizer.lastIndexOf('assertSourceIntegrity(identity.gitCommit)');
++    const finalPreservationCheck = finalizer.lastIndexOf('validateCurrentHeadSuccessBundle(boundary.outputLeaf, identity)');
++    expect(firstSourceCheck).toBeGreaterThan(0);
++    expect(firstSourceCheck).toBeLessThan(firstPreservationCheck);
++    expect(runtimeRecheck).toBeGreaterThan(firstPreservationCheck);
++    expect(finalSourceCheck).toBeGreaterThan(runtimeRecheck);
++    expect(finalSourceCheck).toBeLessThan(finalPreservationCheck);
+     const main = source.slice(source.indexOf('async function main'));
+     expect(main).toContain("catch { process.stderr.write(SAFE_FAILURE); process.exitCode = 1; }");
+     const publication = source.slice(source.indexOf('async function publishFailure'), source.indexOf('async function runDevelopment'));
+-    expect(publication).toContain('cleanBoundary()');
++    expect(publication).toContain('cleanBoundary(boundary)');
+     expect(publication).toContain('[FAILURE_FILE]: tombstone(identity, context)');
+     // A stale success is removed before the current tombstone; a current success
+     // is preserved only after full identity validation. The upload predicate,
+     // rather than if-no-files-found, prevents any skipped or failed finalizer
+     // from reaching the artifact sink.
+-    expect(source).toContain("const FINALIZER_STAGING_LEAF = resolve(RUNS_ROOT, 'ret010-development.finalizer-staging')");
+-    expect(source).toContain('await absentPath(STAGING_LEAF); await absentPath(FINALIZER_STAGING_LEAF);');
++    expect(source).toContain("finalizerStagingLeaf: resolve(runsRoot, 'ret010-development.finalizer-staging')");
++    expect(source).toContain('await absentPath(boundary.stagingLeaf);');
++    expect(source).toContain('await absentPath(boundary.finalizerStagingLeaf);');
+     expect(source).toContain('manifest.workflowRunId !== identity.workflowRunId');
+     expect(source).toContain('manifest.workflowRunAttempt !== identity.workflowRunAttempt');
+     expect(source).toContain("aggregate.modelBlob !== gitBlobAt(identity.gitCommit, 'packages/retrieval/src/served-reranker.ts')");
+diff --git a/bench/lab/ret010/__tests__/dev-gate.test.ts b/bench/lab/ret010/__tests__/dev-gate.test.ts
+index 216cde3..0c6d56f 100644
+--- a/bench/lab/ret010/__tests__/dev-gate.test.ts
++++ b/bench/lab/ret010/__tests__/dev-gate.test.ts
+@@ -1,13 +1,15 @@
+ import { spawnSync } from 'node:child_process';
+ import { createHash } from 'node:crypto';
+-import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
++import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+ import { tmpdir } from 'node:os';
+ import { join, resolve } from 'node:path';
++import { pathToFileURL } from 'node:url';
+ import { afterEach, describe, expect, it } from 'vitest';
+ 
+ import {
+   classifyCustodyComponent,
+   createCustodyLeafForTest,
++  developmentOutputBoundaryForTest,
+   ensureFailureBoundaryForTest,
+   finalizeFailureBoundaryForTest,
+   qualifyingConjunctionCount,
+@@ -19,6 +21,7 @@ import {
+   validateFailureTombstoneForTest,
+   validateHostedMetadataForTest,
+   validateSuccessBundleForTest,
++  type DevelopmentOutputBoundary,
+ } from '../dev-gate.js';
+ 
+ const roots: string[] = [];
+@@ -27,6 +30,31 @@ const ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
+ const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+ const bytes = (value: object) => Buffer.from(`${JSON.stringify(value)}\n`);
+ 
++async function isolatedBoundary(label: string): Promise<DevelopmentOutputBoundary> {
++  const root = await mkdtemp(join(tmpdir(), `ret010e-${label}-`));
++  roots.push(root);
++  return developmentOutputBoundaryForTest(root);
++}
++
++async function spawnInjectedCli(
++  label: string,
++  args: readonly string[],
++  boundary: DevelopmentOutputBoundary,
++  env: NodeJS.ProcessEnv = process.env,
++): Promise<ReturnType<typeof spawnSync>> {
++  const harnessRoot = await mkdtemp(join(tmpdir(), `ret010e-${label}-cli-`));
++  roots.push(harnessRoot);
++  const harness = join(harnessRoot, 'cli.mts');
++  const gateUrl = pathToFileURL(resolve(import.meta.dirname, '..', 'dev-gate.ts')).href;
++  await writeFile(harness, [
++    `import { developmentOutputBoundaryForTest, runDevGateCliForTest } from ${JSON.stringify(gateUrl)};`,
++    `const boundary = developmentOutputBoundaryForTest(${JSON.stringify(boundary.custodyRoot)});`,
++    `await runDevGateCliForTest(${JSON.stringify(args)}, boundary);`,
++    '',
++  ].join('\n'));
++  return spawnSync(process.execPath, ['--import', 'tsx', harness], { cwd: ROOT, encoding: 'utf8', env });
++}
++
+ async function successBundle(nodeMajor: '20' | '22', overrides: { runId?: string; aggregateMarker?: string } = {}): Promise<string> {
+   const root = await mkdtemp(join(tmpdir(), `ret010e-bundle-${nodeMajor}-`));
+   roots.push(root);
+@@ -148,9 +176,15 @@ describe('RET-010E development custody gate', () => {
+     }
+   });
+ 
+-  it('fails closed on real create, publish-rename, quarantine-rename, and delete substitutions', async () => {
+-    for (const stage of ['after-create', 'before-publish', 'before-rename', 'before-delete'] as const) {
+-      const root = await mkdtemp(join(tmpdir(), `ret010e-race-${stage}-`));
++  it('fails closed across every create, publish, quarantine, removal, and verification seam', async () => {
++    const cases = [
++      ['create', 'after-create'],
++      ['rename', 'before-publish'], ['rename', 'pre-rename'], ['rename', 'after-final-check'],
++      ['remove', 'pre-rename'], ['remove', 'before-rename'], ['remove', 'before-delete'],
++    ] as const;
++    for (const [[operation, stage], replacement] of cases
++      .flatMap((item) => (['directory', 'symlink'] as const).map((replacement) => [item, replacement] as const))) {
++      const root = await mkdtemp(join(tmpdir(), `ret010e-race-${stage}-${replacement}-`));
+       roots.push(root);
+       const parent = join(root, 'parent');
+       const foreign = await mkdtemp(join(tmpdir(), `ret010e-foreign-${stage}-`));
+@@ -161,27 +195,39 @@ describe('RET-010E development custody gate', () => {
+       const output = join(parent, 'output');
+       const substitute = async (path: string) => {
+         await rm(path, { recursive: true, force: true });
+-        await symlink(foreign, path, 'dir');
++        if (replacement === 'symlink') await symlink(foreign, path, 'dir');
++        else { await mkdir(path); await writeFile(join(path, 'FOREIGN-SENTINEL'), 'replacement'); }
+       };
+-      if (stage === 'after-create') {
++      if (operation === 'create') {
+         await expect(createCustodyLeafForTest(root, parent, leaf, async (observed, path) => {
+           if (observed === stage) await substitute(path);
+         })).rejects.toThrow('custody');
+-      } else {
++      } else if (operation === 'rename') {
+         await mkdir(leaf);
+-        if (stage === 'before-publish') {
+-          await expect(renameCustodyLeafForTest(root, parent, leaf, output, async (observed, path) => {
+-            if (observed === stage) await substitute(path);
+-          })).rejects.toThrow('custody');
++        await writeFile(join(leaf, 'receipt.json'), 'OWNED-RECEIPT');
++        await expect(renameCustodyLeafForTest(root, parent, leaf, output, async (observed, path) => {
++          if (observed === stage) await substitute(path);
++        })).rejects.toThrow('custody');
++      } else {
++        await mkdir(leaf); await writeFile(join(leaf, 'receipt.json'), 'OWNED-RECEIPT');
++        await expect(removeCustodyLeafForTest(root, parent, leaf, async (observed, path) => {
++          if (observed === stage) await substitute(path);
++        })).rejects.toThrow('custody');
++      }
++      expect(await readFile(join(foreign, 'marker.txt'), 'utf8')).toBe('foreign-unchanged');
++      if (operation === 'rename') {
++        if (stage === 'after-final-check') {
++          if (replacement === 'directory') expect(await readFile(join(output, 'FOREIGN-SENTINEL'), 'utf8')).toBe('replacement');
++          else expect((await lstat(output)).isSymbolicLink()).toBe(true);
+         } else {
+-          await expect(removeCustodyLeafForTest(root, parent, leaf, async (observed, path) => {
+-            if (observed === stage) await substitute(path);
+-          })).rejects.toThrow('custody');
++          await expect(lstat(output)).rejects.toMatchObject({ code: 'ENOENT' });
+         }
+       }
+-      expect(await readFile(join(foreign, 'marker.txt'), 'utf8')).toBe('foreign-unchanged');
+-      const publicPath = stage === 'before-publish' ? output : leaf;
+-      await expect(lstat(publicPath)).rejects.toMatchObject({ code: 'ENOENT' });
++      if (operation === 'remove' && stage === 'before-delete') await expect(lstat(leaf)).rejects.toMatchObject({ code: 'ENOENT' });
++      expect((await readdir(parent)).filter((name) => name.startsWith('.ret010-quarantine-'))).toEqual([]);
++      expect((await readdir(parent)).some((name) => name === 'receipt.json')).toBe(false);
++      if (replacement === 'symlink' && operation === 'create') await expect(lstat(leaf)).rejects.toMatchObject({ code: 'ENOENT' });
++      expect((await readdir(parent)).filter((name) => name.startsWith('.ret010-quarantine-'))).toEqual([]);
+     }
+     const root = await mkdtemp(join(tmpdir(), 'ret010e-directory-race-'));
+     roots.push(root);
+@@ -194,7 +240,66 @@ describe('RET-010E development custody gate', () => {
+       }
+     })).rejects.toThrow('custody');
+     await expect(lstat(output)).rejects.toMatchObject({ code: 'ENOENT' });
+-    await expect(lstat(source)).rejects.toMatchObject({ code: 'ENOENT' });
++    expect(await readFile(join(source, 'FOREIGN-SENTINEL'), 'utf8')).toBe('unchanged');
++    expect((await readdir(parent)).filter((name) => name.startsWith('.ret010-quarantine-'))).toEqual([]);
++  });
++
++  it('never overwrites or cleans a preexisting or raced foreign destination file or directory', async () => {
++    for (const [kind, timing] of (['file', 'directory'] as const)
++      .flatMap((kind) => (['preexisting', 'raced'] as const).map((timing) => [kind, timing] as const))) {
++      const root = await mkdtemp(join(tmpdir(), `ret010e-foreign-destination-${kind}-${timing}-`)); roots.push(root);
++      const parent = join(root, 'parent'); const source = join(parent, 'source'); const destination = join(parent, 'destination');
++      await mkdir(parent); await mkdir(source); await writeFile(join(source, 'receipt.json'), 'OWNED-RECEIPT');
++      const plantDestination = async () => {
++        if (kind === 'file') await writeFile(destination, 'FOREIGN-FILE');
++        else { await mkdir(destination); await writeFile(join(destination, 'sentinel'), 'FOREIGN-DIRECTORY'); }
++      };
++      if (timing === 'preexisting') await plantDestination();
++      await expect(renameCustodyLeafForTest(root, parent, source, destination, async (stage) => {
++        if (timing === 'raced' && stage === 'pre-rename') await plantDestination();
++      })).rejects.toThrow('custody');
++      await expect(lstat(source)).rejects.toMatchObject({ code: 'ENOENT' });
++      if (kind === 'file') expect(await readFile(destination, 'utf8')).toBe('FOREIGN-FILE');
++      else {
++        expect(await readFile(join(destination, 'sentinel'), 'utf8')).toBe('FOREIGN-DIRECTORY');
++        await expect(lstat(join(destination, 'receipt.json'))).rejects.toMatchObject({ code: 'ENOENT' });
++      }
++      expect((await readdir(parent)).filter((name) => name.startsWith('.ret010-quarantine-'))).toEqual([]);
++    }
++  });
++
++  it('contains hook rejection without publishing bytes or leaving quarantine custody', async () => {
++    for (const stage of ['before-publish', 'pre-rename', 'after-final-check'] as const) {
++      const root = await mkdtemp(join(tmpdir(), `ret010e-hook-rejection-${stage}-`)); roots.push(root);
++      const parent = join(root, 'parent'); const source = join(parent, 'source'); const destination = join(parent, 'destination');
++      await mkdir(parent); await mkdir(source); await writeFile(join(source, 'receipt.json'), 'SECRET-RECEIPT');
++      await expect(renameCustodyLeafForTest(root, parent, source, destination, async (observed) => {
++        if (observed === stage) throw new Error('HOOK-SECRET');
++      })).rejects.toThrow('HOOK-SECRET');
++      await expect(lstat(source)).rejects.toMatchObject({ code: 'ENOENT' });
++      await expect(lstat(destination)).rejects.toMatchObject({ code: 'ENOENT' });
++      expect((await readdir(parent)).filter((name) => name.startsWith('.ret010-quarantine-'))).toEqual([]);
++    }
++  });
++
++  it('detects output-parent and every ancestor substitution during before-publish', async () => {
++    for (const substitutedIndex of [0, 1, 2]) {
++      const top = await mkdtemp(join(tmpdir(), `ret010e-ancestor-${substitutedIndex}-`)); roots.push(top);
++      const custodyRoot = join(top, 'custody'); const middle = join(custodyRoot, 'middle'); const parent = join(middle, 'runs');
++      await mkdir(custodyRoot); await mkdir(middle); await mkdir(parent);
++      const source = join(parent, 'source'); const destination = join(parent, 'destination');
++      await mkdir(source); await writeFile(join(source, 'receipt.json'), 'OWNED-RECEIPT');
++      const components = [custodyRoot, middle, parent]; const substituted = components[substitutedIndex]!;
++      const held = `${substituted}.held`; const replacementMarker = join(substituted, 'FOREIGN-SENTINEL');
++      await expect(renameCustodyLeafForTest(custodyRoot, parent, source, destination, async (stage) => {
++        if (stage !== 'before-publish') return;
++        await rename(substituted, held); await mkdir(substituted); await writeFile(replacementMarker, 'FOREIGN-UNCHANGED');
++      })).rejects.toThrow('custody');
++      expect(await readFile(replacementMarker, 'utf8')).toBe('FOREIGN-UNCHANGED');
++      await expect(lstat(destination)).rejects.toMatchObject({ code: 'ENOENT' });
++      await rm(substituted, { recursive: true, force: true }); await rename(held, substituted);
++      expect((await readdir(parent)).filter((name) => name.startsWith('.ret010-quarantine-'))).toEqual([]);
++    }
+   });
+ 
+   it('uses collision-resistant quarantine custody instead of predictable sibling names', async () => {
+@@ -206,6 +311,7 @@ describe('RET-010E development custody gate', () => {
+     await expect(lstat(leaf)).rejects.toMatchObject({ code: 'ENOENT' });
+     expect((await lstat(`${leaf}.quarantine`)).isDirectory()).toBe(true);
+     expect((await lstat(`${leaf}.rejected`)).isDirectory()).toBe(true);
++    expect((await readdir(parent)).filter((name) => name.startsWith('.ret010-quarantine-'))).toEqual([]);
+   });
+ 
+   it('proves current tombstone or absence after combined stale, publication, and primary cleanup failures', async () => {
+@@ -320,41 +426,41 @@ describe('RET-010E development custody gate', () => {
+   });
+ 
+   it('returns CLI success only after exact current tombstone finalization', async () => {
+-    const gate = resolve(import.meta.dirname, '..', 'dev-gate.ts');
+-    const child = spawnSync(process.execPath, ['--import', 'tsx', gate, 'finalize', 'failure'], {
+-      cwd: ROOT, encoding: 'utf8', env: { ...process.env, GITHUB_RUN_ID: '77', GITHUB_RUN_ATTEMPT: '1' },
++    const boundary = await isolatedBoundary('finalize-failure');
++    const child = await spawnInjectedCli('finalize-failure', ['finalize', 'failure'], boundary, {
++      ...process.env, GITHUB_RUN_ID: '77', GITHUB_RUN_ATTEMPT: '1',
+     });
+     expect(child.status).toBe(0); expect(child.stdout).toBe(''); expect(child.stderr).toBe('');
+-    const output = resolve(ROOT, 'node_modules/.cache/memberry-lab/runs/ret010-development');
+-    const tombstone = JSON.parse(await readFile(join(output, 'failure-tombstone.json'), 'utf8'));
++    const tombstone = JSON.parse(await readFile(join(boundary.outputLeaf, 'failure-tombstone.json'), 'utf8'));
+     expect(tombstone).toMatchObject({ decision: 'failed', workflowRunId: '77', workflowRunAttempt: 1 });
+-    await expect(lstat(resolve(ROOT, 'node_modules/.cache/memberry-lab/runs/ret010-development.staging'))).rejects.toMatchObject({ code: 'ENOENT' });
+-    await expect(lstat(resolve(ROOT, 'node_modules/.cache/memberry-lab/runs/ret010-development.finalizer-staging'))).rejects.toMatchObject({ code: 'ENOENT' });
++    await expect(lstat(boundary.stagingLeaf)).rejects.toMatchObject({ code: 'ENOENT' });
++    await expect(lstat(boundary.finalizerStagingLeaf)).rejects.toMatchObject({ code: 'ENOENT' });
+   });
+ 
+   it('returns only fixed CLI failure when success-bundle verification requires cleanup and tombstoning', async () => {
+-    const runs = resolve(ROOT, 'node_modules/.cache/memberry-lab/runs');
+-    const output = resolve(runs, 'ret010-development');
+-    await rm(output, { recursive: true, force: true }); await mkdir(output, { recursive: true });
+-    await writeFile(join(output, 'aggregate-result.json'), 'HOSTILE-SUCCESS-SECRET');
+-    for (const stage of ['ret010-development.staging', 'ret010-development.finalizer-staging']) {
+-      const path = resolve(runs, stage); await rm(path, { recursive: true, force: true }); await mkdir(path); await writeFile(join(path, 'STALE'), 'HOSTILE-STAGE-SECRET');
++    const boundary = await isolatedBoundary('finalize-success-hostile');
++    await mkdir(boundary.runsRoot, { recursive: true });
++    await mkdir(boundary.outputLeaf); await writeFile(join(boundary.outputLeaf, 'aggregate-result.json'), 'HOSTILE-SUCCESS-SECRET');
++    for (const path of [boundary.stagingLeaf, boundary.finalizerStagingLeaf]) {
++      await mkdir(path); await writeFile(join(path, 'STALE'), 'HOSTILE-STAGE-SECRET');
+     }
+-    const gate = resolve(import.meta.dirname, '..', 'dev-gate.ts');
+-    const child = spawnSync(process.execPath, ['--import', 'tsx', gate, 'finalize', 'success'], {
+-      cwd: ROOT, encoding: 'utf8', env: { ...process.env, GITHUB_RUN_ID: '77', GITHUB_RUN_ATTEMPT: '1' },
++    const child = await spawnInjectedCli('finalize-success-hostile', ['finalize', 'success'], boundary, {
++      ...process.env, GITHUB_RUN_ID: '77', GITHUB_RUN_ATTEMPT: '1',
+     });
+     expect(child.status).not.toBe(0); expect(child.stdout).toBe(''); expect(child.stderr).toBe('RET010_DEV_GATE_FAILED\n');
+     expect(`${child.stdout}${child.stderr}`).not.toMatch(/HOSTILE|SECRET/);
+-    const tombstone = JSON.parse(await readFile(join(output, 'failure-tombstone.json'), 'utf8'));
++    const tombstone = JSON.parse(await readFile(join(boundary.outputLeaf, 'failure-tombstone.json'), 'utf8'));
+     expect(tombstone).toMatchObject({ decision: 'failed', workflowRunId: '77', workflowRunAttempt: 1 });
+-    await expect(lstat(resolve(runs, 'ret010-development.staging'))).rejects.toMatchObject({ code: 'ENOENT' });
+-    await expect(lstat(resolve(runs, 'ret010-development.finalizer-staging'))).rejects.toMatchObject({ code: 'ENOENT' });
++    await expect(lstat(boundary.stagingLeaf)).rejects.toMatchObject({ code: 'ENOENT' });
++    await expect(lstat(boundary.finalizerStagingLeaf)).rejects.toMatchObject({ code: 'ENOENT' });
++    expect((await readdir(boundary.runsRoot)).every((name) => !name.startsWith('.ret010-quarantine-'))).toBe(true);
+   });
+ 
+   it('keeps the executable boundary value-free and the public success surface closed', async () => {
+     const source = await readFile(resolve(import.meta.dirname, '..', 'dev-gate.ts'), 'utf8');
+     expect(source).toContain("const SAFE_FAILURE = 'RET010_DEV_GATE_FAILED\\n'");
++    expect(source).toContain('main().catch(() => { process.stderr.write(SAFE_FAILURE); process.exitCode = 1; })');
++    expect(source).not.toMatch(/\)\s+await main\(\)/);
+     expect(source).not.toMatch(/console\.(?:log|error|warn)/);
+     expect(source).toContain("'failure-tombstone.json'");
+     expect(source).toContain("'recall-lane.json', 'precision-lane.json', 'efficiency-interval.json'");
+@@ -364,6 +470,15 @@ describe('RET-010E development custody gate', () => {
+     expect(source).toContain('assertExperimentRegistry(head)');
+     expect(source).toContain('workflowConclusion');
+     expect(source).toContain("args.length === 3");
++    const pinDirectory = source.slice(source.indexOf('async function pinDirectory'), source.indexOf('async function recheckPinnedDirectory'));
++    expect(pinDirectory.indexOf('await open(path')).toBeLessThan(pinDirectory.indexOf('await lstat(path'));
++    expect(pinDirectory).toContain('fsConstants.O_NOFOLLOW');
++    expect(pinDirectory).toContain('fsConstants.O_DIRECTORY');
++    expect(source).not.toMatch(/\brm\s*\(/);
++    const verifiedRmdir = source.slice(source.indexOf('async function verifiedRmdir'), source.indexOf('async function pinRegularFile'));
++    expect(verifiedRmdir).toContain('await rmdir(path)');
++    expect(verifiedRmdir).toContain('await absentPath(path)');
++    expect(verifiedRmdir).not.toContain('handle.close');
+   });
+ 
+   it('pins all twelve mutable paths and six immutable dependencies before publication', async () => {
+@@ -454,13 +569,13 @@ describe('RET-010E development custody gate', () => {
+   it('runs the real three-argument verifier CLI on canonical Node 20/22 custody and hostile bytes', async () => {
+     const previousRunId = process.env.GITHUB_RUN_ID; const previousAttempt = process.env.GITHUB_RUN_ATTEMPT;
+     process.env.GITHUB_RUN_ID = '77'; process.env.GITHUB_RUN_ATTEMPT = '1';
+-    const output = resolve(ROOT, 'node_modules/.cache/memberry-lab/runs/ret010-development');
++    const boundary = await isolatedBoundary('verifier-source');
+     try {
+-      await expect(runDevelopment({ suppressProcessFailure: true })).resolves.toBe('passed');
++      await expect(runDevelopment({ suppressProcessFailure: true }, boundary)).resolves.toBe('passed');
+       const node20 = await mkdtemp(join(tmpdir(), 'ret010e-cli-node20-'));
+       const node22 = await mkdtemp(join(tmpdir(), 'ret010e-cli-node22-'));
+       roots.push(node20, node22);
+-      await cp(output, node20, { recursive: true }); await cp(output, node22, { recursive: true });
++      await cp(boundary.outputLeaf, node20, { recursive: true }); await cp(boundary.outputLeaf, node22, { recursive: true });
+       for (const [root, nodeMajor, nodeVersion] of [[node20, '20', 'v20.19.0'], [node22, '22', 'v22.12.0']] as const) {
+         const path = join(root, 'custody-manifest.json'); const manifest = JSON.parse(await readFile(path, 'utf8'));
+         manifest.nodeMajor = nodeMajor; manifest.nodeVersion = nodeVersion; await writeFile(path, bytes(manifest));
+@@ -520,8 +635,8 @@ describe('RET-010E development custody gate', () => {
+     const previousAttempt = process.env.GITHUB_RUN_ATTEMPT;
+     process.env.GITHUB_RUN_ID = '77';
+     process.env.GITHUB_RUN_ATTEMPT = '1';
+-    const output = resolve(ROOT, 'node_modules/.cache/memberry-lab/runs/ret010-development');
+     for (const [failureClass, stage] of stages) {
++      const boundary = await isolatedBoundary(`stage-${stage}`);
+       const sentinel = `UNIQUE-${failureClass}-${stage}-SECRET`;
+       let captured: { failureClass: string; stage: string } | undefined;
+       let suppressed = '';
+@@ -534,15 +649,16 @@ describe('RET-010E development custody gate', () => {
+         },
+         onFailure: async (current) => { captured = current; }, suppressProcessFailure: true,
+         onSuppressedOutput: async (stdout, stderr) => { suppressed = `${stdout}${stderr}`; },
+-      });
++      }, boundary);
+       expect(outcome).toBe('failed');
+       expect(captured).toEqual({ failureClass, stage });
+-      const artifact = await readFile(join(output, 'failure-tombstone.json'));
++      const artifact = await readFile(join(boundary.outputLeaf, 'failure-tombstone.json'));
+       expect(artifact.toString('utf8')).toMatch(/^\{"schemaVersion":"1","decision":"failed"/);
+       expect(artifact.toString('utf8')).not.toContain(sentinel);
+       expect(suppressed).toBe(`${sentinel}${sentinel}`);
+     }
+     for (const operation of ['dataset', 'provider', 'blobs', 'aggregate', 'publication'] as const) {
++      const boundary = await isolatedBoundary(`operation-${operation}`);
+       const sentinel = `UNIQUE-artifact-${operation}-SECRET`; let captured: any;
+       const outcome = await runDevelopment({
+         beforeOperation: async (observed, context) => {
+@@ -550,9 +666,9 @@ describe('RET-010E development custody gate', () => {
+           captured = context;
+         },
+         onFailure: async (context) => { captured = context; }, suppressProcessFailure: true,
+-      });
++      }, boundary);
+       expect(outcome).toBe('failed'); expect(captured).toEqual({ failureClass: 'custody', stage: 'artifact' });
+-      const artifact = await readFile(join(output, 'failure-tombstone.json'), 'utf8');
++      const artifact = await readFile(join(boundary.outputLeaf, 'failure-tombstone.json'), 'utf8');
+       expect(artifact).not.toContain(sentinel);
+     }
+     if (previousRunId === undefined) delete process.env.GITHUB_RUN_ID; else process.env.GITHUB_RUN_ID = previousRunId;
+diff --git a/bench/lab/ret010/__tests__/holdout-gate.test.ts b/bench/lab/ret010/__tests__/holdout-gate.test.ts
+index c3de19e..85afced 100644
+--- a/bench/lab/ret010/__tests__/holdout-gate.test.ts
++++ b/bench/lab/ret010/__tests__/holdout-gate.test.ts
+@@ -71,7 +71,7 @@ describe('RET-010 one-shot holdout boundary', () => {
+     expect(source).toContain("status', '--porcelain=v1', '--untracked-files=all'");
+     expect(source).toContain('parents.length !== 2');
+     expect(source).toContain('lineage.directParent !== approval.devSourceCommit');
+-    expect(source).toContain('assertResolvedImportGraph(commit)');
++    expect(source).toContain('assertResolvedImportGraph(commit, repoRoot)');
+     expect(source).toContain("for (const shadow of [jsPath");
+   });
+ 
+@@ -157,19 +157,22 @@ describe('RET-010 one-shot holdout boundary', () => {
+     expect(() => validateHoldoutScenariosForTest(scenarios('recall', 10).slice(1), 'recall', 10)).toThrow('metric');
+     expect(() => validateHoldoutScenariosForTest(scenarios('precision', 5), 'precision', 10)).toThrow('metric');
+ 
+-    const metrics = {
++    const metrics = () => ({
+       recallAtK: 1, precisionAtK: 1, reciprocalRank: 1, ndcgAtK: 1, answerCoverage: 1,
+       staleLeakRate: 0, isolationLeakRate: 0, duplicateRate: 0, unknownResultRate: 0,
+       staleSafety: 1, isolationSafety: 1,
+-    };
++    });
+     const arm = (adapterId: string) => ({
+-      adapterId, outcome: 'scored', metrics,
++      adapterId, outcome: 'scored', metrics: metrics(),
+       scenarioReports: Array.from({ length: 10 }, (_, index) => ({
+-        outcome: 'scored', metrics, probes: [{ resultIds: [`id-${index}`], contextTokens: 1, metrics }],
++        outcome: 'scored', metrics: metrics(), probes: [{ resultIds: [`id-${index}`], contextTokens: 1, metrics: metrics() }],
+       })),
+     });
+     const report = { runId: 'lane', evidenceMode: 'registered-ci', passed: true,
+       control: arm('memberry-retrieval-core-disabled-v1'), candidate: arm('memberry-retrieval-core-served-v1') };
++    expect(report.control.metrics).not.toBe(report.control.scenarioReports[0]!.metrics);
++    expect(report.control.scenarioReports[0]!.metrics).not.toBe(report.control.scenarioReports[0]!.probes[0]!.metrics);
++    expect(report.control.metrics).not.toBe(report.candidate.metrics);
+     expect(() => validateHoldoutComparisonForTest(report, 'lane')).not.toThrow();
+     const nonfinite = structuredClone(report); nonfinite.candidate.scenarioReports[0].probes[0].metrics.recallAtK = Number.NaN;
+     expect(() => validateHoldoutComparisonForTest(nonfinite, 'lane')).toThrow('metric');
+@@ -179,6 +182,15 @@ describe('RET-010 one-shot holdout boundary', () => {
+     expect(() => validateHoldoutComparisonForTest(hostileScenarioAggregate, 'lane')).toThrow('metric');
+     const hostileArmAggregate = structuredClone(report); hostileArmAggregate.candidate.metrics.precisionAtK = 0;
+     expect(() => validateHoldoutComparisonForTest(hostileArmAggregate, 'lane')).toThrow('metric');
++    for (const [armName, layer] of (['control', 'candidate'] as const)
++      .flatMap((armName) => (['probe', 'scenario', 'arm'] as const).map((layer) => [armName, layer] as const))) {
++      const hostile = structuredClone(report);
++      const arm = hostile[armName];
++      if (layer === 'probe') arm.scenarioReports[0].probes[0].metrics.ndcgAtK = 0;
++      else if (layer === 'scenario') arm.scenarioReports[0].metrics.ndcgAtK = 0;
++      else arm.metrics.ndcgAtK = 0;
++      expect(() => validateHoldoutComparisonForTest(hostile, 'lane'), `${armName}-${layer}`).toThrow('metric');
++    }
+     const pairs = Array.from({ length: 20 }, (_, index) => ({ scenarioId: `s${index}`, probeId: `p${index}` }));
+     const interval = { outcome: 'measured', pairedProbes: 20, resamples: 2000, level: 0.95, seed: 42, point: 0, lower: 0, upper: 0, oneSidedLower: 0 };
+     expect(() => validateHoldoutIntervalForTest(pairs, interval, 42)).not.toThrow();
+@@ -209,11 +221,18 @@ describe('RET-010 one-shot holdout boundary', () => {
+       input: { id: `${dimension}-${index}`, split: 'holdout', dimensions: [dimension], queries: [{ id: `${dimension}-p${index}`, limit: dimension === 'recall' ? 10 : 5 }] },
+       oracle: { probes: [{ probeId: `${dimension}-p${index}` }] },
+     }));
+-    const metrics = { recallAtK: 1, precisionAtK: 1, reciprocalRank: 1, ndcgAtK: 1, answerCoverage: 1, staleLeakRate: 0, isolationLeakRate: 0, duplicateRate: 0, unknownResultRate: 0, staleSafety: 1, isolationSafety: 1 };
++    const metrics = () => ({ recallAtK: 1, precisionAtK: 1, reciprocalRank: 1, ndcgAtK: 1, answerCoverage: 1, staleLeakRate: 0, isolationLeakRate: 0, duplicateRate: 0, unknownResultRate: 0, staleSafety: 1, isolationSafety: 1 });
++    const arm = (adapterId: string, runId: string, resultPrefix: string) => ({
++      adapterId, outcome: 'scored', metrics: metrics(),
++      scenarioReports: Array.from({ length: 10 }, (_, i) => ({
++        scenarioId: `${runId}-${i}`, outcome: 'scored', metrics: metrics(),
++        probes: [{ probeId: `p${i}`, resultIds: [`${resultPrefix}${i}`], contextTokens: 1, metrics: metrics() }],
++      })),
++    });
+     const report = (runId: string) => ({
+       runId, evidenceMode: 'registered-ci', passed: true,
+-      control: { adapterId: 'memberry-retrieval-core-disabled-v1', outcome: 'scored', metrics, scenarioReports: Array.from({ length: 10 }, (_, i) => ({ scenarioId: `${runId}-${i}`, outcome: 'scored', metrics, probes: [{ probeId: `p${i}`, resultIds: [`a${i}`], contextTokens: 1, metrics }] })) },
+-      candidate: { adapterId: 'memberry-retrieval-core-served-v1', outcome: 'scored', metrics, scenarioReports: Array.from({ length: 10 }, (_, i) => ({ scenarioId: `${runId}-${i}`, outcome: 'scored', metrics, probes: [{ probeId: `p${i}`, resultIds: [`b${i}`], contextTokens: 1, metrics }] })) },
++      control: arm('memberry-retrieval-core-disabled-v1', runId, 'a'),
++      candidate: arm('memberry-retrieval-core-served-v1', runId, 'b'),
+     });
+     const dependencies = {
+       verifySource: async () => {}, loadScenarios: async (dimension: 'recall' | 'precision') => scenarios(dimension),
+@@ -221,11 +240,25 @@ describe('RET-010 one-shot holdout boundary', () => {
+       pairedVectorSeed: () => 42,
+       pairedEfficiencyInterval: () => ({ outcome: 'measured', pairedProbes: 20, resamples: 2000, level: 0.95, seed: 42, point: 0, lower: 0, upper: 0, oneSidedLower: 0 }),
+     };
++    const baseline = report('identity-check');
++    expect(baseline.control.metrics).not.toBe(baseline.candidate.metrics);
++    expect(baseline.candidate.metrics).not.toBe(baseline.candidate.scenarioReports[0]!.metrics);
++    expect(baseline.candidate.scenarioReports[0]!.metrics).not.toBe(baseline.candidate.scenarioReports[0]!.probes[0]!.metrics);
+     await expect(evaluateHoldoutForTest(approval, identity, dependencies)).resolves.toMatchObject({ decision: 'passed', qualificationSha: identity.gitCommit });
+     await expect(evaluateHoldoutForTest(approval, identity, { ...dependencies, loadScenarios: async (dimension) => scenarios(dimension).slice(1) })).rejects.toThrow('metric');
+-    await expect(evaluateHoldoutForTest(approval, identity, { ...dependencies, compare: async (options) => {
++    await expect(evaluateHoldoutForTest(approval, identity, { ...dependencies, compare: async (options: any) => {
+       const hostile = report(options.runId); hostile.candidate.metrics.recallAtK = 0; return hostile;
+     } })).rejects.toThrow('metric');
++    for (const [armName, layer] of (['control', 'candidate'] as const)
++      .flatMap((armName) => (['probe', 'scenario', 'arm'] as const).map((layer) => [armName, layer] as const))) {
++      await expect(evaluateHoldoutForTest(approval, identity, { ...dependencies, compare: async (options: any) => {
++        const hostile = report(options.runId); const arm = hostile[armName];
++        if (layer === 'probe') arm.scenarioReports[0].probes[0].metrics.answerCoverage = 0;
++        else if (layer === 'scenario') arm.scenarioReports[0].metrics.answerCoverage = 0;
++        else arm.metrics.answerCoverage = 0;
++        return hostile;
++      } }), `${armName}-${layer}`).rejects.toThrow('metric');
++    }
+     await expect(evaluateHoldoutForTest(approval, identity, { ...dependencies, pairedVectorSeed: () => 43 })).rejects.toThrow('metric');
+   });
+ 
+diff --git a/bench/lab/ret010/dev-gate.ts b/bench/lab/ret010/dev-gate.ts
+index 85983bd..47c5074 100644
+--- a/bench/lab/ret010/dev-gate.ts
++++ b/bench/lab/ret010/dev-gate.ts
+@@ -2,20 +2,42 @@
+ 
+ import { createHash } from 'node:crypto';
+ import { execFileSync } from 'node:child_process';
+-import { constants as fsConstants } from 'node:fs';
++import { constants as fsConstants, type BigIntStats } from 'node:fs';
+ import {
+-  lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm,
++  lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rmdir, unlink,
+ } from 'node:fs/promises';
++import type { FileHandle } from 'node:fs/promises';
+ import { dirname, relative, resolve, sep } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ 
+ const HERE = dirname(fileURLToPath(import.meta.url));
+ const REPO_ROOT = resolve(HERE, '..', '..', '..');
+ const RUNS_SUFFIX = ['node_modules', '.cache', 'memberry-lab', 'runs'] as const;
+-const RUNS_ROOT = resolve(REPO_ROOT, ...RUNS_SUFFIX);
+-const OUTPUT_LEAF = resolve(RUNS_ROOT, 'ret010-development');
+-const STAGING_LEAF = resolve(RUNS_ROOT, 'ret010-development.staging');
+-const FINALIZER_STAGING_LEAF = resolve(RUNS_ROOT, 'ret010-development.finalizer-staging');
++export interface DevelopmentOutputBoundary {
++  readonly custodyRoot: string;
++  readonly runsSuffix: readonly string[];
++  readonly runsRoot: string;
++  readonly outputLeaf: string;
++  readonly stagingLeaf: string;
++  readonly finalizerStagingLeaf: string;
++}
++function outputBoundary(custodyRoot: string, runsSuffix: readonly string[]): DevelopmentOutputBoundary {
++  const root = resolve(custodyRoot);
++  const suffix = [...runsSuffix];
++  const runsRoot = resolve(root, ...suffix);
++  return Object.freeze({
++    custodyRoot: root,
++    runsSuffix: Object.freeze(suffix),
++    runsRoot,
++    outputLeaf: resolve(runsRoot, 'ret010-development'),
++    stagingLeaf: resolve(runsRoot, 'ret010-development.staging'),
++    finalizerStagingLeaf: resolve(runsRoot, 'ret010-development.finalizer-staging'),
++  });
++}
++const DEFAULT_OUTPUT_BOUNDARY = outputBoundary(REPO_ROOT, RUNS_SUFFIX);
++export function developmentOutputBoundaryForTest(custodyRoot: string): DevelopmentOutputBoundary {
++  return outputBoundary(custodyRoot, ['runs']);
++}
+ const SUCCESS_FILES = [
+   'recall-lane.json', 'precision-lane.json', 'efficiency-interval.json',
+   'aggregate-result.json', 'custody-manifest.json',
+@@ -74,7 +96,7 @@ interface FileStatusFixture {
+ }
+ 
+ type CustodyClassifier = (fixture: FileStatusFixture) => 'directory' | 'reject';
+-type MutationHook = (stage: 'after-create' | 'before-publish' | 'before-rename' | 'before-delete', path: string) => Promise<void>;
++type MutationHook = (stage: 'after-create' | 'before-publish' | 'pre-rename' | 'before-rename' | 'before-delete' | 'after-final-check', path: string) => Promise<void>;
+ export interface RuntimeFileStatus {
+   isDirectory: boolean;
+   isSymbolicLink: boolean;
+@@ -204,53 +226,283 @@ export async function validateCustodyChainForTest(
+   await validateDirectoryChain(resolve(target), false, resolve(root), classifier, acquireStatus);
+ }
+ 
+-async function validateRunsRoot(create = false): Promise<void> {
+-  await validateDirectoryChain(RUNS_ROOT, create);
+-  const repositoryReal = await realpath(REPO_ROOT);
+-  const runsReal = await realpath(RUNS_ROOT);
+-  const expected = resolve(repositoryReal, ...RUNS_SUFFIX);
+-  if (runsReal !== expected || !runsReal.endsWith(`${sep}${RUNS_SUFFIX.join(sep)}`)) throw new Error('custody');
++async function validateRunsRoot(boundary: DevelopmentOutputBoundary, create = false): Promise<void> {
++  await validateDirectoryChain(boundary.runsRoot, create, boundary.custodyRoot);
++  const repositoryReal = await realpath(boundary.custodyRoot);
++  const runsReal = await realpath(boundary.runsRoot);
++  const expected = resolve(repositoryReal, ...boundary.runsSuffix);
++  if (runsReal !== expected || boundary.runsSuffix.length === 0
++    || !runsReal.endsWith(`${sep}${boundary.runsSuffix.join(sep)}`)) throw new Error('custody');
+ }
+ 
+-async function safeRemoveLeaf(path: string): Promise<void> {
+-  await validateRunsRoot(false);
++async function safeRemoveLeaf(boundary: DevelopmentOutputBoundary, path: string): Promise<void> {
++  await validateRunsRoot(boundary, false);
+   try {
+-    await quarantineRemoveLeaf(REPO_ROOT, RUNS_ROOT, path);
++    await quarantineRemoveLeaf(boundary.custodyRoot, boundary.runsRoot, path);
+   } catch (error) {
+     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+   }
+ }
+ 
+-async function directoryIdentity(path: string): Promise<{ dev: number | bigint; ino: number | bigint }> {
+-  const info = await lstat(path, { bigint: true });
+-  if (!info.isDirectory() || info.isSymbolicLink() || await realpath(path) !== path) throw new Error('custody');
+-  return { dev: info.dev, ino: info.ino };
++interface DirectoryPin {
++  readonly handle: FileHandle;
++  readonly dev: bigint;
++  readonly ino: bigint;
+ }
+ 
++interface RegularFilePin {
++  readonly kind: 'file';
++  readonly handle: FileHandle;
++  readonly dev: bigint;
++  readonly ino: bigint;
++}
++
++interface DirectoryLeafPin extends DirectoryPin { readonly kind: 'directory' }
++interface SymbolicLinkPin { readonly kind: 'symlink'; readonly dev: bigint; readonly ino: bigint }
++type RemovableLeafPin = DirectoryLeafPin | RegularFilePin | SymbolicLinkPin;
++const MAX_FLAT_LEAF_CHILDREN = 32;
++
+ function sameIdentity(left: { dev: number | bigint; ino: number | bigint }, right: { dev: number | bigint; ino: number | bigint }): boolean {
+   return left.dev === right.dev && left.ino === right.ino;
+ }
+ 
++function statsIdentity(info: BigIntStats): { dev: bigint; ino: bigint } {
++  return { dev: info.dev, ino: info.ino };
++}
++
++async function pinDirectory(path: string): Promise<DirectoryPin> {
++  if (typeof fsConstants.O_DIRECTORY !== 'number' || fsConstants.O_DIRECTORY === 0
++    || typeof fsConstants.O_NOFOLLOW !== 'number' || fsConstants.O_NOFOLLOW === 0) throw new Error('custody');
++  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
++  try {
++    const opened = await handle.stat({ bigint: true });
++    const current = await lstat(path, { bigint: true });
++    if (!opened.isDirectory() || !current.isDirectory() || current.isSymbolicLink()
++      || !sameIdentity(statsIdentity(opened), statsIdentity(current))
++      || await realpath(path) !== path) throw new Error('custody');
++    return { handle, dev: opened.dev, ino: opened.ino };
++  } catch (error) {
++    await handle.close();
++    throw error;
++  }
++}
++
++async function recheckPinnedDirectory(pin: DirectoryPin, path: string): Promise<void> {
++  const opened = await pin.handle.stat({ bigint: true });
++  const current = await lstat(path, { bigint: true });
++  if (!opened.isDirectory() || !current.isDirectory() || current.isSymbolicLink()
++    || !sameIdentity(pin, statsIdentity(opened)) || !sameIdentity(pin, statsIdentity(current))
++    || await realpath(path) !== path) throw new Error('custody');
++}
++
++async function verifiedRmdir(pin: DirectoryPin, path: string): Promise<void> {
++  await recheckPinnedDirectory(pin, path);
++  if ((await readdir(path)).length !== 0) throw new Error('custody');
++  await recheckPinnedDirectory(pin, path);
++  await rmdir(path);
++  await absentPath(path);
++  const opened = await pin.handle.stat({ bigint: true });
++  if (!opened.isDirectory() || !sameIdentity(pin, statsIdentity(opened))) throw new Error('custody');
++}
++
++async function pinRegularFile(path: string): Promise<RegularFilePin> {
++  if (typeof fsConstants.O_NOFOLLOW !== 'number' || fsConstants.O_NOFOLLOW === 0) throw new Error('custody');
++  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
++  try {
++    const opened = await handle.stat({ bigint: true });
++    const current = await lstat(path, { bigint: true });
++    if (!opened.isFile() || !current.isFile() || current.isSymbolicLink()
++      || !sameIdentity(statsIdentity(opened), statsIdentity(current))
++      || await realpath(path) !== path) throw new Error('custody');
++    return { kind: 'file', handle, dev: opened.dev, ino: opened.ino };
++  } catch (error) {
++    await handle.close();
++    throw error;
++  }
++}
++
++async function pinRemovableLeaf(path: string): Promise<RemovableLeafPin> {
++  try {
++    const pin = await pinDirectory(path);
++    return { kind: 'directory', ...pin };
++  } catch (directoryError) {
++    const code = (directoryError as NodeJS.ErrnoException).code;
++    if (code !== 'ENOTDIR' && code !== 'ELOOP' && code !== 'EINVAL') throw directoryError;
++  }
++  try { return await pinRegularFile(path); }
++  catch (fileError) {
++    const code = (fileError as NodeJS.ErrnoException).code;
++    if (code !== 'ELOOP' && code !== 'EINVAL') throw fileError;
++  }
++  const current = await lstat(path, { bigint: true });
++  if (!current.isSymbolicLink()) throw new Error('custody');
++  return { kind: 'symlink', dev: current.dev, ino: current.ino };
++}
++
++async function closeLeafPin(pin: RemovableLeafPin | undefined): Promise<void> {
++  if (pin?.kind === 'directory' || pin?.kind === 'file') await pin.handle.close();
++}
++
++async function leafPathMatches(pin: RemovableLeafPin, path: string): Promise<boolean> {
++  try {
++    if (pin.kind === 'directory') { await recheckPinnedDirectory(pin, path); return true; }
++    const current = await lstat(path, { bigint: true });
++    if (!sameIdentity(pin, statsIdentity(current))) return false;
++    if (pin.kind === 'symlink') return current.isSymbolicLink();
++    const opened = await pin.handle.stat({ bigint: true });
++    return opened.isFile() && current.isFile() && !current.isSymbolicLink()
++      && sameIdentity(pin, statsIdentity(opened)) && await realpath(path) === path;
++  } catch { return false; }
++}
++
++async function pinDirectoryChain(root: string, target: string): Promise<DirectoryPin[]> {
++  const canonicalRoot = resolve(root); const canonicalTarget = resolve(target);
++  const suffix = relative(canonicalRoot, canonicalTarget);
++  if (suffix === '..' || suffix.startsWith(`..${sep}`) || resolve(canonicalRoot, suffix) !== canonicalTarget) throw new Error('custody');
++  const pins: DirectoryPin[] = [];
++  try {
++    let component = canonicalRoot;
++    pins.push(await pinDirectory(component));
++    if (suffix !== '') for (const name of suffix.split(sep)) {
++      if (name === '' || name === '.' || name === '..') throw new Error('custody');
++      component = resolve(component, name);
++      pins.push(await pinDirectory(component));
++    }
++    await recheckDirectoryChain(pins, canonicalRoot, canonicalTarget);
++    return pins;
++  } catch (error) {
++    try { await closeDirectoryPins(pins); }
++    catch (closeError) { throw new AggregateError([error, closeError], 'custody'); }
++    throw error;
++  }
++}
++
++async function recheckDirectoryChain(pins: readonly DirectoryPin[], root: string, target: string): Promise<void> {
++  const suffix = relative(resolve(root), resolve(target));
++  const paths = [resolve(root), ...(suffix === '' ? [] : suffix.split(sep).map((_, index, names) => resolve(root, ...names.slice(0, index + 1))))];
++  if (paths.length !== pins.length) throw new Error('custody');
++  for (let index = 0; index < pins.length; index += 1) await recheckPinnedDirectory(pins[index]!, paths[index]!);
++}
++
++async function closeDirectoryPins(pins: readonly DirectoryPin[]): Promise<void> {
++  const errors: unknown[] = [];
++  for (const pin of [...pins].reverse()) try { await pin.handle.close(); } catch (error) { errors.push(error); }
++  if (errors.length > 0) throw new AggregateError(errors, 'custody');
++}
++
++async function removePinnedRegularFile(pin: RegularFilePin, path: string): Promise<void> {
++  if (!await leafPathMatches(pin, path)) throw new Error('custody');
++  await unlink(path);
++  await absentPath(path);
++  const opened = await pin.handle.stat({ bigint: true });
++  if (!opened.isFile() || !sameIdentity(pin, statsIdentity(opened))) throw new Error('custody');
++}
++
++async function removePinnedSymlink(pin: SymbolicLinkPin, path: string): Promise<void> {
++  const current = await lstat(path, { bigint: true });
++  if (!current.isSymbolicLink() || !sameIdentity(pin, statsIdentity(current))) throw new Error('custody');
++  await unlink(path);
++  await absentPath(path);
++}
++
++async function removePinnedFlatDirectory(pin: DirectoryLeafPin, path: string): Promise<void> {
++  await recheckPinnedDirectory(pin, path);
++  const entries = await readdir(path);
++  if (entries.length > MAX_FLAT_LEAF_CHILDREN) throw new Error('custody');
++  for (const name of entries) {
++    if (name === '' || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) throw new Error('custody');
++    await recheckPinnedDirectory(pin, path);
++    const childPath = resolve(path, name);
++    let childPin: RemovableLeafPin | undefined;
++    try {
++      childPin = await pinRemovableLeaf(childPath);
++      if (childPin.kind === 'directory') throw new Error('custody');
++      if (childPin.kind === 'file') await removePinnedRegularFile(childPin, childPath);
++      else await removePinnedSymlink(childPin, childPath);
++    } finally { await closeLeafPin(childPin); }
++  }
++  await verifiedRmdir(pin, path);
++}
++
++async function removePinnedLeaf(pin: RemovableLeafPin, path: string): Promise<void> {
++  if (pin.kind === 'directory') await removePinnedFlatDirectory(pin, path);
++  else if (pin.kind === 'file') await removePinnedRegularFile(pin, path);
++  else await removePinnedSymlink(pin, path);
++}
++
+ async function quarantineAnyLeaf(
+   custodyRoot: string,
+   parent: string,
+   path: string,
+-): Promise<{ quarantineParent: string; quarantine: string; identity: { dev: number | bigint; ino: number | bigint } }> {
+-  await validateDirectoryChain(parent, false, custodyRoot);
+-  const observed = await lstat(path, { bigint: true });
+-  const identity = { dev: observed.dev, ino: observed.ino };
+-  const quarantineParent = await mkdtemp(resolve(parent, '.ret010-quarantine-'));
+-  await validateDirectoryChain(quarantineParent, false, custodyRoot);
+-  const quarantine = resolve(quarantineParent, 'leaf');
+-  await absentPath(quarantine);
+-  await validateDirectoryChain(parent, false, custodyRoot);
+-  const immediate = await lstat(path, { bigint: true });
+-  if (immediate.dev !== identity.dev || immediate.ino !== identity.ino) throw new Error('custody');
+-  await rename(path, quarantine);
+-  const moved = await lstat(quarantine, { bigint: true });
+-  if (moved.dev !== identity.dev || moved.ino !== identity.ino) throw new Error('custody');
+-  await absentPath(path);
+-  return { quarantineParent, quarantine, identity };
++  beforeDelete?: MutationHook,
++): Promise<{ dev: bigint; ino: bigint }> {
++  const chainPins = await pinDirectoryChain(custodyRoot, parent);
++  let leafPin: RemovableLeafPin | undefined;
++  let quarantineParent: string | undefined;
++  let quarantineParentPin: DirectoryPin | undefined;
++  let quarantine: string | undefined;
++  let state: 'source' | 'quarantine' | 'removed' = 'source';
++  try {
++    leafPin = await pinRemovableLeaf(path);
++    const identity = { dev: leafPin.dev, ino: leafPin.ino };
++    if (leafPin.kind === 'directory') {
++      const children = await readdir(path);
++      if (children.length > MAX_FLAT_LEAF_CHILDREN) throw new Error('custody');
++      for (const name of children) if ((await lstat(resolve(path, name))).isDirectory()) throw new Error('custody');
++    }
++    quarantineParent = await mkdtemp(resolve(parent, '.ret010-quarantine-'));
++    quarantineParentPin = await pinDirectory(quarantineParent);
++    quarantine = resolve(quarantineParent, 'leaf');
++    await absentPath(quarantine);
++    await beforeDelete?.('before-rename', path);
++    await recheckDirectoryChain(chainPins, custodyRoot, parent);
++    await recheckPinnedDirectory(quarantineParentPin, quarantineParent);
++    if (!await leafPathMatches(leafPin, path)) throw new Error('custody');
++    await rename(path, quarantine);
++    state = 'quarantine';
++    await recheckDirectoryChain(chainPins, custodyRoot, parent);
++    await recheckPinnedDirectory(quarantineParentPin, quarantineParent);
++    if (!await leafPathMatches(leafPin, quarantine)) throw new Error('custody');
++    await absentPath(path);
++    await beforeDelete?.('before-delete', quarantine);
++    await recheckDirectoryChain(chainPins, custodyRoot, parent);
++    await recheckPinnedDirectory(quarantineParentPin, quarantineParent);
++    if (!await leafPathMatches(leafPin, quarantine)) throw new Error('custody');
++    await removePinnedLeaf(leafPin, quarantine);
++    state = 'removed';
++    await verifiedRmdir(quarantineParentPin, quarantineParent);
++    return identity;
++  } catch (error) {
++    const cleanupErrors: unknown[] = [];
++    const candidate = state === 'source' ? path : state === 'quarantine' ? quarantine : undefined;
++    if (leafPin && candidate && await leafPathMatches(leafPin, candidate)) {
++      try { await removePinnedLeaf(leafPin, candidate); state = 'removed'; }
++      catch (cleanupError) { cleanupErrors.push(cleanupError); }
++    } else if (state === 'quarantine' && quarantine) {
++      let racedPin: RemovableLeafPin | undefined;
++      try {
++        racedPin = await pinRemovableLeaf(quarantine);
++        await removePinnedLeaf(racedPin, quarantine);
++        state = 'removed';
++      } catch (cleanupError) {
++        if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') cleanupErrors.push(cleanupError);
++      } finally {
++        try { await closeLeafPin(racedPin); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
++      }
++    }
++    if (quarantineParentPin && quarantineParent) {
++      try { await verifiedRmdir(quarantineParentPin, quarantineParent); }
++      catch (cleanupError) { cleanupErrors.push(cleanupError); }
++    }
++    if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors], 'custody');
++    throw error;
++  } finally {
++    const closeErrors: unknown[] = [];
++    try { await closeLeafPin(leafPin); } catch (error) { closeErrors.push(error); }
++    if (quarantineParentPin) try { await quarantineParentPin.handle.close(); } catch (error) { closeErrors.push(error); }
++    try { await closeDirectoryPins(chainPins); } catch (error) { closeErrors.push(error); }
++    if (closeErrors.length > 0) throw new AggregateError(closeErrors, 'custody');
++  }
+ }
+ 
+ async function quarantineRemoveLeaf(
+@@ -259,80 +511,126 @@ async function quarantineRemoveLeaf(
+   path: string,
+   hook?: MutationHook,
+ ): Promise<void> {
+-  await validateDirectoryChain(parent, false, custodyRoot);
+-  const before = await directoryIdentity(path);
+-  await hook?.('before-rename', path);
+-  const moved = await quarantineAnyLeaf(custodyRoot, parent, path);
+-  if (!sameIdentity(before, moved.identity)) throw new Error('custody');
+-  const { quarantineParent, quarantine } = moved;
+-  await hook?.('before-delete', quarantine);
+-  await validateDirectoryChain(parent, false, custodyRoot);
+-  const final = await directoryIdentity(quarantine);
+-  if (!sameIdentity(before, final)) throw new Error('custody');
+-  await rm(quarantine, { recursive: true, force: false });
+-  await rm(quarantineParent, { recursive: false, force: false });
++  const before = await pinRemovableLeaf(path);
++  try {
++    await hook?.('pre-rename', path);
++    if (!await leafPathMatches(before, path)) throw new Error('custody');
++    const moved = await quarantineAnyLeaf(custodyRoot, parent, path, hook);
++    if (!sameIdentity(before, moved)) throw new Error('custody');
++  } catch (error) {
++    if (await leafPathMatches(before, path)) {
++      try { await quarantineAnyLeaf(custodyRoot, parent, path); }
++      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'custody'); }
++    }
++    throw error;
++  } finally {
++    await closeLeafPin(before);
++  }
+ }
+ 
+ export async function removeCustodyLeafForTest(root: string, parent: string, path: string, hook?: MutationHook): Promise<void> {
+   await quarantineRemoveLeaf(resolve(root), resolve(parent), resolve(path), hook);
+ }
+ 
+-async function cleanBoundary(): Promise<void> {
+-  await validateRunsRoot(true);
+-  await safeRemoveLeaf(OUTPUT_LEAF);
+-  await safeRemoveLeaf(STAGING_LEAF);
+-  await safeRemoveLeaf(FINALIZER_STAGING_LEAF);
+-  await validateRunsRoot(false);
++async function cleanBoundary(boundary: DevelopmentOutputBoundary): Promise<void> {
++  await validateRunsRoot(boundary, true);
++  await safeRemoveLeaf(boundary, boundary.outputLeaf);
++  await safeRemoveLeaf(boundary, boundary.stagingLeaf);
++  await safeRemoveLeaf(boundary, boundary.finalizerStagingLeaf);
++  await validateRunsRoot(boundary, false);
+ }
+ 
+ async function writeExclusive(path: string, bytes: Buffer): Promise<void> {
+-  const handle = await open(path, 'wx', 0o600);
+-  try { await handle.writeFile(bytes); } finally { await handle.close(); }
++  if (typeof fsConstants.O_NOFOLLOW !== 'number' || fsConstants.O_NOFOLLOW === 0) throw new Error('custody');
++  const handle = await open(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
++  try {
++    const opened = await handle.stat({ bigint: true });
++    const current = await lstat(path, { bigint: true });
++    if (!opened.isFile() || !current.isFile() || current.isSymbolicLink()
++      || !sameIdentity(statsIdentity(opened), statsIdentity(current)) || await realpath(path) !== path) throw new Error('custody');
++    await handle.writeFile(bytes);
++    const after = await handle.stat({ bigint: true }); const pathAfter = await lstat(path, { bigint: true });
++    if (!after.isFile() || !pathAfter.isFile() || pathAfter.isSymbolicLink()
++      || !sameIdentity(statsIdentity(opened), statsIdentity(after))
++      || !sameIdentity(statsIdentity(opened), statsIdentity(pathAfter)) || await realpath(path) !== path) throw new Error('custody');
++  } finally { await handle.close(); }
+ }
+ 
+ async function publishBundle(
+   records: Readonly<Record<string, JsonRecord>>,
++  boundary: DevelopmentOutputBoundary,
+   expectedIdentity?: CustodyIdentity,
+-  stagingLeaf = STAGING_LEAF,
++  stagingLeaf = boundary.stagingLeaf,
+ ): Promise<void> {
+-  await validateRunsRoot(false);
+-  await safeRemoveLeaf(stagingLeaf);
+-  await createVerifiedLeaf(REPO_ROOT, RUNS_ROOT, stagingLeaf);
+-  for (const [name, record] of Object.entries(records)) await writeExclusive(resolve(stagingLeaf, name), canonicalBytes(record));
+-  await verifyDirectory(stagingLeaf, Object.keys(records).sort());
+-  await validateDirectoryChain(stagingLeaf, false);
+-  await validateRunsRoot(false);
+-  try { await lstat(OUTPUT_LEAF); throw new Error('custody'); } catch (error) {
+-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
++  await validateRunsRoot(boundary, false);
++  await safeRemoveLeaf(boundary, stagingLeaf);
++  await createVerifiedLeaf(boundary.custodyRoot, boundary.runsRoot, stagingLeaf);
++  const publicationChainPins = await pinDirectoryChain(boundary.custodyRoot, boundary.runsRoot);
++  let publicationPin: DirectoryPin | undefined;
++  try {
++    publicationPin = await pinDirectory(stagingLeaf);
++    for (const [name, record] of Object.entries(records)) {
++      await recheckDirectoryChain(publicationChainPins, boundary.custodyRoot, boundary.runsRoot);
++      await recheckPinnedDirectory(publicationPin, stagingLeaf);
++      await writeExclusive(resolve(stagingLeaf, name), canonicalBytes(record));
++      await recheckDirectoryChain(publicationChainPins, boundary.custodyRoot, boundary.runsRoot);
++      await recheckPinnedDirectory(publicationPin, stagingLeaf);
++    }
++    await verifyDirectory(stagingLeaf, Object.keys(records).sort());
++    await recheckPinnedDirectory(publicationPin, stagingLeaf);
++    await validateDirectoryChain(stagingLeaf, false, boundary.custodyRoot);
++    await validateRunsRoot(boundary, false);
++    try { await lstat(boundary.outputLeaf); throw new Error('custody'); } catch (error) {
++      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
++    }
++    await renameVerifiedLeaf(
++      boundary.custodyRoot, boundary.runsRoot, stagingLeaf, boundary.outputLeaf, undefined,
++      expectedIdentity ? async () => {
++        await assertSourceIntegrity(expectedIdentity.gitCommit);
++        if (JSON.stringify(environmentIdentity()) !== JSON.stringify(expectedIdentity)) throw new Error('custody');
++        await validateRunsRoot(boundary, false);
++        await absentPath(boundary.outputLeaf);
++      } : undefined,
++    );
++    await recheckDirectoryChain(publicationChainPins, boundary.custodyRoot, boundary.runsRoot);
++    await recheckPinnedDirectory(publicationPin, boundary.outputLeaf);
++    await verifyDirectory(boundary.outputLeaf, Object.keys(records).sort());
++  } finally {
++    const closeErrors: unknown[] = [];
++    if (publicationPin) try { await publicationPin.handle.close(); } catch (error) { closeErrors.push(error); }
++    try { await closeDirectoryPins(publicationChainPins); } catch (error) { closeErrors.push(error); }
++    if (closeErrors.length > 0) throw new AggregateError(closeErrors, 'custody');
+   }
+-  await renameVerifiedLeaf(
+-    REPO_ROOT, RUNS_ROOT, stagingLeaf, OUTPUT_LEAF, undefined,
+-    expectedIdentity ? async () => {
+-      await assertSourceIntegrity(expectedIdentity.gitCommit);
+-      if (JSON.stringify(environmentIdentity()) !== JSON.stringify(expectedIdentity)) throw new Error('custody');
+-      await validateRunsRoot(false);
+-      await absentPath(OUTPUT_LEAF);
+-    } : undefined,
+-  );
+-  await verifyDirectory(OUTPUT_LEAF, Object.keys(records).sort());
+ }
+ 
+ async function createVerifiedLeaf(custodyRoot: string, parent: string, path: string, hook?: MutationHook): Promise<void> {
+-  await validateDirectoryChain(parent, false, custodyRoot);
+-  await mkdir(path);
+-  await hook?.('after-create', path);
++  const chainPins = await pinDirectoryChain(custodyRoot, parent);
++  let created: DirectoryPin | undefined;
+   try {
+-    await validateDirectoryChain(path, false, custodyRoot);
+-    await directoryIdentity(path);
++    await mkdir(path);
++    created = await pinDirectory(path);
++    await hook?.('after-create', path);
++    await recheckDirectoryChain(chainPins, custodyRoot, parent);
++    await recheckPinnedDirectory(created, path);
+   } catch (error) {
+-    try {
+-      const info = await lstat(path);
+-      if (info.isSymbolicLink() || !info.isDirectory()) await rm(path, { force: true, recursive: false });
+-      else {
+-        await quarantineAnyLeaf(custodyRoot, parent, path);
+-      }
+-    } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'custody'); }
++    if (created && await leafPathMatches({ kind: 'directory', ...created }, path)) {
++      try { await removePinnedFlatDirectory({ kind: 'directory', ...created }, path); }
++      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'custody'); }
++    } else {
++      let racedPin: RemovableLeafPin | undefined;
++      try {
++        racedPin = await pinRemovableLeaf(path);
++        if (racedPin.kind === 'symlink') await removePinnedSymlink(racedPin, path);
++      } catch (cleanupError) {
++        if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') throw new AggregateError([error, cleanupError], 'custody');
++      } finally { await closeLeafPin(racedPin); }
++    }
+     throw error;
++  } finally {
++    const closeErrors: unknown[] = [];
++    if (created) try { await created.handle.close(); } catch (error) { closeErrors.push(error); }
++    try { await closeDirectoryPins(chainPins); } catch (error) { closeErrors.push(error); }
++    if (closeErrors.length > 0) throw new AggregateError(closeErrors, 'custody');
+   }
+ }
+ 
+@@ -344,32 +642,41 @@ async function renameVerifiedLeaf(
+   hook?: MutationHook,
+   preRename?: () => Promise<void>,
+ ): Promise<void> {
+-  await validateDirectoryChain(parent, false, custodyRoot);
+-  const identity = await directoryIdentity(source);
+-  await hook?.('before-publish', source);
+-  await validateDirectoryChain(parent, false, custodyRoot);
+-  await preRename?.();
+-  await validateDirectoryChain(parent, false, custodyRoot);
+-  let immediate: { dev: number | bigint; ino: number | bigint };
+-  try { immediate = await directoryIdentity(source); }
+-  catch (error) {
+-    try { await quarantineAnyLeaf(custodyRoot, parent, source); }
+-    catch (cleanupError) { throw new AggregateError([error, cleanupError], 'custody'); }
+-    throw error;
+-  }
+-  if (!sameIdentity(identity, immediate)) {
+-    await quarantineAnyLeaf(custodyRoot, parent, source);
+-    throw new Error('custody');
+-  }
+-  await absentPath(destination);
+-  await rename(source, destination);
++  const chainPins = await pinDirectoryChain(custodyRoot, parent);
++  let sourcePin: RemovableLeafPin | undefined;
++  let state: 'before-rename' | 'after-rename' | 'verified' = 'before-rename';
+   try {
+-    await validateDirectoryChain(destination, false, custodyRoot);
+-    if (!sameIdentity(identity, await directoryIdentity(destination))) throw new Error('custody');
++    sourcePin = await pinRemovableLeaf(source);
++    await hook?.('before-publish', source);
++    await recheckDirectoryChain(chainPins, custodyRoot, parent);
++    if (!await leafPathMatches(sourcePin, source)) throw new Error('custody');
++    await preRename?.();
++    await hook?.('pre-rename', source);
++    await recheckDirectoryChain(chainPins, custodyRoot, parent);
++    if (!await leafPathMatches(sourcePin, source)) throw new Error('custody');
++    await absentPath(destination);
++    await rename(source, destination);
++    state = 'after-rename';
++    await recheckDirectoryChain(chainPins, custodyRoot, parent);
++    if (!await leafPathMatches(sourcePin, destination)) throw new Error('custody');
++    await hook?.('after-final-check', destination);
++    await recheckDirectoryChain(chainPins, custodyRoot, parent);
++    if (!await leafPathMatches(sourcePin, destination)) throw new Error('custody');
++    state = 'verified';
+   } catch (error) {
+-    try { await quarantineAnyLeaf(custodyRoot, parent, destination); }
+-    catch (cleanupError) { throw new AggregateError([error, cleanupError], 'custody'); }
++    const cleanupErrors: unknown[] = [];
++    const candidate = state === 'before-rename' ? source : destination;
++    if (sourcePin && await leafPathMatches(sourcePin, candidate)) {
++      try { await removePinnedLeaf(sourcePin, candidate); }
++      catch (cleanupError) { cleanupErrors.push(cleanupError); }
++    }
++    if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors], 'custody');
+     throw error;
++  } finally {
++    const closeErrors: unknown[] = [];
++    try { await closeLeafPin(sourcePin); } catch (error) { closeErrors.push(error); }
++    try { await closeDirectoryPins(chainPins); } catch (error) { closeErrors.push(error); }
++    if (closeErrors.length > 0) throw new AggregateError(closeErrors, 'custody');
+   }
+ }
+ 
+@@ -388,30 +695,30 @@ export async function renameCustodyLeafForTest(root: string, parent: string, sou
+ }
+ 
+ async function verifyDirectory(root: string, allowlist: readonly string[]): Promise<Record<string, Buffer>> {
+-  const rootIdentity = await directoryIdentity(root);
+-  const entries = await readdir(root);
+-  if (JSON.stringify(entries.sort()) !== JSON.stringify([...allowlist].sort())) throw new Error('artifact');
+-  const verified: Record<string, Buffer> = {};
+-  for (const name of entries) {
+-    const path = resolve(root, name);
+-    const info = await lstat(path, { bigint: true });
+-    if (!info.isFile() || info.isSymbolicLink() || await realpath(path) !== path) throw new Error('artifact');
+-    const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+-    let bytes: Buffer;
+-    try {
+-      const opened = await handle.stat({ bigint: true });
+-      if (!opened.isFile() || info.dev !== opened.dev || info.ino !== opened.ino) throw new Error('artifact');
+-      bytes = await handle.readFile();
+-      const after = await handle.stat({ bigint: true });
+-      if (!after.isFile() || info.dev !== after.dev || info.ino !== after.ino) throw new Error('artifact');
+-    } finally { await handle.close(); }
+-    if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) throw new Error('artifact');
+-    const parsed = JSON.parse(bytes.toString('utf8')) as unknown;
+-    if (!isRecord(parsed) || !bytes.equals(canonicalBytes(parsed))) throw new Error('artifact');
+-    verified[name] = bytes;
+-  }
+-  if (!sameIdentity(rootIdentity, await directoryIdentity(root))) throw new Error('artifact');
+-  return verified;
++  const rootPin = await pinDirectory(root);
++  try {
++    const entries = await readdir(root);
++    if (JSON.stringify(entries.sort()) !== JSON.stringify([...allowlist].sort())) throw new Error('artifact');
++    const verified: Record<string, Buffer> = {};
++    for (const name of entries) {
++      await recheckPinnedDirectory(rootPin, root);
++      const path = resolve(root, name);
++      let filePin: RegularFilePin | undefined;
++      let bytes: Buffer;
++      try {
++        filePin = await pinRegularFile(path);
++        bytes = await filePin.handle.readFile();
++        if (!await leafPathMatches(filePin, path)) throw new Error('artifact');
++        await recheckPinnedDirectory(rootPin, root);
++      } finally { if (filePin) await filePin.handle.close(); }
++      if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) throw new Error('artifact');
++      const parsed = JSON.parse(bytes.toString('utf8')) as unknown;
++      if (!isRecord(parsed) || !bytes.equals(canonicalBytes(parsed))) throw new Error('artifact');
++      verified[name] = bytes;
++    }
++    await recheckPinnedDirectory(rootPin, root);
++    return verified;
++  } finally { await rootPin.handle.close(); }
+ }
+ 
+ function gitOutput(args: readonly string[]): Buffer {
+@@ -758,10 +1065,11 @@ export function validateFailureTombstoneForTest(value: unknown): void {
+ async function publishFailure(
+   identity: CustodyIdentity,
+   context: FailureContext,
+-  stagingLeaf = STAGING_LEAF,
++  boundary: DevelopmentOutputBoundary,
++  stagingLeaf = boundary.stagingLeaf,
+ ): Promise<void> {
+-  await cleanBoundary();
+-  await publishBundle({ [FAILURE_FILE]: tombstone(identity, context) }, identity, stagingLeaf);
++  await cleanBoundary(boundary);
++  await publishBundle({ [FAILURE_FILE]: tombstone(identity, context) }, boundary, identity, stagingLeaf);
+ }
+ 
+ export interface FailureBoundaryDependencies {
+@@ -788,31 +1096,33 @@ async function ensureFailureBoundary(dependencies: FailureBoundaryDependencies):
+   }
+ }
+ 
+-async function validateCurrentFailure(identity: CustodyIdentity, context: FailureContext): Promise<void> {
+-  const verified = await verifyDirectory(OUTPUT_LEAF, [FAILURE_FILE]);
++async function validateCurrentFailure(identity: CustodyIdentity, context: FailureContext, boundary: DevelopmentOutputBoundary): Promise<void> {
++  const verified = await verifyDirectory(boundary.outputLeaf, [FAILURE_FILE]);
+   const value = parseCanonical(verified[FAILURE_FILE]!);
+   validateFailureTombstoneForTest(value);
+   if (!canonicalBytes(value).equals(canonicalBytes(tombstone(identity, context)))) throw new Error('custody');
+-  await absentPath(STAGING_LEAF);
+-  await absentPath(FINALIZER_STAGING_LEAF);
++  await absentPath(boundary.stagingLeaf);
++  await absentPath(boundary.finalizerStagingLeaf);
+ }
+ 
+-async function provePublicLeavesAbsent(): Promise<void> {
+-  await validateRunsRoot(false);
+-  await absentPath(OUTPUT_LEAF);
+-  await absentPath(STAGING_LEAF);
+-  await absentPath(FINALIZER_STAGING_LEAF);
++async function provePublicLeavesAbsent(boundary: DevelopmentOutputBoundary): Promise<void> {
++  await validateRunsRoot(boundary, false);
++  await absentPath(boundary.outputLeaf);
++  await absentPath(boundary.stagingLeaf);
++  await absentPath(boundary.finalizerStagingLeaf);
+ }
+ 
+-async function publishFailureOrProveAbsent(identity: CustodyIdentity, context: FailureContext): Promise<'tombstone' | 'absent'> {
++async function publishFailureOrProveAbsent(identity: CustodyIdentity, context: FailureContext, boundary: DevelopmentOutputBoundary): Promise<'tombstone' | 'absent'> {
+   return ensureFailureBoundary({
+-    publish: async () => publishFailure(identity, context),
+-    validateCurrent: async () => validateCurrentFailure(identity, context),
+-    primaryCleanup: cleanBoundary,
++    publish: async () => publishFailure(identity, context, boundary),
++    validateCurrent: async () => validateCurrentFailure(identity, context, boundary),
++    primaryCleanup: async () => cleanBoundary(boundary),
+     fallbackCleanup: async () => {
+-      await safeRemoveLeaf(OUTPUT_LEAF); await safeRemoveLeaf(STAGING_LEAF); await safeRemoveLeaf(FINALIZER_STAGING_LEAF);
++      await safeRemoveLeaf(boundary, boundary.outputLeaf);
++      await safeRemoveLeaf(boundary, boundary.stagingLeaf);
++      await safeRemoveLeaf(boundary, boundary.finalizerStagingLeaf);
+     },
+-    proveAbsent: provePublicLeavesAbsent,
++    proveAbsent: async () => provePublicLeavesAbsent(boundary),
+   });
+ }
+ 
+@@ -859,18 +1169,18 @@ export async function finalizeFailureBoundaryForTest(dependencies: FinalizerFail
+   await finalizeFailureBoundary(dependencies);
+ }
+ 
+-async function finalizeCurrentFailure(identity: CustodyIdentity, context: FailureContext): Promise<void> {
+-  await validateRunsRoot(true);
++async function finalizeCurrentFailure(identity: CustodyIdentity, context: FailureContext, boundary: DevelopmentOutputBoundary): Promise<void> {
++  await validateRunsRoot(boundary, true);
+   await finalizeFailureBoundary({
+-    cleanupPublic: async () => safeRemoveLeaf(OUTPUT_LEAF),
+-    cleanupGateStage: async () => safeRemoveLeaf(STAGING_LEAF),
+-    cleanupFinalizerStage: async () => safeRemoveLeaf(FINALIZER_STAGING_LEAF),
++    cleanupPublic: async () => safeRemoveLeaf(boundary, boundary.outputLeaf),
++    cleanupGateStage: async () => safeRemoveLeaf(boundary, boundary.stagingLeaf),
++    cleanupFinalizerStage: async () => safeRemoveLeaf(boundary, boundary.finalizerStagingLeaf),
+     publishCurrentTombstone: async () => {
+-      await publishBundle({ [FAILURE_FILE]: tombstone(identity, context) }, identity, FINALIZER_STAGING_LEAF);
++      await publishBundle({ [FAILURE_FILE]: tombstone(identity, context) }, boundary, identity, boundary.finalizerStagingLeaf);
+     },
+-    verifyCurrentTombstone: async () => validateCurrentFailure(identity, context),
+-    proveAllStagingAbsent: async () => { await absentPath(STAGING_LEAF); await absentPath(FINALIZER_STAGING_LEAF); },
+-    proveAllAbsent: provePublicLeavesAbsent,
++    verifyCurrentTombstone: async () => validateCurrentFailure(identity, context, boundary),
++    proveAllStagingAbsent: async () => { await absentPath(boundary.stagingLeaf); await absentPath(boundary.finalizerStagingLeaf); },
++    proveAllAbsent: async () => provePublicLeavesAbsent(boundary),
+   });
+ }
+ 
+@@ -882,7 +1192,10 @@ export interface DevelopmentRunHooks {
+   suppressProcessFailure?: boolean;
+ }
+ 
+-export async function runDevelopment(hooks: DevelopmentRunHooks = {}): Promise<'passed' | 'failed'> {
++export async function runDevelopment(
++  hooks: DevelopmentRunHooks = {},
++  boundary: DevelopmentOutputBoundary = DEFAULT_OUTPUT_BOUNDARY,
++): Promise<'passed' | 'failed'> {
+   let identity: CustodyIdentity | undefined;
+   let context: FailureContext = { failureClass: 'custody', stage: 'source-integrity' };
+   const stdoutWrite = process.stdout.write;
+@@ -904,7 +1217,7 @@ export async function runDevelopment(hooks: DevelopmentRunHooks = {}): Promise<'
+   };
+   try {
+     identity = environmentIdentity();
+-    await cleanBoundary();
++    await cleanBoundary(boundary);
+     await enter(context);
+     const head = await assertSourceIntegrity(identity.gitCommit);
+     await enter({ failureClass: 'custody', stage: 'registry' });
+@@ -1011,7 +1324,7 @@ export async function runDevelopment(hooks: DevelopmentRunHooks = {}): Promise<'
+       'recall-lane.json': recall, 'precision-lane.json': precision,
+       'efficiency-interval.json': interval, 'aggregate-result.json': aggregate,
+       'custody-manifest.json': manifest,
+-    }, identity);
++    }, boundary, identity);
+     restoreOutput();
+     await hooks.onSuppressedOutput?.(suppressedStdout, suppressedStderr);
+     return 'passed';
+@@ -1019,8 +1332,8 @@ export async function runDevelopment(hooks: DevelopmentRunHooks = {}): Promise<'
+     context = failureContext(error, context);
+     let boundaryError: unknown;
+     try {
+-      if (identity !== undefined) await publishFailureOrProveAbsent(identity, context);
+-      else { await cleanBoundary(); await provePublicLeavesAbsent(); }
++      if (identity !== undefined) await publishFailureOrProveAbsent(identity, context, boundary);
++      else { await cleanBoundary(boundary); await provePublicLeavesAbsent(boundary); }
+     } catch (failure) { boundaryError = failure; }
+     try { await hooks.onFailure?.(context); } finally { restoreOutput(); }
+     await hooks.onSuppressedOutput?.(suppressedStdout, suppressedStderr);
+@@ -1342,36 +1655,42 @@ export async function verifyDevelopmentBundles(
+   };
+ }
+ 
+-export async function finalizeCurrentRun(gateSucceeded: boolean): Promise<void> {
++export async function finalizeCurrentRun(
++  gateSucceeded: boolean,
++  boundary: DevelopmentOutputBoundary = DEFAULT_OUTPUT_BOUNDARY,
++): Promise<void> {
+   const identity = environmentIdentity();
+   try {
+     if (!gateSucceeded) {
+-      await finalizeCurrentFailure(identity, { failureClass: 'custody', stage: 'artifact' });
++      await finalizeCurrentFailure(identity, { failureClass: 'custody', stage: 'artifact' }, boundary);
+       return;
+     }
+     const head = await assertSourceIntegrity(identity.gitCommit);
+     if (head !== identity.gitCommit) throw new Error('custody');
+-    await validateRunsRoot(false);
+-    await validateDirectoryChain(OUTPUT_LEAF, false);
+-    await validateCurrentHeadSuccessBundle(OUTPUT_LEAF, identity);
++    await validateRunsRoot(boundary, false);
++    await validateDirectoryChain(boundary.outputLeaf, false, boundary.custodyRoot);
++    await validateCurrentHeadSuccessBundle(boundary.outputLeaf, identity);
+     const currentIdentity = environmentIdentity();
+     if (JSON.stringify(currentIdentity) !== JSON.stringify(identity)) throw new Error('custody');
+     await assertSourceIntegrity(identity.gitCommit);
+-    await validateRunsRoot(false);
+-    await validateDirectoryChain(OUTPUT_LEAF, false);
+-    await validateCurrentHeadSuccessBundle(OUTPUT_LEAF, identity);
++    await validateRunsRoot(boundary, false);
++    await validateDirectoryChain(boundary.outputLeaf, false, boundary.custodyRoot);
++    await validateCurrentHeadSuccessBundle(boundary.outputLeaf, identity);
+   } catch (error) {
+-    try { await finalizeCurrentFailure(identity, failureContext(error, { failureClass: 'custody', stage: 'artifact' })); }
++    try { await finalizeCurrentFailure(identity, failureContext(error, { failureClass: 'custody', stage: 'artifact' }), boundary); }
+     catch (finalizerError) { throw new AggregateError([error, finalizerError], 'custody'); }
+     throw new Error('custody');
+   }
+ }
+ 
+-async function main(): Promise<void> {
+-  const [mode, ...args] = process.argv.slice(2);
+-  if (mode === 'run') { await runDevelopment(); return; }
++export async function runDevGateCliForTest(
++  argv: readonly string[],
++  boundary: DevelopmentOutputBoundary = DEFAULT_OUTPUT_BOUNDARY,
++): Promise<void> {
++  const [mode, ...args] = argv;
++  if (mode === 'run') { await runDevelopment({}, boundary); return; }
+   if (mode === 'finalize') {
+-    try { await finalizeCurrentRun(args[0] === 'success'); }
++    try { await finalizeCurrentRun(args[0] === 'success', boundary); }
+     catch { process.stderr.write(SAFE_FAILURE); process.exitCode = 1; }
+     return;
+   }
+@@ -1384,4 +1703,10 @@ async function main(): Promise<void> {
+   process.exitCode = 1;
+ }
+ 
+-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
++async function main(): Promise<void> {
++  await runDevGateCliForTest(process.argv.slice(2));
++}
++
++if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
++  main().catch(() => { process.stderr.write(SAFE_FAILURE); process.exitCode = 1; });
++}

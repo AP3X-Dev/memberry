@@ -1,0 +1,2387 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 6c5042d..0c4c0c1 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -57,11 +57,29 @@ jobs:
+       # against the independent control over physically separated dev/holdout oracles.
+       # It is deliberately offline; external datasets and live adapters run separately.
+       - name: Evaluation-lab deterministic gate
++        id: ret010_development_gate
+         run: npm run bench:lab:ci
+         env:
+           REDIS_URL: ""
+           NEO4J_URI: ""
+ 
++      - name: Finalize RET-010 development custody
++        id: ret010_finalize
++        if: ${{ always() }}
++        env:
++          RET010_DEVELOPMENT_GATE_OUTCOME: ${{ steps.ret010_development_gate.outcome }}
++        run: node --import tsx bench/lab/ret010/dev-gate.ts finalize
++
++      - name: Upload RET-010 development custody
++        if: ${{ always() && steps.ret010_finalize.outcome == 'success' && steps.ret010_finalize.outputs.upload_path != '' }}
++        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
++        with:
++          name: memberry-ret010-development-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}
++          path: ${{ steps.ret010_finalize.outputs.upload_path }}
++          if-no-files-found: error
++          include-hidden-files: true
++          retention-days: 14
++
+   # Full job: integration tests with Redis + Neo4j service containers
+   integration:
+     runs-on: ubuntu-latest
+diff --git a/bench/lab/__tests__/memberry-retrieval-core.test.ts b/bench/lab/__tests__/memberry-retrieval-core.test.ts
+index aa62454..d0f19cc 100644
+--- a/bench/lab/__tests__/memberry-retrieval-core.test.ts
++++ b/bench/lab/__tests__/memberry-retrieval-core.test.ts
+@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
+ 
+ import type { LabMemory, LabNamespace, LabQueryResult } from '../contracts/adapter.js';
+ import { MemBerryProxyAdapter } from '../adapters/memberry-proxy.js';
+-import { MemBerryRetrievalCoreAdapter } from '../adapters/memberry-retrieval-core.js';
++import { createDisabledRetrievalCore, createServedRetrievalCore, MemBerryRetrievalCoreAdapter, projectAssemblyResults } from '../adapters/memberry-retrieval-core.js';
+ import { loadG2HoldoutScenarioInputs } from '../datasets/load-suite.js';
+ import { TEMPORAL_ISOLATION_SCENARIOS } from '../fixtures/temporal-isolation.js';
+ import { auditAdapterDependencies, compareRegisteredAdapters } from '../registered-adapters.js';
+@@ -212,6 +212,43 @@ describe('LAB-010 production retrieval adapter', () => {
+     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+   });
+ 
++  it('RET-010E binds distinct disabled and served identities to the production path', async () => {
++    const disabled = createDisabledRetrievalCore();
++    const served = createServedRetrievalCore();
++    expect(disabled.id).toBe('memberry-retrieval-core-disabled-v1');
++    expect(served.id).toBe('memberry-retrieval-core-served-v1');
++    const corpus: readonly LabMemory[] = [
++      { id: 'alpha-first', content: 'noise', kind: 'fact', recordedAt: '2026-08-01T00:00:00.000Z' },
++      { id: 'target-second', content: 'zebra', kind: 'fact', recordedAt: '2026-08-01T00:00:01.000Z' },
++    ];
++    await disabled.ingest({ namespace: NAMESPACE, memories: corpus });
++    await served.ingest({ namespace: NAMESPACE, memories: corpus });
++    const request = { namespace: NAMESPACE, query: 'zebra', limit: 2 };
++    const control = await disabled.query(request);
++    const candidate = await served.query(request);
++    expect(control.results).toEqual([
++      { id: 'target-second', score: 0.016450541918145017 },
++      { id: 'alpha-first', score: 0.01639344262295082 },
++    ]);
++    expect(candidate.results).toEqual([
++      { id: 'target-second', score: 0.29842 },
++      { id: 'alpha-first', score: 0.002459 },
++    ]);
++    expect(candidate.results).not.toEqual(control.results);
++    expect(new (MemBerryRetrievalCoreAdapter as any)('served').id).toBe('memberry-retrieval-core-v1');
++  });
++
++  it('RET-010E preserves interleaved-source presentation and equal-score cutoffs exactly', () => {
++    expect(projectAssemblyResults([
++      { items: [{ id: 'memory-z', score: 0.5 }, { id: 'memory-a', score: 0.5 }] },
++      { items: [{ id: 'code-first', score: 0.9 }, { id: 'code-second', score: 0.4 }] },
++    ], 3)).toEqual([
++      { id: 'memory-z', score: 0.5 },
++      { id: 'memory-a', score: 0.5 },
++      { id: 'code-first', score: 0.9 },
++    ]);
++  });
++
+   it('LAB-011 keeps code retrieval enabled for a named namespace through default-tenant assembly', async () => {
+     const source = await readFile(resolve(REPO_ROOT, ADAPTER_ENTRY), 'utf8');
+     expect(source).not.toContain('forces the code channel OFF');
+diff --git a/bench/lab/__tests__/registered-adapters.test.ts b/bench/lab/__tests__/registered-adapters.test.ts
+index 24a00cc..2dbea5c 100644
+--- a/bench/lab/__tests__/registered-adapters.test.ts
++++ b/bench/lab/__tests__/registered-adapters.test.ts
+@@ -36,6 +36,28 @@ function manifest(runId: string) {
+ }
+ 
+ describe('registered adapter evidence boundary', () => {
++  it('registers both RET-010E production-path development arms', async () => {
++    const root = resolve(import.meta.dirname, '..', '..', '..');
++    const source = JSON.parse(await readFile(resolve(root, 'bench/lab/registry/systems.json'), 'utf8')) as {
++      systems: Array<{ id: string; adapter: string; requiredInCi: boolean }>;
++    };
++    for (const id of ['memberry-retrieval-core-disabled-v1', 'memberry-retrieval-core-served-v1']) {
++      expect(source.systems).toContainEqual(expect.objectContaining({
++        id, adapter: 'bench/lab/adapters/memberry-retrieval-core.ts', requiredInCi: true,
++      }));
++    }
++    const options = { scenarios: TEMPORAL_ISOLATION_SCENARIOS.slice(0, 1), repoRoot: root };
++    const disabled = await compareRegisteredAdapters({
++      ...options, runId: 'ret010e-disabled-registration',
++      controlId: 'scope-aware-bm25-control-v1', candidateId: 'memberry-retrieval-core-disabled-v1',
++    });
++    const served = await compareRegisteredAdapters({
++      ...options, runId: 'ret010e-served-registration',
++      controlId: 'scope-aware-bm25-control-v1', candidateId: 'memberry-retrieval-core-served-v1',
++    });
++    expect(disabled.candidate.adapterId).toBe('memberry-retrieval-core-disabled-v1');
++    expect(served.candidate.adapterId).toBe('memberry-retrieval-core-served-v1');
++  });
+   it('audits the real candidate graph without granting oracle or filesystem access', async () => {
+     const root = resolve(import.meta.dirname, '..', '..', '..');
+     const audit = await auditAdapterDependencies(resolve(root, 'bench/lab/adapters/memberry-proxy.ts'), root);
+diff --git a/bench/lab/adapters/memberry-retrieval-core.ts b/bench/lab/adapters/memberry-retrieval-core.ts
+index 3ceda0b..10c4960 100644
+--- a/bench/lab/adapters/memberry-retrieval-core.ts
++++ b/bench/lab/adapters/memberry-retrieval-core.ts
+@@ -22,6 +22,7 @@
+ import type {
+   AdapterCapability,
+   LabMemory,
++  LabQueryResult,
+   QueryRequest,
+   QueryResponse,
+ } from '../contracts/adapter.js';
+@@ -32,6 +33,7 @@ import {
+   type AssemblerMemoryLayer,
+ } from '../../../packages/retrieval/src/assembler.js';
+ import type { FeedbackRedisLayer } from '../../../packages/retrieval/src/feedback.js';
++import { createServedRerankerProviderV1 } from '../../../packages/retrieval/src/served-reranker.js';
+ 
+ /** assembler.ts MAX_ASSEMBLER_MEMORY_SOURCES. */
+ const MAX_MEMORY_SOURCES = 512;
+@@ -168,15 +170,61 @@ function fixtureLayers(memories: readonly LabMemory[]): {
+   };
+ }
+ 
++/** Preserve the assembler's post-budget production presentation order exactly. */
++export function projectAssemblyResults(
++  sections: readonly { items: readonly { id: string; score: number }[] }[],
++  limit: number,
++): LabQueryResult[] {
++  return sections.flatMap((section) => section.items)
++    .map((item) => ({ id: item.id, score: item.score }))
++    .slice(0, limit);
++}
++
++export let createDisabledRetrievalCore: () => MemBerryRetrievalCoreAdapter;
++export let createServedRetrievalCore: () => MemBerryRetrievalCoreAdapter;
++
+ /** Scores the production retrieval assembler over a fixture-persisted corpus. */
+ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
+-  readonly id: string = 'memberry-retrieval-core-v1';
+-  readonly displayName: string = 'MemBerry production retrieval core';
++  id!: string;
++  displayName!: string;
+   readonly executionMode = 'fixture' as const;
+   readonly capabilities: ReadonlySet<AdapterCapability> = new Set([
+     'namespaces', 'feedback', 'stats', 'cleanup', 'project-scope', 'tenant-scope', 'temporal-filtering',
+   ]);
+ 
++  private rerankerMode: 'legacy' | 'disabled' | 'served' = 'legacy';
++
++  constructor() {
++    super();
++    this.bindIdentity();
++  }
++
++  private static exact(mode: 'disabled' | 'served'): MemBerryRetrievalCoreAdapter {
++    const adapter = new MemBerryRetrievalCoreAdapter();
++    adapter.rerankerMode = mode;
++    adapter.bindIdentity();
++    return adapter;
++  }
++
++  static {
++    createDisabledRetrievalCore = () => MemBerryRetrievalCoreAdapter.exact('disabled');
++    createServedRetrievalCore = () => MemBerryRetrievalCoreAdapter.exact('served');
++  }
++
++  private bindIdentity(): void {
++    const rerankerMode = this.rerankerMode;
++    this.id = rerankerMode === 'disabled'
++      ? 'memberry-retrieval-core-disabled-v1'
++      : rerankerMode === 'served'
++        ? 'memberry-retrieval-core-served-v1'
++        : 'memberry-retrieval-core-v1';
++    this.displayName = rerankerMode === 'served'
++      ? 'MemBerry production retrieval core (served reranker)'
++      : rerankerMode === 'disabled'
++        ? 'MemBerry production retrieval core (reranker disabled)'
++        : 'MemBerry production retrieval core';
++  }
++
+   async query(request: QueryRequest): Promise<QueryResponse> {
+     this.queryCount += 1;
+     const scoped = (this.stores.get(namespaceKey(request.namespace)) ?? [])
+@@ -192,6 +240,8 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
+       layers.codeLayer,
+       layers.memoryLayer,
+       FIXTURE_EMBEDDING,
++      null,
++      this.rerankerMode === 'served' ? createServedRerankerProviderV1() : null,
+     );
+     // 'ranked', never 'auto': 'auto' would route through classifyIntent, whose
+     // decision depends on this fixture embedding provider and can select GRAPH,
+@@ -206,17 +256,13 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
+       include_arch: false,
+       include_memory: true,
+       max_tokens: request.tokenBudget ?? DEFAULT_MAX_TOKENS,
++      ...(this.rerankerMode === 'disabled' ? { servedRerankerDisabled: true as const } : {}),
+     });
+     // Only id and score cross this boundary. context.assembled_at is wall clock,
+     // and nothing derived from it may enter a lab result.
+     //
+-    // groupAndBudget emits sections grouped by source_type, which is presentation
+-    // order, not rank; sorting by the assembler's own final score recovers the
+-    // ranking it actually produced. The id tie-break keeps that total.
+-    const ranked = context.sections
+-      .flatMap((section) => section.items)
+-      .map((item) => ({ id: item.id, score: item.score }))
+-      .sort((left, right) => right.score - left.score || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+-    return { results: ranked.slice(0, request.limit) };
++    // groupAndBudget's section/item traversal is the production presentation and
++    // budget order. Re-sorting here would create a benchmark-only result path.
++    return { results: projectAssemblyResults(context.sections, request.limit) };
+   }
+ }
+diff --git a/bench/lab/baselines/__tests__/ci-gate-binding.test.ts b/bench/lab/baselines/__tests__/ci-gate-binding.test.ts
+index c13b0db..79a2e2d 100644
+--- a/bench/lab/baselines/__tests__/ci-gate-binding.test.ts
++++ b/bench/lab/baselines/__tests__/ci-gate-binding.test.ts
+@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
+ 
+ const REPO_ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
+ const CI_GATE = resolve(REPO_ROOT, 'bench/lab/baselines/ci-gate.ts');
++const CI_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/ci.yml');
+ 
+ function namedProperty(object: ts.ObjectLiteralExpression, name: string): ts.PropertyAssignment {
+   const property = object.properties.find((candidate): candidate is ts.PropertyAssignment => {
+@@ -171,3 +172,35 @@ describe('LAB-011 G2 production binding', () => {
+     }
+   });
+ });
++
++describe('RET-010E development evaluation binding', () => {
++  it('runs the development evaluator once as the isolated final child', async () => {
++    const source = await readFile(CI_GATE, 'utf8');
++    expect(source.match(/spawnSync\s*\(/g)).toHaveLength(1);
++    expect(source).toContain("['--import', 'tsx', resolve(REPO_ROOT, 'bench', 'lab', 'ret010', 'dev-gate.ts'), 'run']");
++    expect(source).toContain("{ cwd: REPO_ROOT, stdio: 'inherit', env: process.env }");
++    expect(source.indexOf('const development = spawnSync(')).toBeGreaterThan(source.indexOf("console.log(`Known retrieval answer coverage"));
++    expect(source.indexOf('const development = spawnSync(')).toBeLessThan(source.indexOf('return { passed: true'));
++    expect(source).not.toContain('holdout-gate');
++  });
++
++  it('freezes the sole outcome binding and terminal upload authorization', async () => {
++    const workflow = (await readFile(CI_WORKFLOW, 'utf8')).replace(/\r\n/g, '\n');
++    expect(workflow.match(/^\s*id: ret010_development_gate$/gm)).toHaveLength(1);
++    expect(workflow.match(/^\s*id: ret010_finalize$/gm)).toHaveLength(1);
++    expect(workflow.match(/^\s*RET010_DEVELOPMENT_GATE_OUTCOME: \$\{\{ steps\.ret010_development_gate\.outcome \}\}$/gm)).toHaveLength(1);
++    expect(workflow).toContain('        if: ${{ always() }}\n        env:\n          RET010_DEVELOPMENT_GATE_OUTCOME: ${{ steps.ret010_development_gate.outcome }}\n        run: node --import tsx bench/lab/ret010/dev-gate.ts finalize');
++    const uploadCondition = "if: ${{ always() && steps.ret010_finalize.outcome == 'success' && steps.ret010_finalize.outputs.upload_path != '' }}";
++    expect(workflow).toContain(uploadCondition);
++    expect(workflow).toContain('uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02');
++    expect(workflow).toContain('name: memberry-ret010-development-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}');
++    expect(workflow).toContain('path: ${{ steps.ret010_finalize.outputs.upload_path }}');
++    expect(workflow).toContain('if-no-files-found: error');
++    expect(workflow).toContain('include-hidden-files: true');
++    expect(workflow).toContain('retention-days: 14');
++    expect(workflow.indexOf('id: ret010_finalize')).toBeLessThan(workflow.indexOf(uploadCondition));
++    const unitBlock = workflow.slice(workflow.indexOf('  unit:'), workflow.indexOf('  # Full job:'));
++    expect(unitBlock.trimEnd().endsWith('retention-days: 14')).toBe(true);
++    expect(workflow).toContain('node-version: [20, 22]');
++  });
++});
+diff --git a/bench/lab/baselines/ci-gate.ts b/bench/lab/baselines/ci-gate.ts
+index 021ccdb..1c2098a 100644
+--- a/bench/lab/baselines/ci-gate.ts
++++ b/bench/lab/baselines/ci-gate.ts
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env tsx
+ 
+-import { execFileSync } from 'node:child_process';
++import { execFileSync, spawnSync } from 'node:child_process';
+ import { readFile } from 'node:fs/promises';
+ import { dirname, resolve } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+@@ -228,6 +228,12 @@ export async function runDeterministicCiGate(
+   console.log(`Holdout precision@5 artifact: ${holdoutPrecisionPaths.manifest}`);
+   console.log(`Admission structural artifact: ${admission.artifacts.manifest}`);
+   console.log(`Known retrieval answer coverage remains visible at ${retrievalComparison.candidate.metrics.answerCoverage}; promotion work must improve it without regressing safety.`);
++  const development = spawnSync(
++    process.execPath,
++    ['--import', 'tsx', resolve(REPO_ROOT, 'bench', 'lab', 'ret010', 'dev-gate.ts'), 'run'],
++    { cwd: REPO_ROOT, stdio: 'inherit', env: process.env },
++  );
++  if (development.status !== 0) process.exit(development.status ?? 1);
+   return { passed: true, artifacts: [goldenPaths.manifest, protectedPaths.manifest, retrievalPaths.manifest, holdoutRecallPaths.manifest, holdoutPrecisionPaths.manifest, admission.artifacts.manifest] };
+ }
+ 
+diff --git a/bench/lab/registered-adapters.ts b/bench/lab/registered-adapters.ts
+index 752bc02..1aae2ce 100644
+--- a/bench/lab/registered-adapters.ts
++++ b/bench/lab/registered-adapters.ts
+@@ -56,6 +56,20 @@ const CANONICAL_FACTORIES: Readonly<Record<string, CanonicalFactory>> = Object.f
+       return new MemBerryRetrievalCoreAdapter();
+     },
+   },
++  'memberry-retrieval-core-disabled-v1': {
++    entry: 'bench/lab/adapters/memberry-retrieval-core.ts',
++    create: async () => {
++      const { createDisabledRetrievalCore } = await import('./adapters/memberry-retrieval-core.js');
++      return createDisabledRetrievalCore();
++    },
++  },
++  'memberry-retrieval-core-served-v1': {
++    entry: 'bench/lab/adapters/memberry-retrieval-core.ts',
++    create: async () => {
++      const { createServedRetrievalCore } = await import('./adapters/memberry-retrieval-core.js');
++      return createServedRetrievalCore();
++    },
++  },
+   'scope-aware-bm25-control-v1': {
+     entry: 'bench/lab/adapters/baselines.ts',
+     create: async () => {
+diff --git a/bench/lab/registry/systems.json b/bench/lab/registry/systems.json
+index 41ccf2b..33dac17 100644
+--- a/bench/lab/registry/systems.json
++++ b/bench/lab/registry/systems.json
+@@ -20,6 +20,26 @@
+       "adapter": "bench/lab/adapters/memberry-retrieval-core.ts",
+       "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
+     },
++    {
++      "id": "memberry-retrieval-core-disabled-v1",
++      "displayName": "MemBerry production retrieval core (reranker disabled)",
++      "mode": "fixture",
++      "fidelity": "fixture",
++      "fidelityDetail": "production-retrieval / fixture-persistence / reranker-disabled",
++      "requiredInCi": true,
++      "adapter": "bench/lab/adapters/memberry-retrieval-core.ts",
++      "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
++    },
++    {
++      "id": "memberry-retrieval-core-served-v1",
++      "displayName": "MemBerry production retrieval core (served reranker)",
++      "mode": "fixture",
++      "fidelity": "fixture",
++      "fidelityDetail": "production-retrieval / fixture-persistence / served-reranker-v1",
++      "requiredInCi": true,
++      "adapter": "bench/lab/adapters/memberry-retrieval-core.ts",
++      "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
++    },
+     {
+       "id": "scope-aware-bm25-control-v1",
+       "displayName": "Scope-aware BM25 control",
+--- /dev/null
++++ b/bench/lab/ret010/__tests__/dev-gate.test.ts
++import { spawnSync } from 'node:child_process';
++import { createHash } from 'node:crypto';
++import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join, resolve } from 'node:path';
++import { describe, expect, it } from 'vitest';
++
++import {
++  canonicalRestIdentity,
++  classifyCustodyComponent,
++  custodyBoundaryForTest,
++  finalizeCurrentRunForTest,
++  qualifyingConjunctionCount,
++  runDevelopment,
++  validateCompletionMarkerForTest,
++  validateFailureTombstoneForTest,
++  validateHostedMetadataForTest,
++  writeGithubOutputForTest,
++  type CustodyIdentity,
++} from '../dev-gate.js';
++
++const ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
++const GATE = resolve(import.meta.dirname, '..', 'dev-gate.ts');
++const digest = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
++const jsonBytes = (value: object): Buffer => Buffer.from(`${JSON.stringify(value)}\n`);
++
++const identity: CustodyIdentity = {
++  gitCommit: 'a'.repeat(40), nodeMajor: '20', nodeVersion: 'v20.19.0', workflowRunId: '77', workflowRunAttempt: '3',
++};
++
++async function writeSuccessBundle(root: string, current: CustodyIdentity): Promise<void> {
++  await mkdir(root, { recursive: true });
++  const arm = { recallAtK: 0.5, precisionAtK: 0.5, staleLeakRate: 0, isolationLeakRate: 0, duplicateRate: 0, unknownResultRate: 0 };
++  const recallCandidate = { ...arm, recallAtK: 0.6 }; const precisionCandidate = { ...arm, precisionAtK: 0.55 };
++  const lane = (name: 'recall-at-10' | 'precision-at-5', candidate: typeof arm) => ({
++    schemaVersion: '1', lane: name, datasetId: 'memberry-ret010-dev-v1', split: 'dev', controlAdapterId: 'memberry-retrieval-core-disabled-v1',
++    candidateAdapterId: 'memberry-retrieval-core-served-v1', scenarioCount: 10, probeCount: 10, k: name === 'recall-at-10' ? 10 : 5,
++    control: arm, candidate, delta: { recallAtK: candidate.recallAtK - arm.recallAtK, precisionAtK: candidate.precisionAtK - arm.precisionAtK },
++    qualifyingCaseCount: 1, passed: true,
++  });
++  const recall = lane('recall-at-10', recallCandidate); const precision = lane('precision-at-5', precisionCandidate);
++  const interval = { schemaVersion: '1', metric: 'task-success-per-1k-tokens', outcome: 'measured', pairedProbes: 20,
++    resamples: 2000, level: 0.95, seed: 17, point: 0.1, lower: 0, upper: 0.2, oneSidedLower: 0 };
++  const recallBytes = jsonBytes(recall); const precisionBytes = jsonBytes(precision); const intervalBytes = jsonBytes(interval);
++  const registry = JSON.parse(await readFile(resolve(ROOT, 'bench/lab/registry/datasets.json'), 'utf8')) as { datasets: any[] };
++  const descriptor = registry.datasets.find((entry) => entry.id === 'memberry-ret010-dev-v1'); const policyBytes = await readFile(resolve(ROOT, 'bench/lab/ret010/dev-policy.json'));
++  const git = (...args: string[]) => spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
++  const aggregate = { schemaVersion: '1', decision: 'passed', datasetId: 'memberry-ret010-dev-v1', split: 'dev',
++    controlAdapterId: 'memberry-retrieval-core-disabled-v1', candidateAdapterId: 'memberry-retrieval-core-served-v1',
++    providerIdentity: { providerId: 'memberry.local.lexical', modelId: 'bm25f-query-v1', calibrationId: 'fixed-blend-v1', locality: 'local' },
++    sourceCommit: current.gitCommit, modelBlob: git('rev-parse', `${current.gitCommit}:packages/retrieval/src/served-reranker.ts`),
++    providerContractBlob: git('rev-parse', `${current.gitCommit}:packages/retrieval/src/reranker.ts`),
++    adapterBlob: git('rev-parse', `${current.gitCommit}:bench/lab/adapters/memberry-retrieval-core.ts`),
++    datasetDescriptorSha256: digest(jsonBytes(descriptor)), inputSha256: descriptor.artifacts[0].sha256, oracleSha256: descriptor.artifacts[1].sha256,
++    devPolicySha256: digest(policyBytes), recallLaneSha256: digest(recallBytes), precisionLaneSha256: digest(precisionBytes),
++    efficiencyIntervalSha256: digest(intervalBytes), seed: 17,
++    quality: { recallDelta: recall.delta.recallAtK, precisionDelta: precision.delta.precisionAtK, efficiencyPoint: 0.1, efficiencyOneSidedLower: 0 },
++    safety: { staleLeakRate: 0, isolationLeakRate: 0, duplicateRate: 0, unknownResultRate: 0 },
++    responseEffect: { sameCaseOrderAndSelectionChanged: true, qualifyingCaseCount: 2 }, passed: true };
++  const aggregateBytes = jsonBytes(aggregate);
++  const manifest = { schemaVersion: '1', decision: 'passed', ...current, recallLaneSha256: digest(recallBytes), precisionLaneSha256: digest(precisionBytes),
++    efficiencyIntervalSha256: digest(intervalBytes), aggregateResultSha256: digest(aggregateBytes) };
++  await Promise.all([writeFile(join(root, 'recall-lane.json'), recallBytes), writeFile(join(root, 'precision-lane.json'), precisionBytes),
++    writeFile(join(root, 'efficiency-interval.json'), intervalBytes), writeFile(join(root, 'aggregate-result.json'), aggregateBytes),
++    writeFile(join(root, 'custody-manifest.json'), jsonBytes(manifest))]);
++}
++
++describe('RET-010E exclusive development custody', () => {
++  it('normalizes only positive safe raw REST numeric identities', () => {
++    expect(canonicalRestIdentity(1)).toBe('1');
++    expect(canonicalRestIdentity(1e3)).toBe('1000');
++    expect(canonicalRestIdentity(Number.MAX_SAFE_INTEGER)).toBe('9007199254740991');
++    for (const hostile of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, 9007199254740993, '1', '01', null, undefined]) {
++      expect(() => canonicalRestIdentity(hostile)).toThrow('artifact');
++    }
++  });
++
++  it('derives one exact run-attempt-node evaluation basename', () => {
++    const boundary = custodyBoundaryForTest(identity, resolve('C:/fixture'), ['node_modules', '.cache', 'memberry-lab', 'runs']);
++    expect(boundary.evaluationRoot.replace(/\\/g, '/')).toMatch(/\/ret010-development-run-77-attempt-3-node-20$/);
++    expect(boundary.runsRoot.replace(/\\/g, '/')).toMatch(/\/node_modules\/\.cache\/memberry-lab\/runs$/);
++  });
++
++  it('rejects link, junction, reparse, mount, bind-mount, and path substitution classifications', () => {
++    expect(classifyCustodyComponent({ kind: 'directory', realPathMatches: true, sameDevice: true })).toBe('directory');
++    for (const kind of ['file', 'symlink', 'junction', 'reparse', 'mount'] as const) {
++      expect(classifyCustodyComponent({ kind, realPathMatches: true, sameDevice: true })).toBe('reject');
++    }
++    expect(classifyCustodyComponent({ kind: 'directory', realPathMatches: false, sameDevice: true })).toBe('reject');
++    expect(classifyCustodyComponent({ kind: 'directory', realPathMatches: true, sameDevice: false })).toBe('reject');
++  });
++
++  it('requires selection and order to change on the same case', () => {
++    expect(qualifyingConjunctionCount([['a', 'b', 'c']], [['b', 'a', 'x']])).toBe(1);
++    expect(qualifyingConjunctionCount([['a', 'b', 'c']], [['b', 'a', 'c']])).toBe(0);
++    expect(qualifyingConjunctionCount([['a', 'b', 'c']], [['a', 'b', 'x']])).toBe(0);
++    expect(() => qualifyingConjunctionCount([['a', 'a']], [['a', 'b']])).toThrow('metric');
++  });
++
++  it('accepts only the closed success completion-marker union', () => {
++    const payload = {
++      'recall-lane.json': Buffer.from('recall\n'),
++      'precision-lane.json': Buffer.from('precision\n'),
++      'efficiency-interval.json': Buffer.from('interval\n'),
++      'aggregate-result.json': Buffer.from('aggregate\n'),
++      'custody-manifest.json': Buffer.from('manifest\n'),
++    };
++    const marker = {
++      schemaVersion: '1', decision: 'complete', bundleKind: 'success', ...identity,
++      uploadLeafName: `ret010-upload-${'b'.repeat(64)}`,
++      allowlist: ['recall-lane.json', 'precision-lane.json', 'efficiency-interval.json', 'aggregate-result.json', 'custody-manifest.json', 'upload-complete.json'],
++      payloadSha256: {
++        recallLaneSha256: digest(payload['recall-lane.json']),
++        precisionLaneSha256: digest(payload['precision-lane.json']),
++        efficiencyIntervalSha256: digest(payload['efficiency-interval.json']),
++        aggregateResultSha256: digest(payload['aggregate-result.json']),
++        custodyManifestSha256: digest(payload['custody-manifest.json']),
++      },
++    };
++    expect(() => validateCompletionMarkerForTest(marker, payload, identity)).not.toThrow();
++    expect(() => validateCompletionMarkerForTest({ ...marker, uploadLeafName: 'C:/runs/ret010-upload-x' }, payload, identity)).toThrow('artifact');
++    expect(() => validateCompletionMarkerForTest({ ...marker, payloadSha256: { failureTombstoneSha256: '0'.repeat(64) } }, payload, identity)).toThrow('artifact');
++    const reordered = { decision: marker.decision, schemaVersion: marker.schemaVersion, ...Object.fromEntries(Object.entries(marker).slice(2)) };
++    expect(() => validateCompletionMarkerForTest(reordered, payload, identity)).toThrow('artifact');
++  });
++
++  it('accepts only the closed current tombstone identity', () => {
++    const tombstone = { schemaVersion: '1', decision: 'failed', failureClass: 'custody', stage: 'artifact', ...identity };
++    expect(() => validateFailureTombstoneForTest(tombstone)).not.toThrow();
++    expect(() => validateFailureTombstoneForTest({ ...tombstone, exception: 'secret' })).toThrow('artifact');
++    expect(() => validateFailureTombstoneForTest({ ...tombstone, workflowRunAttempt: 3 })).toThrow('artifact');
++  });
++
++  it('rejects malformed, duplicate, unsafe, stale, and cross-run hosted REST identities', () => {
++    const metadata = {
++      run: { id: 77, run_attempt: 3, head_sha: 'a'.repeat(40), conclusion: 'success', repository: { full_name: 'AP3X-Dev/memberry' } },
++      jobs: { total_count: 2, jobs: [
++        { id: 201, run_id: 77, run_attempt: 3, head_sha: 'a'.repeat(40), name: 'unit (20)', conclusion: 'success' },
++        { id: 221, run_id: 77, run_attempt: 3, head_sha: 'a'.repeat(40), name: 'unit (22)', conclusion: 'success' },
++      ] },
++      artifacts: { total_count: 2, artifacts: [
++        { id: 2001, name: 'memberry-ret010-development-node-20-77-3', digest: `sha256:${'1'.repeat(64)}`, workflow_run: { id: 77, head_sha: 'a'.repeat(40) } },
++        { id: 2201, name: 'memberry-ret010-development-node-22-77-3', digest: `sha256:${'2'.repeat(64)}`, workflow_run: { id: 77, head_sha: 'a'.repeat(40) } },
++      ] },
++    };
++    expect(() => validateHostedMetadataForTest(JSON.stringify(metadata))).not.toThrow();
++    expect(() => validateHostedMetadataForTest(JSON.stringify({ ...metadata, run: { ...metadata.run, id: '77' } }))).toThrow('artifact');
++    expect(() => validateHostedMetadataForTest(JSON.stringify({ ...metadata, artifacts: { ...metadata.artifacts, artifacts: metadata.artifacts.artifacts.map((item, index) => index ? item : { ...item, workflow_run: { ...item.workflow_run, id: 78 } }) } }))).toThrow('artifact');
++    expect(() => validateHostedMetadataForTest(JSON.stringify({ ...metadata, jobs: { ...metadata.jobs, jobs: [metadata.jobs.jobs[0], metadata.jobs.jobs[0]] } }))).toThrow('artifact');
++    expect(() => validateHostedMetadataForTest('{"schemaVersion":"1","schemaVersion":"1"}')).toThrow('artifact');
++  });
++
++  it('uses one checked append for the sole structured success output', async () => {
++    const root = await mkdtemp(join(tmpdir(), 'ret010-output-'));
++    try {
++      const output = join(root, 'GITHUB_OUTPUT');
++      await import('node:fs/promises').then(({ writeFile }) => writeFile(output, ''));
++      await writeGithubOutputForTest(output, 'C:/runner/runs/ret010-upload-abc');
++      expect(await readFile(output, 'utf8')).toBe('upload_path=C:/runner/runs/ret010-upload-abc\n');
++      await expect(writeGithubOutputForTest(root, 'C:/runner/runs/ret010-upload-abc')).rejects.toThrow();
++    } finally { await rm(root, { recursive: true, force: true }); }
++  });
++
++  it('keeps CLI failures value-free and custody operations exclusive', async () => {
++    const child = spawnSync(process.execPath, ['--import', 'tsx', GATE, 'unknown'], { cwd: ROOT, encoding: 'utf8' });
++    expect(child.status).not.toBe(0);
++    expect(child.stdout).toBe('');
++    expect(child.stderr).toBe('RET010_DEV_GATE_FAILED\n');
++    const source = await readFile(GATE, 'utf8');
++    expect(source).toContain('fsConstants.O_EXCL');
++    expect(source).toContain('beforeUploadPathOutput');
++    expect(source).toContain('duringFinalSweep');
++    expect(source).not.toMatch(/\brename\s*\(|\brm\s*\(|\bunlink\s*\(|\bcp\s*\(/);
++  });
++
++  it('executes hostile evaluator, finalizer, and verifier failure matrices without qualification', async () => {
++    const root = await mkdtemp(join(tmpdir(), 'ret010-hostile-matrix-'));
++    const prior = { sha: process.env.GITHUB_SHA, run: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT };
++    try {
++      const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
++      Object.assign(process.env, { GITHUB_SHA: head, GITHUB_RUN_ID: '77', GITHUB_RUN_ATTEMPT: '3' });
++      const current = { ...identity, gitCommit: head, nodeMajor: process.versions.node.split('.')[0] as '20' | '22', nodeVersion: `v${process.versions.node}` };
++      const collision = custodyBoundaryForTest(current, root, ['node_modules', '.cache', 'memberry-lab', 'runs']);
++      await mkdir(collision.evaluationRoot, { recursive: true });
++      await expect(runDevelopment({ suppressProcessFailure: true }, root)).resolves.toBe('failed');
++      expect((await readFile(GATE, 'utf8')).includes('import(\'./load-dev.js\')')).toBe(true);
++
++      const finalizer = spawnSync(process.execPath, ['--import', 'tsx', GATE, 'finalize'], {
++        cwd: ROOT, encoding: 'utf8', env: { ...process.env, RET010_DEVELOPMENT_GATE_OUTCOME: 'cancelled', GITHUB_OUTPUT: join(root, 'output') },
++      });
++      expect({ status: finalizer.status, stdout: finalizer.stdout, stderr: finalizer.stderr }).toEqual({ status: 1, stdout: '', stderr: 'RET010_FINALIZE_FAILED\n' });
++
++      const metadata = join(root, 'metadata.json'); const first = join(root, 'first.zip'); const second = join(root, 'second.zip');
++      await Promise.all([writeFile(metadata, '{}'), writeFile(first, ''), writeFile(second, '')]);
++      const verifier = spawnSync(process.execPath, ['--import', 'tsx', GATE, 'verify', metadata, first, second], { cwd: ROOT, encoding: 'utf8' });
++      expect({ status: verifier.status, stdout: verifier.stdout, stderr: verifier.stderr }).toEqual({ status: 1, stdout: '', stderr: 'RET010_DEV_RECEIPT_VERIFY_FAILED\n' });
++    } finally {
++      if (prior.sha === undefined) delete process.env.GITHUB_SHA; else process.env.GITHUB_SHA = prior.sha;
++      if (prior.run === undefined) delete process.env.GITHUB_RUN_ID; else process.env.GITHUB_RUN_ID = prior.run;
++      if (prior.attempt === undefined) delete process.env.GITHUB_RUN_ATTEMPT; else process.env.GITHUB_RUN_ATTEMPT = prior.attempt;
++      await rm(root, { recursive: true, force: true });
++    }
++  });
++
++  it('executes both finalizer branches over exact fixture bundles and marker-last publication', async () => {
++    if (process.platform === 'win32') return;
++    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
++    const current: CustodyIdentity = { gitCommit: head, nodeMajor: process.versions.node.split('.')[0] as '20' | '22',
++      nodeVersion: `v${process.versions.node}`, workflowRunId: '177', workflowRunAttempt: '2' };
++    const prior = { sha: process.env.GITHUB_SHA, run: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT };
++    const successRoot = await mkdtemp(join(tmpdir(), 'ret010-finalize-success-'));
++    try {
++      Object.assign(process.env, { GITHUB_SHA: head, GITHUB_RUN_ID: current.workflowRunId, GITHUB_RUN_ATTEMPT: current.workflowRunAttempt });
++      const boundary = custodyBoundaryForTest(current, successRoot, ['node_modules', '.cache', 'memberry-lab', 'runs']);
++      await writeSuccessBundle(boundary.evaluationRoot, current);
++      const upload = await finalizeCurrentRunForTest('success', current, successRoot, { randomBytes: () => Buffer.alloc(32, 0xab) });
++      expect((await readdir(upload)).sort()).toEqual([
++        'aggregate-result.json', 'custody-manifest.json', 'efficiency-interval.json', 'precision-lane.json',
++        'recall-lane.json', 'upload-complete.json',
++      ]);
++      const marker = JSON.parse(await readFile(join(upload, 'upload-complete.json'), 'utf8')) as { uploadLeafName: string; bundleKind: string };
++      expect(marker).toMatchObject({ uploadLeafName: `ret010-upload-${'ab'.repeat(32)}`, bundleKind: 'success' });
++
++      const failureRoot = await mkdtemp(join(tmpdir(), 'ret010-finalize-failure-'));
++      const failureBoundary = custodyBoundaryForTest(current, failureRoot, ['node_modules', '.cache', 'memberry-lab', 'runs']);
++      await mkdir(failureBoundary.evaluationRoot, { recursive: true });
++      await writeFile(join(failureBoundary.evaluationRoot, 'failure-tombstone.json'), jsonBytes({ schemaVersion: '1', decision: 'failed',
++        failureClass: 'safety', stage: 'safety-policy', ...current }));
++      const failureUpload = await finalizeCurrentRunForTest('failure', current, failureRoot, { randomBytes: () => Buffer.alloc(32, 0xcd) });
++      expect((await readdir(failureUpload)).sort()).toEqual(['failure-tombstone.json', 'upload-complete.json']);
++      await rm(failureRoot, { recursive: true, force: true });
++    } finally {
++      if (prior.sha === undefined) delete process.env.GITHUB_SHA; else process.env.GITHUB_SHA = prior.sha;
++      if (prior.run === undefined) delete process.env.GITHUB_RUN_ID; else process.env.GITHUB_RUN_ID = prior.run;
++      if (prior.attempt === undefined) delete process.env.GITHUB_RUN_ATTEMPT; else process.env.GITHUB_RUN_ATTEMPT = prior.attempt;
++      await rm(successRoot, { recursive: true, force: true });
++    }
++  });
++});
+--- /dev/null
++++ b/bench/lab/ret010/__tests__/holdout-gate.test.ts
++import { spawnSync } from 'node:child_process';
++import { createHash } from 'node:crypto';
++import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join, resolve } from 'node:path';
++import { describe, expect, it } from 'vitest';
++
++import {
++  validateApprovalBindingForTest,
++  validateApprovalRecordForTest,
++  validateHoldoutPolicyForTest,
++  validateHoldoutReceiptForTest,
++  validateQualificationSourceForTest,
++  runInjectedHoldoutForTest,
++  type HoldoutEvaluator,
++  type HoldoutIdentity,
++} from '../holdout-gate.mjs';
++
++const ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
++const GATE = resolve(import.meta.dirname, '..', 'holdout-gate.mts');
++const canonical = (value: object): Buffer => Buffer.from(`${JSON.stringify(value)}\n`);
++const digest = (value: Buffer): string => createHash('sha256').update(value).digest('hex');
++
++function approval(): Record<string, unknown> {
++  return {
++    schemaVersion: '1', decision: 'approved',
++    source: {
++      gitCommit: 'a'.repeat(40), modelBlob: 'b'.repeat(40), providerContractBlob: 'c'.repeat(40), adapterBlob: 'd'.repeat(40),
++      providerIdentity: { providerId: 'memberry.local.lexical', modelId: 'bm25f-query-v1', calibrationId: 'fixed-blend-v1', locality: 'local' },
++    },
++    development: {
++      datasetDescriptorSha256: '1'.repeat(64), inputSha256: '2'.repeat(64), oracleSha256: '3'.repeat(64),
++      devPolicySha256: '4'.repeat(64), seed: 17, aggregateResultSha256: '5'.repeat(64),
++    },
++    node20: {
++      nodeVersion: 'v20.19.0', custodyManifestSha256: '6'.repeat(64), completionMarkerSha256: '7'.repeat(64),
++      artifactName: 'memberry-ret010-development-node-20-77-3', artifactId: '2001', artifactServiceSha256: '8'.repeat(64),
++    },
++    node22: {
++      nodeVersion: 'v22.12.0', custodyManifestSha256: '9'.repeat(64), completionMarkerSha256: 'a'.repeat(64),
++      artifactName: 'memberry-ret010-development-node-22-77-3', artifactId: '2201', artifactServiceSha256: 'b'.repeat(64),
++    },
++    workflowRunId: '77', workflowRunAttempt: '3',
++  };
++}
++
++function git(root: string, ...args: string[]): string {
++  const child = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
++  if (child.status !== 0) throw new Error(child.stderr);
++  return child.stdout.trim();
++}
++
++describe('RET-010E fixture-only holdout boundary', () => {
++  it('accepts one canonical expanded Node20-then-Node22 approval record', () => {
++    const value = approval(); const bytes = canonical(value);
++    expect(validateApprovalRecordForTest(bytes)).toEqual(value);
++    expect(validateApprovalBindingForTest(bytes, digest(bytes), 'f'.repeat(40), 'a'.repeat(40), ['bench/lab/ret010/approved-dev.json'])).toEqual(value);
++  });
++
++  it('rejects stale, reordered, cross-run, numeric, path-valued, and noncanonical approval fields', () => {
++    const value = approval();
++    const hostile = [
++      { ...value, workflowRunId: '077' },
++      { ...value, workflowRunAttempt: 3 },
++      { ...value, node20: { ...(value.node20 as object), artifactId: '02001' } },
++      { ...value, node20: { ...(value.node20 as object), artifactName: 'memberry-ret010-development-node-20-78-3' } },
++      { ...value, node22: { ...(value.node22 as object), artifactServiceSha256: `sha256:${'b'.repeat(64)}` } },
++      { ...value, path: 'download/artifact.zip' },
++    ];
++    for (const item of hostile) expect(() => validateApprovalRecordForTest(canonical(item))).toThrow('custody');
++    const swapped = { schemaVersion: '1', decision: 'approved', source: value.source, development: value.development,
++      node22: value.node22, node20: value.node20, workflowRunId: '77', workflowRunAttempt: '3' };
++    expect(() => validateApprovalRecordForTest(canonical(swapped))).toThrow('custody');
++    expect(() => validateApprovalRecordForTest(Buffer.from(JSON.stringify(value)))).toThrow('custody');
++    expect(() => validateApprovalBindingForTest(canonical(value), '0'.repeat(64), 'f'.repeat(40), 'a'.repeat(40), ['bench/lab/ret010/approved-dev.json'])).toThrow('custody');
++    expect(() => validateApprovalBindingForTest(canonical(value), digest(canonical(value)), 'f'.repeat(40), 'e'.repeat(40), ['bench/lab/ret010/approved-dev.json'])).toThrow('custody');
++  });
++
++  it('freezes the 10+10 disabled-versus-served qualification policy', async () => {
++    const policy = JSON.parse(await readFile(resolve(ROOT, 'bench/lab/ret010/holdout-policy.json'), 'utf8')) as unknown;
++    expect(() => validateHoldoutPolicyForTest(policy)).not.toThrow();
++    expect(() => validateHoldoutPolicyForTest({ ...(policy as object), candidateAdapterId: 'memberry-retrieval-core-v1' })).toThrow('custody');
++  });
++
++  it('accepts only a clean single-parent approval-only qualification commit', async () => {
++    const root = await mkdtemp(join(tmpdir(), 'ret010-holdout-lineage-'));
++    try {
++      git(root, 'init', '-q'); git(root, 'config', 'user.email', 'ret010@example.invalid'); git(root, 'config', 'user.name', 'RET010 fixture');
++      await writeFile(join(root, 'source.txt'), 'source\n'); git(root, 'add', '.'); git(root, 'commit', '-qm', 'source');
++      const base = git(root, 'rev-parse', 'HEAD');
++      await mkdir(resolve(root, 'bench/lab/ret010'), { recursive: true });
++      await writeFile(resolve(root, 'bench/lab/ret010/approved-dev.json'), canonical(approval()));
++      git(root, 'add', '.'); git(root, 'commit', '-qm', 'approval'); const head = git(root, 'rev-parse', 'HEAD');
++      await expect(validateQualificationSourceForTest(root, head, head)).resolves.toEqual({ head, directParent: base });
++      await expect(validateQualificationSourceForTest(root, head, base)).rejects.toThrow('custody');
++      await writeFile(join(root, 'dirty.txt'), 'dirty\n');
++      await expect(validateQualificationSourceForTest(root, head, head)).rejects.toThrow('custody');
++    } finally { await rm(root, { recursive: true, force: true }); }
++  });
++
++  it('never imports holdout evaluators before approval checks and keeps failures value-free', async () => {
++    const source = await readFile(GATE, 'utf8');
++    expect(source).not.toMatch(/^import .*load-suite/m);
++    expect(source).not.toMatch(/^import .*registered-adapters/m);
++    expect(source.indexOf('await validateCommittedApproval()')).toBeLessThan(source.indexOf("import('../datasets/load-suite.js')"));
++    expect(source).not.toMatch(/completion-marker|upload-complete|artifact.*download/i);
++    const child = spawnSync(process.execPath, ['--import', 'tsx', GATE, 'unexpected'], { cwd: ROOT, encoding: 'utf8' });
++    expect(child.status).not.toBe(0);
++    expect(child.stdout).toBe('');
++    expect(child.stderr).toBe('RET010_HOLDOUT_GATE_FAILED\n');
++  });
++
++  it('executes an injected exact 10+10 qualification and publishes one closed exclusive receipt', async () => {
++    const root = await mkdtemp(join(tmpdir(), 'ret010-holdout-evaluator-'));
++    try {
++      const approved = validateApprovalRecordForTest(canonical(approval()));
++      const identity: HoldoutIdentity = { gitCommit: 'f'.repeat(40), nodeMajor: '20', nodeVersion: 'v20.19.0', workflowRunId: '91', workflowRunAttempt: '2' };
++      const report = (dimension: 'recall' | 'precision') => {
++        const metric = dimension === 'recall' ? 'recallAtK' : 'precisionAtK'; const prefix = dimension === 'recall' ? 'r' : 'p';
++        const scenarios = Array.from({ length: 10 }, (_, index) => ({ scenarioId: `${prefix}-scenario-${index}`, probes: [{
++          probeId: `${prefix}-probe-${index}`, contextTokens: 100, metrics: { answerCoverage: 0.5 },
++        }] }));
++        const metrics = { recallAtK: metric === 'recallAtK' ? 0.6 : 0.4, precisionAtK: metric === 'precisionAtK' ? 0.6 : 0.4,
++          staleLeakRate: 0, isolationLeakRate: 0, duplicateRate: 0, unknownResultRate: 0 };
++        return { passed: true, control: { adapterId: 'memberry-retrieval-core-disabled-v1', metrics: { ...metrics, [metric]: 0.5 }, scenarioReports: scenarios },
++          candidate: { adapterId: 'memberry-retrieval-core-served-v1', metrics, scenarioReports: scenarios } };
++      };
++      const evaluator: HoldoutEvaluator = {
++        load: async () => Array.from({ length: 10 }, () => ({})),
++        compare: async (dimension) => report(dimension),
++        interval: (pairs) => ({ outcome: 'measured', pairedProbes: pairs.length, resamples: 2000, level: 0.95,
++          seed: 17, point: 0, lower: 0, upper: 0, oneSidedLower: 0 }),
++      };
++      const receiptPath = join(root, 'receipt.json');
++      await expect(runInjectedHoldoutForTest(approved, identity, evaluator, receiptPath)).resolves.toBe('passed');
++      const receipt = JSON.parse(await readFile(receiptPath, 'utf8')) as unknown;
++      expect(() => validateHoldoutReceiptForTest(receipt)).not.toThrow();
++      await expect(runInjectedHoldoutForTest(approved, identity, evaluator, receiptPath)).resolves.toBe('failed');
++      expect((JSON.parse(await readFile(receiptPath, 'utf8')) as { decision: string }).decision).toBe('passed');
++
++      const duplicatePath = join(root, 'duplicate.json');
++      const duplicate: HoldoutEvaluator = { ...evaluator, compare: async (dimension) => {
++        const value = report(dimension); value.candidate.scenarioReports[1] = value.candidate.scenarioReports[0]; return value;
++      } };
++      await expect(runInjectedHoldoutForTest(approved, identity, duplicate, duplicatePath)).resolves.toBe('failed');
++      expect((JSON.parse(await readFile(duplicatePath, 'utf8')) as { decision: string }).decision).toBe('failed');
++    } finally { await rm(root, { recursive: true, force: true }); }
++  });
++});
+--- /dev/null
++++ b/bench/lab/ret010/dev-gate.ts
++#!/usr/bin/env tsx
++
++import { execFileSync } from 'node:child_process';
++import { createHash, randomBytes } from 'node:crypto';
++import { constants as fsConstants, type BigIntStats } from 'node:fs';
++import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
++import type { FileHandle } from 'node:fs/promises';
++import { basename, dirname, relative, resolve, sep } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { inflateRawSync } from 'node:zlib';
++
++const HERE = dirname(fileURLToPath(import.meta.url));
++const REPO_ROOT = resolve(HERE, '..', '..', '..');
++const RUNS_PARTS = ['node_modules', '.cache', 'memberry-lab', 'runs'] as const;
++const SUCCESS_FILES = [
++  'recall-lane.json', 'precision-lane.json', 'efficiency-interval.json',
++  'aggregate-result.json', 'custody-manifest.json',
++] as const;
++const FAILURE_FILE = 'failure-tombstone.json';
++const MARKER_FILE = 'upload-complete.json';
++const SAFE_GATE_FAILURE = 'RET010_DEV_GATE_FAILED\n';
++const SAFE_FINALIZER_FAILURE = 'RET010_FINALIZE_FAILED\n';
++const SAFE_VERIFY_FAILURE = 'RET010_DEV_RECEIPT_VERIFY_FAILED\n';
++const CONTROL_ID = 'memberry-retrieval-core-disabled-v1';
++const CANDIDATE_ID = 'memberry-retrieval-core-served-v1';
++const DATASET_ID = 'memberry-ret010-dev-v1';
++const POSITIVE_DECIMAL = /^[1-9][0-9]*$/;
++const SHA256 = /^[0-9a-f]{64}$/;
++const GIT_OBJECT = /^[0-9a-f]{40}$/;
++const UPLOAD_LEAF = /^ret010-upload-[0-9a-f]{64}$/;
++const MUTABLE_PATHS = [
++  '.github/workflows/ci.yml',
++  'bench/lab/adapters/memberry-retrieval-core.ts',
++  'bench/lab/registered-adapters.ts',
++  'bench/lab/registry/systems.json',
++  'bench/lab/baselines/ci-gate.ts',
++  'bench/lab/ret010/dev-gate.ts',
++  'bench/lab/ret010/holdout-gate.mts',
++  'bench/lab/__tests__/memberry-retrieval-core.test.ts',
++  'bench/lab/__tests__/registered-adapters.test.ts',
++  'bench/lab/baselines/__tests__/ci-gate-binding.test.ts',
++  'bench/lab/ret010/__tests__/dev-gate.test.ts',
++  'bench/lab/ret010/__tests__/holdout-gate.test.ts',
++] as const;
++const IMMUTABLE_PATHS = [
++  'bench/lab/stats.ts',
++  'bench/lab/baselines/canonical.ts',
++  'bench/lab/datasets/hash.ts',
++  'packages/retrieval/src/served-reranker.ts',
++  'packages/retrieval/src/reranker.ts',
++  'packages/retrieval/src/assembler.ts',
++] as const;
++const CUSTODY_PATHS = [...MUTABLE_PATHS, ...IMMUTABLE_PATHS] as const;
++
++type JsonRecord = Record<string, unknown>;
++type NodeMajor = '20' | '22';
++type FailureClass = 'harness' | 'infrastructure' | 'model' | 'metric' | 'safety' | 'custody';
++type FailureStage = 'source-integrity' | 'registry' | 'load-dev' | 'recall-comparison'
++  | 'precision-comparison' | 'efficiency' | 'quality-policy' | 'safety-policy'
++  | 'response-effect' | 'artifact';
++
++export interface CustodyIdentity {
++  gitCommit: string;
++  nodeMajor: NodeMajor;
++  nodeVersion: string;
++  workflowRunId: string;
++  workflowRunAttempt: string;
++}
++
++export interface FailureContext { failureClass: FailureClass; stage: FailureStage }
++
++export interface CustodyBoundary {
++  custodyRoot: string;
++  runsRoot: string;
++  evaluationRoot: string;
++}
++
++interface IdentityTuple {
++  dev: bigint;
++  ino: bigint;
++  mode: bigint;
++  size: bigint;
++  ctimeNs: bigint;
++  birthtimeNs: bigint;
++}
++
++interface PinnedFile {
++  path: string;
++  handle: FileHandle;
++  identity: IdentityTuple;
++  bytes: Buffer;
++}
++
++interface PinnedDirectory {
++  path: string;
++  handle: FileHandle;
++  identity: IdentityTuple;
++}
++
++export interface FinalizerHooks {
++  beforeUploadPathOutput?(): Promise<void>;
++  duringFinalSweep?(label: string): Promise<void>;
++  randomBytes?(size: number): Buffer;
++  writeStructuredOutput?(path: string, uploadPath: string): Promise<void>;
++  classifyComponent?(fixture: CustodyComponentFixture): CustodyComponentDisposition;
++}
++
++export interface DevelopmentHooks {
++  beforeStage?(context: FailureContext): Promise<void>;
++  suppressProcessFailure?: boolean;
++  classifyComponent?(fixture: CustodyComponentFixture): CustodyComponentDisposition;
++}
++
++export interface CustodyComponentFixture {
++  kind: 'directory' | 'file' | 'symlink' | 'junction' | 'reparse' | 'mount';
++  realPathMatches: boolean;
++  sameDevice: boolean;
++}
++
++export type CustodyComponentDisposition = 'directory' | 'reject';
++
++export function classifyCustodyComponent(fixture: CustodyComponentFixture): CustodyComponentDisposition {
++  return fixture.kind === 'directory' && fixture.realPathMatches && fixture.sameDevice ? 'directory' : 'reject';
++}
++
++function object(value: unknown): JsonRecord {
++  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('artifact');
++  return value as JsonRecord;
++}
++
++function exactKeys(value: JsonRecord, keys: readonly string[]): boolean {
++  return JSON.stringify(Object.keys(value)) === JSON.stringify(keys);
++}
++
++function canonicalBytes(value: JsonRecord): Buffer {
++  return Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');
++}
++
++function parseCanonical(bytes: Buffer): JsonRecord {
++  if (bytes.includes(0xef) && bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) throw new Error('artifact');
++  const value = object(JSON.parse(bytes.toString('utf8')) as unknown);
++  if (!bytes.equals(canonicalBytes(value))) throw new Error('artifact');
++  return value;
++}
++
++function sha256(bytes: Uint8Array | string): string {
++  return createHash('sha256').update(bytes).digest('hex');
++}
++
++function normalized(value: number): number {
++  if (!Number.isFinite(value)) throw new Error('metric');
++  return Object.is(value, -0) ? 0 : value;
++}
++
++function finite(value: unknown, minimum: number, maximum: number): value is number {
++  return typeof value === 'number' && Number.isFinite(value) && value >= minimum && value <= maximum;
++}
++
++function positiveDecimal(value: unknown): string {
++  if (typeof value !== 'string' || !POSITIVE_DECIMAL.test(value)) throw new Error('custody');
++  return value;
++}
++
++export function canonicalRestIdentity(value: unknown): string {
++  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) throw new Error('artifact');
++  const result = value.toString(10);
++  if (!POSITIVE_DECIMAL.test(result) || Number(result) !== value || Number(result).toString(10) !== result) {
++    throw new Error('artifact');
++  }
++  return result;
++}
++
++function environmentIdentity(environment: NodeJS.ProcessEnv = process.env): CustodyIdentity {
++  const gitCommit = environment.GITHUB_SHA ?? gitText(['rev-parse', 'HEAD']);
++  const nodeMajor = process.versions.node.split('.')[0];
++  const nodeVersion = `v${process.versions.node}`;
++  if (!GIT_OBJECT.test(gitCommit) || (nodeMajor !== '20' && nodeMajor !== '22')
++    || !new RegExp(`^v${nodeMajor}\\.[0-9]+\\.[0-9]+$`).test(nodeVersion)) throw new Error('custody');
++  return {
++    gitCommit,
++    nodeMajor,
++    nodeVersion,
++    workflowRunId: positiveDecimal(environment.GITHUB_RUN_ID),
++    workflowRunAttempt: positiveDecimal(environment.GITHUB_RUN_ATTEMPT),
++  };
++}
++
++function evaluationLeafName(identity: CustodyIdentity): string {
++  return `ret010-development-run-${identity.workflowRunId}-attempt-${identity.workflowRunAttempt}-node-${identity.nodeMajor}`;
++}
++
++function boundary(identity: CustodyIdentity, custodyRoot = REPO_ROOT): CustodyBoundary {
++  const root = resolve(custodyRoot);
++  const runsRoot = resolve(root, ...RUNS_PARTS);
++  return { custodyRoot: root, runsRoot, evaluationRoot: resolve(runsRoot, evaluationLeafName(identity)) };
++}
++
++export function custodyBoundaryForTest(identity: CustodyIdentity, custodyRoot: string, runsParts: readonly string[] = ['runs']): CustodyBoundary {
++  const root = resolve(custodyRoot);
++  const runsRoot = resolve(root, ...runsParts);
++  return { custodyRoot: root, runsRoot, evaluationRoot: resolve(runsRoot, evaluationLeafName(identity)) };
++}
++
++function tuple(info: BigIntStats): IdentityTuple {
++  return { dev: info.dev, ino: info.ino, mode: info.mode, size: info.size, ctimeNs: info.ctimeNs, birthtimeNs: info.birthtimeNs };
++}
++
++function sameTuple(left: IdentityTuple, right: IdentityTuple): boolean {
++  return Object.keys(left).every((key) => left[key as keyof IdentityTuple] === right[key as keyof IdentityTuple]);
++}
++
++async function containedComponents(root: string, target: string): Promise<string[]> {
++  const rel = relative(root, target);
++  if (rel === '' || rel.startsWith(`..${sep}`) || rel === '..' || resolve(root, rel) !== resolve(target)) throw new Error('custody');
++  const parts = rel.split(sep).filter(Boolean);
++  return parts.map((_, index) => resolve(root, ...parts.slice(0, index + 1)));
++}
++
++function custodyOpenFlags(): { noFollow: number; directory: number } {
++  if (typeof fsConstants.O_NOFOLLOW !== 'number' || typeof fsConstants.O_DIRECTORY !== 'number') throw new Error('custody');
++  return { noFollow: fsConstants.O_NOFOLLOW, directory: fsConstants.O_DIRECTORY };
++}
++
++async function mountPoints(): Promise<ReadonlySet<string>> {
++  if (process.platform !== 'linux') return new Set();
++  const text = await readFile('/proc/self/mountinfo', 'utf8');
++  return new Set(text.split('\n').filter(Boolean).map((line) => {
++    const fields = line.split(' ');
++    return resolve((fields[4] ?? '').replace(/\\040/g, ' ').replace(/\\011/g, '\t').replace(/\\134/g, '\\'));
++  }));
++}
++
++async function validateDirectory(
++  path: string,
++  parentDev?: bigint,
++  authorityRoot?: string,
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<IdentityTuple> {
++  const info = await lstat(path, { bigint: true });
++  const resolved = resolve(path); const real = await realpath(path); const mounted = (await mountPoints()).has(resolved) && resolved !== resolve(authorityRoot ?? resolved);
++  const fixture: CustodyComponentFixture = {
++    kind: info.isSymbolicLink() ? 'symlink' : mounted ? 'mount' : info.isDirectory() ? 'directory' : 'file',
++    realPathMatches: real === resolved,
++    sameDevice: parentDev === undefined || info.dev === parentDev,
++  };
++  if (classifier(fixture) !== 'directory') throw new Error('custody');
++  return tuple(info);
++}
++
++async function pinAuthorityChain(
++  root: string,
++  targetDirectory: string,
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<PinnedDirectory[]> {
++  const flags = custodyOpenFlags(); const rootPath = resolve(root); const pins: PinnedDirectory[] = [];
++  let parentDev: bigint | undefined;
++  try {
++    const targetPath = resolve(targetDirectory);
++    const components = targetPath === rootPath ? [] : await containedComponents(rootPath, targetPath);
++    for (const path of [rootPath, ...components]) {
++      const before = await validateDirectory(path, parentDev, rootPath, classifier);
++      const handle = await open(path, fsConstants.O_RDONLY | flags.directory | flags.noFollow);
++      const after = await handle.stat({ bigint: true });
++      if (!sameTuple(before, tuple(after))) { await handle.close(); throw new Error('custody'); }
++      pins.push({ path, handle, identity: before }); parentDev = before.dev;
++    }
++    return pins;
++  } catch (error) { await closePins(pins); throw error; }
++}
++
++async function ensureRunsRoot(
++  value: CustodyBoundary,
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<void> {
++  let parent = value.custodyRoot;
++  let parentIdentity = await validateDirectory(parent, undefined, value.custodyRoot, classifier);
++  for (const path of await containedComponents(value.custodyRoot, value.runsRoot)) {
++    try {
++      parentIdentity = await validateDirectory(path, parentIdentity.dev, value.custodyRoot, classifier);
++    } catch (error) {
++      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
++      const authority = await pinAuthorityChain(value.custodyRoot, parent, classifier);
++      try { await mkdir(path); } finally { await closePins(authority); }
++      parentIdentity = await validateDirectory(path, parentIdentity.dev, value.custodyRoot, classifier);
++    }
++    parent = path;
++  }
++  if (parent !== value.runsRoot || resolve(value.custodyRoot, ...RUNS_PARTS) !== value.runsRoot) throw new Error('custody');
++}
++
++async function createExclusiveDirectory(
++  authorityRoot: string,
++  path: string,
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<void> {
++  const authority = await pinAuthorityChain(authorityRoot, dirname(path), classifier);
++  try { await mkdir(path); } finally { await closePins(authority); }
++  await validateDirectory(path, authority.at(-1)?.identity.dev, authorityRoot, classifier);
++}
++
++async function writeExclusive(
++  authorityRoot: string,
++  path: string,
++  bytes: Buffer,
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<void> {
++  const flags = custodyOpenFlags(); const authority = await pinAuthorityChain(authorityRoot, dirname(path), classifier);
++  let handle: FileHandle | undefined;
++  try {
++    handle = await open(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | flags.noFollow, 0o600);
++    const result = await handle.write(bytes, 0, bytes.length, 0);
++    if (result.bytesWritten !== bytes.length) throw new Error('custody');
++    await handle.sync();
++  } finally { await handle?.close(); await closePins(authority); }
++}
++
++async function openDirectoryPin(
++  authorityRoot: string,
++  path: string,
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<PinnedDirectory> {
++  const flags = custodyOpenFlags(); const authority = await pinAuthorityChain(authorityRoot, dirname(path), classifier);
++  let handle: FileHandle | undefined;
++  try {
++    handle = await open(path, fsConstants.O_RDONLY | flags.directory | flags.noFollow);
++    const info = await handle.stat({ bigint: true });
++    if (!info.isDirectory()) throw new Error('custody');
++    return { path, handle, identity: tuple(info) };
++  } catch (error) { await handle?.close(); throw error; }
++  finally { await closePins(authority); }
++}
++
++async function openFilePin(
++  authorityRoot: string,
++  path: string,
++  maximumBytes = 2_000_000n,
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<PinnedFile> {
++  const flags = custodyOpenFlags(); const authority = await pinAuthorityChain(authorityRoot, dirname(path), classifier);
++  let handle: FileHandle | undefined;
++  try {
++    handle = await open(path, fsConstants.O_RDONLY | flags.noFollow);
++    const info = await handle.stat({ bigint: true });
++    if (!info.isFile() || info.nlink !== 1n || info.size > maximumBytes) throw new Error('custody');
++    const bytes = Buffer.alloc(Number(info.size));
++    const read = await handle.read(bytes, 0, bytes.length, 0);
++    if (read.bytesRead !== bytes.length) throw new Error('custody');
++    return { path, handle, identity: tuple(info), bytes };
++  } catch (error) { await handle?.close(); throw error; }
++  finally { await closePins(authority); }
++}
++
++async function recheckDirectoryPin(pin: PinnedDirectory): Promise<void> {
++  const [handleInfo, pathInfo] = await Promise.all([pin.handle.stat({ bigint: true }), lstat(pin.path, { bigint: true })]);
++  if (!pathInfo.isDirectory() || pathInfo.isSymbolicLink() || !sameTuple(tuple(handleInfo), pin.identity)
++    || !sameTuple(tuple(pathInfo), pin.identity) || await realpath(pin.path) !== resolve(pin.path)) throw new Error('custody');
++}
++
++async function recheckFilePin(pin: PinnedFile): Promise<void> {
++  const [handleInfo, pathInfo] = await Promise.all([pin.handle.stat({ bigint: true }), lstat(pin.path, { bigint: true })]);
++  if (!pathInfo.isFile() || pathInfo.isSymbolicLink() || pathInfo.nlink !== 1n
++    || !sameTuple(tuple(handleInfo), pin.identity) || !sameTuple(tuple(pathInfo), pin.identity)) throw new Error('custody');
++  const bytes = Buffer.alloc(pin.bytes.length);
++  const read = await pin.handle.read(bytes, 0, bytes.length, 0);
++  if (read.bytesRead !== bytes.length || !bytes.equals(pin.bytes)) throw new Error('custody');
++}
++
++async function readDirectoryAuthorized(
++  authorityRoot: string,
++  path: string,
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<string[]> {
++  const authority = await pinAuthorityChain(authorityRoot, path, classifier);
++  try { return await readdir(path); } finally { await closePins(authority); }
++}
++
++async function closePins(pins: readonly (PinnedFile | PinnedDirectory)[]): Promise<void> {
++  await Promise.all(pins.map(async (pin) => pin.handle.close().catch(() => undefined)));
++}
++
++function gitBytes(args: readonly string[]): Buffer {
++  return execFileSync('git', [...args], { cwd: REPO_ROOT, encoding: 'buffer', stdio: ['ignore', 'pipe', 'ignore'] });
++}
++
++function gitText(args: readonly string[]): string { return gitBytes(args).toString('utf8').trim(); }
++
++function gitBytesAt(commit: string, path: string): Buffer {
++  if (!GIT_OBJECT.test(commit)) throw new Error('custody');
++  return gitBytes(['cat-file', 'blob', `${commit}:${path}`]);
++}
++
++function gitBlobAt(commit: string, path: string): string {
++  const result = gitText(['rev-parse', `${commit}:${path}`]);
++  if (!GIT_OBJECT.test(result)) throw new Error('custody');
++  return result;
++}
++
++async function assertSourceIntegrity(expectedCommit: string): Promise<string> {
++  const head = gitText(['rev-parse', 'HEAD']);
++  if (head !== expectedCommit || !GIT_OBJECT.test(head) || gitBytes(['status', '--porcelain=v1', '--untracked-files=all']).length !== 0) throw new Error('custody');
++  for (const path of CUSTODY_PATHS) {
++    const pin = await openFilePin(REPO_ROOT, resolve(REPO_ROOT, path), 2_000_000n);
++    try { if (!pin.bytes.equals(gitBytesAt(head, path))) throw new Error('custody'); await recheckFilePin(pin); }
++    finally { await pin.handle.close(); }
++    const mode = gitText(['ls-tree', head, '--', path]).split(/\s+/)[0];
++    if (mode !== '100644' && mode !== '100755') throw new Error('custody');
++  }
++  return head;
++}
++
++function textLf(bytes: Buffer): Buffer { return Buffer.from(bytes.toString('utf8').replace(/\r\n?/g, '\n'), 'utf8'); }
++
++function frozenDataset(commit: string): { descriptorSha256: string; inputSha256: string; oracleSha256: string } {
++  const registry = object(JSON.parse(gitBytesAt(commit, 'bench/lab/registry/datasets.json').toString('utf8')) as unknown);
++  if (!Array.isArray(registry.datasets)) throw new Error('artifact');
++  const matches = registry.datasets.filter((entry) => object(entry).id === DATASET_ID);
++  if (matches.length !== 1) throw new Error('artifact');
++  const descriptor = object(matches[0]);
++  if (!Array.isArray(descriptor.artifacts) || descriptor.artifacts.length !== 2) throw new Error('artifact');
++  const digests = descriptor.artifacts.map((raw) => {
++    const artifact = object(raw);
++    if (artifact.hashMode !== 'text-lf' || typeof artifact.repositoryPath !== 'string' || !SHA256.test(String(artifact.sha256))) throw new Error('artifact');
++    const bytes = textLf(gitBytesAt(commit, artifact.repositoryPath));
++    const digest = sha256(bytes);
++    if (digest !== artifact.sha256 || bytes.length !== artifact.sizeBytes) throw new Error('artifact');
++    return digest;
++  });
++  return { descriptorSha256: sha256(canonicalBytes(descriptor)), inputSha256: digests[0]!, oracleSha256: digests[1]! };
++}
++
++interface ProbePair {
++  scenarioId: string; probeId: string; controlCoverage: number; controlTokens: number;
++  candidateCoverage: number; candidateTokens: number; controlResultIds: readonly string[]; candidateResultIds: readonly string[];
++}
++
++function reportProbePairs(report: any): ProbePair[] {
++  if (report?.control?.adapterId !== CONTROL_ID || report?.candidate?.adapterId !== CANDIDATE_ID
++    || !Array.isArray(report.control.scenarioReports) || !Array.isArray(report.candidate.scenarioReports)
++    || report.control.scenarioReports.length !== 10 || report.candidate.scenarioReports.length !== 10) throw new Error('metric');
++  const arm = (scenarios: any[]): Map<string, { scenarioId: string; probeId: string; probe: any }> => {
++    const result = new Map<string, { scenarioId: string; probeId: string; probe: any }>(); const scenarioIds = new Set<string>(); const probeIds = new Set<string>();
++    for (const scenario of scenarios) {
++      if (typeof scenario?.scenarioId !== 'string' || scenario.scenarioId.length === 0 || scenarioIds.has(scenario.scenarioId)
++        || !Array.isArray(scenario.probes) || scenario.probes.length !== 1) throw new Error('metric');
++      scenarioIds.add(scenario.scenarioId); const probe = scenario.probes[0];
++      if (typeof probe?.probeId !== 'string' || probe.probeId.length === 0 || probeIds.has(probe.probeId) || !Array.isArray(probe.resultIds)
++        || new Set(probe.resultIds).size !== probe.resultIds.length || probe.resultIds.some((id: unknown) => typeof id !== 'string' || id.length === 0)
++        || !finite(probe.metrics?.answerCoverage, 0, 1) || !finite(probe.contextTokens ?? 0, 0, Number.MAX_SAFE_INTEGER)) throw new Error('metric');
++      probeIds.add(probe.probeId); const key = `${scenario.scenarioId}\0${probe.probeId}`; if (result.has(key)) throw new Error('metric');
++      result.set(key, { scenarioId: scenario.scenarioId, probeId: probe.probeId, probe });
++    }
++    if (scenarioIds.size !== 10 || probeIds.size !== 10 || result.size !== 10) throw new Error('metric');
++    return result;
++  };
++  const controls = arm(report.control.scenarioReports); const candidates = arm(report.candidate.scenarioReports);
++  if (controls.size !== candidates.size || [...controls.keys()].some((key) => !candidates.has(key))) throw new Error('metric');
++  return [...controls.entries()].map(([key, current]) => {
++    const paired = candidates.get(key)!;
++    return { scenarioId: current.scenarioId, probeId: current.probeId,
++      controlCoverage: current.probe.metrics.answerCoverage, controlTokens: current.probe.contextTokens ?? 0,
++      candidateCoverage: paired.probe.metrics.answerCoverage, candidateTokens: paired.probe.contextTokens ?? 0,
++      controlResultIds: current.probe.resultIds, candidateResultIds: paired.probe.resultIds };
++  });
++}
++
++export function qualifyingConjunctionCount(controls: readonly (readonly string[])[], candidates: readonly (readonly string[])[]): number {
++  if (controls.length !== candidates.length) throw new Error('metric');
++  let count = 0;
++  for (let index = 0; index < controls.length; index += 1) {
++    const control = controls[index]!; const candidate = candidates[index]!;
++    if (new Set(control).size !== control.length || new Set(candidate).size !== candidate.length) throw new Error('metric');
++    const positions = new Map(candidate.map((id, position) => [id, position]));
++    const shared = control.filter((id) => positions.has(id));
++    let orderChanged = false;
++    for (let left = 0; left < shared.length; left += 1) for (let right = left + 1; right < shared.length; right += 1) {
++      if (positions.get(shared[left]!)! > positions.get(shared[right]!)!) orderChanged = true;
++    }
++    const controlSet = new Set(control); const candidateSet = new Set(candidate);
++    const selectionChanged = control.length !== candidate.length || candidate.some((id) => !controlSet.has(id)) || control.some((id) => !candidateSet.has(id));
++    if (orderChanged && selectionChanged) count += 1;
++  }
++  return count;
++}
++
++function qualifyingCount(pairs: readonly ProbePair[]): number {
++  return qualifyingConjunctionCount(pairs.map((pair) => pair.controlResultIds), pairs.map((pair) => pair.candidateResultIds));
++}
++
++function laneRecord(lane: 'recall-at-10' | 'precision-at-5', report: any, count: number): JsonRecord {
++  const arm = (value: any): JsonRecord => ({ recallAtK: normalized(value.metrics.recallAtK), precisionAtK: normalized(value.metrics.precisionAtK),
++    staleLeakRate: normalized(value.metrics.staleLeakRate), isolationLeakRate: normalized(value.metrics.isolationLeakRate),
++    duplicateRate: normalized(value.metrics.duplicateRate), unknownResultRate: normalized(value.metrics.unknownResultRate) });
++  const control = arm(report.control); const candidate = arm(report.candidate);
++  return { schemaVersion: '1', lane, datasetId: DATASET_ID, split: 'dev', controlAdapterId: CONTROL_ID, candidateAdapterId: CANDIDATE_ID,
++    scenarioCount: 10, probeCount: 10, k: lane === 'recall-at-10' ? 10 : 5, control, candidate,
++    delta: { recallAtK: normalized((candidate.recallAtK as number) - (control.recallAtK as number)),
++      precisionAtK: normalized((candidate.precisionAtK as number) - (control.precisionAtK as number)) }, qualifyingCaseCount: count, passed: true };
++}
++
++function policy(value: unknown): any {
++  const expected = { schemaVersion: 1, controlAdapterId: CONTROL_ID, candidateAdapterId: CANDIDATE_ID,
++    dataset: { id: DATASET_ID, split: 'dev' }, lanes: { recall: { dimension: 'recall', probes: 10, k: 10, minimumDelta: 0 },
++      precision: { dimension: 'precision', probes: 10, k: 5, minimumDelta: 0.05 } },
++    safety: { maxStaleLeakRate: 0, maxIsolationLeakRate: 0, maxDuplicateRate: 0, maxUnknownResultRate: 0 },
++    pairedVectorOrder: ['recall', 'precision'], withinLaneSortKeys: ['scenarioId', 'probeId'],
++    efficiency: { outcome: 'measured', method: 'paired-bootstrap', confidenceLevel: 0.95, minimumPointDeltaExclusive: 0,
++      minimumOneSided95LowerBound: 0, resamples: 2000, minimumPairedProbes: 10, seedRule: 'vector-derived' } };
++  if (JSON.stringify(value) !== JSON.stringify(expected)) throw new Error('metric');
++  return value as any;
++}
++
++function enforceQualityPolicy(configuration: any, recall: JsonRecord, precision: JsonRecord, interval: JsonRecord): void {
++  const recallDelta = (recall.delta as JsonRecord).recallAtK as number;
++  const precisionDelta = (precision.delta as JsonRecord).precisionAtK as number;
++  if (recallDelta < configuration.lanes.recall.minimumDelta || precisionDelta < configuration.lanes.precision.minimumDelta
++    || interval.outcome !== 'measured' || interval.pairedProbes !== 20 || interval.resamples !== 2000 || interval.level !== 0.95
++    || !((interval.point as number) > 0) || (interval.oneSidedLower as number) < 0) throw new Error('metric');
++}
++
++function enforceSafetyPolicy(recall: JsonRecord, precision: JsonRecord): void {
++  for (const lane of [recall, precision]) {
++    const candidate = lane.candidate as JsonRecord;
++    if (candidate.staleLeakRate !== 0 || candidate.isolationLeakRate !== 0 || candidate.duplicateRate !== 0 || candidate.unknownResultRate !== 0) throw new Error('safety');
++  }
++}
++
++function failureContext(error: unknown, current: FailureContext): FailureContext {
++  const marker = error instanceof Error ? error.message : '';
++  if (marker === 'custody' || marker === 'artifact') return { failureClass: 'custody', stage: current.stage };
++  if (marker === 'safety') return { failureClass: 'safety', stage: current.stage };
++  if (marker === 'metric' || marker === 'response-effect') return { failureClass: 'metric', stage: current.stage };
++  if (marker === 'comparison') return { failureClass: 'model', stage: current.stage };
++  return current;
++}
++
++function tombstone(identity: CustodyIdentity, context: FailureContext): JsonRecord {
++  return { schemaVersion: '1', decision: 'failed', failureClass: context.failureClass, stage: context.stage,
++    gitCommit: identity.gitCommit, nodeMajor: identity.nodeMajor, nodeVersion: identity.nodeVersion,
++    workflowRunId: identity.workflowRunId, workflowRunAttempt: identity.workflowRunAttempt };
++}
++
++async function exclusivelyPublish(
++  authorityRoot: string,
++  root: string,
++  records: Readonly<Record<string, JsonRecord>>,
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<void> {
++  for (const [name, record] of Object.entries(records)) await writeExclusive(authorityRoot, resolve(root, name), canonicalBytes(record), classifier);
++}
++
++export async function runDevelopment(hooks: DevelopmentHooks = {}, custodyRoot = REPO_ROOT): Promise<'passed' | 'failed'> {
++  let identity: CustodyIdentity | undefined;
++  let output: CustodyBoundary | undefined;
++  let context: FailureContext = { failureClass: 'custody', stage: 'source-integrity' };
++  const stdout = process.stdout.write; const stderr = process.stderr.write;
++  process.stdout.write = (() => true) as typeof process.stdout.write;
++  process.stderr.write = (() => true) as typeof process.stderr.write;
++  const enter = async (value: FailureContext): Promise<void> => { context = value; await hooks.beforeStage?.(value); };
++  try {
++    identity = environmentIdentity(); output = boundary(identity, custodyRoot);
++    const classifier = hooks.classifyComponent ?? classifyCustodyComponent;
++    await ensureRunsRoot(output, classifier); await createExclusiveDirectory(output.custodyRoot, output.evaluationRoot, classifier);
++    await enter(context); const head = await assertSourceIntegrity(identity.gitCommit);
++    await enter({ failureClass: 'harness', stage: 'load-dev' });
++    const [{ loadRet010DevScenarios }, { compareRegisteredAdapters }, stats, served] = await Promise.all([
++      import('./load-dev.js'), import('../registered-adapters.js'), import('../stats.js'),
++      import('../../../packages/retrieval/src/served-reranker.js'),
++    ]);
++    const scenarios = await loadRet010DevScenarios(REPO_ROOT); if (scenarios.length !== 20) throw new Error('metric');
++    const basePolicy = { minRecallAtK: 0, minPrecisionAtK: 0, minAnswerCoverage: 0, maxStaleLeakRate: 0,
++      maxIsolationLeakRate: 0, maxDuplicateRate: 0, maxUnknownResultRate: 0, maxQualityRegression: 1 };
++    await enter({ failureClass: 'model', stage: 'recall-comparison' });
++    const recallReport = await compareRegisteredAdapters({ runId: 'ret010-development-recall', controlId: CONTROL_ID,
++      candidateId: CANDIDATE_ID, scenarios: scenarios.slice(0, 10), splits: ['dev'], policy: basePolicy, repoRoot: REPO_ROOT });
++    await enter({ failureClass: 'model', stage: 'precision-comparison' });
++    const precisionReport = await compareRegisteredAdapters({ runId: 'ret010-development-precision', controlId: CONTROL_ID,
++      candidateId: CANDIDATE_ID, scenarios: scenarios.slice(10), splits: ['dev'], policy: basePolicy, repoRoot: REPO_ROOT });
++    if (!recallReport.passed || !precisionReport.passed) throw new Error('comparison');
++    await enter({ failureClass: 'metric', stage: 'response-effect' });
++    const recallPairs = reportProbePairs(recallReport); const precisionPairs = reportProbePairs(precisionReport);
++    const allKeys = [...recallPairs, ...precisionPairs].map((pair) => `${pair.scenarioId}\0${pair.probeId}`);
++    if (new Set(allKeys).size !== 20 || new Set([...recallPairs, ...precisionPairs].map((pair) => pair.scenarioId)).size !== 20
++      || new Set([...recallPairs, ...precisionPairs].map((pair) => pair.probeId)).size !== 20) throw new Error('metric');
++    const recallCount = qualifyingCount(recallPairs); const precisionCount = qualifyingCount(precisionPairs);
++    if (recallCount + precisionCount < 1 || recallCount + precisionCount > 20) throw new Error('response-effect');
++    const recall = laneRecord('recall-at-10', recallReport, recallCount);
++    const precision = laneRecord('precision-at-5', precisionReport, precisionCount);
++    await enter({ failureClass: 'metric', stage: 'efficiency' });
++    const ordered = (values: ProbePair[]) => values.sort((a, b) => a.scenarioId.localeCompare(b.scenarioId) || a.probeId.localeCompare(b.probeId));
++    const pairs = [...ordered(recallPairs), ...ordered(precisionPairs)];
++    const measured = stats.pairedEfficiencyInterval(pairs); if (measured.outcome !== 'measured') throw new Error('metric');
++    const interval: JsonRecord = { schemaVersion: '1', metric: 'task-success-per-1k-tokens', outcome: 'measured', pairedProbes: 20,
++      resamples: 2000, level: 0.95, seed: measured.seed, point: normalized(measured.point!), lower: normalized(measured.lower!),
++      upper: normalized(measured.upper!), oneSidedLower: normalized(measured.oneSidedLower!) };
++    const policyBytes = gitBytesAt(head, 'bench/lab/ret010/dev-policy.json');
++    const configuration = policy(JSON.parse(policyBytes.toString('utf8')) as unknown);
++    await enter({ failureClass: 'metric', stage: 'quality-policy' }); enforceQualityPolicy(configuration, recall, precision, interval);
++    await enter({ failureClass: 'safety', stage: 'safety-policy' }); enforceSafetyPolicy(recall, precision);
++    await enter({ failureClass: 'custody', stage: 'artifact' });
++    const recallBytes = canonicalBytes(recall); const precisionBytes = canonicalBytes(precision); const intervalBytes = canonicalBytes(interval);
++    const dataset = frozenDataset(head); const provider = served.SERVED_RERANKER_PROVIDER_IDENTITY;
++    const aggregate: JsonRecord = { schemaVersion: '1', decision: 'passed', datasetId: DATASET_ID, split: 'dev', controlAdapterId: CONTROL_ID,
++      candidateAdapterId: CANDIDATE_ID, providerIdentity: { providerId: provider.providerId, modelId: provider.modelId,
++        calibrationId: provider.calibrationId, locality: provider.locality }, sourceCommit: head,
++      modelBlob: gitBlobAt(head, 'packages/retrieval/src/served-reranker.ts'), providerContractBlob: gitBlobAt(head, 'packages/retrieval/src/reranker.ts'),
++      adapterBlob: gitBlobAt(head, 'bench/lab/adapters/memberry-retrieval-core.ts'), datasetDescriptorSha256: dataset.descriptorSha256,
++      inputSha256: dataset.inputSha256, oracleSha256: dataset.oracleSha256, devPolicySha256: sha256(policyBytes),
++      recallLaneSha256: sha256(recallBytes), precisionLaneSha256: sha256(precisionBytes), efficiencyIntervalSha256: sha256(intervalBytes),
++      seed: measured.seed, quality: { recallDelta: (recall.delta as JsonRecord).recallAtK,
++        precisionDelta: (precision.delta as JsonRecord).precisionAtK, efficiencyPoint: interval.point,
++        efficiencyOneSidedLower: interval.oneSidedLower }, safety: { staleLeakRate: 0, isolationLeakRate: 0, duplicateRate: 0, unknownResultRate: 0 },
++      responseEffect: { sameCaseOrderAndSelectionChanged: true, qualifyingCaseCount: recallCount + precisionCount }, passed: true };
++    const aggregateBytes = canonicalBytes(aggregate);
++    const manifest: JsonRecord = { schemaVersion: '1', decision: 'passed', gitCommit: head, nodeMajor: identity.nodeMajor,
++      nodeVersion: identity.nodeVersion, workflowRunId: identity.workflowRunId, workflowRunAttempt: identity.workflowRunAttempt,
++      recallLaneSha256: sha256(recallBytes), precisionLaneSha256: sha256(precisionBytes), efficiencyIntervalSha256: sha256(intervalBytes),
++      aggregateResultSha256: sha256(aggregateBytes) };
++    await assertSourceIntegrity(head);
++    if (JSON.stringify(environmentIdentity()) !== JSON.stringify(identity)) throw new Error('custody');
++    await exclusivelyPublish(output.custodyRoot, output.evaluationRoot, { 'recall-lane.json': recall, 'precision-lane.json': precision,
++      'efficiency-interval.json': interval, 'aggregate-result.json': aggregate, 'custody-manifest.json': manifest });
++    return 'passed';
++  } catch (error) {
++    context = failureContext(error, context);
++    if (identity && output) {
++      try {
++        const entries = await readDirectoryAuthorized(output.custodyRoot, output.evaluationRoot, hooks.classifyComponent);
++        if (entries.length === 0) await writeExclusive(output.custodyRoot, resolve(output.evaluationRoot, FAILURE_FILE), canonicalBytes(tombstone(identity, context)), hooks.classifyComponent);
++      } catch { /* immutable partial or missing roots remain untouched */ }
++    }
++    if (!hooks.suppressProcessFailure) process.exitCode = 1;
++    return 'failed';
++  } finally {
++    process.stdout.write = stdout; process.stderr.write = stderr;
++  }
++}
++
++function validateTombstone(record: JsonRecord, identity?: CustodyIdentity): void {
++  const keys = ['schemaVersion', 'decision', 'failureClass', 'stage', 'gitCommit', 'nodeMajor', 'nodeVersion', 'workflowRunId', 'workflowRunAttempt'];
++  if (!exactKeys(record, keys) || record.schemaVersion !== '1' || record.decision !== 'failed'
++    || !['harness', 'infrastructure', 'model', 'metric', 'safety', 'custody'].includes(String(record.failureClass))
++    || !['source-integrity', 'registry', 'load-dev', 'recall-comparison', 'precision-comparison', 'efficiency', 'quality-policy', 'safety-policy', 'response-effect', 'artifact'].includes(String(record.stage))
++    || typeof record.gitCommit !== 'string' || !GIT_OBJECT.test(record.gitCommit)
++    || (record.nodeMajor !== '20' && record.nodeMajor !== '22')
++    || typeof record.nodeVersion !== 'string' || !new RegExp(`^v${record.nodeMajor}\\.[0-9]+\\.[0-9]+$`).test(record.nodeVersion)
++    || typeof record.workflowRunId !== 'string' || !POSITIVE_DECIMAL.test(record.workflowRunId)
++    || typeof record.workflowRunAttempt !== 'string' || !POSITIVE_DECIMAL.test(record.workflowRunAttempt)) throw new Error('artifact');
++  if (identity && Object.entries(identity).some(([key, value]) => record[key] !== value)) throw new Error('custody');
++}
++
++export function validateFailureTombstoneForTest(value: unknown): void { validateTombstone(object(value)); }
++
++function validateLane(record: JsonRecord, lane: 'recall-at-10' | 'precision-at-5'): void {
++  const keys = ['schemaVersion', 'lane', 'datasetId', 'split', 'controlAdapterId', 'candidateAdapterId', 'scenarioCount', 'probeCount', 'k', 'control', 'candidate', 'delta', 'qualifyingCaseCount', 'passed'];
++  if (!exactKeys(record, keys) || record.schemaVersion !== '1' || record.lane !== lane || record.datasetId !== DATASET_ID
++    || record.split !== 'dev' || record.controlAdapterId !== CONTROL_ID || record.candidateAdapterId !== CANDIDATE_ID
++    || record.scenarioCount !== 10 || record.probeCount !== 10 || record.k !== (lane === 'recall-at-10' ? 10 : 5)
++    || !Number.isInteger(record.qualifyingCaseCount) || (record.qualifyingCaseCount as number) < 0
++    || (record.qualifyingCaseCount as number) > 10 || record.passed !== true) throw new Error('artifact');
++  const armKeys = ['recallAtK', 'precisionAtK', 'staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate'];
++  for (const name of ['control', 'candidate']) {
++    const arm = object(record[name]);
++    if (!exactKeys(arm, armKeys) || armKeys.some((key) => !finite(arm[key], 0, 1))) throw new Error('artifact');
++  }
++  const delta = object(record.delta);
++  const control = object(record.control); const candidate = object(record.candidate);
++  if (!exactKeys(delta, ['recallAtK', 'precisionAtK']) || !finite(delta.recallAtK, -1, 1) || !finite(delta.precisionAtK, -1, 1)
++    || delta.recallAtK !== normalized((candidate.recallAtK as number) - (control.recallAtK as number))
++    || delta.precisionAtK !== normalized((candidate.precisionAtK as number) - (control.precisionAtK as number))) throw new Error('artifact');
++}
++
++function validateInterval(record: JsonRecord): void {
++  const keys = ['schemaVersion', 'metric', 'outcome', 'pairedProbes', 'resamples', 'level', 'seed', 'point', 'lower', 'upper', 'oneSidedLower'];
++  if (!exactKeys(record, keys) || record.schemaVersion !== '1' || record.metric !== 'task-success-per-1k-tokens'
++    || record.outcome !== 'measured' || record.pairedProbes !== 20 || record.resamples !== 2000 || record.level !== 0.95
++    || !Number.isInteger(record.seed) || (record.seed as number) < 0 || (record.seed as number) > 0xffffffff
++    || ['point', 'lower', 'upper', 'oneSidedLower'].some((key) => !finite(record[key], -Number.MAX_VALUE, Number.MAX_VALUE))
++    || (record.lower as number) > (record.point as number) || (record.point as number) > (record.upper as number)
++    || (record.oneSidedLower as number) > (record.point as number)) throw new Error('artifact');
++}
++
++function validateAggregate(record: JsonRecord): void {
++  const keys = ['schemaVersion', 'decision', 'datasetId', 'split', 'controlAdapterId', 'candidateAdapterId', 'providerIdentity',
++    'sourceCommit', 'modelBlob', 'providerContractBlob', 'adapterBlob', 'datasetDescriptorSha256', 'inputSha256', 'oracleSha256',
++    'devPolicySha256', 'recallLaneSha256', 'precisionLaneSha256', 'efficiencyIntervalSha256', 'seed', 'quality', 'safety',
++    'responseEffect', 'passed'];
++  if (!exactKeys(record, keys) || record.schemaVersion !== '1' || record.decision !== 'passed' || record.datasetId !== DATASET_ID
++    || record.split !== 'dev' || record.controlAdapterId !== CONTROL_ID || record.candidateAdapterId !== CANDIDATE_ID || record.passed !== true
++    || typeof record.sourceCommit !== 'string' || !GIT_OBJECT.test(record.sourceCommit)
++    || ['modelBlob', 'providerContractBlob', 'adapterBlob'].some((key) => typeof record[key] !== 'string' || !GIT_OBJECT.test(record[key] as string))
++    || ['datasetDescriptorSha256', 'inputSha256', 'oracleSha256', 'devPolicySha256', 'recallLaneSha256', 'precisionLaneSha256', 'efficiencyIntervalSha256']
++      .some((key) => typeof record[key] !== 'string' || !SHA256.test(record[key] as string))
++    || !Number.isInteger(record.seed) || (record.seed as number) < 0 || (record.seed as number) > 0xffffffff) throw new Error('artifact');
++  const provider = object(record.providerIdentity);
++  if (!exactKeys(provider, ['providerId', 'modelId', 'calibrationId', 'locality']) || provider.providerId !== 'memberry.local.lexical'
++    || provider.modelId !== 'bm25f-query-v1' || provider.calibrationId !== 'fixed-blend-v1' || provider.locality !== 'local') throw new Error('artifact');
++  const quality = object(record.quality);
++  if (!exactKeys(quality, ['recallDelta', 'precisionDelta', 'efficiencyPoint', 'efficiencyOneSidedLower'])
++    || Object.values(quality).some((value) => !finite(value, -Number.MAX_VALUE, Number.MAX_VALUE))) throw new Error('artifact');
++  const safety = object(record.safety);
++  if (!exactKeys(safety, ['staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate'])
++    || Object.values(safety).some((value) => value !== 0)) throw new Error('artifact');
++  const effect = object(record.responseEffect);
++  if (!exactKeys(effect, ['sameCaseOrderAndSelectionChanged', 'qualifyingCaseCount']) || effect.sameCaseOrderAndSelectionChanged !== true
++    || !Number.isInteger(effect.qualifyingCaseCount) || (effect.qualifyingCaseCount as number) < 1 || (effect.qualifyingCaseCount as number) > 20) throw new Error('artifact');
++}
++
++interface BundlePins {
++  directory: PinnedDirectory;
++  files: PinnedFile[];
++  records: Record<string, JsonRecord>;
++  bytes: Record<string, Buffer>;
++}
++
++async function pinDirectoryBundle(
++  authorityRoot: string,
++  root: string,
++  allowlist: readonly string[],
++  classifier: (fixture: CustodyComponentFixture) => CustodyComponentDisposition = classifyCustodyComponent,
++): Promise<BundlePins> {
++  const directory = await openDirectoryPin(authorityRoot, root, classifier);
++  const entries = (await readDirectoryAuthorized(authorityRoot, root, classifier)).sort();
++  if (JSON.stringify(entries) !== JSON.stringify([...allowlist].sort())) { await directory.handle.close(); throw new Error('artifact'); }
++  const files: PinnedFile[] = [];
++  try {
++    for (const name of allowlist) files.push(await openFilePin(authorityRoot, resolve(root, name), 2_000_000n, classifier));
++    const records: Record<string, JsonRecord> = {}; const bytes: Record<string, Buffer> = {};
++    for (const file of files) { const name = basename(file.path); bytes[name] = file.bytes; records[name] = parseCanonical(file.bytes); }
++    return { directory, files, records, bytes };
++  } catch (error) { await closePins([directory, ...files]); throw error; }
++}
++
++async function sweepBundle(bundle: BundlePins, hook?: (label: string) => Promise<void>): Promise<void> {
++  await hook?.('directory'); await recheckDirectoryPin(bundle.directory);
++  for (const file of bundle.files) { await hook?.(basename(file.path)); await recheckFilePin(file); }
++}
++
++function validateManifest(record: JsonRecord, bundle: BundlePins, identity?: CustodyIdentity): void {
++  const keys = ['schemaVersion', 'decision', 'gitCommit', 'nodeMajor', 'nodeVersion', 'workflowRunId', 'workflowRunAttempt',
++    'recallLaneSha256', 'precisionLaneSha256', 'efficiencyIntervalSha256', 'aggregateResultSha256'];
++  if (!exactKeys(record, keys) || record.schemaVersion !== '1' || record.decision !== 'passed'
++    || typeof record.gitCommit !== 'string' || !GIT_OBJECT.test(record.gitCommit) || (record.nodeMajor !== '20' && record.nodeMajor !== '22')
++    || typeof record.nodeVersion !== 'string' || !new RegExp(`^v${record.nodeMajor}\\.[0-9]+\\.[0-9]+$`).test(record.nodeVersion)
++    || typeof record.workflowRunId !== 'string' || !POSITIVE_DECIMAL.test(record.workflowRunId)
++    || typeof record.workflowRunAttempt !== 'string' || !POSITIVE_DECIMAL.test(record.workflowRunAttempt)
++    || record.recallLaneSha256 !== sha256(bundle.bytes['recall-lane.json']!)
++    || record.precisionLaneSha256 !== sha256(bundle.bytes['precision-lane.json']!)
++    || record.efficiencyIntervalSha256 !== sha256(bundle.bytes['efficiency-interval.json']!)
++    || record.aggregateResultSha256 !== sha256(bundle.bytes['aggregate-result.json']!)) throw new Error('artifact');
++  if (identity && Object.entries(identity).some(([key, value]) => record[key] !== value)) throw new Error('custody');
++}
++
++function validateSuccessBundle(bundle: BundlePins, identity?: CustodyIdentity): void {
++  const recall = bundle.records['recall-lane.json']!; const precision = bundle.records['precision-lane.json']!;
++  const interval = bundle.records['efficiency-interval.json']!; const aggregate = bundle.records['aggregate-result.json']!;
++  const manifest = bundle.records['custody-manifest.json']!;
++  validateLane(recall, 'recall-at-10'); validateLane(precision, 'precision-at-5'); validateInterval(interval); validateAggregate(aggregate);
++  validateManifest(manifest, bundle, identity);
++  const qualifying = (recall.qualifyingCaseCount as number) + (precision.qualifyingCaseCount as number);
++  const recallDelta = object(recall.delta); const precisionDelta = object(precision.delta); const response = object(aggregate.responseEffect);
++  const quality = object(aggregate.quality); const safety = object(aggregate.safety);
++  const recallCandidate = object(recall.candidate); const precisionCandidate = object(precision.candidate);
++  if ((recallDelta.recallAtK as number) < 0 || (precisionDelta.precisionAtK as number) < 0.05 || (interval.point as number) <= 0
++    || (interval.oneSidedLower as number) < 0 || response.qualifyingCaseCount !== qualifying || qualifying < 1 || qualifying > 20
++    || aggregate.sourceCommit !== manifest.gitCommit || aggregate.recallLaneSha256 !== manifest.recallLaneSha256
++    || aggregate.precisionLaneSha256 !== manifest.precisionLaneSha256 || aggregate.efficiencyIntervalSha256 !== manifest.efficiencyIntervalSha256
++    || aggregate.seed !== interval.seed || quality.recallDelta !== recallDelta.recallAtK || quality.precisionDelta !== precisionDelta.precisionAtK
++    || quality.efficiencyPoint !== interval.point || quality.efficiencyOneSidedLower !== interval.oneSidedLower
++    || safety.staleLeakRate !== recallCandidate.staleLeakRate || safety.staleLeakRate !== precisionCandidate.staleLeakRate
++    || safety.isolationLeakRate !== recallCandidate.isolationLeakRate || safety.isolationLeakRate !== precisionCandidate.isolationLeakRate
++    || safety.duplicateRate !== recallCandidate.duplicateRate || safety.duplicateRate !== precisionCandidate.duplicateRate
++    || safety.unknownResultRate !== recallCandidate.unknownResultRate || safety.unknownResultRate !== precisionCandidate.unknownResultRate) throw new Error('artifact');
++  const configuration = policy(JSON.parse(gitBytesAt(manifest.gitCommit as string, 'bench/lab/ret010/dev-policy.json').toString('utf8')) as unknown);
++  enforceQualityPolicy(configuration, recall, precision, interval); enforceSafetyPolicy(recall, precision);
++  const dataset = frozenDataset(manifest.gitCommit as string);
++  if (aggregate.modelBlob !== gitBlobAt(manifest.gitCommit as string, 'packages/retrieval/src/served-reranker.ts')
++    || aggregate.providerContractBlob !== gitBlobAt(manifest.gitCommit as string, 'packages/retrieval/src/reranker.ts')
++    || aggregate.adapterBlob !== gitBlobAt(manifest.gitCommit as string, 'bench/lab/adapters/memberry-retrieval-core.ts')
++    || aggregate.datasetDescriptorSha256 !== dataset.descriptorSha256 || aggregate.inputSha256 !== dataset.inputSha256
++    || aggregate.oracleSha256 !== dataset.oracleSha256 || aggregate.devPolicySha256 !== sha256(gitBytesAt(manifest.gitCommit as string, 'bench/lab/ret010/dev-policy.json'))) throw new Error('artifact');
++}
++
++export async function validateSuccessBundleForTest(root: string): Promise<void> {
++  const bundle = await pinDirectoryBundle(dirname(resolve(root)), resolve(root), SUCCESS_FILES);
++  try { validateSuccessBundle(bundle); await sweepBundle(bundle); } finally { await closePins([bundle.directory, ...bundle.files]); }
++}
++
++type MarkerKind = 'success' | 'failure';
++
++function payloadDigestMap(kind: MarkerKind, bytes: Record<string, Buffer>): JsonRecord {
++  return kind === 'success'
++    ? { recallLaneSha256: sha256(bytes['recall-lane.json']!), precisionLaneSha256: sha256(bytes['precision-lane.json']!),
++      efficiencyIntervalSha256: sha256(bytes['efficiency-interval.json']!), aggregateResultSha256: sha256(bytes['aggregate-result.json']!),
++      custodyManifestSha256: sha256(bytes['custody-manifest.json']!) }
++    : { failureTombstoneSha256: sha256(bytes[FAILURE_FILE]!) };
++}
++
++function completionMarker(kind: MarkerKind, identity: CustodyIdentity, uploadLeafName: string, bytes: Record<string, Buffer>): JsonRecord {
++  const allowlist = kind === 'success' ? [...SUCCESS_FILES, MARKER_FILE] : [FAILURE_FILE, MARKER_FILE];
++  return { schemaVersion: '1', decision: 'complete', bundleKind: kind, gitCommit: identity.gitCommit, nodeMajor: identity.nodeMajor,
++    nodeVersion: identity.nodeVersion, workflowRunId: identity.workflowRunId, workflowRunAttempt: identity.workflowRunAttempt,
++    uploadLeafName, allowlist, payloadSha256: payloadDigestMap(kind, bytes) };
++}
++
++function validateCompletionMarker(record: JsonRecord, bytes: Record<string, Buffer>, identity?: CustodyIdentity): MarkerKind {
++  const keys = ['schemaVersion', 'decision', 'bundleKind', 'gitCommit', 'nodeMajor', 'nodeVersion', 'workflowRunId', 'workflowRunAttempt',
++    'uploadLeafName', 'allowlist', 'payloadSha256'];
++  if (!exactKeys(record, keys) || record.schemaVersion !== '1' || record.decision !== 'complete'
++    || (record.bundleKind !== 'success' && record.bundleKind !== 'failure') || typeof record.gitCommit !== 'string' || !GIT_OBJECT.test(record.gitCommit)
++    || (record.nodeMajor !== '20' && record.nodeMajor !== '22') || typeof record.nodeVersion !== 'string'
++    || !new RegExp(`^v${record.nodeMajor}\\.[0-9]+\\.[0-9]+$`).test(record.nodeVersion)
++    || typeof record.workflowRunId !== 'string' || !POSITIVE_DECIMAL.test(record.workflowRunId)
++    || typeof record.workflowRunAttempt !== 'string' || !POSITIVE_DECIMAL.test(record.workflowRunAttempt)
++    || typeof record.uploadLeafName !== 'string' || !UPLOAD_LEAF.test(record.uploadLeafName)) throw new Error('artifact');
++  const kind = record.bundleKind;
++  const expectedAllowlist = kind === 'success' ? [...SUCCESS_FILES, MARKER_FILE] : [FAILURE_FILE, MARKER_FILE];
++  if (JSON.stringify(record.allowlist) !== JSON.stringify(expectedAllowlist)
++    || JSON.stringify(record.payloadSha256) !== JSON.stringify(payloadDigestMap(kind, bytes))) throw new Error('artifact');
++  if (identity && Object.entries(identity).some(([key, value]) => record[key] !== value)) throw new Error('custody');
++  return kind;
++}
++
++export function validateCompletionMarkerForTest(record: unknown, payloadBytes: Record<string, Buffer>, identity?: CustodyIdentity): void {
++  validateCompletionMarker(object(record), payloadBytes, identity);
++}
++
++async function pinMarkedBundle(authorityRoot: string, root: string, identity?: CustodyIdentity): Promise<{ kind: MarkerKind; bundle: BundlePins }> {
++  const markerPin = await openFilePin(authorityRoot, resolve(root, MARKER_FILE), 128_000n);
++  let marker: JsonRecord;
++  try { marker = parseCanonical(markerPin.bytes); } finally { await markerPin.handle.close(); }
++  const kind = marker.bundleKind === 'success' ? 'success' : marker.bundleKind === 'failure' ? 'failure' : (() => { throw new Error('artifact'); })();
++  const allowlist = kind === 'success' ? [...SUCCESS_FILES, MARKER_FILE] : [FAILURE_FILE, MARKER_FILE];
++  const bundle = await pinDirectoryBundle(authorityRoot, root, allowlist);
++  try {
++    validateCompletionMarker(bundle.records[MARKER_FILE]!, bundle.bytes, identity);
++    if (kind === 'success') validateSuccessBundle(bundle, identity); else validateTombstone(bundle.records[FAILURE_FILE]!, identity);
++    return { kind, bundle };
++  } catch (error) { await closePins([bundle.directory, ...bundle.files]); throw error; }
++}
++
++async function refreshDirectoryPin(pin: PinnedDirectory): Promise<void> {
++  const info = await pin.handle.stat({ bigint: true }); if (!info.isDirectory()) throw new Error('custody'); pin.identity = tuple(info);
++}
++
++export async function finalizeCurrentRun(
++  outcome: string,
++  hooks: FinalizerHooks = {},
++  custodyRoot = REPO_ROOT,
++  githubOutputPath?: string,
++): Promise<string> {
++  if (outcome !== 'success' && outcome !== 'failure') throw new Error('custody');
++  const identity = environmentIdentity(); const output = boundary(identity, custodyRoot);
++  const classifier = hooks.classifyComponent ?? classifyCustodyComponent;
++  await assertSourceIntegrity(identity.gitCommit); await ensureRunsRoot(output, classifier);
++  const expected = outcome === 'success' ? SUCCESS_FILES : [FAILURE_FILE] as const;
++  const source = await pinDirectoryBundle(output.custodyRoot, output.evaluationRoot, expected, classifier);
++  let ancestry: PinnedDirectory[];
++  try { ancestry = await pinAuthorityChain(output.custodyRoot, output.runsRoot, classifier); }
++  catch (error) { await closePins([source.directory, ...source.files]); throw error; }
++  let destination: BundlePins | undefined; let markerPin: PinnedFile | undefined;
++  try {
++    if (outcome === 'success') validateSuccessBundle(source, identity); else validateTombstone(source.records[FAILURE_FILE]!, identity);
++    const uploadLeafName = `ret010-upload-${(hooks.randomBytes ?? randomBytes)(32).toString('hex')}`;
++    if (!UPLOAD_LEAF.test(uploadLeafName)) throw new Error('custody');
++    const uploadRoot = resolve(output.runsRoot, uploadLeafName); await createExclusiveDirectory(output.custodyRoot, uploadRoot, classifier);
++    await refreshDirectoryPin(ancestry.at(-1)!);
++    const uploadDirectory = await openDirectoryPin(output.custodyRoot, uploadRoot, classifier); const destinationFiles: PinnedFile[] = [];
++    try {
++      for (const name of expected) {
++        await writeExclusive(output.custodyRoot, resolve(uploadRoot, name), source.bytes[name]!, classifier);
++        destinationFiles.push(await openFilePin(output.custodyRoot, resolve(uploadRoot, name), 2_000_000n, classifier));
++      }
++      destination = { directory: uploadDirectory, files: destinationFiles, records: { ...source.records }, bytes: { ...source.bytes } };
++      await refreshDirectoryPin(destination.directory);
++      await sweepBundle(source); await sweepBundle(destination);
++      const marker = completionMarker(outcome, identity, uploadLeafName, destination.bytes);
++      await assertSourceIntegrity(identity.gitCommit);
++      if (JSON.stringify(environmentIdentity()) !== JSON.stringify(identity)) throw new Error('custody');
++      await sweepBundle(source); await sweepBundle(destination);
++      await assertSourceIntegrity(identity.gitCommit);
++      if (JSON.stringify(environmentIdentity()) !== JSON.stringify(identity)) throw new Error('custody');
++      await writeExclusive(output.custodyRoot, resolve(uploadRoot, MARKER_FILE), canonicalBytes(marker), classifier);
++      markerPin = await openFilePin(output.custodyRoot, resolve(uploadRoot, MARKER_FILE), 128_000n, classifier); destination.files.push(markerPin);
++      destination.records[MARKER_FILE] = marker; destination.bytes[MARKER_FILE] = markerPin.bytes;
++      await refreshDirectoryPin(destination.directory);
++      const completionMarkerSha256 = sha256(markerPin.bytes);
++      await hooks.beforeUploadPathOutput?.();
++      await assertSourceIntegrity(identity.gitCommit);
++      if (JSON.stringify(environmentIdentity()) !== JSON.stringify(identity)
++        || basename(source.directory.path) !== evaluationLeafName(identity)
++        || resolve(output.runsRoot, basename(destination.directory.path)) !== destination.directory.path) throw new Error('custody');
++      await sweepBundle(source, hooks.duringFinalSweep); await sweepBundle(destination, hooks.duringFinalSweep);
++      for (const pin of ancestry) await recheckDirectoryPin(pin);
++      await assertSourceIntegrity(identity.gitCommit);
++      if (JSON.stringify(environmentIdentity()) !== JSON.stringify(identity)) throw new Error('custody');
++      validateCompletionMarker(marker, destination.bytes, identity);
++      if (sha256(markerPin.bytes) !== completionMarkerSha256 || completionMarkerSha256 !== sha256(canonicalBytes(marker))) throw new Error('custody');
++      if (githubOutputPath !== undefined) await (hooks.writeStructuredOutput ?? writeGithubOutput)(githubOutputPath, uploadRoot);
++      return uploadRoot;
++    } catch (error) { if (!destination) await closePins([uploadDirectory, ...destinationFiles]); throw error; }
++  } finally {
++    await closePins([source.directory, ...source.files]);
++    if (destination) await closePins([destination.directory, ...destination.files]);
++    await closePins(ancestry);
++  }
++}
++
++export async function finalizeCurrentRunForTest(outcome: string, identity: CustodyIdentity, custodyRoot: string, hooks: FinalizerHooks = {}): Promise<string> {
++  const prior = { GITHUB_SHA: process.env.GITHUB_SHA, GITHUB_RUN_ID: process.env.GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT: process.env.GITHUB_RUN_ATTEMPT };
++  Object.assign(process.env, { GITHUB_SHA: identity.gitCommit, GITHUB_RUN_ID: identity.workflowRunId, GITHUB_RUN_ATTEMPT: identity.workflowRunAttempt });
++  try { return await finalizeCurrentRun(outcome, hooks, custodyRoot); } finally {
++    for (const [key, value] of Object.entries(prior)) {
++      if (value === undefined) delete process.env[key]; else process.env[key] = value;
++    }
++  }
++}
++
++function rejectDuplicateJsonKeys(text: string): void {
++  let index = 0;
++  const whitespace = (): void => { while (/\s/.test(text[index] ?? '')) index += 1; };
++  const stringValue = (): string => {
++    const start = index; if (text[index] !== '"') throw new Error('artifact'); index += 1;
++    while (index < text.length) {
++      if (text[index] === '\\') { index += 2; continue; }
++      if (text[index] === '"') { index += 1; return JSON.parse(text.slice(start, index)) as string; }
++      index += 1;
++    }
++    throw new Error('artifact');
++  };
++  const value = (): void => {
++    whitespace(); const current = text[index];
++    if (current === '{') {
++      index += 1; whitespace(); const keys = new Set<string>();
++      if (text[index] === '}') { index += 1; return; }
++      for (;;) {
++        whitespace(); const key = stringValue(); if (keys.has(key)) throw new Error('artifact'); keys.add(key);
++        whitespace(); if (text[index] !== ':') throw new Error('artifact'); index += 1; value(); whitespace();
++        if (text[index] === '}') { index += 1; return; }
++        if (text[index] !== ',') throw new Error('artifact'); index += 1;
++      }
++    }
++    if (current === '[') {
++      index += 1; whitespace(); if (text[index] === ']') { index += 1; return; }
++      for (;;) { value(); whitespace(); if (text[index] === ']') { index += 1; return; } if (text[index] !== ',') throw new Error('artifact'); index += 1; }
++    }
++    if (current === '"') { stringValue(); return; }
++    const match = /^(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)/.exec(text.slice(index));
++    if (!match) throw new Error('artifact'); index += match[0].length;
++  };
++  value(); whitespace(); if (index !== text.length) throw new Error('artifact');
++}
++
++function parseRawJson(text: string): unknown { rejectDuplicateJsonKeys(text); return JSON.parse(text) as unknown; }
++
++interface HostedJob {
++  id: string;
++  runId: string;
++  runAttempt: string;
++  nodeMajor: NodeMajor;
++  headSha: string;
++  name: string;
++}
++
++interface HostedArtifact {
++  id: string;
++  runId: string;
++  runAttempt: string;
++  nodeMajor: NodeMajor;
++  name: string;
++  serviceSha256: string;
++}
++
++interface HostedMetadata {
++  repository: 'AP3X-Dev/memberry';
++  headSha: string;
++  runId: string;
++  runAttempt: string;
++  jobs: HostedJob[];
++  artifacts: HostedArtifact[];
++}
++
++function hostedMetadata(raw: unknown): HostedMetadata {
++  const value = object(raw);
++  if (!exactKeys(value, ['run', 'jobs', 'artifacts'])) throw new Error('artifact');
++  const run = object(value.run);
++  const repository = object(run.repository);
++  if (!exactKeys(run, ['id', 'run_attempt', 'head_sha', 'conclusion', 'repository']) || run.conclusion !== 'success'
++    || typeof run.head_sha !== 'string' || !GIT_OBJECT.test(run.head_sha) || !exactKeys(repository, ['full_name'])
++    || repository.full_name !== 'AP3X-Dev/memberry') throw new Error('artifact');
++  const runId = canonicalRestIdentity(run.id); const runAttempt = canonicalRestIdentity(run.run_attempt); const headSha = run.head_sha as string;
++  const rawJobs = object(value.jobs); const rawArtifacts = object(value.artifacts);
++  if (!exactKeys(rawJobs, ['total_count', 'jobs']) || canonicalRestIdentity(rawJobs.total_count) !== '2' || !Array.isArray(rawJobs.jobs) || rawJobs.jobs.length !== 2
++    || !exactKeys(rawArtifacts, ['total_count', 'artifacts']) || canonicalRestIdentity(rawArtifacts.total_count) !== '2'
++    || !Array.isArray(rawArtifacts.artifacts) || rawArtifacts.artifacts.length !== 2) throw new Error('artifact');
++  const jobs = rawJobs.jobs.map((rawJob): HostedJob => {
++    const job = object(rawJob);
++    if (!exactKeys(job, ['id', 'run_id', 'run_attempt', 'head_sha', 'name', 'conclusion']) || typeof job.name !== 'string'
++      || job.head_sha !== headSha || job.conclusion !== 'success') throw new Error('artifact');
++    const match = /^unit \((20|22)\)$/.exec(job.name); if (!match) throw new Error('artifact');
++    return { id: canonicalRestIdentity(job.id), runId: canonicalRestIdentity(job.run_id), runAttempt: canonicalRestIdentity(job.run_attempt),
++      nodeMajor: match[1] as NodeMajor, headSha: job.head_sha as string, name: job.name };
++  });
++  const artifacts = rawArtifacts.artifacts.map((rawArtifact): HostedArtifact => {
++    const artifact = object(rawArtifact);
++    const workflowRun = object(artifact.workflow_run);
++    if (!exactKeys(artifact, ['id', 'name', 'digest', 'workflow_run']) || typeof artifact.name !== 'string'
++      || typeof artifact.digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(artifact.digest)) throw new Error('artifact');
++    if (!exactKeys(workflowRun, ['id', 'head_sha']) || workflowRun.head_sha !== headSha) throw new Error('artifact');
++    const match = new RegExp(`^memberry-ret010-development-node-(20|22)-${runId}-${runAttempt}$`).exec(artifact.name);
++    if (!match) throw new Error('artifact');
++    return { id: canonicalRestIdentity(artifact.id), runId: canonicalRestIdentity(workflowRun.id),
++      runAttempt, nodeMajor: match[1] as NodeMajor,
++      name: artifact.name, serviceSha256: artifact.digest.slice('sha256:'.length) };
++  });
++  if (new Set(jobs.map((job) => job.id)).size !== 2 || new Set(jobs.map((job) => job.nodeMajor)).size !== 2
++    || new Set(artifacts.map((artifact) => artifact.id)).size !== 2 || new Set(artifacts.map((artifact) => artifact.nodeMajor)).size !== 2
++    || jobs.some((job) => job.runId !== runId || job.runAttempt !== runAttempt)
++    || artifacts.some((artifact) => artifact.runId !== runId || artifact.runAttempt !== runAttempt)) throw new Error('artifact');
++  return { repository: 'AP3X-Dev/memberry', headSha, runId, runAttempt, jobs, artifacts };
++}
++
++export function validateHostedMetadataForTest(rawJson: string): void { hostedMetadata(parseRawJson(rawJson)); }
++
++function approvalRecord(value: unknown): JsonRecord {
++  const record = object(value);
++  const top = ['schemaVersion', 'decision', 'source', 'development', 'node20', 'node22', 'workflowRunId', 'workflowRunAttempt'];
++  if (!exactKeys(record, top) || record.schemaVersion !== '1' || record.decision !== 'approved'
++    || typeof record.workflowRunId !== 'string' || !POSITIVE_DECIMAL.test(record.workflowRunId)
++    || typeof record.workflowRunAttempt !== 'string' || !POSITIVE_DECIMAL.test(record.workflowRunAttempt)) throw new Error('artifact');
++  const source = object(record.source);
++  if (!exactKeys(source, ['gitCommit', 'modelBlob', 'providerContractBlob', 'adapterBlob', 'providerIdentity'])
++    || ['gitCommit', 'modelBlob', 'providerContractBlob', 'adapterBlob'].some((key) => typeof source[key] !== 'string' || !GIT_OBJECT.test(source[key] as string))) throw new Error('artifact');
++  const provider = object(source.providerIdentity);
++  if (!exactKeys(provider, ['providerId', 'modelId', 'calibrationId', 'locality']) || provider.providerId !== 'memberry.local.lexical'
++    || provider.modelId !== 'bm25f-query-v1' || provider.calibrationId !== 'fixed-blend-v1' || provider.locality !== 'local') throw new Error('artifact');
++  const development = object(record.development);
++  if (!exactKeys(development, ['datasetDescriptorSha256', 'inputSha256', 'oracleSha256', 'devPolicySha256', 'seed', 'aggregateResultSha256'])
++    || ['datasetDescriptorSha256', 'inputSha256', 'oracleSha256', 'devPolicySha256', 'aggregateResultSha256']
++      .some((key) => typeof development[key] !== 'string' || !SHA256.test(development[key] as string))
++    || !Number.isInteger(development.seed) || (development.seed as number) < 0 || (development.seed as number) > 0xffffffff) throw new Error('artifact');
++  for (const [key, major] of [['node20', '20'], ['node22', '22']] as const) {
++    const node = object(record[key]);
++    if (!exactKeys(node, ['nodeVersion', 'custodyManifestSha256', 'completionMarkerSha256', 'artifactName', 'artifactId', 'artifactServiceSha256'])
++      || typeof node.nodeVersion !== 'string' || !new RegExp(`^v${major}\\.[0-9]+\\.[0-9]+$`).test(node.nodeVersion)
++      || ['custodyManifestSha256', 'completionMarkerSha256', 'artifactServiceSha256'].some((name) => typeof node[name] !== 'string' || !SHA256.test(node[name] as string))
++      || node.artifactName !== `memberry-ret010-development-node-${major}-${record.workflowRunId}-${record.workflowRunAttempt}`
++      || typeof node.artifactId !== 'string' || !POSITIVE_DECIMAL.test(node.artifactId)) throw new Error('artifact');
++  }
++  return record;
++}
++
++export function validateApprovalReceiptForTest(bytes: Buffer): void { approvalRecord(parseCanonical(bytes)); }
++
++interface ZipEntry { name: string; method: number; flags: number; crc32: number; compressedSize: number; size: number; localOffset: number }
++
++function crc32(bytes: Buffer): number {
++  let value = 0xffffffff;
++  for (const byte of bytes) {
++    value ^= byte;
++    for (let bit = 0; bit < 8; bit += 1) value = (value >>> 1) ^ ((value & 1) === 1 ? 0xedb88320 : 0);
++  }
++  return (value ^ 0xffffffff) >>> 0;
++}
++
++function zipPayloads(archive: Buffer): Record<string, Buffer> {
++  if (archive.length < 22 || archive.length > 64 * 1024 * 1024) throw new Error('artifact');
++  let eocd = -1;
++  for (let index = archive.length - 22; index >= Math.max(0, archive.length - 65_557); index -= 1) {
++    if (archive.readUInt32LE(index) === 0x06054b50) { eocd = index; break; }
++  }
++  if (eocd < 0 || archive.readUInt16LE(eocd + 4) !== 0 || archive.readUInt16LE(eocd + 6) !== 0
++    || archive.readUInt16LE(eocd + 8) !== archive.readUInt16LE(eocd + 10) || archive.readUInt16LE(eocd + 20) !== 0) throw new Error('artifact');
++  const count = archive.readUInt16LE(eocd + 10); const centralSize = archive.readUInt32LE(eocd + 12); const centralOffset = archive.readUInt32LE(eocd + 16);
++  if (count !== 6 || centralOffset + centralSize !== eocd) throw new Error('artifact');
++  const entries: ZipEntry[] = []; let cursor = centralOffset;
++  for (let index = 0; index < count; index += 1) {
++    if (cursor + 46 > eocd || archive.readUInt32LE(cursor) !== 0x02014b50) throw new Error('artifact');
++    const flags = archive.readUInt16LE(cursor + 8); const method = archive.readUInt16LE(cursor + 10);
++    const compressedSize = archive.readUInt32LE(cursor + 20); const size = archive.readUInt32LE(cursor + 24);
++    const nameLength = archive.readUInt16LE(cursor + 28); const extraLength = archive.readUInt16LE(cursor + 30); const commentLength = archive.readUInt16LE(cursor + 32);
++    const localOffset = archive.readUInt32LE(cursor + 42); const nameBytes = archive.subarray(cursor + 46, cursor + 46 + nameLength);
++    const name = nameBytes.toString('utf8');
++    if ((flags & 0x0001) !== 0 || (flags & ~(0x0008 | 0x0800)) !== 0 || (method !== 0 && method !== 8)
++      || compressedSize === 0xffffffff || size === 0xffffffff || size > 2_000_000 || nameBytes.length === 0
++      || !Buffer.from(name, 'utf8').equals(nameBytes) || basename(name) !== name || name.includes('/') || name.includes('\\')) throw new Error('artifact');
++    entries.push({ name, method, flags, crc32: archive.readUInt32LE(cursor + 16), compressedSize, size, localOffset });
++    cursor += 46 + nameLength + extraLength + commentLength;
++  }
++  if (cursor !== eocd || JSON.stringify(entries.map((entry) => entry.name).sort()) !== JSON.stringify([...SUCCESS_FILES, MARKER_FILE].sort())) throw new Error('artifact');
++  const payloads: Record<string, Buffer> = {};
++  for (const entry of entries) {
++    const offset = entry.localOffset;
++    if (offset + 30 > centralOffset || archive.readUInt32LE(offset) !== 0x04034b50
++      || archive.readUInt16LE(offset + 6) !== entry.flags || archive.readUInt16LE(offset + 8) !== entry.method) throw new Error('artifact');
++    const nameLength = archive.readUInt16LE(offset + 26); const extraLength = archive.readUInt16LE(offset + 28);
++    const nameBytes = archive.subarray(offset + 30, offset + 30 + nameLength); const start = offset + 30 + nameLength + extraLength;
++    if (nameBytes.toString('utf8') !== entry.name || start + entry.compressedSize > centralOffset) throw new Error('artifact');
++    const compressed = archive.subarray(start, start + entry.compressedSize);
++    const payload = entry.method === 0 ? Buffer.from(compressed) : inflateRawSync(compressed, { maxOutputLength: 2_000_000 });
++    if (payload.length !== entry.size || crc32(payload) !== entry.crc32) throw new Error('artifact');
++    payloads[entry.name] = payload;
++  }
++  return payloads;
++}
++
++export function validateDownloadedArchiveForTest(bytes: Buffer): Record<string, Buffer> { return zipPayloads(bytes); }
++
++interface ExtractedArchive {
++  archive: PinnedFile;
++  archiveSha256: string;
++  kind: MarkerKind;
++  bundle: BundlePins;
++}
++
++async function extractDownloadedArchive(archivePath: string): Promise<ExtractedArchive> {
++  const absolute = resolve(archivePath); const archive = await openFilePin(dirname(absolute), absolute, 64n * 1024n * 1024n);
++  try {
++    const payloads = zipPayloads(archive.bytes); const runsRoot = resolve(REPO_ROOT, ...RUNS_PARTS);
++    await ensureRunsRoot({ custodyRoot: REPO_ROOT, runsRoot, evaluationRoot: resolve(runsRoot, 'unused') });
++    const extractionRoot = resolve(runsRoot, `ret010-verify-${randomBytes(32).toString('hex')}`);
++    await createExclusiveDirectory(REPO_ROOT, extractionRoot);
++    for (const name of [...SUCCESS_FILES, MARKER_FILE]) await writeExclusive(REPO_ROOT, resolve(extractionRoot, name), payloads[name]!);
++    const marked = await pinMarkedBundle(REPO_ROOT, extractionRoot);
++    return { archive, archiveSha256: sha256(archive.bytes), ...marked };
++  } catch (error) { await archive.handle.close(); throw error; }
++}
++
++export async function verifyDevelopmentBundles(
++  metadataPath: string,
++  firstDownloadedArchivePath: string,
++  secondDownloadedArchivePath: string,
++): Promise<JsonRecord> {
++  const metadataAbsolute = resolve(metadataPath); const metadataPin = await openFilePin(dirname(metadataAbsolute), metadataAbsolute, 2_000_000n);
++  let metadata: HostedMetadata;
++  try { metadata = hostedMetadata(parseRawJson(metadataPin.bytes.toString('utf8'))); }
++  catch (error) { await metadataPin.handle.close(); throw error; }
++  const attempts = await Promise.allSettled([extractDownloadedArchive(firstDownloadedArchivePath), extractDownloadedArchive(secondDownloadedArchivePath)]);
++  if (attempts.some((attempt) => attempt.status === 'rejected')) {
++    await metadataPin.handle.close();
++    for (const attempt of attempts) if (attempt.status === 'fulfilled') await closePins([attempt.value.archive, attempt.value.bundle.directory, ...attempt.value.bundle.files]);
++    throw new Error('artifact');
++  }
++  const marked = attempts.map((attempt) => (attempt as PromiseFulfilledResult<ExtractedArchive>).value);
++  try {
++    if (marked.some((entry) => entry.kind !== 'success')) throw new Error('artifact');
++    const byMajor = new Map<NodeMajor, { bundle: BundlePins; marker: JsonRecord; manifest: JsonRecord }>();
++    for (const entry of marked) {
++      const manifest = entry.bundle.records['custody-manifest.json']!; const marker = entry.bundle.records[MARKER_FILE]!;
++      const major = manifest.nodeMajor as NodeMajor;
++      if (byMajor.has(major)) throw new Error('artifact'); byMajor.set(major, { bundle: entry.bundle, marker, manifest });
++    }
++    const node20 = byMajor.get('20'); const node22 = byMajor.get('22'); if (!node20 || !node22) throw new Error('artifact');
++    if (!node20.bundle.bytes['aggregate-result.json']!.equals(node22.bundle.bytes['aggregate-result.json']!)) throw new Error('artifact');
++    const aggregate = node20.bundle.records['aggregate-result.json']!; const aggregateDigest = sha256(node20.bundle.bytes['aggregate-result.json']!);
++    if (metadata.headSha !== aggregate.sourceCommit || node20.manifest.gitCommit !== metadata.headSha || node22.manifest.gitCommit !== metadata.headSha
++      || node20.manifest.workflowRunId !== metadata.runId || node22.manifest.workflowRunId !== metadata.runId
++      || node20.manifest.workflowRunAttempt !== metadata.runAttempt || node22.manifest.workflowRunAttempt !== metadata.runAttempt
++      || node20.manifest.aggregateResultSha256 !== aggregateDigest || node22.manifest.aggregateResultSha256 !== aggregateDigest) throw new Error('artifact');
++    const nodeRecords: Partial<Record<NodeMajor, JsonRecord>> = {};
++    for (const major of ['20', '22'] as const) {
++      const current = byMajor.get(major)!; const job = metadata.jobs.find((item) => item.nodeMajor === major);
++      const artifact = metadata.artifacts.find((item) => item.nodeMajor === major);
++      const expectedName = `memberry-ret010-development-node-${major}-${metadata.runId}-${metadata.runAttempt}`;
++      const extracted = marked.find((entry) => entry.bundle === current.bundle);
++      if (!job || !artifact || !extracted || artifact.name !== expectedName || extracted.archiveSha256 !== artifact.serviceSha256
++        || current.marker.workflowRunId !== metadata.runId || current.marker.workflowRunAttempt !== metadata.runAttempt
++        || current.marker.nodeMajor !== major || current.manifest.nodeMajor !== major || job.name !== `unit (${major})`
++        || current.marker.gitCommit !== metadata.headSha || current.manifest.gitCommit !== metadata.headSha
++        || current.marker.nodeVersion !== current.manifest.nodeVersion || current.marker.uploadLeafName === artifact.name
++        || job.runId !== metadata.runId || job.runAttempt !== metadata.runAttempt || artifact.runId !== metadata.runId
++        || artifact.runAttempt !== metadata.runAttempt) throw new Error('artifact');
++      nodeRecords[major] = { nodeVersion: current.manifest.nodeVersion,
++        custodyManifestSha256: sha256(current.bundle.bytes['custody-manifest.json']!),
++        completionMarkerSha256: sha256(current.bundle.bytes[MARKER_FILE]!), artifactName: expectedName,
++        artifactId: artifact.id, artifactServiceSha256: artifact.serviceSha256 };
++    }
++    const source = { gitCommit: aggregate.sourceCommit, modelBlob: aggregate.modelBlob, providerContractBlob: aggregate.providerContractBlob,
++      adapterBlob: aggregate.adapterBlob, providerIdentity: aggregate.providerIdentity };
++    const development = { datasetDescriptorSha256: aggregate.datasetDescriptorSha256, inputSha256: aggregate.inputSha256,
++      oracleSha256: aggregate.oracleSha256, devPolicySha256: aggregate.devPolicySha256, seed: aggregate.seed,
++      aggregateResultSha256: aggregateDigest };
++    const receipt = { schemaVersion: '1', decision: 'approved', source, development, node20: nodeRecords['20'], node22: nodeRecords['22'],
++      workflowRunId: metadata.runId, workflowRunAttempt: metadata.runAttempt };
++    await recheckFilePin(metadataPin);
++    for (const entry of marked) { await recheckFilePin(entry.archive); await sweepBundle(entry.bundle); }
++    return approvalRecord(receipt);
++  } finally {
++    await metadataPin.handle.close();
++    for (const entry of marked) await closePins([entry.archive, entry.bundle.directory, ...entry.bundle.files]);
++  }
++}
++
++async function writeGithubOutput(path: string, uploadPath: string): Promise<void> {
++  if (typeof path !== 'string' || path.length === 0 || /[\r\n]/.test(uploadPath)) throw new Error('custody');
++  const bytes = Buffer.from(`upload_path=${uploadPath}\n`, 'utf8');
++  const absolute = resolve(path); const flags = custodyOpenFlags(); const authority = await pinAuthorityChain(dirname(absolute), dirname(absolute));
++  let handle: FileHandle | undefined;
++  try {
++    const before = await lstat(absolute, { bigint: true });
++    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) throw new Error('custody');
++    handle = await open(absolute, fsConstants.O_WRONLY | fsConstants.O_APPEND | flags.noFollow);
++    const after = await handle.stat({ bigint: true }); if (!sameTuple(tuple(before), tuple(after))) throw new Error('custody');
++    const result = await handle.write(bytes, 0, bytes.length, null);
++    if (result.bytesWritten !== bytes.length) throw new Error('custody');
++    await handle.sync();
++  } finally { await handle?.close(); await closePins(authority); }
++}
++
++export async function writeGithubOutputForTest(path: string, uploadPath: string): Promise<void> { await writeGithubOutput(path, uploadPath); }
++
++async function cli(): Promise<void> {
++  const [command, ...args] = process.argv.slice(2);
++  if (command === 'run' && args.length === 0) {
++    const result = await runDevelopment({ suppressProcessFailure: true });
++    if (result !== 'passed') { process.stderr.write(SAFE_GATE_FAILURE); process.exitCode = 1; }
++    return;
++  }
++  if (command === 'finalize' && args.length === 0) {
++    try {
++      const outcome = process.env.RET010_DEVELOPMENT_GATE_OUTCOME;
++      await finalizeCurrentRun(outcome ?? '', {}, REPO_ROOT, process.env.GITHUB_OUTPUT ?? '');
++    } catch { process.stderr.write(SAFE_FINALIZER_FAILURE); process.exitCode = 1; }
++    return;
++  }
++  if (command === 'verify' && args.length === 3) {
++    try {
++      const receipt = await verifyDevelopmentBundles(args[0]!, args[1]!, args[2]!);
++      process.stdout.write(canonicalBytes(receipt));
++    } catch { process.stderr.write(SAFE_VERIFY_FAILURE); process.exitCode = 1; }
++    return;
++  }
++  process.stderr.write(command === 'verify' ? SAFE_VERIFY_FAILURE : command === 'finalize' ? SAFE_FINALIZER_FAILURE : SAFE_GATE_FAILURE);
++  process.exitCode = 1;
++}
++
++if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
++  void cli().catch(() => { process.stderr.write(SAFE_GATE_FAILURE); process.exitCode = 1; });
++}
+--- /dev/null
++++ b/bench/lab/ret010/holdout-gate.mts
++#!/usr/bin/env tsx
++
++import { execFileSync } from 'node:child_process';
++import { createHash } from 'node:crypto';
++import { constants as fsConstants } from 'node:fs';
++import { lstat, open, readFile, realpath } from 'node:fs/promises';
++import { dirname, resolve } from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const HERE = dirname(fileURLToPath(import.meta.url));
++const REPO_ROOT = resolve(HERE, '..', '..', '..');
++const APPROVAL_PATH = 'bench/lab/ret010/approved-dev.json';
++const CONTROL_ID = 'memberry-retrieval-core-disabled-v1';
++const CANDIDATE_ID = 'memberry-retrieval-core-served-v1';
++const FAILURE_SENTINEL = 'RET010_HOLDOUT_GATE_FAILED\n';
++const SHA256 = /^[0-9a-f]{64}$/;
++const GIT_OBJECT = /^[0-9a-f]{40}$/;
++const POSITIVE_DECIMAL = /^[1-9][0-9]*$/;
++
++type JsonRecord = Record<string, unknown>;
++
++export interface ApprovedDevelopment {
++  schemaVersion: '1';
++  decision: 'approved';
++  source: {
++    gitCommit: string;
++    modelBlob: string;
++    providerContractBlob: string;
++    adapterBlob: string;
++    providerIdentity: { providerId: string; modelId: string; calibrationId: string; locality: string };
++  };
++  development: {
++    datasetDescriptorSha256: string;
++    inputSha256: string;
++    oracleSha256: string;
++    devPolicySha256: string;
++    seed: number;
++    aggregateResultSha256: string;
++  };
++  node20: ApprovedNode;
++  node22: ApprovedNode;
++  workflowRunId: string;
++  workflowRunAttempt: string;
++}
++
++interface ApprovedNode {
++  nodeVersion: string;
++  custodyManifestSha256: string;
++  completionMarkerSha256: string;
++  artifactName: string;
++  artifactId: string;
++  artifactServiceSha256: string;
++}
++
++function object(value: unknown): JsonRecord {
++  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('custody');
++  return value as JsonRecord;
++}
++
++function exactKeys(value: JsonRecord, keys: readonly string[]): void {
++  if (JSON.stringify(Object.keys(value)) !== JSON.stringify(keys)) throw new Error('custody');
++}
++
++function canonicalBytes(value: JsonRecord): Buffer {
++  return Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');
++}
++
++function sha256(value: Uint8Array): string {
++  return createHash('sha256').update(value).digest('hex');
++}
++
++function gitText(args: readonly string[], repoRoot = REPO_ROOT): string {
++  return execFileSync('git', [...args], { cwd: repoRoot, encoding: 'utf8' }).trim();
++}
++
++function gitBytes(args: readonly string[], repoRoot = REPO_ROOT): Buffer {
++  return execFileSync('git', [...args], { cwd: repoRoot, encoding: null, maxBuffer: 16 * 1024 * 1024 });
++}
++
++function parseApproval(bytes: Buffer): ApprovedDevelopment {
++  if (bytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) throw new Error('custody');
++  const value = object(JSON.parse(bytes.toString('utf8')) as unknown);
++  exactKeys(value, ['schemaVersion', 'decision', 'source', 'development', 'node20', 'node22', 'workflowRunId', 'workflowRunAttempt']);
++  if (!bytes.equals(canonicalBytes(value)) || value.schemaVersion !== '1' || value.decision !== 'approved'
++    || typeof value.workflowRunId !== 'string' || !POSITIVE_DECIMAL.test(value.workflowRunId)
++    || typeof value.workflowRunAttempt !== 'string' || !POSITIVE_DECIMAL.test(value.workflowRunAttempt)) throw new Error('custody');
++  const source = object(value.source);
++  exactKeys(source, ['gitCommit', 'modelBlob', 'providerContractBlob', 'adapterBlob', 'providerIdentity']);
++  if (['gitCommit', 'modelBlob', 'providerContractBlob', 'adapterBlob']
++    .some((key) => typeof source[key] !== 'string' || !GIT_OBJECT.test(source[key] as string))) throw new Error('custody');
++  const provider = object(source.providerIdentity);
++  exactKeys(provider, ['providerId', 'modelId', 'calibrationId', 'locality']);
++  if (provider.providerId !== 'memberry.local.lexical' || provider.modelId !== 'bm25f-query-v1'
++    || provider.calibrationId !== 'fixed-blend-v1' || provider.locality !== 'local') throw new Error('custody');
++  const development = object(value.development);
++  exactKeys(development, ['datasetDescriptorSha256', 'inputSha256', 'oracleSha256', 'devPolicySha256', 'seed', 'aggregateResultSha256']);
++  if (['datasetDescriptorSha256', 'inputSha256', 'oracleSha256', 'devPolicySha256', 'aggregateResultSha256']
++    .some((key) => typeof development[key] !== 'string' || !SHA256.test(development[key] as string))
++    || !Number.isInteger(development.seed) || (development.seed as number) < 0 || (development.seed as number) > 0xffffffff) throw new Error('custody');
++  for (const [name, major] of [['node20', '20'], ['node22', '22']] as const) {
++    const node = object(value[name]);
++    exactKeys(node, ['nodeVersion', 'custodyManifestSha256', 'completionMarkerSha256', 'artifactName', 'artifactId', 'artifactServiceSha256']);
++    if (typeof node.nodeVersion !== 'string' || !new RegExp(`^v${major}\\.[0-9]+\\.[0-9]+$`).test(node.nodeVersion)
++      || ['custodyManifestSha256', 'completionMarkerSha256', 'artifactServiceSha256']
++        .some((key) => typeof node[key] !== 'string' || !SHA256.test(node[key] as string))
++      || node.artifactName !== `memberry-ret010-development-node-${major}-${value.workflowRunId}-${value.workflowRunAttempt}`
++      || typeof node.artifactId !== 'string' || !POSITIVE_DECIMAL.test(node.artifactId)) throw new Error('custody');
++  }
++  return value as unknown as ApprovedDevelopment;
++}
++
++export function validateApprovalRecordForTest(bytes: Buffer): ApprovedDevelopment {
++  return parseApproval(bytes);
++}
++
++export function validateApprovalBindingForTest(
++  bytes: Buffer,
++  expectedDigest: string,
++  head: string,
++  directParent: string,
++  changedPaths: readonly string[],
++): ApprovedDevelopment {
++  if (!SHA256.test(expectedDigest) || sha256(bytes) !== expectedDigest || !GIT_OBJECT.test(head)
++    || changedPaths.length !== 1 || changedPaths[0] !== APPROVAL_PATH) throw new Error('custody');
++  const approval = parseApproval(bytes);
++  if (directParent !== approval.source.gitCommit) throw new Error('custody');
++  return approval;
++}
++
++async function assertTrackedCanonicalFile(path: string, commit: string, repoRoot = REPO_ROOT): Promise<void> {
++  const entry = gitText(['ls-tree', commit, '--', path], repoRoot);
++  const match = /^([0-9]{6}) blob ([0-9a-f]{40})\t(.+)$/.exec(entry);
++  if (!match || match[3] !== path || (match[1] !== '100644' && match[1] !== '100755')) throw new Error('custody');
++  const absolute = resolve(repoRoot, path);
++  const info = await lstat(absolute);
++  if (!info.isFile() || info.isSymbolicLink() || await realpath(absolute) !== absolute
++    || !(await readFile(absolute)).equals(gitBytes(['cat-file', 'blob', `${commit}:${path}`], repoRoot))) throw new Error('custody');
++}
++
++function blob(commit: string, path: string, repoRoot = REPO_ROOT): string {
++  const value = gitText(['rev-parse', `${commit}:${path}`], repoRoot);
++  if (!GIT_OBJECT.test(value)) throw new Error('custody');
++  return value;
++}
++
++function verifyDevelopmentDigests(approval: ApprovedDevelopment, repoRoot = REPO_ROOT): void {
++  const commit = approval.source.gitCommit;
++  if (blob(commit, 'packages/retrieval/src/served-reranker.ts', repoRoot) !== approval.source.modelBlob
++    || blob(commit, 'packages/retrieval/src/reranker.ts', repoRoot) !== approval.source.providerContractBlob
++    || blob(commit, 'bench/lab/adapters/memberry-retrieval-core.ts', repoRoot) !== approval.source.adapterBlob
++    || sha256(gitBytes(['cat-file', 'blob', `${commit}:bench/lab/ret010/dev-policy.json`], repoRoot)) !== approval.development.devPolicySha256) {
++    throw new Error('custody');
++  }
++  const datasets = object(JSON.parse(gitBytes(['cat-file', 'blob', `${commit}:bench/lab/registry/datasets.json`], repoRoot).toString('utf8')) as unknown);
++  if (!Array.isArray(datasets.datasets)) throw new Error('custody');
++  const matches = datasets.datasets.filter((entry) => object(entry).id === 'memberry-ret010-dev-v1');
++  if (matches.length !== 1 || sha256(canonicalBytes(object(matches[0]))) !== approval.development.datasetDescriptorSha256) throw new Error('custody');
++  const descriptor = object(matches[0]);
++  if (!Array.isArray(descriptor.artifacts) || descriptor.artifacts.length !== 2) throw new Error('custody');
++  const expected = [approval.development.inputSha256, approval.development.oracleSha256];
++  descriptor.artifacts.forEach((entry, index) => {
++    const artifact = object(entry);
++    if (typeof artifact.repositoryPath !== 'string' || artifact.hashMode !== 'text-lf' || artifact.sha256 !== expected[index]) throw new Error('custody');
++    const normalized = Buffer.from(gitBytes(['cat-file', 'blob', `${commit}:${artifact.repositoryPath}`], repoRoot).toString('utf8').replace(/\r\n?/g, '\n'));
++    if (sha256(normalized) !== expected[index]) throw new Error('custody');
++  });
++}
++
++export async function validateQualificationSourceForTest(repoRoot: string, head: string, requestedSha: string): Promise<{ head: string; directParent: string }> {
++  return validateQualificationSource(resolve(repoRoot), head, requestedSha);
++}
++
++async function validateQualificationSource(repoRoot = REPO_ROOT, expectedHead?: string, requestedSha = process.env.RET010_QUALIFICATION_SHA ?? ''): Promise<{ head: string; directParent: string }> {
++  const head = gitText(['rev-parse', 'HEAD'], repoRoot);
++  if (!GIT_OBJECT.test(requestedSha) || requestedSha !== head || (expectedHead !== undefined && expectedHead !== head)
++    || gitText(['status', '--porcelain=v1', '--untracked-files=all'], repoRoot) !== '') throw new Error('custody');
++  await assertTrackedCanonicalFile(APPROVAL_PATH, head, repoRoot);
++  const parents = gitText(['rev-list', '--parents', '-n', '1', head], repoRoot).split(' ');
++  if (parents.length !== 2) throw new Error('custody');
++  const changed = gitText(['diff-tree', '--no-commit-id', '--name-status', '-r', head], repoRoot).split(/\r?\n/).filter(Boolean);
++  if (changed.length !== 1 || changed[0] !== `A\t${APPROVAL_PATH}`) throw new Error('custody');
++  return { head, directParent: parents[1]! };
++}
++
++async function validateCommittedApproval(): Promise<ApprovedDevelopment> {
++  const lineage = await validateQualificationSource();
++  const bytes = await readFile(resolve(REPO_ROOT, APPROVAL_PATH));
++  const approval = validateApprovalBindingForTest(bytes, process.env.RET010_APPROVAL_DIGEST ?? '', lineage.head, lineage.directParent, [APPROVAL_PATH]);
++  verifyDevelopmentDigests(approval);
++  for (const [path, approved] of [
++    ['packages/retrieval/src/served-reranker.ts', approval.source.modelBlob],
++    ['packages/retrieval/src/reranker.ts', approval.source.providerContractBlob],
++    ['bench/lab/adapters/memberry-retrieval-core.ts', approval.source.adapterBlob],
++  ] as const) if (blob(lineage.head, path) !== approved) throw new Error('custody');
++  return approval;
++}
++
++function validateHoldoutPolicy(value: unknown): void {
++  const expected = {
++    schemaVersion: 1,
++    controlAdapterId: CONTROL_ID,
++    candidateAdapterId: CANDIDATE_ID,
++    dataset: { id: 'memberry-g2-holdout-holdout', split: 'holdout' },
++    lanes: {
++      recall: { dimension: 'recall', probes: 10, k: 10, minimumDelta: 0 },
++      precision: { dimension: 'precision', probes: 10, k: 5, minimumDelta: 0 },
++    },
++    safety: { maxStaleLeakRate: 0, maxIsolationLeakRate: 0, maxDuplicateRate: 0, maxUnknownResultRate: 0 },
++    pairedVectorOrder: ['recall', 'precision'],
++    withinLaneSortKeys: ['scenarioId', 'probeId'],
++    efficiency: { outcome: 'measured', method: 'paired-bootstrap', confidenceLevel: 0.95, minimumPointDeltaInclusive: 0,
++      minimumOneSided95LowerBound: 0, resamples: 2000, minimumPairedProbes: 10, seedRule: 'vector-derived' },
++  };
++  if (JSON.stringify(value) !== JSON.stringify(expected)) throw new Error('custody');
++}
++
++export function validateHoldoutPolicyForTest(value: unknown): void { validateHoldoutPolicy(value); }
++
++export interface HoldoutIdentity { gitCommit: string; nodeMajor: '20' | '22'; nodeVersion: string; workflowRunId: string; workflowRunAttempt: string }
++export interface HoldoutPair { scenarioId: string; probeId: string; controlCoverage: number; controlTokens: number; candidateCoverage: number; candidateTokens: number }
++export interface HoldoutEvaluator {
++  load(dimension: 'recall' | 'precision'): Promise<readonly unknown[]>;
++  compare(dimension: 'recall' | 'precision', scenarios: readonly unknown[]): Promise<any>;
++  interval(pairs: readonly HoldoutPair[]): any;
++}
++
++function holdoutIdentity(environment: NodeJS.ProcessEnv = process.env): HoldoutIdentity {
++  const nodeMajor = process.versions.node.split('.')[0]; const nodeVersion = `v${process.versions.node}`;
++  const gitCommit = environment.GITHUB_SHA ?? gitText(['rev-parse', 'HEAD']);
++  const workflowRunId = environment.GITHUB_RUN_ID; const workflowRunAttempt = environment.GITHUB_RUN_ATTEMPT;
++  if ((nodeMajor !== '20' && nodeMajor !== '22') || !new RegExp(`^v${nodeMajor}\\.[0-9]+\\.[0-9]+$`).test(nodeVersion)
++    || !GIT_OBJECT.test(gitCommit) || typeof workflowRunId !== 'string' || !POSITIVE_DECIMAL.test(workflowRunId)
++    || typeof workflowRunAttempt !== 'string' || !POSITIVE_DECIMAL.test(workflowRunAttempt)) throw new Error('custody');
++  return { gitCommit, nodeMajor, nodeVersion, workflowRunId, workflowRunAttempt };
++}
++
++function finite(value: unknown, minimum: number, maximum: number): value is number {
++  return typeof value === 'number' && Number.isFinite(value) && value >= minimum && value <= maximum && !Object.is(value, -0);
++}
++
++function strictPairs(report: any): HoldoutPair[] {
++  if (report?.passed !== true || report?.control?.adapterId !== CONTROL_ID || report?.candidate?.adapterId !== CANDIDATE_ID
++    || !Array.isArray(report.control.scenarioReports) || !Array.isArray(report.candidate.scenarioReports)
++    || report.control.scenarioReports.length !== 10 || report.candidate.scenarioReports.length !== 10) throw new Error('metric');
++  const collect = (scenarios: any[]): Map<string, any> => {
++    const values = new Map<string, any>(); const scenarioIds = new Set<string>(); const probeIds = new Set<string>();
++    for (const scenario of scenarios) {
++      if (typeof scenario?.scenarioId !== 'string' || scenario.scenarioId.length === 0 || scenarioIds.has(scenario.scenarioId)
++        || !Array.isArray(scenario.probes) || scenario.probes.length !== 1) throw new Error('metric');
++      scenarioIds.add(scenario.scenarioId); const probe = scenario.probes[0];
++      if (typeof probe?.probeId !== 'string' || probe.probeId.length === 0 || probeIds.has(probe.probeId)
++        || !finite(probe.metrics?.answerCoverage, 0, 1) || !finite(probe.contextTokens, 1, Number.MAX_SAFE_INTEGER)) throw new Error('metric');
++      probeIds.add(probe.probeId); const key = `${scenario.scenarioId}\0${probe.probeId}`; if (values.has(key)) throw new Error('metric'); values.set(key, probe);
++    }
++    if (scenarioIds.size !== 10 || probeIds.size !== 10 || values.size !== 10) throw new Error('metric');
++    return values;
++  };
++  const control = collect(report.control.scenarioReports); const candidate = collect(report.candidate.scenarioReports);
++  if ([...control.keys()].some((key) => !candidate.has(key)) || candidate.size !== control.size) throw new Error('metric');
++  return [...control.entries()].map(([key, left]) => {
++    const right = candidate.get(key); const [scenarioId, probeId] = key.split('\0');
++    return { scenarioId: scenarioId!, probeId: probeId!, controlCoverage: left.metrics.answerCoverage,
++      controlTokens: left.contextTokens, candidateCoverage: right.metrics.answerCoverage, candidateTokens: right.contextTokens };
++  });
++}
++
++function laneSummary(report: any, dimension: 'recall' | 'precision'): JsonRecord {
++  const metric = dimension === 'recall' ? 'recallAtK' : 'precisionAtK'; const k = dimension === 'recall' ? 10 : 5;
++  const control = report.control.metrics[metric]; const candidate = report.candidate.metrics[metric]; const delta = candidate - control;
++  if (!finite(control, 0, 1) || !finite(candidate, 0, 1) || !finite(delta, -1, 1) || delta < 0) throw new Error('metric');
++  return { scenarioCount: 10, probeCount: 10, k, metric, control, candidate, delta };
++}
++
++function validateHoldoutReceipt(value: unknown): JsonRecord {
++  const receipt = object(value);
++  exactKeys(receipt, ['schemaVersion', 'decision', 'gitCommit', 'nodeMajor', 'nodeVersion', 'workflowRunId', 'workflowRunAttempt',
++    'approvalSha256', 'datasetId', 'split', 'controlAdapterId', 'candidateAdapterId', 'recall', 'precision', 'efficiency', 'safety']);
++  if (receipt.schemaVersion !== '1' || receipt.decision !== 'passed' || typeof receipt.gitCommit !== 'string' || !GIT_OBJECT.test(receipt.gitCommit)
++    || (receipt.nodeMajor !== '20' && receipt.nodeMajor !== '22') || typeof receipt.nodeVersion !== 'string'
++    || !new RegExp(`^v${receipt.nodeMajor}\\.[0-9]+\\.[0-9]+$`).test(receipt.nodeVersion)
++    || typeof receipt.workflowRunId !== 'string' || !POSITIVE_DECIMAL.test(receipt.workflowRunId)
++    || typeof receipt.workflowRunAttempt !== 'string' || !POSITIVE_DECIMAL.test(receipt.workflowRunAttempt)
++    || typeof receipt.approvalSha256 !== 'string' || !SHA256.test(receipt.approvalSha256)
++    || receipt.datasetId !== 'memberry-g2-holdout-holdout' || receipt.split !== 'holdout'
++    || receipt.controlAdapterId !== CONTROL_ID || receipt.candidateAdapterId !== CANDIDATE_ID) throw new Error('artifact');
++  for (const [name, metric, k] of [['recall', 'recallAtK', 10], ['precision', 'precisionAtK', 5]] as const) {
++    const lane = object(receipt[name]); exactKeys(lane, ['scenarioCount', 'probeCount', 'k', 'metric', 'control', 'candidate', 'delta']);
++    if (lane.scenarioCount !== 10 || lane.probeCount !== 10 || lane.k !== k || lane.metric !== metric
++      || !finite(lane.control, 0, 1) || !finite(lane.candidate, 0, 1) || lane.delta !== (lane.candidate as number) - (lane.control as number)
++      || (lane.delta as number) < 0) throw new Error('artifact');
++  }
++  const interval = object(receipt.efficiency); exactKeys(interval, ['outcome', 'pairedProbes', 'resamples', 'level', 'seed', 'point', 'lower', 'upper', 'oneSidedLower']);
++  if (interval.outcome !== 'measured' || interval.pairedProbes !== 20 || interval.resamples !== 2000 || interval.level !== 0.95
++    || !Number.isInteger(interval.seed) || (interval.seed as number) < 0 || (interval.seed as number) > 0xffffffff
++    || !finite(interval.point, 0, Number.MAX_VALUE) || !finite(interval.oneSidedLower, 0, Number.MAX_VALUE)
++    || !finite(interval.lower, -Number.MAX_VALUE, Number.MAX_VALUE) || !finite(interval.upper, -Number.MAX_VALUE, Number.MAX_VALUE)
++    || (interval.lower as number) > (interval.point as number) || (interval.point as number) > (interval.upper as number)
++    || (interval.oneSidedLower as number) > (interval.point as number)) throw new Error('artifact');
++  const safety = object(receipt.safety); exactKeys(safety, ['staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate']);
++  if (Object.values(safety).some((metric) => metric !== 0)) throw new Error('artifact');
++  return receipt;
++}
++
++export function validateHoldoutReceiptForTest(value: unknown): void { validateHoldoutReceipt(value); }
++
++async function publishClosed(path: string, record: JsonRecord): Promise<void> {
++  if (typeof fsConstants.O_NOFOLLOW !== 'number') throw new Error('custody');
++  const absolute = resolve(path); const parent = await lstat(dirname(absolute));
++  if (!parent.isDirectory() || parent.isSymbolicLink() || await realpath(dirname(absolute)) !== dirname(absolute)) throw new Error('custody');
++  const bytes = canonicalBytes(record); const handle = await open(absolute, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
++  try { const write = await handle.write(bytes, 0, bytes.length, 0); if (write.bytesWritten !== bytes.length) throw new Error('custody'); await handle.sync(); }
++  finally { await handle.close(); }
++}
++
++async function evaluateHoldout(approval: ApprovedDevelopment, identity: HoldoutIdentity, evaluator: HoldoutEvaluator): Promise<JsonRecord> {
++  const [recallScenarios, precisionScenarios] = await Promise.all([evaluator.load('recall'), evaluator.load('precision')]);
++  if (recallScenarios.length !== 10 || precisionScenarios.length !== 10) throw new Error('metric');
++  const recallReport = await evaluator.compare('recall', recallScenarios); const precisionReport = await evaluator.compare('precision', precisionScenarios);
++  const recallPairs = strictPairs(recallReport).sort((a, b) => a.scenarioId.localeCompare(b.scenarioId) || a.probeId.localeCompare(b.probeId));
++  const precisionPairs = strictPairs(precisionReport).sort((a, b) => a.scenarioId.localeCompare(b.scenarioId) || a.probeId.localeCompare(b.probeId));
++  const identities = [...recallPairs, ...precisionPairs].map((pair) => `${pair.scenarioId}\0${pair.probeId}`);
++  if (new Set(identities).size !== 20 || new Set([...recallPairs, ...precisionPairs].map((pair) => pair.scenarioId)).size !== 20
++    || new Set([...recallPairs, ...precisionPairs].map((pair) => pair.probeId)).size !== 20) throw new Error('metric');
++  const recall = laneSummary(recallReport, 'recall'); const precision = laneSummary(precisionReport, 'precision');
++  for (const report of [recallReport, precisionReport]) {
++    const metrics = report.candidate.metrics;
++    if (metrics.staleLeakRate !== 0 || metrics.isolationLeakRate !== 0 || metrics.duplicateRate !== 0 || metrics.unknownResultRate !== 0) throw new Error('safety');
++  }
++  const measured = evaluator.interval([...recallPairs, ...precisionPairs]);
++  const efficiency = { outcome: measured.outcome, pairedProbes: measured.pairedProbes, resamples: measured.resamples, level: measured.level,
++    seed: measured.seed, point: measured.point, lower: measured.lower, upper: measured.upper, oneSidedLower: measured.oneSidedLower };
++  const receipt = { schemaVersion: '1', decision: 'passed', ...identity, approvalSha256: sha256(canonicalBytes(approval as unknown as JsonRecord)),
++    datasetId: 'memberry-g2-holdout-holdout', split: 'holdout', controlAdapterId: CONTROL_ID, candidateAdapterId: CANDIDATE_ID,
++    recall, precision, efficiency, safety: { staleLeakRate: 0, isolationLeakRate: 0, duplicateRate: 0, unknownResultRate: 0 } };
++  return validateHoldoutReceipt(receipt);
++}
++
++export async function runInjectedHoldoutForTest(
++  approval: ApprovedDevelopment,
++  identity: HoldoutIdentity,
++  evaluator: HoldoutEvaluator,
++  receiptPath: string,
++): Promise<'passed' | 'failed'> {
++  try { await publishClosed(receiptPath, await evaluateHoldout(approval, identity, evaluator)); return 'passed'; }
++  catch (error) {
++    const marker = error instanceof Error ? error.message : '';
++    const tombstone = { schemaVersion: '1', decision: 'failed', failureClass: marker === 'safety' ? 'safety' : marker === 'metric' ? 'metric' : 'custody',
++      stage: marker === 'safety' ? 'safety-policy' : marker === 'metric' ? 'qualification' : 'custody', ...identity };
++    try { await publishClosed(receiptPath, tombstone); } catch { /* collision or partial receipt stays untouched */ }
++    return 'failed';
++  }
++}
++
++async function runHoldoutQualification(): Promise<void> {
++  const identity = holdoutIdentity(); const receiptPath = process.env.RET010_HOLDOUT_RECEIPT_PATH ?? '';
++  try {
++    const approval = await validateCommittedApproval();
++    validateHoldoutPolicy(JSON.parse(await readFile(resolve(HERE, 'holdout-policy.json'), 'utf8')) as unknown);
++    const [{ loadG2HoldoutScenariosForScoring }, { compareRegisteredAdapters }, stats] = await Promise.all([
++      import('../datasets/load-suite.js'), import('../registered-adapters.js'), import('../stats.js'),
++    ]);
++    const policy = { minRecallAtK: 0, minPrecisionAtK: 0, minAnswerCoverage: 0, maxStaleLeakRate: 0,
++      maxIsolationLeakRate: 0, maxDuplicateRate: 0, maxUnknownResultRate: 0, maxQualityRegression: 1 };
++    const evaluator: HoldoutEvaluator = {
++      load: (dimension) => loadG2HoldoutScenariosForScoring(dimension, REPO_ROOT),
++      compare: (dimension, scenarios) => compareRegisteredAdapters({ runId: `ret010-holdout-${dimension}`, controlId: CONTROL_ID,
++        candidateId: CANDIDATE_ID, scenarios: scenarios as any, splits: ['holdout'], policy, repoRoot: REPO_ROOT }),
++      interval: (pairs) => stats.pairedEfficiencyInterval(pairs),
++    };
++    if (await runInjectedHoldoutForTest(approval, identity, evaluator, receiptPath) !== 'passed') throw new Error('metric');
++  } catch (error) {
++    const tombstone = { schemaVersion: '1', decision: 'failed', failureClass: 'custody', stage: 'approval', ...identity };
++    try { await publishClosed(receiptPath, tombstone); } catch { /* a current tombstone or contradiction remains untouched */ }
++    throw error;
++  }
++}
++
++async function cli(): Promise<void> {
++  if (process.argv.length !== 2) throw new Error('custody');
++  await runHoldoutQualification();
++}
++
++if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
++  void cli().catch(() => { process.stderr.write(FAILURE_SENTINEL); process.exitCode = 1; });
++}

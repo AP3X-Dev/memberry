@@ -1,0 +1,2343 @@
+diff --git a/bench/lab/__tests__/memberry-retrieval-core.test.ts b/bench/lab/__tests__/memberry-retrieval-core.test.ts
+index aa62454..e005e9c 100644
+--- a/bench/lab/__tests__/memberry-retrieval-core.test.ts
++++ b/bench/lab/__tests__/memberry-retrieval-core.test.ts
+@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
+ 
+ import type { LabMemory, LabNamespace, LabQueryResult } from '../contracts/adapter.js';
+ import { MemBerryProxyAdapter } from '../adapters/memberry-proxy.js';
+-import { MemBerryRetrievalCoreAdapter } from '../adapters/memberry-retrieval-core.js';
++import { MemBerryRetrievalCoreAdapter, projectAssemblyResults } from '../adapters/memberry-retrieval-core.js';
+ import { loadG2HoldoutScenarioInputs } from '../datasets/load-suite.js';
+ import { TEMPORAL_ISOLATION_SCENARIOS } from '../fixtures/temporal-isolation.js';
+ import { auditAdapterDependencies, compareRegisteredAdapters } from '../registered-adapters.js';
+@@ -212,6 +212,43 @@ describe('LAB-010 production retrieval adapter', () => {
+     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+   });
+ 
++  it('RET-010E binds distinct disabled and served identities to the production path', async () => {
++    const disabled = new MemBerryRetrievalCoreAdapter('disabled');
++    const served = new MemBerryRetrievalCoreAdapter('served');
++    expect(disabled.id).toBe('memberry-retrieval-core-disabled-v1');
++    expect(served.id).toBe('memberry-retrieval-core-served-v1');
++    const distinguishingCorpus: readonly LabMemory[] = [
++      { id: 'alpha-first', content: 'noise', kind: 'fact', recordedAt: '2026-08-01T00:00:00.000Z' },
++      { id: 'target-second', content: 'zebra', kind: 'fact', recordedAt: '2026-08-01T00:00:01.000Z' },
++    ];
++    await disabled.ingest({ namespace: NAMESPACE, memories: distinguishingCorpus });
++    await served.ingest({ namespace: NAMESPACE, memories: distinguishingCorpus });
++    const request = { namespace: NAMESPACE, query: 'zebra', limit: 2 };
++    const control = await disabled.query(request);
++    const candidate = await served.query(request);
++    expect(control.results).toEqual([
++      { id: 'target-second', score: 0.016450541918145017 },
++      { id: 'alpha-first', score: 0.01639344262295082 },
++    ]);
++    expect(candidate.results).toEqual([
++      { id: 'target-second', score: 0.29842 },
++      { id: 'alpha-first', score: 0.002459 },
++    ]);
++    expect(candidate.results).not.toEqual(control.results);
++  });
++
++  it('RET-010E preserves interleaved-source presentation and equal-score cutoffs exactly', () => {
++    const projected = projectAssemblyResults([
++      { items: [{ id: 'memory-z', score: 0.5 }, { id: 'memory-a', score: 0.5 }] },
++      { items: [{ id: 'code-first', score: 0.9 }, { id: 'code-second', score: 0.4 }] },
++    ], 3);
++    expect(projected).toEqual([
++      { id: 'memory-z', score: 0.5 },
++      { id: 'memory-a', score: 0.5 },
++      { id: 'code-first', score: 0.9 },
++    ]);
++  });
++
+   it('LAB-011 keeps code retrieval enabled for a named namespace through default-tenant assembly', async () => {
+     const source = await readFile(resolve(REPO_ROOT, ADAPTER_ENTRY), 'utf8');
+     expect(source).not.toContain('forces the code channel OFF');
+diff --git a/bench/lab/__tests__/registered-adapters.test.ts b/bench/lab/__tests__/registered-adapters.test.ts
+index 24a00cc..c5c82e3 100644
+--- a/bench/lab/__tests__/registered-adapters.test.ts
++++ b/bench/lab/__tests__/registered-adapters.test.ts
+@@ -36,6 +36,33 @@ function manifest(runId: string) {
+ }
+ 
+ describe('registered adapter evidence boundary', () => {
++  it('registers both RET-010E production-path development arms', async () => {
++    const root = resolve(import.meta.dirname, '..', '..', '..');
++    const source = JSON.parse(await readFile(resolve(root, 'bench/lab/registry/systems.json'), 'utf8')) as {
++      systems: Array<{ id: string; adapter: string; requiredInCi: boolean }>;
++    };
++    for (const id of ['memberry-retrieval-core-disabled-v1', 'memberry-retrieval-core-served-v1']) {
++      expect(source.systems).toContainEqual(expect.objectContaining({
++        id,
++        adapter: 'bench/lab/adapters/memberry-retrieval-core.ts',
++        requiredInCi: true,
++      }));
++    }
++    const options = {
++      scenarios: TEMPORAL_ISOLATION_SCENARIOS.slice(0, 1),
++      repoRoot: root,
++    };
++    const disabled = await compareRegisteredAdapters({
++      ...options, runId: 'ret010e-disabled-registration',
++      controlId: 'scope-aware-bm25-control-v1', candidateId: 'memberry-retrieval-core-disabled-v1',
++    });
++    const served = await compareRegisteredAdapters({
++      ...options, runId: 'ret010e-served-registration',
++      controlId: 'scope-aware-bm25-control-v1', candidateId: 'memberry-retrieval-core-served-v1',
++    });
++    expect(disabled.candidate.adapterId).toBe('memberry-retrieval-core-disabled-v1');
++    expect(served.candidate.adapterId).toBe('memberry-retrieval-core-served-v1');
++  });
+   it('audits the real candidate graph without granting oracle or filesystem access', async () => {
+     const root = resolve(import.meta.dirname, '..', '..', '..');
+     const audit = await auditAdapterDependencies(resolve(root, 'bench/lab/adapters/memberry-proxy.ts'), root);
+diff --git a/bench/lab/adapters/memberry-retrieval-core.ts b/bench/lab/adapters/memberry-retrieval-core.ts
+index 3ceda0b..4d6116d 100644
+--- a/bench/lab/adapters/memberry-retrieval-core.ts
++++ b/bench/lab/adapters/memberry-retrieval-core.ts
+@@ -32,6 +32,7 @@ import {
+   type AssemblerMemoryLayer,
+ } from '../../../packages/retrieval/src/assembler.js';
+ import type { FeedbackRedisLayer } from '../../../packages/retrieval/src/feedback.js';
++import { createServedRerankerProviderV1 } from '../../../packages/retrieval/src/served-reranker.js';
+ 
+ /** assembler.ts MAX_ASSEMBLER_MEMORY_SOURCES. */
+ const MAX_MEMORY_SOURCES = 512;
+@@ -168,15 +169,40 @@ function fixtureLayers(memories: readonly LabMemory[]): {
+   };
+ }
+ 
++/** Preserve the assembler's post-budget presentation order exactly. */
++export function projectAssemblyResults(
++  sections: readonly { items: readonly { id: string; score: number }[] }[],
++  limit: number,
++): LabQueryResult[] {
++  return sections
++    .flatMap((section) => section.items)
++    .map((item) => ({ id: item.id, score: item.score }))
++    .slice(0, limit);
++}
++
+ /** Scores the production retrieval assembler over a fixture-persisted corpus. */
+ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
+-  readonly id: string = 'memberry-retrieval-core-v1';
+-  readonly displayName: string = 'MemBerry production retrieval core';
++  readonly id: string;
++  readonly displayName: string;
+   readonly executionMode = 'fixture' as const;
+   readonly capabilities: ReadonlySet<AdapterCapability> = new Set([
+     'namespaces', 'feedback', 'stats', 'cleanup', 'project-scope', 'tenant-scope', 'temporal-filtering',
+   ]);
+ 
++  constructor(private readonly rerankerMode: 'legacy' | 'disabled' | 'served' = 'legacy') {
++    super();
++    this.id = rerankerMode === 'disabled'
++      ? 'memberry-retrieval-core-disabled-v1'
++      : rerankerMode === 'served'
++        ? 'memberry-retrieval-core-served-v1'
++        : 'memberry-retrieval-core-v1';
++    this.displayName = rerankerMode === 'served'
++      ? 'MemBerry production retrieval core (served reranker)'
++      : rerankerMode === 'disabled'
++        ? 'MemBerry production retrieval core (reranker disabled)'
++        : 'MemBerry production retrieval core';
++  }
++
+   async query(request: QueryRequest): Promise<QueryResponse> {
+     this.queryCount += 1;
+     const scoped = (this.stores.get(namespaceKey(request.namespace)) ?? [])
+@@ -192,6 +218,8 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
+       layers.codeLayer,
+       layers.memoryLayer,
+       FIXTURE_EMBEDDING,
++      null,
++      this.rerankerMode === 'served' ? createServedRerankerProviderV1() : null,
+     );
+     // 'ranked', never 'auto': 'auto' would route through classifyIntent, whose
+     // decision depends on this fixture embedding provider and can select GRAPH,
+@@ -206,17 +234,13 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
+       include_arch: false,
+       include_memory: true,
+       max_tokens: request.tokenBudget ?? DEFAULT_MAX_TOKENS,
++      ...(this.rerankerMode === 'disabled' ? { servedRerankerDisabled: true as const } : {}),
+     });
+     // Only id and score cross this boundary. context.assembled_at is wall clock,
+     // and nothing derived from it may enter a lab result.
+     //
+-    // groupAndBudget emits sections grouped by source_type, which is presentation
+-    // order, not rank; sorting by the assembler's own final score recovers the
+-    // ranking it actually produced. The id tie-break keeps that total.
+-    const ranked = context.sections
+-      .flatMap((section) => section.items)
+-      .map((item) => ({ id: item.id, score: item.score }))
+-      .sort((left, right) => right.score - left.score || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+-    return { results: ranked.slice(0, request.limit) };
++    // The returned section/item sequence is the production presentation and
++    // budget decision. Re-sorting here would create a lab-only ranking path.
++    return { results: projectAssemblyResults(context.sections, request.limit) };
+   }
+ }
+diff --git a/bench/lab/registered-adapters.ts b/bench/lab/registered-adapters.ts
+index 752bc02..15ee249 100644
+--- a/bench/lab/registered-adapters.ts
++++ b/bench/lab/registered-adapters.ts
+@@ -56,6 +56,20 @@ const CANONICAL_FACTORIES: Readonly<Record<string, CanonicalFactory>> = Object.f
+       return new MemBerryRetrievalCoreAdapter();
+     },
+   },
++  'memberry-retrieval-core-disabled-v1': {
++    entry: 'bench/lab/adapters/memberry-retrieval-core.ts',
++    create: async () => {
++      const { MemBerryRetrievalCoreAdapter } = await import('./adapters/memberry-retrieval-core.js');
++      return new MemBerryRetrievalCoreAdapter('disabled');
++    },
++  },
++  'memberry-retrieval-core-served-v1': {
++    entry: 'bench/lab/adapters/memberry-retrieval-core.ts',
++    create: async () => {
++      const { MemBerryRetrievalCoreAdapter } = await import('./adapters/memberry-retrieval-core.js');
++      return new MemBerryRetrievalCoreAdapter('served');
++    },
++  },
+   'scope-aware-bm25-control-v1': {
+     entry: 'bench/lab/adapters/baselines.ts',
+     create: async () => {
+diff --git a/bench/lab/registry/systems.json b/bench/lab/registry/systems.json
+index 41ccf2b..33dac17 100644
+--- a/bench/lab/registry/systems.json
++++ b/bench/lab/registry/systems.json
+@@ -20,6 +20,26 @@
+       "adapter": "bench/lab/adapters/memberry-retrieval-core.ts",
+       "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
+     },
++    {
++      "id": "memberry-retrieval-core-disabled-v1",
++      "displayName": "MemBerry production retrieval core (reranker disabled)",
++      "mode": "fixture",
++      "fidelity": "fixture",
++      "fidelityDetail": "production-retrieval / fixture-persistence / reranker-disabled",
++      "requiredInCi": true,
++      "adapter": "bench/lab/adapters/memberry-retrieval-core.ts",
++      "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
++    },
++    {
++      "id": "memberry-retrieval-core-served-v1",
++      "displayName": "MemBerry production retrieval core (served reranker)",
++      "mode": "fixture",
++      "fidelity": "fixture",
++      "fidelityDetail": "production-retrieval / fixture-persistence / served-reranker-v1",
++      "requiredInCi": true,
++      "adapter": "bench/lab/adapters/memberry-retrieval-core.ts",
++      "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
++    },
+     {
+       "id": "scope-aware-bm25-control-v1",
+       "displayName": "Scope-aware BM25 control",
+--- /dev/null
++++ b/bench/lab/ret010/dev-gate.ts
++#!/usr/bin/env node
++'use strict';
++
++/*
++ * RET-010E is intentionally ordinary CommonJS despite the .ts suffix.  The
++ * hosted verifier runs with plain Node 20/22 and never imports executable
++ * repository code.  The development-only "run" arm is launched with the tsx
++ * hook and delays all evaluation requires until after its exclusive evidence
++ * root exists.
++ */
++const crypto = require('node:crypto');
++const childProcess = require('node:child_process');
++const fs = require('node:fs');
++const fsp = require('node:fs/promises');
++const http = require('node:http');
++const https = require('node:https');
++const os = require('node:os');
++const path = require('node:path');
++const zlib = require('node:zlib');
++
++const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
++const RUNS_ROOT = path.join(REPO_ROOT, 'node_modules', '.cache', 'memberry-lab', 'runs');
++const CONTROL_ID = 'memberry-retrieval-core-disabled-v1';
++const CANDIDATE_ID = 'memberry-retrieval-core-served-v1';
++const DATASET_ID = 'memberry-ret010-dev-v1';
++const DEV_FAILED = Buffer.from('RET010_DEV_GATE_FAILED\n');
++const VERIFY_FAILED = Buffer.from('RET010_DEV_RECEIPT_VERIFY_FAILED\n');
++const POSITIVE_DECIMAL = /^[1-9][0-9]*$/;
++const HEX40 = /^[0-9a-f]{40}$/;
++const HEX64 = /^[0-9a-f]{64}$/;
++const UPLOAD_LEAF = /^ret010-upload-[0-9a-f]{64}$/;
++const SUCCESS_FILES = Object.freeze([
++  'recall-lane.json', 'precision-lane.json', 'efficiency-interval.json',
++  'aggregate-result.json', 'custody-manifest.json',
++]);
++const SUCCESS_ALLOWLIST = Object.freeze([...SUCCESS_FILES, 'upload-complete.json']);
++const FAILURE_ALLOWLIST = Object.freeze(['failure-tombstone.json', 'upload-complete.json']);
++const SOURCE_PATHS = Object.freeze([
++  'bench/lab/ret010/dev-gate.ts',
++  'packages/retrieval/src/served-reranker.ts',
++  'packages/retrieval/src/reranker.ts',
++  'packages/retrieval/src/assembler.ts',
++  'bench/lab/adapters/memberry-retrieval-core.ts',
++  'bench/lab/stats.ts',
++  'bench/lab/baselines/canonical.ts',
++  'bench/lab/datasets/hash.ts',
++  'bench/lab/registry/datasets.json',
++  'bench/lab/ret010/load-dev.ts',
++  'bench/lab/datasets/ret010/v1/dev/input.jsonl',
++  'bench/lab/datasets/ret010/v1/dev/oracle.jsonl',
++  'bench/lab/ret010/dev-policy.json',
++]);
++const PROVIDER_IDENTITY = Object.freeze({
++  providerId: 'memberry.local.lexical',
++  modelId: 'bm25f-query-v1',
++  calibrationId: 'fixed-blend-v1',
++  locality: 'local',
++});
++
++function fail(code) {
++  const error = new Error('ret010');
++  error.code = code || 'custody';
++  throw error;
++}
++function isRecord(value) {
++  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
++  const proto = Object.getPrototypeOf(value);
++  return proto === Object.prototype || proto === null;
++}
++function exactKeys(value, keys) {
++  return isRecord(value) && JSON.stringify(Object.keys(value)) === JSON.stringify(keys);
++}
++function finite(value, min, max) {
++  return typeof value === 'number' && Number.isFinite(value) && !Object.is(value, -0)
++    && value >= min && value <= max;
++}
++function canonicalBytes(value) {
++  return Buffer.from(JSON.stringify(value) + '\n', 'utf8');
++}
++function sha256(bytes) {
++  return crypto.createHash('sha256').update(bytes).digest('hex');
++}
++function gitSha1(bytes) {
++  return crypto.createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
++}
++function canonicalDecimal(value) {
++  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) fail('identity');
++  const result = value.toString(10);
++  if (!POSITIVE_DECIMAL.test(result) || Number(result) !== value
++    || Number(result).toString(10) !== result) fail('identity');
++  return result;
++}
++function requireCanonicalDecimal(value) {
++  if (typeof value !== 'string' || !POSITIVE_DECIMAL.test(value)) fail('identity');
++  return value;
++}
++function normalized(value) {
++  if (!Number.isFinite(value)) fail('metric');
++  return Object.is(value, -0) ? 0 : value;
++}
++
++/* Duplicate-aware JSON parser. It creates only null-prototype records and own
++ * array elements, so inherited setters cannot replace parsed values. */
++function parseJsonExact(bytes) {
++  if (!Buffer.isBuffer(bytes)) bytes = Buffer.from(bytes);
++  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) fail('json');
++  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
++  let at = 0;
++  const ws = () => { while (at < text.length && /[\x20\x09\x0a\x0d]/.test(text[at])) at += 1; };
++  const string = () => {
++    if (text[at++] !== '"') fail('json');
++    let raw = '"';
++    for (;;) {
++      if (at >= text.length) fail('json');
++      const ch = text[at++];
++      raw += ch;
++      if (ch === '"') break;
++      if (ch === '\\') {
++        if (at >= text.length) fail('json');
++        raw += text[at++];
++        if (raw.endsWith('u')) {
++          const hex = text.slice(at, at + 4);
++          if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail('json');
++          raw += hex; at += 4;
++        }
++      } else if (ch.charCodeAt(0) < 0x20) fail('json');
++    }
++    try { return JSON.parse(raw); } catch { fail('json'); }
++  };
++  const number = () => {
++    const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(text.slice(at));
++    if (!match) fail('json');
++    at += match[0].length;
++    const value = Number(match[0]);
++    if (!Number.isFinite(value)) fail('json');
++    return value;
++  };
++  const value = () => {
++    ws();
++    const ch = text[at];
++    if (ch === '"') return string();
++    if (ch === '{') {
++      at += 1; ws();
++      const out = Object.create(null);
++      const seen = new Set();
++      if (text[at] === '}') { at += 1; return out; }
++      for (;;) {
++        ws(); const key = string();
++        if (seen.has(key)) fail('duplicate-key');
++        seen.add(key); ws();
++        if (text[at++] !== ':') fail('json');
++        Object.defineProperty(out, key, { value: value(), enumerable: true, writable: true, configurable: true });
++        ws();
++        const separator = text[at++];
++        if (separator === '}') return out;
++        if (separator !== ',') fail('json');
++      }
++    }
++    if (ch === '[') {
++      at += 1; ws();
++      const out = [];
++      if (text[at] === ']') { at += 1; return out; }
++      let index = 0;
++      for (;;) {
++        Object.defineProperty(out, index++, { value: value(), enumerable: true, writable: true, configurable: true });
++        ws();
++        const separator = text[at++];
++        if (separator === ']') return out;
++        if (separator !== ',') fail('json');
++      }
++    }
++    if (text.startsWith('true', at)) { at += 4; return true; }
++    if (text.startsWith('false', at)) { at += 5; return false; }
++    if (text.startsWith('null', at)) { at += 4; return null; }
++    return number();
++  };
++  const result = value(); ws();
++  if (at !== text.length) fail('json');
++  return result;
++}
++
++function foldEnvironment(environment) {
++  const folded = new Map();
++  for (const raw of Object.keys(environment)) {
++    if (!/^[\x00-\x7f]+$/.test(raw)) fail('environment');
++    const upper = raw.replace(/[a-z]/g, (c) => c.toUpperCase());
++    if (folded.has(upper)) fail('environment');
++    folded.set(upper, raw);
++  }
++  const exact = new Set([
++    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS',
++    'NODE_TLS_REJECT_UNAUTHORIZED', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_OPTIONS',
++    'NODE_PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES',
++    'DYLD_LIBRARY_PATH',
++  ]);
++  for (const name of folded.keys()) {
++    if (name.startsWith('GH_') || name.startsWith('GITHUB_') || exact.has(name)) fail('environment');
++  }
++  return folded;
++}
++
++function trustedConfigRoot(environment, platform) {
++  let root;
++  if (platform === 'win32') {
++    if (!environment.APPDATA || !path.win32.isAbsolute(environment.APPDATA)) fail('environment');
++    root = path.win32.join(environment.APPDATA, 'GitHub CLI');
++  } else {
++    const base = environment.XDG_CONFIG_HOME || (environment.HOME && path.posix.join(environment.HOME, '.config'));
++    if (!base || !path.posix.isAbsolute(base)) fail('environment');
++    root = path.posix.join(base, 'gh');
++  }
++  return root;
++}
++
++function oneClose(handle) {
++  let closed = false;
++  return async () => {
++    if (closed) fail('double-close');
++    closed = true;
++    await handle.close();
++  };
++}
++async function readOwnedFile(absolute, maximum) {
++  const parent = path.dirname(absolute);
++  const pstat = await fsp.lstat(parent);
++  if (!pstat.isDirectory() || pstat.isSymbolicLink() || await fsp.realpath(parent) !== parent) fail('custody');
++  if (typeof fs.constants.O_NOFOLLOW !== 'number') fail('custody');
++  const handle = await fsp.open(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
++  const close = oneClose(handle);
++  try {
++    const stat = await handle.stat({ bigint: true });
++    if (!stat.isFile() || stat.size > BigInt(maximum)) fail('custody');
++    const bytes = await handle.readFile();
++    const after = await handle.stat({ bigint: true });
++    const current = await fsp.lstat(absolute, { bigint: true });
++    if (!current.isFile() || current.isSymbolicLink() || stat.dev !== after.dev || stat.ino !== after.ino
++      || stat.dev !== current.dev || stat.ino !== current.ino) fail('custody');
++    await close();
++    return bytes;
++  } catch (error) {
++    try { await close(); } catch { /* failure remains closed */ }
++    throw error;
++  }
++}
++
++function spawnExact(command, args, options, limits) {
++  return new Promise((resolve, reject) => {
++    const child = childProcess.spawn(command, args, {
++      cwd: options.cwd, env: options.env, shell: false,
++      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
++    });
++    const started = performance.now();
++    const deadline = started + limits.timeout;
++    const stdout = [];
++    let stdoutBytes = 0;
++    let failed = false;
++    let disposed = false;
++    let timer;
++    const dispose = () => {
++      if (disposed) return;
++      disposed = true;
++      if (timer) clearTimeout(timer);
++    };
++    const trigger = () => {
++      if (failed) return;
++      failed = true;
++      child.kill();
++      const now = performance.now();
++      const drainDeadline = Math.min(now + 5000, deadline);
++      const remaining = drainDeadline - now;
++      if (remaining <= 0) child.kill('SIGKILL');
++      else setTimeout(() => child.kill('SIGKILL'), remaining).unref();
++    };
++    timer = setTimeout(trigger, limits.timeout);
++    child.on('error', () => { trigger(); });
++    child.stderr.on('data', () => trigger());
++    child.stdout.on('data', (chunk) => {
++      if (failed) return;
++      stdoutBytes += chunk.length;
++      if (stdoutBytes > limits.stdout) { trigger(); return; }
++      stdout.push(Buffer.from(chunk));
++    });
++    child.on('close', (code, signal) => {
++      dispose();
++      if (failed || code !== 0 || signal || performance.now() > deadline) reject(new Error('process'));
++      else resolve(Buffer.concat(stdout));
++    });
++  });
++}
++
++async function acquireGhToken(environment) {
++  foldEnvironment(environment);
++  const frozen = trustedConfigRoot(environment, process.platform);
++  const stdout = await spawnExact('gh', ['auth', 'token', '--hostname', 'github.com'],
++    { env: environment }, { timeout: 30000, stdout: 4097 });
++  if (trustedConfigRoot(environment, process.platform) !== frozen) fail('environment');
++  if (stdout.length < 2 || stdout.length > 4097 || stdout[stdout.length - 1] !== 0x0a) fail('token');
++  const token = Buffer.from(stdout.subarray(0, -1));
++  if (token.length < 1 || token.length > 4096 || [...token].some((b) => b < 0x21 || b > 0x7e)) fail('token');
++  return token;
++}
++
++function rawHeaderPairs(rawHeaders) {
++  const pairs = [];
++  for (let i = 0; i < rawHeaders.length; i += 2) pairs.push([rawHeaders[i].toLowerCase(), rawHeaders[i + 1]]);
++  return pairs;
++}
++function headerValues(response, name) {
++  return rawHeaderPairs(response.rawHeaders || []).filter(([key]) => key === name.toLowerCase()).map(([, value]) => value);
++}
++function canonicalLength(value) {
++  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) fail('http');
++  const number = Number(value);
++  if (!Number.isSafeInteger(number) || number < 0 || String(number) !== value) fail('http');
++  return number;
++}
++
++function requestBytes(url, headers, timeout, maximum, expectedStatus, policy) {
++  return new Promise((resolve, reject) => {
++    const client = url.startsWith('https:') ? https : http;
++    const req = client.get(url, { headers, timeout, agent: false }, (res) => {
++      const location = headerValues(res, 'location');
++      const contentEncoding = headerValues(res, 'content-encoding');
++      const setCookie = headerValues(res, 'set-cookie');
++      if (res.statusCode !== expectedStatus || contentEncoding.length || (policy.noCookie && setCookie.length)
++        || (policy.noRedirect && location.length)) { res.resume(); reject(new Error('http')); return; }
++      for (const unique of ['content-type', 'content-length', 'transfer-encoding', 'location', 'link']) {
++        if (headerValues(res, unique).length > 1) { res.resume(); reject(new Error('http')); return; }
++      }
++      const lengthValues = headerValues(res, 'content-length');
++      const transfer = headerValues(res, 'transfer-encoding');
++      let declared;
++      try {
++        if (lengthValues.length) declared = canonicalLength(lengthValues[0]);
++        if (lengthValues.length && transfer.length) fail('http');
++        if (transfer.length && transfer[0] !== 'chunked') fail('http');
++      } catch (error) { res.resume(); reject(error); return; }
++      const chunks = []; let size = 0; let ended = false;
++      const timer = setTimeout(() => req.destroy(new Error('timeout')), timeout);
++      res.on('data', (chunk) => {
++        size += chunk.length;
++        if (size > maximum) req.destroy(new Error('large')); else chunks.push(Buffer.from(chunk));
++      });
++      res.on('end', () => {
++        ended = true; clearTimeout(timer);
++        if (declared !== undefined && declared !== size) reject(new Error('length'));
++        else resolve({ status: res.statusCode, rawHeaders: res.rawHeaders, body: Buffer.concat(chunks), url });
++      });
++      res.on('aborted', () => { if (!ended) reject(new Error('truncated')); });
++    });
++    req.on('timeout', () => req.destroy(new Error('timeout')));
++    req.on('error', reject);
++  });
++}
++
++function createProductionTransport(token) {
++  const apiHeaders = Object.freeze({
++    Authorization: 'Bearer ' + token.toString('ascii'),
++    Accept: 'application/vnd.github+json',
++    'X-GitHub-Api-Version': '2022-11-28',
++    'User-Agent': 'memberry-ret010-receipt-verifier/1',
++    'Accept-Encoding': 'identity',
++  });
++  return Object.freeze({
++    async send(descriptor) {
++      if (!exactKeys(descriptor, ['kind', 'url'])) fail('descriptor');
++      if (descriptor.kind === 'metadata') {
++        return requestBytes(descriptor.url, apiHeaders, 30000, 8388608, 200, { noRedirect: true, noCookie: false });
++      }
++      if (descriptor.kind === 'artifact-api') {
++        return requestBytes(descriptor.url, apiHeaders, 30000, 65536, 302, { noRedirect: false, noCookie: true });
++      }
++      if (descriptor.kind === 'archive') {
++        return requestBytes(descriptor.url, {
++          'User-Agent': 'memberry-ret010-receipt-verifier/1',
++          Accept: 'application/octet-stream', 'Accept-Encoding': 'identity',
++        }, 120000, 67108864, 200, { noRedirect: true, noCookie: true });
++      }
++      fail('descriptor');
++    },
++  });
++}
++
++function metadataDescriptor(url) { return Object.freeze({ kind: 'metadata', url }); }
++function artifactDescriptor(url) { return Object.freeze({ kind: 'artifact-api', url }); }
++function archiveDescriptor(url) { return Object.freeze({ kind: 'archive', url }); }
++
++function parseMetadataResponse(response) {
++  const types = headerValues(response, 'content-type');
++  if (types.length !== 1 || !/^application\/json(?:; charset=utf-8)?$/.test(types[0])) fail('http');
++  return parseJsonExact(response.body);
++}
++
++function parseLink(value, originPath, page, lastPage) {
++  if (value === undefined) {
++    if (page < lastPage) fail('paging');
++    return;
++  }
++  const relations = new Map();
++  for (const member of value.split(',')) {
++    const match = /^<([^>]+)>; rel="(next|first|prev|last)"$/.exec(member.trim());
++    if (!match || relations.has(match[2])) fail('paging');
++    const target = new URL(match[1]);
++    if (target.origin !== 'https://api.github.com' || target.pathname !== originPath
++      || target.searchParams.size !== 2 || target.searchParams.get('per_page') !== '100'
++      || !POSITIVE_DECIMAL.test(target.searchParams.get('page') || '')) fail('paging');
++    relations.set(match[2], Number(target.searchParams.get('page')));
++  }
++  const expected = { next: page + 1, first: 1, prev: page - 1, last: lastPage };
++  if ((page < lastPage) !== relations.has('next')) fail('paging');
++  for (const [relation, target] of relations) if (target !== expected[relation]) fail('paging');
++}
++
++async function fetchPaged(transport, base, collection) {
++  const records = []; let total; let lastPage;
++  for (let page = 1; page <= (lastPage || 1); page += 1) {
++    const response = await transport.send(metadataDescriptor(base + '/' + collection + '?per_page=100&page=' + page));
++    const body = parseMetadataResponse(response);
++    const key = collection === 'jobs' ? 'jobs' : 'artifacts';
++    if (!isRecord(body) || !Array.isArray(body[key])
++      || typeof body.total_count !== 'number' || !Number.isSafeInteger(body.total_count)
++      || body.total_count < 0) fail('paging');
++    if (total === undefined) {
++      total = body.total_count;
++      lastPage = Math.max(1, Math.ceil(total / 100));
++      if (total > 1000 || lastPage > 10) fail('paging');
++    }
++    if (body.total_count !== total) fail('paging');
++    const expected = page < lastPage ? 100 : total - 100 * (lastPage - 1);
++    if (body[key].length !== expected) fail('paging');
++    const links = headerValues(response, 'link');
++    if (links.length > 1) fail('paging');
++    parseLink(links[0], new URL(base).pathname + '/' + collection, page, lastPage);
++    records.push(...body[key]);
++  }
++  const ids = records.map((record) => canonicalDecimal(record.id));
++  if (records.length !== total || new Set(ids).size !== total) fail('paging');
++  return records;
++}
++
++function crc32(bytes) {
++  let crc = 0xffffffff;
++  for (const byte of bytes) {
++    crc ^= byte;
++    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
++  }
++  return (crc ^ 0xffffffff) >>> 0;
++}
++function u16(bytes, offset) {
++  if (offset < 0 || offset + 2 > bytes.length) fail('zip');
++  return bytes.readUInt16LE(offset);
++}
++function u32(bytes, offset) {
++  if (offset < 0 || offset + 4 > bytes.length) fail('zip');
++  return bytes.readUInt32LE(offset);
++}
++function addRange(ranges, start, end) {
++  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) fail('zip');
++  for (const prior of ranges) if (start < prior[1] && end > prior[0]) fail('zip');
++  ranges.push([start, end]);
++}
++
++function extractZip32(archive) {
++  if (!Buffer.isBuffer(archive) || archive.length > 67108864 || archive.length < 22) fail('zip');
++  let eocd = -1; let occurrences = 0;
++  for (let at = 0; at <= archive.length - 4; at += 1) {
++    if (u32(archive, at) === 0x06054b50) { eocd = at; occurrences += 1; }
++  }
++  if (occurrences !== 1 || eocd + 22 !== archive.length || u16(archive, eocd + 20) !== 0
++    || u16(archive, eocd + 4) !== 0 || u16(archive, eocd + 6) !== 0) fail('zip');
++  const count = u16(archive, eocd + 10);
++  if (u16(archive, eocd + 8) !== count || count !== 6) fail('zip');
++  const centralSize = u32(archive, eocd + 12);
++  const centralStart = u32(archive, eocd + 16);
++  if (centralStart + centralSize !== eocd) fail('zip');
++  const expectedNames = new Set(SUCCESS_ALLOWLIST);
++  const central = []; const ranges = [];
++  let cursor = centralStart;
++  for (let index = 0; index < count; index += 1) {
++    const start = cursor;
++    if (u32(archive, cursor) !== 0x02014b50) fail('zip');
++    const madeBy = u16(archive, cursor + 4);
++    const needed = u16(archive, cursor + 6);
++    const flags = u16(archive, cursor + 8);
++    const method = u16(archive, cursor + 10);
++    const crc = u32(archive, cursor + 16);
++    const compressed = u32(archive, cursor + 20);
++    const uncompressed = u32(archive, cursor + 24);
++    const nameLength = u16(archive, cursor + 28);
++    const extraLength = u16(archive, cursor + 30);
++    const commentLength = u16(archive, cursor + 32);
++    const disk = u16(archive, cursor + 34);
++    const internal = u16(archive, cursor + 36);
++    const external = u32(archive, cursor + 38);
++    const localOffset = u32(archive, cursor + 42);
++    cursor += 46;
++    if (needed !== 20 || (madeBy !== 0x0014 && madeBy !== 0x0314) || internal !== 0
++      || disk !== 0 || extraLength !== 0 || commentLength !== 0
++      || (method !== 0 && method !== 8) || (flags & ~0x0808) !== 0
++      || nameLength < 1 || cursor + nameLength > archive.length
++      || compressed === 0xffffffff || uncompressed === 0xffffffff || localOffset === 0xffffffff
++      || uncompressed > 2000000) fail('zip');
++    if (madeBy === 0x0014) {
++      if (external !== 0 && external !== 0x20) fail('zip');
++    } else {
++      const mode = external >>> 16;
++      const low = external & 0xffff;
++      if ((mode & 0xf000) !== 0x8000 || (mode & ~0x81ff) !== 0 || (low !== 0 && low !== 0x20)) fail('zip');
++    }
++    const nameBytes = archive.subarray(cursor, cursor + nameLength);
++    if ([...nameBytes].some((b) => b < 0x20 || b > 0x7e)) fail('zip');
++    const name = nameBytes.toString('ascii');
++    if (!expectedNames.delete(name) || name.includes('/') || name.includes('\\')) fail('zip');
++    cursor += nameLength;
++    central.push({ name, needed, flags, method, crc, compressed, uncompressed, localOffset });
++    addRange(ranges, start, cursor);
++  }
++  if (cursor !== eocd || expectedNames.size) fail('zip');
++  addRange(ranges, eocd, archive.length);
++  const output = Object.create(null);
++  let aggregate = 0;
++  const localStarts = new Set();
++  for (const entry of central) {
++    const start = entry.localOffset;
++    if (localStarts.has(start) || u32(archive, start) !== 0x04034b50) fail('zip');
++    localStarts.add(start);
++    if (u16(archive, start + 4) !== entry.needed || u16(archive, start + 6) !== entry.flags
++      || u16(archive, start + 8) !== entry.method) fail('zip');
++    const localCrc = u32(archive, start + 14);
++    const localCompressed = u32(archive, start + 18);
++    const localUncompressed = u32(archive, start + 22);
++    const nameLength = u16(archive, start + 26);
++    const extraLength = u16(archive, start + 28);
++    if (extraLength !== 0 || nameLength !== Buffer.byteLength(entry.name)
++      || archive.subarray(start + 30, start + 30 + nameLength).toString('ascii') !== entry.name) fail('zip');
++    const dataStart = start + 30 + nameLength;
++    const dataEnd = dataStart + entry.compressed;
++    let localEnd = dataEnd;
++    if ((entry.flags & 0x0008) === 0) {
++      if (localCrc !== entry.crc || localCompressed !== entry.compressed
++        || localUncompressed !== entry.uncompressed) fail('zip');
++    } else {
++      if (localCrc !== 0 || localCompressed !== 0 || localUncompressed !== 0) fail('zip');
++      const first = u32(archive, dataEnd);
++      let descriptor;
++      if (first === 0x08074b50) {
++        descriptor = [u32(archive, dataEnd + 4), u32(archive, dataEnd + 8), u32(archive, dataEnd + 12)];
++        localEnd += 16;
++      } else {
++        if (entry.crc === 0x08074b50) fail('zip');
++        descriptor = [first, u32(archive, dataEnd + 4), u32(archive, dataEnd + 8)];
++        localEnd += 12;
++      }
++      if (descriptor[0] !== entry.crc || descriptor[1] !== entry.compressed
++        || descriptor[2] !== entry.uncompressed) fail('zip');
++    }
++    addRange(ranges, start, localEnd);
++    const compressedBytes = archive.subarray(dataStart, dataEnd);
++    let bytes;
++    try {
++      bytes = entry.method === 0 ? Buffer.from(compressedBytes)
++        : zlib.inflateRawSync(compressedBytes, { maxOutputLength: entry.uncompressed });
++    } catch { fail('zip'); }
++    if (bytes.length !== entry.uncompressed || crc32(bytes) !== entry.crc) fail('zip');
++    aggregate += bytes.length;
++    if (aggregate > 12000000) fail('zip');
++    output[entry.name] = bytes;
++  }
++  ranges.sort((a, b) => a[0] - b[0]);
++  let accounted = 0;
++  for (const range of ranges) {
++    if (range[0] !== accounted) fail('zip');
++    accounted = range[1];
++  }
++  if (accounted !== archive.length) fail('zip');
++  return output;
++}
++
++function runGit(args, encoding) {
++  const common = ['--no-replace-objects', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'];
++  const env = {};
++  for (const [key, value] of Object.entries(process.env)) {
++    if (!key.toUpperCase().startsWith('GIT_')) env[key] = value;
++  }
++  Object.assign(env, {
++    GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', GIT_CONFIG_NOSYSTEM: '1',
++    GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
++    GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0',
++  });
++  return childProcess.execFileSync('git', [...common, ...args], {
++    cwd: REPO_ROOT, env, encoding, maxBuffer: 40 * 1024 * 1024,
++    stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000, windowsHide: true,
++  });
++}
++
++async function pinSources(head) {
++  const pins = Object.create(null); let aggregate = 0;
++  for (const relative of SOURCE_PATHS) {
++    const tree = runGit(['ls-tree', '-z', head, '--', relative], null);
++    const match = /^100644 blob ([0-9a-f]{40})\t([^\0]+)\0$/.exec(tree.toString('utf8'));
++    if (!match || match[2] !== relative) fail('source');
++    const absolute = path.join(REPO_ROOT, ...relative.split('/'));
++    const bytes = await readOwnedFile(absolute, 4194304);
++    aggregate += bytes.length;
++    if (aggregate > 33554432) fail('source');
++    const gitBytes = runGit(['cat-file', 'blob', head + ':' + relative], null);
++    if (!bytes.equals(gitBytes) || gitSha1(bytes) !== match[1]) fail('source');
++    pins[relative] = Object.freeze({ bytes, blob: match[1], sha256: sha256(bytes), absolute });
++  }
++  return pins;
++}
++
++function validateMarker(files) {
++  const markerBytes = files['upload-complete.json'];
++  const marker = parseJsonExact(markerBytes);
++  if (!exactKeys(marker, ['schemaVersion', 'decision', 'bundleKind', 'gitCommit', 'nodeMajor',
++    'nodeVersion', 'workflowRunId', 'workflowRunAttempt', 'uploadLeafName', 'allowlist', 'payloadSha256'])
++    || marker.schemaVersion !== '1' || marker.decision !== 'complete' || marker.bundleKind !== 'success'
++    || !HEX40.test(marker.gitCommit) || !['20', '22'].includes(marker.nodeMajor)
++    || !(new RegExp('^v' + marker.nodeMajor + '\\.[0-9]+\\.[0-9]+$')).test(marker.nodeVersion)
++    || !POSITIVE_DECIMAL.test(marker.workflowRunId) || !POSITIVE_DECIMAL.test(marker.workflowRunAttempt)
++    || !UPLOAD_LEAF.test(marker.uploadLeafName)
++    || JSON.stringify(marker.allowlist) !== JSON.stringify(SUCCESS_ALLOWLIST)
++    || !exactKeys(marker.payloadSha256, ['recallLaneSha256', 'precisionLaneSha256',
++      'efficiencyIntervalSha256', 'aggregateResultSha256', 'custodyManifestSha256'])
++    || !markerBytes.equals(canonicalBytes(marker))) fail('marker');
++  const map = [
++    ['recallLaneSha256', 'recall-lane.json'], ['precisionLaneSha256', 'precision-lane.json'],
++    ['efficiencyIntervalSha256', 'efficiency-interval.json'], ['aggregateResultSha256', 'aggregate-result.json'],
++    ['custodyManifestSha256', 'custody-manifest.json'],
++  ];
++  for (const [key, file] of map) if (!HEX64.test(marker.payloadSha256[key])
++    || marker.payloadSha256[key] !== sha256(files[file])) fail('marker');
++  return marker;
++}
++
++function validateLane(bytes, lane) {
++  const value = parseJsonExact(bytes);
++  const k = lane === 'recall-at-10' ? 10 : 5;
++  if (!exactKeys(value, ['schemaVersion', 'lane', 'datasetId', 'split', 'controlAdapterId',
++    'candidateAdapterId', 'scenarioCount', 'probeCount', 'k', 'control', 'candidate',
++    'delta', 'qualifyingCaseCount', 'passed'])
++    || value.schemaVersion !== '1' || value.lane !== lane || value.datasetId !== DATASET_ID
++    || value.split !== 'dev' || value.controlAdapterId !== CONTROL_ID || value.candidateAdapterId !== CANDIDATE_ID
++    || value.scenarioCount !== 10 || value.probeCount !== 10 || value.k !== k
++    || !Number.isInteger(value.qualifyingCaseCount) || value.qualifyingCaseCount < 0
++    || value.qualifyingCaseCount > 10 || value.passed !== true || !bytes.equals(canonicalBytes(value))) fail('lane');
++  const armKeys = ['recallAtK', 'precisionAtK', 'staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate'];
++  for (const arm of [value.control, value.candidate]) {
++    if (!exactKeys(arm, armKeys) || armKeys.some((key) => !finite(arm[key], 0, 1))) fail('lane');
++  }
++  if (!exactKeys(value.delta, ['recallAtK', 'precisionAtK'])
++    || !finite(value.delta.recallAtK, -1, 1) || !finite(value.delta.precisionAtK, -1, 1)) fail('lane');
++  return value;
++}
++function validateInterval(bytes) {
++  const value = parseJsonExact(bytes);
++  if (!exactKeys(value, ['schemaVersion', 'metric', 'outcome', 'pairedProbes', 'resamples',
++    'level', 'seed', 'point', 'lower', 'upper', 'oneSidedLower'])
++    || value.schemaVersion !== '1' || value.metric !== 'task-success-per-1k-tokens'
++    || value.outcome !== 'measured' || value.pairedProbes !== 20 || value.resamples !== 2000
++    || value.level !== 0.95 || !Number.isInteger(value.seed) || value.seed < 0 || value.seed > 0xffffffff
++    || !['point', 'lower', 'upper', 'oneSidedLower'].every((key) => finite(value[key], -Number.MAX_VALUE, Number.MAX_VALUE))
++    || !bytes.equals(canonicalBytes(value))) fail('interval');
++  return value;
++}
++function validateAggregate(bytes) {
++  const value = parseJsonExact(bytes);
++  if (!exactKeys(value, ['schemaVersion', 'decision', 'datasetId', 'split', 'controlAdapterId',
++    'candidateAdapterId', 'providerIdentity', 'sourceCommit', 'modelBlob', 'providerContractBlob',
++    'adapterBlob', 'statisticsBlob', 'datasetDescriptorSha256', 'inputSha256', 'oracleSha256',
++    'devPolicySha256', 'recallLaneSha256', 'precisionLaneSha256', 'efficiencyIntervalSha256',
++    'seed', 'quality', 'safety', 'responseEffect', 'passed'])
++    || value.schemaVersion !== '1' || value.decision !== 'passed' || value.datasetId !== DATASET_ID
++    || value.split !== 'dev' || value.controlAdapterId !== CONTROL_ID || value.candidateAdapterId !== CANDIDATE_ID
++    || JSON.stringify(value.providerIdentity) !== JSON.stringify(PROVIDER_IDENTITY)
++    || !['sourceCommit', 'modelBlob', 'providerContractBlob', 'adapterBlob', 'statisticsBlob'].every((key) => HEX40.test(value[key]))
++    || !['datasetDescriptorSha256', 'inputSha256', 'oracleSha256', 'devPolicySha256',
++      'recallLaneSha256', 'precisionLaneSha256', 'efficiencyIntervalSha256'].every((key) => HEX64.test(value[key]))
++    || !exactKeys(value.quality, ['recallDelta', 'precisionDelta', 'efficiencyPoint', 'efficiencyOneSidedLower'])
++    || !exactKeys(value.safety, ['staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate'])
++    || Object.values(value.safety).some((entry) => entry !== 0)
++    || !exactKeys(value.responseEffect, ['sameCaseOrderAndSelectionChanged', 'qualifyingCaseCount'])
++    || value.responseEffect.sameCaseOrderAndSelectionChanged !== true
++    || !Number.isInteger(value.responseEffect.qualifyingCaseCount)
++    || value.responseEffect.qualifyingCaseCount < 1 || value.responseEffect.qualifyingCaseCount > 20
++    || value.passed !== true || !bytes.equals(canonicalBytes(value))) fail('aggregate');
++  return value;
++}
++
++function validateBundle(files, expectedHead) {
++  if (JSON.stringify(Object.keys(files).sort()) !== JSON.stringify([...SUCCESS_ALLOWLIST].sort())) fail('bundle');
++  const marker = validateMarker(files);
++  const recall = validateLane(files['recall-lane.json'], 'recall-at-10');
++  const precision = validateLane(files['precision-lane.json'], 'precision-at-5');
++  const interval = validateInterval(files['efficiency-interval.json']);
++  const aggregate = validateAggregate(files['aggregate-result.json']);
++  const manifest = parseJsonExact(files['custody-manifest.json']);
++  if (!exactKeys(manifest, ['schemaVersion', 'decision', 'gitCommit', 'nodeMajor', 'nodeVersion',
++    'workflowRunId', 'workflowRunAttempt', 'recallLaneSha256', 'precisionLaneSha256',
++    'efficiencyIntervalSha256', 'aggregateResultSha256'])
++    || manifest.schemaVersion !== '1' || manifest.decision !== 'passed'
++    || !files['custody-manifest.json'].equals(canonicalBytes(manifest))) fail('manifest');
++  if (marker.gitCommit !== expectedHead || manifest.gitCommit !== expectedHead
++    || marker.nodeMajor !== manifest.nodeMajor || marker.nodeVersion !== manifest.nodeVersion
++    || marker.workflowRunId !== manifest.workflowRunId || marker.workflowRunAttempt !== manifest.workflowRunAttempt
++    || aggregate.sourceCommit !== expectedHead
++    || recall.qualifyingCaseCount + precision.qualifyingCaseCount !== aggregate.responseEffect.qualifyingCaseCount
++    || aggregate.responseEffect.qualifyingCaseCount < 1 || aggregate.responseEffect.qualifyingCaseCount > 20
++    || aggregate.recallLaneSha256 !== sha256(files['recall-lane.json'])
++    || aggregate.precisionLaneSha256 !== sha256(files['precision-lane.json'])
++    || aggregate.efficiencyIntervalSha256 !== sha256(files['efficiency-interval.json'])
++    || aggregate.seed !== interval.seed
++    || aggregate.quality.recallDelta !== recall.delta.recallAtK
++    || aggregate.quality.precisionDelta !== precision.delta.precisionAtK
++    || aggregate.quality.efficiencyPoint !== interval.point
++    || aggregate.quality.efficiencyOneSidedLower !== interval.oneSidedLower
++    || aggregate.quality.recallDelta < 0 || aggregate.quality.precisionDelta < 0.05
++    || aggregate.quality.efficiencyPoint <= 0 || aggregate.quality.efficiencyOneSidedLower < 0) fail('join');
++  return { marker, manifest, aggregate, interval };
++}
++
++function expectedArtifactName(major, runId, attempt) {
++  return 'memberry-ret010-development-node-' + major + '-' + runId + '-' + attempt;
++}
++function exactOne(records, predicate) {
++  const selected = records.filter(predicate);
++  if (selected.length !== 1) fail('selection');
++  return selected[0];
++}
++function artifactDigest(value) {
++  if (typeof value !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(value)) fail('digest');
++  return value.slice(7);
++}
++function validateRun(raw, head, requestedRunId) {
++  if (!isRecord(raw) || canonicalDecimal(raw.id) !== requestedRunId
++    || raw.head_sha !== head || raw.status !== 'completed' || raw.conclusion !== 'success'
++    || !isRecord(raw.repository) || raw.repository.full_name !== 'AP3X-Dev/memberry') fail('run');
++  return {
++    id: requestedRunId,
++    attempt: canonicalDecimal(raw.run_attempt),
++    head,
++  };
++}
++function validateJob(raw, run, name) {
++  if (!isRecord(raw) || raw.name !== name || raw.conclusion !== 'success') fail('job');
++  const id = canonicalDecimal(raw.id);
++  if (Object.hasOwn(raw, 'run_id') && canonicalDecimal(raw.run_id) !== run.id) fail('job');
++  if (Object.hasOwn(raw, 'run_attempt') && canonicalDecimal(raw.run_attempt) !== run.attempt) fail('job');
++  if (Object.hasOwn(raw, 'head_sha') && raw.head_sha !== run.head) fail('job');
++  return { id, name };
++}
++function validateArtifact(raw, run, name) {
++  if (!isRecord(raw) || raw.name !== name || raw.expired !== false) fail('artifact');
++  const id = canonicalDecimal(raw.id);
++  if (!isRecord(raw.workflow_run) || canonicalDecimal(raw.workflow_run.id) !== run.id
++    || raw.workflow_run.head_sha !== run.head) fail('artifact');
++  if (Object.hasOwn(raw.workflow_run, 'run_attempt')
++    && canonicalDecimal(raw.workflow_run.run_attempt) !== run.attempt) fail('artifact');
++  return { id, name, digest: artifactDigest(raw.digest) };
++}
++function validateRedirectLocation(response) {
++  if (response.body.length !== 0) fail('http');
++  const locations = headerValues(response, 'location');
++  if (locations.length !== 1) fail('http');
++  let target;
++  try { target = new URL(locations[0]); } catch { fail('http'); }
++  if (target.protocol !== 'https:' || target.username || target.password || target.hash
++    || (target.port && target.port !== '443')) fail('http');
++  const host = target.hostname.toLowerCase();
++  if (host === 'localhost' || host === '::1' || /^127\./.test(host) || /^10\./.test(host)
++    || /^192\.168\./.test(host) || /^169\.254\./.test(host)
++    || /^172\.(?:1[6-9]|2[0-9]|3[01])\./.test(host)) fail('http');
++  return target.href;
++}
++async function preserveExtraction(files, leafName) {
++  const parent = await fsp.mkdtemp(path.join(os.tmpdir(), 'memberry-ret010-verifier-'));
++  const leaf = path.join(parent, leafName);
++  await fsp.mkdir(leaf, { recursive: false, mode: 0o700 });
++  const names = Object.keys(files);
++  for (const name of names) {
++    const destination = path.join(leaf, name);
++    const handle = await fsp.open(destination,
++      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY
++        | (fs.constants.O_NOFOLLOW || 0), 0o600);
++    const close = oneClose(handle);
++    try {
++      await handle.writeFile(files[name]);
++      await handle.sync();
++      const pinned = await handle.readFile().catch(() => null);
++      if (pinned !== null && !pinned.equals(files[name])) fail('extraction');
++      await close();
++    } catch (error) {
++      try { await close(); } catch { /* keep first failure */ }
++      throw error;
++    }
++    const reread = await readOwnedFile(destination, 2000000);
++    if (!reread.equals(files[name])) fail('extraction');
++  }
++  return leaf;
++}
++function descriptorDigest(pins) {
++  const registry = parseJsonExact(pins['bench/lab/registry/datasets.json'].bytes);
++  if (!isRecord(registry) || !Array.isArray(registry.datasets)) fail('dataset');
++  const selected = registry.datasets.filter((entry) => isRecord(entry) && entry.id === DATASET_ID);
++  if (selected.length !== 1) fail('dataset');
++  const descriptor = selected[0];
++  return sha256(Buffer.from(JSON.stringify(descriptor), 'utf8'));
++}
++function textLfDigest(bytes) {
++  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
++  return sha256(Buffer.from(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'), 'utf8'));
++}
++
++function createVerifyHostedVerifier(options) {
++  if (!exactKeys(options, ['transport']) || !options.transport
++    || typeof options.transport.send !== 'function') fail('factory');
++  const transport = options.transport;
++  return async function verifyHosted(head, requestedRunId) {
++    if (typeof head !== 'string' || !HEX40.test(head)
++      || typeof requestedRunId !== 'string' || !POSITIVE_DECIMAL.test(requestedRunId)) fail('arguments');
++    const pins = await pinSources(head);
++    const runBase = 'https://api.github.com/repos/AP3X-Dev/memberry/actions/runs/' + requestedRunId;
++    const runResponse = await transport.send(metadataDescriptor(runBase));
++    if (headerValues(runResponse, 'link').length) fail('run');
++    const run = validateRun(parseMetadataResponse(runResponse), head, requestedRunId);
++    const jobsRaw = await fetchPaged(transport, runBase, 'jobs');
++    const artifactsRaw = await fetchPaged(transport, runBase, 'artifacts');
++    const jobs = Object.create(null);
++    const artifacts = Object.create(null);
++    const bundles = Object.create(null);
++    for (const major of ['20', '22']) {
++      jobs[major] = validateJob(exactOne(jobsRaw, (item) => isRecord(item) && item.name === 'unit (' + major + ')'),
++        run, 'unit (' + major + ')');
++      const name = expectedArtifactName(major, run.id, run.attempt);
++      artifacts[major] = validateArtifact(exactOne(artifactsRaw,
++        (item) => isRecord(item) && item.name === name), run, name);
++      const api = 'https://api.github.com/repos/AP3X-Dev/memberry/actions/artifacts/'
++        + artifacts[major].id + '/zip';
++      const redirect = await transport.send(artifactDescriptor(api));
++      const archiveResponse = await transport.send(archiveDescriptor(validateRedirectLocation(redirect)));
++      if (sha256(archiveResponse.body) !== artifacts[major].digest) fail('digest');
++      const files = extractZip32(archiveResponse.body);
++      const markerCandidate = parseJsonExact(files['upload-complete.json']);
++      if (!isRecord(markerCandidate) || !UPLOAD_LEAF.test(markerCandidate.uploadLeafName)) fail('marker');
++      await preserveExtraction(files, markerCandidate.uploadLeafName);
++      bundles[major] = validateBundle(files, head);
++      if (bundles[major].marker.nodeMajor !== major
++        || bundles[major].marker.workflowRunId !== run.id
++        || bundles[major].marker.workflowRunAttempt !== run.attempt) fail('join');
++    }
++    const a = bundles['20']; const b = bundles['22'];
++    if (!a || !b || a.marker.nodeMajor !== '20' || b.marker.nodeMajor !== '22'
++      || !a.aggregate || !b.aggregate
++      || !canonicalBytes(a.aggregate).equals(canonicalBytes(b.aggregate))
++      || a.aggregate.seed !== b.aggregate.seed) fail('join');
++    const aggregateDigest = sha256(canonicalBytes(a.aggregate));
++    const modelPin = pins['packages/retrieval/src/served-reranker.ts'];
++    const providerPin = pins['packages/retrieval/src/reranker.ts'];
++    const adapterPin = pins['bench/lab/adapters/memberry-retrieval-core.ts'];
++    const statsPin = pins['bench/lab/stats.ts'];
++    const policyPin = pins['bench/lab/ret010/dev-policy.json'];
++    const inputPin = pins['bench/lab/datasets/ret010/v1/dev/input.jsonl'];
++    const oraclePin = pins['bench/lab/datasets/ret010/v1/dev/oracle.jsonl'];
++    if (a.aggregate.modelBlob !== modelPin.blob || a.aggregate.providerContractBlob !== providerPin.blob
++      || a.aggregate.adapterBlob !== adapterPin.blob || a.aggregate.statisticsBlob !== statsPin.blob
++      || a.aggregate.datasetDescriptorSha256 !== descriptorDigest(pins)
++      || a.aggregate.inputSha256 !== textLfDigest(inputPin.bytes)
++      || a.aggregate.oracleSha256 !== textLfDigest(oraclePin.bytes)
++      || a.aggregate.devPolicySha256 !== policyPin.sha256) fail('source');
++    const record = {
++      schemaVersion: '1',
++      decision: 'approved',
++      source: {
++        gitCommit: head,
++        modelBlob: modelPin.blob,
++        providerContractBlob: providerPin.blob,
++        adapterBlob: adapterPin.blob,
++        statisticsBlob: statsPin.blob,
++        providerIdentity: { ...PROVIDER_IDENTITY },
++      },
++      development: {
++        datasetDescriptorSha256: a.aggregate.datasetDescriptorSha256,
++        inputSha256: a.aggregate.inputSha256,
++        oracleSha256: a.aggregate.oracleSha256,
++        devPolicySha256: a.aggregate.devPolicySha256,
++        seed: a.aggregate.seed,
++        aggregateResultSha256: aggregateDigest,
++      },
++      node20: {
++        nodeVersion: a.marker.nodeVersion,
++        custodyManifestSha256: a.marker.payloadSha256.custodyManifestSha256,
++        completionMarkerSha256: sha256(canonicalBytes(a.marker)),
++        artifactName: artifacts['20'].name,
++        artifactId: artifacts['20'].id,
++        artifactServiceSha256: artifacts['20'].digest,
++      },
++      node22: {
++        nodeVersion: b.marker.nodeVersion,
++        custodyManifestSha256: b.marker.payloadSha256.custodyManifestSha256,
++        completionMarkerSha256: sha256(canonicalBytes(b.marker)),
++        artifactName: artifacts['22'].name,
++        artifactId: artifacts['22'].id,
++        artifactServiceSha256: artifacts['22'].digest,
++      },
++      workflowRunId: run.id,
++      workflowRunAttempt: run.attempt,
++    };
++    /* Final source sweep: compare all source bytes/blob identities together
++     * immediately before returning the sole canonical approval record. */
++    const finalPins = await pinSources(head);
++    for (const relative of SOURCE_PATHS) {
++      if (pins[relative].blob !== finalPins[relative].blob
++        || !pins[relative].bytes.equals(finalPins[relative].bytes)
++        || pins[relative].sha256 !== finalPins[relative].sha256) fail('source');
++    }
++    return canonicalBytes(record);
++  };
++}
++
++function currentIdentity(environment) {
++  const head = runGit(['rev-parse', 'HEAD'], 'utf8');
++  const status = runGit(['status', '--porcelain=v1', '--untracked-files=all'], 'utf8');
++  if (!/^[0-9a-f]{40}\n$/.test(head) || status !== '') fail('source');
++  const nodeMajor = process.versions.node.split('.')[0];
++  if (!['20', '22'].includes(nodeMajor)
++    || !(new RegExp('^v' + nodeMajor + '\\.[0-9]+\\.[0-9]+$')).test(process.version)) fail('runtime');
++  return Object.freeze({
++    gitCommit: head.trim(),
++    nodeMajor,
++    nodeVersion: process.version,
++    workflowRunId: requireCanonicalDecimal(environment.GITHUB_RUN_ID),
++    workflowRunAttempt: requireCanonicalDecimal(environment.GITHUB_RUN_ATTEMPT),
++  });
++}
++function evaluationBasename(identity) {
++  return 'ret010-development-run-' + identity.workflowRunId + '-attempt-'
++    + identity.workflowRunAttempt + '-node-' + identity.nodeMajor;
++}
++async function assertDirectory(absolute) {
++  const info = await fsp.lstat(absolute, { bigint: true });
++  if (!info.isDirectory() || info.isSymbolicLink() || await fsp.realpath(absolute) !== absolute) fail('custody');
++  return info;
++}
++async function assertRunsRoot() {
++  const root = await fsp.realpath(REPO_ROOT);
++  if (root !== REPO_ROOT) fail('custody');
++  let current = root;
++  for (const component of ['node_modules', '.cache', 'memberry-lab', 'runs']) {
++    current = path.join(current, component);
++    await assertDirectory(current);
++  }
++  if (current !== RUNS_ROOT) fail('custody');
++  return current;
++}
++async function exclusiveDirectory(absolute) {
++  await assertDirectory(path.dirname(absolute));
++  await fsp.mkdir(absolute, { recursive: false, mode: 0o700 });
++  await assertDirectory(absolute);
++}
++async function exclusiveCanonicalFile(directory, name, value) {
++  await assertDirectory(directory);
++  const bytes = canonicalBytes(value);
++  const absolute = path.join(directory, name);
++  const flags = fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY
++    | (fs.constants.O_NOFOLLOW || 0);
++  const handle = await fsp.open(absolute, flags, 0o600);
++  const close = oneClose(handle);
++  try {
++    await handle.writeFile(bytes);
++    await handle.sync();
++    await close();
++  } catch (error) {
++    try { await close(); } catch { /* preserve first failure */ }
++    throw error;
++  }
++  const reread = await readOwnedFile(absolute, 2000000);
++  if (!reread.equals(bytes)) fail('artifact');
++  return { bytes, sha256: sha256(bytes), absolute };
++}
++function probeMap(report) {
++  const result = new Map();
++  for (const scenario of report.scenarioReports) {
++    if (scenario.outcome !== 'scored' || scenario.probes.length !== 1) fail('metric');
++    const probe = scenario.probes[0];
++    const key = scenario.scenarioId + '\0' + probe.probeId;
++    if (result.has(key)) fail('metric');
++    result.set(key, {
++      scenarioId: scenario.scenarioId, probeId: probe.probeId,
++      resultIds: [...probe.resultIds], coverage: probe.metrics.answerCoverage,
++      tokens: probe.contextTokens,
++    });
++  }
++  return result;
++}
++function pairedData(report) {
++  const control = probeMap(report.control);
++  const candidate = probeMap(report.candidate);
++  if (control.size !== 10 || candidate.size !== 10) fail('metric');
++  const pairs = [];
++  let qualifying = 0;
++  for (const key of [...control.keys()].sort()) {
++    const left = control.get(key); const right = candidate.get(key);
++    if (!right || !Number.isSafeInteger(left.tokens) || !Number.isSafeInteger(right.tokens)) fail('metric');
++    const sameSet = left.resultIds.length === right.resultIds.length
++      && [...left.resultIds].sort().every((id, index) => id === [...right.resultIds].sort()[index]);
++    const orderChanged = JSON.stringify(left.resultIds) !== JSON.stringify(right.resultIds);
++    const selectionChanged = !sameSet;
++    if (orderChanged && selectionChanged) qualifying += 1;
++    pairs.push({
++      scenarioId: left.scenarioId, probeId: left.probeId,
++      controlCoverage: left.coverage, controlTokens: left.tokens,
++      candidateCoverage: right.coverage, candidateTokens: right.tokens,
++    });
++  }
++  return { pairs, qualifying };
++}
++function armMetrics(arm) {
++  return {
++    recallAtK: normalized(arm.metrics.recallAtK),
++    precisionAtK: normalized(arm.metrics.precisionAtK),
++    staleLeakRate: normalized(arm.metrics.staleLeakRate),
++    isolationLeakRate: normalized(arm.metrics.isolationLeakRate),
++    duplicateRate: normalized(arm.metrics.duplicateRate),
++    unknownResultRate: normalized(arm.metrics.unknownResultRate),
++  };
++}
++function laneRecord(report, lane, qualifying) {
++  const k = lane === 'recall-at-10' ? 10 : 5;
++  const control = armMetrics(report.control);
++  const candidate = armMetrics(report.candidate);
++  return {
++    schemaVersion: '1', lane, datasetId: DATASET_ID, split: 'dev',
++    controlAdapterId: CONTROL_ID, candidateAdapterId: CANDIDATE_ID,
++    scenarioCount: 10, probeCount: 10, k, control, candidate,
++    delta: {
++      recallAtK: normalized(candidate.recallAtK - control.recallAtK),
++      precisionAtK: normalized(candidate.precisionAtK - control.precisionAtK),
++    },
++    qualifyingCaseCount: qualifying, passed: true,
++  };
++}
++async function developmentRun(environment) {
++  const identity = currentIdentity(environment);
++  await assertRunsRoot();
++  const root = path.join(RUNS_ROOT, evaluationBasename(identity));
++  await exclusiveDirectory(root);
++  let stage = 'registry';
++  try {
++    const { loadRet010DevScenarios } = require('./load-dev.ts');
++    const { compareRegisteredAdapters } = require('../registered-adapters.ts');
++    const { pairedEfficiencyInterval } = require('../stats.ts');
++    stage = 'load-dev';
++    const scenarios = await loadRet010DevScenarios(REPO_ROOT);
++    if (!Array.isArray(scenarios) || scenarios.length !== 20) fail('load');
++    const recallScenarios = scenarios.slice(0, 10);
++    const precisionScenarios = scenarios.slice(10);
++    const policy = {
++      minRecallAtK: 0, minPrecisionAtK: 0, minAnswerCoverage: 0,
++      maxStaleLeakRate: 0, maxIsolationLeakRate: 0, maxDuplicateRate: 0,
++      maxUnknownResultRate: 0, maxQualityRegression: 1,
++    };
++    stage = 'recall-comparison';
++    const recallReport = await compareRegisteredAdapters({
++      runId: 'ret010-development-recall', controlId: CONTROL_ID, candidateId: CANDIDATE_ID,
++      scenarios: recallScenarios, splits: ['dev'], policy, repoRoot: REPO_ROOT,
++    });
++    stage = 'precision-comparison';
++    const precisionReport = await compareRegisteredAdapters({
++      runId: 'ret010-development-precision', controlId: CONTROL_ID, candidateId: CANDIDATE_ID,
++      scenarios: precisionScenarios, splits: ['dev'], policy, repoRoot: REPO_ROOT,
++    });
++    const recallPair = pairedData(recallReport);
++    const precisionPair = pairedData(precisionReport);
++    const recall = laneRecord(recallReport, 'recall-at-10', recallPair.qualifying);
++    const precision = laneRecord(precisionReport, 'precision-at-5', precisionPair.qualifying);
++    stage = 'efficiency';
++    const measured = pairedEfficiencyInterval([...recallPair.pairs, ...precisionPair.pairs]);
++    if (measured.outcome !== 'measured' || measured.pairedProbes !== 20
++      || measured.resamples !== 2000 || measured.level !== 0.95
++      || measured.point === null || measured.oneSidedLower === null) fail('metric');
++    const interval = {
++      schemaVersion: '1', metric: 'task-success-per-1k-tokens', outcome: 'measured',
++      pairedProbes: 20, resamples: 2000, level: 0.95, seed: measured.seed,
++      point: normalized(measured.point), lower: normalized(measured.lower),
++      upper: normalized(measured.upper), oneSidedLower: normalized(measured.oneSidedLower),
++    };
++    const recallBytes = canonicalBytes(recall);
++    const precisionBytes = canonicalBytes(precision);
++    const intervalBytes = canonicalBytes(interval);
++    const sourcePins = await pinSources(identity.gitCommit);
++    const count = recall.qualifyingCaseCount + precision.qualifyingCaseCount;
++    stage = 'quality-policy';
++    if (recall.delta.recallAtK < 0 || precision.delta.precisionAtK < 0.05
++      || interval.point <= 0 || interval.oneSidedLower < 0) fail('metric');
++    stage = 'safety-policy';
++    const safety = {
++      staleLeakRate: Math.max(recall.candidate.staleLeakRate, precision.candidate.staleLeakRate),
++      isolationLeakRate: Math.max(recall.candidate.isolationLeakRate, precision.candidate.isolationLeakRate),
++      duplicateRate: Math.max(recall.candidate.duplicateRate, precision.candidate.duplicateRate),
++      unknownResultRate: Math.max(recall.candidate.unknownResultRate, precision.candidate.unknownResultRate),
++    };
++    if (Object.values(safety).some((value) => value !== 0)) fail('safety');
++    stage = 'response-effect';
++    if (count < 1 || count > 20) fail('response-effect');
++    const aggregate = {
++      schemaVersion: '1', decision: 'passed', datasetId: DATASET_ID, split: 'dev',
++      controlAdapterId: CONTROL_ID, candidateAdapterId: CANDIDATE_ID,
++      providerIdentity: { ...PROVIDER_IDENTITY }, sourceCommit: identity.gitCommit,
++      modelBlob: sourcePins['packages/retrieval/src/served-reranker.ts'].blob,
++      providerContractBlob: sourcePins['packages/retrieval/src/reranker.ts'].blob,
++      adapterBlob: sourcePins['bench/lab/adapters/memberry-retrieval-core.ts'].blob,
++      statisticsBlob: sourcePins['bench/lab/stats.ts'].blob,
++      datasetDescriptorSha256: descriptorDigest(sourcePins),
++      inputSha256: textLfDigest(sourcePins['bench/lab/datasets/ret010/v1/dev/input.jsonl'].bytes),
++      oracleSha256: textLfDigest(sourcePins['bench/lab/datasets/ret010/v1/dev/oracle.jsonl'].bytes),
++      devPolicySha256: sourcePins['bench/lab/ret010/dev-policy.json'].sha256,
++      recallLaneSha256: sha256(recallBytes), precisionLaneSha256: sha256(precisionBytes),
++      efficiencyIntervalSha256: sha256(intervalBytes), seed: interval.seed,
++      quality: {
++        recallDelta: recall.delta.recallAtK, precisionDelta: precision.delta.precisionAtK,
++        efficiencyPoint: interval.point, efficiencyOneSidedLower: interval.oneSidedLower,
++      },
++      safety,
++      responseEffect: { sameCaseOrderAndSelectionChanged: true, qualifyingCaseCount: count },
++      passed: true,
++    };
++    const aggregateBytes = canonicalBytes(aggregate);
++    const manifest = {
++      schemaVersion: '1', decision: 'passed', gitCommit: identity.gitCommit,
++      nodeMajor: identity.nodeMajor, nodeVersion: identity.nodeVersion,
++      workflowRunId: identity.workflowRunId, workflowRunAttempt: identity.workflowRunAttempt,
++      recallLaneSha256: sha256(recallBytes), precisionLaneSha256: sha256(precisionBytes),
++      efficiencyIntervalSha256: sha256(intervalBytes), aggregateResultSha256: sha256(aggregateBytes),
++    };
++    stage = 'artifact';
++    const records = [
++      ['recall-lane.json', recall], ['precision-lane.json', precision],
++      ['efficiency-interval.json', interval], ['aggregate-result.json', aggregate],
++      ['custody-manifest.json', manifest],
++    ];
++    for (const [name, record] of records) await exclusiveCanonicalFile(root, name, record);
++    return;
++  } catch (error) {
++    try {
++      const entries = await fsp.readdir(root);
++      if (entries.length === 0) {
++        await exclusiveCanonicalFile(root, 'failure-tombstone.json', {
++          schemaVersion: '1', decision: 'failed',
++          failureClass: stage === 'safety-policy' ? 'safety' : stage === 'artifact' ? 'custody' : 'metric',
++          stage, gitCommit: identity.gitCommit, nodeMajor: identity.nodeMajor,
++          nodeVersion: identity.nodeVersion, workflowRunId: identity.workflowRunId,
++          workflowRunAttempt: identity.workflowRunAttempt,
++        });
++      }
++    } catch { /* fixed failure only */ }
++    throw error;
++  }
++}
++
++function parseCanonicalFile(bytes) {
++  const value = parseJsonExact(bytes);
++  if (!bytes.equals(canonicalBytes(value))) fail('canonical');
++  return value;
++}
++async function finalizer(options) {
++  const environment = options.environment || process.env;
++  const outcome = environment.RET010_DEVELOPMENT_GATE_OUTCOME;
++  if (outcome !== 'success' && outcome !== 'failure') fail('outcome');
++  const identity = currentIdentity(environment);
++  await assertRunsRoot();
++  const evaluation = path.join(RUNS_ROOT, evaluationBasename(identity));
++  await assertDirectory(evaluation);
++  const expected = outcome === 'success' ? SUCCESS_FILES : ['failure-tombstone.json'];
++  const entries = await fsp.readdir(evaluation);
++  if (JSON.stringify(entries.sort()) !== JSON.stringify([...expected].sort())) fail('bundle');
++  const sources = Object.create(null);
++  for (const name of expected) {
++    const bytes = await readOwnedFile(path.join(evaluation, name), 2000000);
++    parseCanonicalFile(bytes);
++    sources[name] = bytes;
++  }
++  if (outcome === 'success') validateBundle(Object.assign(Object.create(null), sources, {
++    'upload-complete.json': canonicalBytes({
++      schemaVersion: '1', decision: 'complete', bundleKind: 'success',
++      gitCommit: identity.gitCommit, nodeMajor: identity.nodeMajor, nodeVersion: identity.nodeVersion,
++      workflowRunId: identity.workflowRunId, workflowRunAttempt: identity.workflowRunAttempt,
++      uploadLeafName: 'ret010-upload-' + '0'.repeat(64), allowlist: SUCCESS_ALLOWLIST,
++      payloadSha256: {
++        recallLaneSha256: sha256(sources['recall-lane.json']),
++        precisionLaneSha256: sha256(sources['precision-lane.json']),
++        efficiencyIntervalSha256: sha256(sources['efficiency-interval.json']),
++        aggregateResultSha256: sha256(sources['aggregate-result.json']),
++        custodyManifestSha256: sha256(sources['custody-manifest.json']),
++      },
++    }),
++  }), identity.gitCommit);
++  const leafName = 'ret010-upload-' + (options.randomBytes || crypto.randomBytes)(32).toString('hex');
++  if (!UPLOAD_LEAF.test(leafName)) fail('random');
++  const upload = path.join(RUNS_ROOT, leafName);
++  await exclusiveDirectory(upload);
++  for (const name of expected) {
++    const value = parseCanonicalFile(sources[name]);
++    await exclusiveCanonicalFile(upload, name, value);
++  }
++  const payloadSha256 = outcome === 'success' ? {
++    recallLaneSha256: sha256(sources['recall-lane.json']),
++    precisionLaneSha256: sha256(sources['precision-lane.json']),
++    efficiencyIntervalSha256: sha256(sources['efficiency-interval.json']),
++    aggregateResultSha256: sha256(sources['aggregate-result.json']),
++    custodyManifestSha256: sha256(sources['custody-manifest.json']),
++  } : { failureTombstoneSha256: sha256(sources['failure-tombstone.json']) };
++  const marker = {
++    schemaVersion: '1', decision: 'complete', bundleKind: outcome,
++    gitCommit: identity.gitCommit, nodeMajor: identity.nodeMajor, nodeVersion: identity.nodeVersion,
++    workflowRunId: identity.workflowRunId, workflowRunAttempt: identity.workflowRunAttempt,
++    uploadLeafName: leafName, allowlist: outcome === 'success' ? SUCCESS_ALLOWLIST : FAILURE_ALLOWLIST,
++    payloadSha256,
++  };
++  await exclusiveCanonicalFile(upload, 'upload-complete.json', marker);
++  if (typeof options.beforeUploadPathOutput === 'function') await options.beforeUploadPathOutput({ evaluation, upload });
++  /* Final simultaneous whole-bundle sweep immediately precedes output. */
++  if (currentIdentity(environment).gitCommit !== identity.gitCommit) fail('identity');
++  const finalNames = await fsp.readdir(upload);
++  if (JSON.stringify(finalNames.sort()) !== JSON.stringify([...marker.allowlist].sort())) fail('bundle');
++  for (const name of marker.allowlist) {
++    const bytes = await readOwnedFile(path.join(upload, name), 2000000);
++    if (name === 'upload-complete.json') {
++      if (!bytes.equals(canonicalBytes(marker))) fail('marker');
++    } else if (!bytes.equals(sources[name])) fail('destination');
++  }
++  if (options.writeOutput) await options.writeOutput(upload);
++  return upload;
++}
++
++async function appendGithubOutput(upload) {
++  const output = process.env.GITHUB_OUTPUT;
++  if (typeof output !== 'string' || output.length === 0) fail('output');
++  await fsp.appendFile(output, 'upload_path=' + upload + '\n', { encoding: 'utf8', flag: 'a' });
++}
++
++async function main() {
++  const mode = process.argv[2];
++  if (mode === 'verify-hosted') {
++    if (process.execArgv.length !== 0 || process.argv.length !== 5
++      || path.resolve(process.argv[1]) !== __filename
++      || !HEX40.test(process.argv[3]) || !POSITIVE_DECIMAL.test(process.argv[4])
++      || Object.hasOwn(process.env, 'NODE_OPTIONS') || Object.hasOwn(process.env, 'NODE_PATH')) fail('arguments');
++    let token;
++    try {
++      token = await acquireGhToken(process.env);
++      const verifier = createVerifyHostedVerifier({ transport: createProductionTransport(token) });
++      const approval = await verifier(process.argv[3], process.argv[4]);
++      process.stdout.write(approval);
++    } finally {
++      if (Buffer.isBuffer(token)) {
++        try { token.fill(0); } catch { /* best effort only */ }
++      }
++    }
++    return;
++  }
++  if (mode === 'run') {
++    if (process.argv.length !== 3) fail('arguments');
++    await developmentRun(process.env);
++    return;
++  }
++  if (mode === 'finalize') {
++    if (process.argv.length !== 3) fail('arguments');
++    await finalizer({ environment: process.env, writeOutput: appendGithubOutput });
++    return;
++  }
++  fail('arguments');
++}
++
++module.exports = Object.freeze({ createVerifyHostedVerifier });
++
++if (require.main === module) {
++  main().catch(() => {
++    const sentinel = process.argv[2] === 'verify-hosted' ? VERIFY_FAILED : DEV_FAILED;
++    try { process.stderr.write(sentinel); } catch { /* value-free terminal failure */ }
++    process.exitCode = 1;
++  });
++}
+--- /dev/null
++++ b/bench/lab/ret010/holdout-gate.mts
++#!/usr/bin/env tsx
++
++import { createHash } from 'node:crypto';
++import { execFileSync } from 'node:child_process';
++import { constants as fsConstants } from 'node:fs';
++import { lstat, mkdtemp, open, readFile, realpath, rename } from 'node:fs/promises';
++import { dirname, relative, resolve, sep } from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const HERE = dirname(fileURLToPath(import.meta.url));
++const REPO_ROOT = resolve(HERE, '..', '..', '..');
++const APPROVAL_PATH = 'bench/lab/ret010/approved-dev.json';
++const CONTROL_ID = 'memberry-retrieval-core-disabled-v1';
++const CANDIDATE_ID = 'memberry-retrieval-core-served-v1';
++const SAFE_FAILURE = 'RET010_HOLDOUT_GATE_FAILED\n';
++type JsonRecord = Record<string, unknown>;
++
++function record(value: unknown): JsonRecord {
++  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('custody');
++  return value as JsonRecord;
++}
++
++function exactKeys(value: JsonRecord, keys: readonly string[]): void {
++  if (JSON.stringify(Object.keys(value)) !== JSON.stringify(keys)) throw new Error('custody');
++}
++
++function canonicalBytes(value: JsonRecord): Buffer {
++  return Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');
++}
++
++function sha256(value: Uint8Array): string {
++  return createHash('sha256').update(value).digest('hex');
++}
++
++function gitText(args: readonly string[], repoRoot = REPO_ROOT): string {
++  return execFileSync('git', [...args], { cwd: repoRoot, encoding: 'utf8' }).trim();
++}
++
++function gitBytes(args: readonly string[], repoRoot = REPO_ROOT): Buffer {
++  return execFileSync('git', [...args], { cwd: repoRoot, encoding: null, maxBuffer: 16 * 1024 * 1024 });
++}
++
++async function assertTrackedFile(path: string, commit: string, repoRoot = REPO_ROOT): Promise<void> {
++  const entry = gitText(['ls-tree', commit, '--', path], repoRoot);
++  const match = /^([0-9]{6}) blob ([0-9a-f]{40})\t(.+)$/.exec(entry);
++  if (!match || match[3] !== path || (match[1] !== '100644' && match[1] !== '100755')) throw new Error('custody');
++  const absolute = resolve(repoRoot, path);
++  const info = await lstat(absolute);
++  if (!info.isFile() || info.isSymbolicLink() || await realpath(absolute) !== absolute
++    || (process.platform !== 'win32' && ((info.mode & 0o111) !== 0) !== (match[1] === '100755'))
++    || !(await readFile(absolute)).equals(gitBytes(['cat-file', 'blob', `${commit}:${path}`], repoRoot))) throw new Error('custody');
++}
++
++async function assertResolvedImportGraph(commit: string, repoRoot = REPO_ROOT): Promise<void> {
++  const queue = [
++    'bench/lab/ret010/holdout-gate.mts', 'bench/lab/datasets/load-suite.ts',
++    'bench/lab/registered-adapters.ts', 'bench/lab/stats.ts',
++  ];
++  const visited = new Set<string>();
++  while (queue.length > 0) {
++    const path = queue.shift()!;
++    if (visited.has(path)) continue;
++    visited.add(path);
++    await assertTrackedFile(path, commit, repoRoot);
++    const source = gitBytes(['cat-file', 'blob', `${commit}:${path}`], repoRoot).toString('utf8');
++    const specifiers = [...source.matchAll(/(?:from\s+|import\s*\()(['"])(\.[^'"]+)\1/g)].map((match) => match[2]!);
++    for (const specifier of specifiers) {
++      const jsPath = resolve(dirname(resolve(repoRoot, path)), specifier);
++      if (!jsPath.startsWith(`${repoRoot}${sep}`)) throw new Error('custody');
++      for (const shadow of [jsPath, jsPath.replace(/\.js$/i, '.mjs'), jsPath.replace(/\.js$/i, '.cjs')]) {
++        try { await lstat(shadow); throw new Error('custody'); } catch (error) {
++          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
++        }
++      }
++      const sourcePath = jsPath.replace(/\.js$/i, '.ts').replace(/\.mjs$/i, '.mts');
++      const relativePath = relative(repoRoot, sourcePath).replace(/\\/g, '/');
++      if (!relativePath.startsWith('../')) queue.push(relativePath);
++    }
++  }
++}
++
++async function assertCleanSource(commit: string, repoRoot = REPO_ROOT): Promise<void> {
++  if (!/^[0-9a-f]{40}$/.test(commit) || gitText(['rev-parse', 'HEAD'], repoRoot) !== commit
++    || gitText(['status', '--porcelain=v1', '--untracked-files=all'], repoRoot) !== '') throw new Error('custody');
++  await assertResolvedImportGraph(commit, repoRoot);
++}
++
++function gitBlob(path: string): string {
++  const blob = gitText(['rev-parse', `HEAD:${path}`]);
++  if (!/^[0-9a-f]{40}$/.test(blob)) throw new Error('custody');
++  return blob;
++}
++
++export interface Approval {
++  schemaVersion: '1';
++  decision: 'approved';
++  devSourceCommit: string;
++  modelBlob: string;
++  providerContractBlob: string;
++  adapterBlob: string;
++  aggregateResultSha256: string;
++  node20ManifestSha256: string;
++  node22ManifestSha256: string;
++  node20Version: string;
++  node22Version: string;
++  workflowRunId: string;
++  workflowRunAttempt: number;
++  repository: 'AP3X-Dev/memberry';
++  workflowConclusion: 'success';
++  node20JobConclusion: 'success';
++  node22JobConclusion: 'success';
++  node20ArtifactName: string;
++  node22ArtifactName: string;
++  datasetDescriptorSha256: string;
++  inputSha256: string;
++  oracleSha256: string;
++  devPolicySha256: string;
++  seed: number;
++}
++
++const APPROVAL_KEYS = [
++  'schemaVersion', 'decision', 'devSourceCommit', 'modelBlob', 'providerContractBlob', 'adapterBlob',
++  'aggregateResultSha256', 'node20ManifestSha256', 'node22ManifestSha256', 'node20Version', 'node22Version',
++  'workflowRunId', 'workflowRunAttempt', 'datasetDescriptorSha256', 'inputSha256', 'oracleSha256',
++  'devPolicySha256', 'seed', 'repository', 'workflowConclusion', 'node20JobConclusion', 'node22JobConclusion',
++  'node20ArtifactName', 'node22ArtifactName',
++] as const;
++
++function parseApproval(bytes: Buffer): Approval {
++  const value = record(JSON.parse(bytes.toString('utf8')));
++  exactKeys(value, APPROVAL_KEYS);
++  if (!bytes.equals(canonicalBytes(value)) || value.schemaVersion !== '1' || value.decision !== 'approved'
++    || typeof value.devSourceCommit !== 'string' || !/^[0-9a-f]{40}$/.test(value.devSourceCommit)
++    || ['modelBlob', 'providerContractBlob', 'adapterBlob'].some((key) => typeof value[key] !== 'string' || !/^[0-9a-f]{40}$/.test(value[key] as string))
++    || ['aggregateResultSha256', 'node20ManifestSha256', 'node22ManifestSha256', 'datasetDescriptorSha256', 'inputSha256', 'oracleSha256', 'devPolicySha256']
++      .some((key) => typeof value[key] !== 'string' || !/^[0-9a-f]{64}$/.test(value[key] as string))
++    || typeof value.node20Version !== 'string' || !/^v20\.[0-9]+\.[0-9]+$/.test(value.node20Version)
++    || typeof value.node22Version !== 'string' || !/^v22\.[0-9]+\.[0-9]+$/.test(value.node22Version)
++    || typeof value.workflowRunId !== 'string' || !/^[1-9][0-9]*$/.test(value.workflowRunId)
++    || !Number.isSafeInteger(value.workflowRunAttempt) || (value.workflowRunAttempt as number) < 1
++    || !Number.isInteger(value.seed) || (value.seed as number) < 0 || (value.seed as number) > 0xffffffff
++    || value.repository !== 'AP3X-Dev/memberry' || value.workflowConclusion !== 'success'
++    || value.node20JobConclusion !== 'success' || value.node22JobConclusion !== 'success'
++    || value.node20ArtifactName !== `memberry-ret010-development-node-20-${value.workflowRunId}-${value.workflowRunAttempt}`
++    || value.node22ArtifactName !== `memberry-ret010-development-node-22-${value.workflowRunId}-${value.workflowRunAttempt}`) throw new Error('custody');
++  return value as unknown as Approval;
++}
++
++export function validateApprovalRecordForTest(bytes: Buffer): void {
++  parseApproval(bytes);
++}
++
++function gitTextLf(commit: string, path: string): Buffer {
++  return Buffer.from(gitBytes(['cat-file', 'blob', `${commit}:${path}`]).toString('utf8').replace(/\r\n?/g, '\n'));
++}
++
++function verifyApprovalDigests(approval: Approval): void {
++  if (gitText(['rev-parse', `${approval.devSourceCommit}:packages/retrieval/src/served-reranker.ts`]) !== approval.modelBlob
++    || gitText(['rev-parse', `${approval.devSourceCommit}:packages/retrieval/src/reranker.ts`]) !== approval.providerContractBlob
++    || gitText(['rev-parse', `${approval.devSourceCommit}:bench/lab/adapters/memberry-retrieval-core.ts`]) !== approval.adapterBlob
++    || sha256(gitBytes(['cat-file', 'blob', `${approval.devSourceCommit}:bench/lab/ret010/dev-policy.json`])) !== approval.devPolicySha256) throw new Error('custody');
++  const registry = record(JSON.parse(gitBytes(['cat-file', 'blob', `${approval.devSourceCommit}:bench/lab/registry/datasets.json`]).toString('utf8')));
++  if (!Array.isArray(registry.datasets)) throw new Error('custody');
++  const matches = registry.datasets.filter((raw) => {
++    const item = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw as JsonRecord : undefined;
++    return item?.id === 'memberry-ret010-dev-v1' || item?.suite === 'ret010-development';
++  });
++  if (matches.length !== 1 || sha256(Buffer.from(`${JSON.stringify(matches[0])}\n`)) !== approval.datasetDescriptorSha256) throw new Error('custody');
++  const descriptor = record(matches[0]);
++  if (!Array.isArray(descriptor.artifacts) || descriptor.artifacts.length !== 2) throw new Error('custody');
++  const expected = [
++    ['input', 'adapter', 'input.jsonl', 'bench/lab/datasets/ret010/v1/dev/input.jsonl', approval.inputSha256],
++    ['oracle', 'scorer', 'oracle.jsonl', 'bench/lab/datasets/ret010/v1/dev/oracle.jsonl', approval.oracleSha256],
++  ] as const;
++  descriptor.artifacts.forEach((raw, index) => {
++    const artifact = record(raw);
++    const [role, access, fileName, path, approvedDigest] = expected[index]!;
++    const content = gitTextLf(approval.devSourceCommit, path);
++    if (artifact.role !== role || artifact.access !== access || artifact.fileName !== fileName
++      || artifact.repositoryPath !== path || artifact.hashMode !== 'text-lf'
++      || artifact.sha256 !== approvedDigest || sha256(content) !== approvedDigest
++      || artifact.sizeBytes !== content.byteLength) throw new Error('custody');
++  });
++}
++
++export interface SourceLineage { head: string; directParent: string }
++
++async function validateSourceAndLineage(head: string): Promise<SourceLineage> {
++  const requestedSha = process.env.RET010_QUALIFICATION_SHA ?? '';
++  return validateSourceAndLineageAt(REPO_ROOT, head, requestedSha);
++}
++
++async function validateSourceAndLineageAt(repoRoot: string, head: string, requestedSha: string): Promise<SourceLineage> {
++  if (!/^[0-9a-f]{40}$/.test(requestedSha) || requestedSha !== head) throw new Error('custody');
++  await assertCleanSource(head, repoRoot);
++  await assertTrackedFile(APPROVAL_PATH, head, repoRoot);
++  const parents = gitText(['rev-list', '--parents', '-n', '1', head], repoRoot).split(' ');
++  if (parents.length !== 2) throw new Error('custody');
++  const changed = gitText(['diff-tree', '--no-commit-id', '--name-status', '-r', head], repoRoot).split(/\r?\n/).filter(Boolean);
++  if (changed.length !== 1 || changed[0] !== `A\t${APPROVAL_PATH}`) throw new Error('custody');
++  try { gitBytes(['cat-file', 'blob', `${parents[1]}:${APPROVAL_PATH}`], repoRoot); throw new Error('custody'); }
++  catch (error) {
++    const message = error instanceof Error ? error.message : '';
++    if (message === 'custody') throw error;
++    if ((error as { status?: number }).status !== 128) throw new Error('custody');
++  }
++  return { head, directParent: parents[1]! };
++}
++
++export async function validateSourceAndLineageForTest(repoRoot: string, head: string, requestedSha = head): Promise<SourceLineage> {
++  return validateSourceAndLineageAt(resolve(repoRoot), head, requestedSha);
++}
++
++async function validateApproval(lineage: SourceLineage): Promise<Approval> {
++  const requestedDigest = process.env.RET010_APPROVAL_DIGEST ?? '';
++  if (!/^[0-9a-f]{64}$/.test(requestedDigest)) throw new Error('custody');
++  const approvalBytes = await readFile(resolve(REPO_ROOT, APPROVAL_PATH));
++  const approval = validateApprovalRecord(lineage, approvalBytes, requestedDigest);
++  if (gitBlob('packages/retrieval/src/served-reranker.ts') !== approval.modelBlob
++    || gitBlob('packages/retrieval/src/reranker.ts') !== approval.providerContractBlob
++    || gitBlob('bench/lab/adapters/memberry-retrieval-core.ts') !== approval.adapterBlob) throw new Error('custody');
++  verifyApprovalDigests(approval);
++  return approval;
++}
++
++function validateApprovalRecord(lineage: SourceLineage, approvalBytes: Buffer, requestedDigest: string): Approval {
++  if (!/^[0-9a-f]{64}$/.test(requestedDigest) || sha256(approvalBytes) !== requestedDigest) throw new Error('custody');
++  const approval = parseApproval(approvalBytes);
++  if (lineage.directParent !== approval.devSourceCommit) throw new Error('custody');
++  return approval;
++}
++
++export function validateApprovalLineageForTest(lineage: SourceLineage, approvalBytes: Buffer, requestedDigest: string): Approval {
++  return validateApprovalRecord(lineage, approvalBytes, requestedDigest);
++}
++
++function paired(report: any): Array<{ scenarioId: string; probeId: string; controlCoverage: number; controlTokens: number; candidateCoverage: number; candidateTokens: number }> {
++  const candidate = new Map<string, any>();
++  for (const scenario of report.candidate.scenarioReports) for (const probe of scenario.probes) {
++    candidate.set(`${scenario.scenarioId}\0${probe.probeId}`, probe);
++  }
++  return report.control.scenarioReports.flatMap((scenario: any) => scenario.probes.map((probe: any) => {
++    const other = candidate.get(`${scenario.scenarioId}\0${probe.probeId}`);
++    if (!other) throw new Error('metric');
++    return {
++      scenarioId: scenario.scenarioId, probeId: probe.probeId,
++      controlCoverage: probe.metrics.answerCoverage, controlTokens: probe.contextTokens ?? 0,
++      candidateCoverage: other.metrics.answerCoverage, candidateTokens: other.contextTokens ?? 0,
++    };
++  }));
++}
++
++function finiteMetric(value: unknown): value is number {
++  return typeof value === 'number' && Number.isFinite(value) && !Object.is(value, -0);
++}
++
++function validateLaneScenarios(scenarios: readonly any[], dimension: 'recall' | 'precision', k: 10 | 5): void {
++  if (scenarios.length !== 10) throw new Error('metric');
++  const identities = new Set<string>();
++  for (const scenario of scenarios) {
++    const input = scenario?.input; const oracle = scenario?.oracle;
++    if (!input || input.split !== 'holdout' || !Array.isArray(input.dimensions)
++      || input.dimensions.length !== 1 || input.dimensions[0] !== dimension
++      || !Array.isArray(input.queries) || input.queries.length !== 1 || input.queries[0]?.limit !== k
++      || !oracle || !Array.isArray(oracle.probes) || oracle.probes.length !== 1
++      || oracle.probes[0]?.probeId !== input.queries[0]?.id) throw new Error('metric');
++    const identity = `${input.id}\0${input.queries[0].id}`;
++    if (identities.has(identity)) throw new Error('metric');
++    identities.add(identity);
++  }
++}
++
++export function validateHoldoutScenariosForTest(scenarios: readonly any[], dimension: 'recall' | 'precision', k: 10 | 5): void {
++  validateLaneScenarios(scenarios, dimension, k);
++}
++
++function validateComparison(report: any, expectedRunId: string): void {
++  if (report.runId !== expectedRunId || report.evidenceMode !== 'registered-ci' || report.passed !== true
++    || report.control?.adapterId !== CONTROL_ID || report.candidate?.adapterId !== CANDIDATE_ID) throw new Error('metric');
++  for (const arm of [report.control, report.candidate]) {
++    if (arm.outcome !== 'scored' || !Array.isArray(arm.scenarioReports) || arm.scenarioReports.length !== 10) throw new Error('metric');
++    const metricKeys = [
++      'recallAtK', 'precisionAtK', 'reciprocalRank', 'ndcgAtK', 'answerCoverage',
++      'staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate', 'staleSafety', 'isolationSafety',
++    ];
++    const probeMetrics: JsonRecord[] = [];
++    for (const scenario of arm.scenarioReports) {
++      if (scenario.outcome !== 'scored' || !Array.isArray(scenario.probes) || scenario.probes.length !== 1) throw new Error('metric');
++      const probe = scenario.probes[0];
++      if (!Array.isArray(probe.resultIds) || new Set(probe.resultIds).size !== probe.resultIds.length
++        || !Number.isSafeInteger(probe.contextTokens) || probe.contextTokens < 0) throw new Error('metric');
++      if (!isRecordMetrics(probe.metrics, metricKeys) || !isRecordMetrics(scenario.metrics, metricKeys)) throw new Error('metric');
++      for (const key of metricKeys) if (scenario.metrics[key] !== probe.metrics[key]) throw new Error('metric');
++      probeMetrics.push(probe.metrics);
++      for (const key of ['staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate']) {
++        if (probe.metrics[key] !== 0 || scenario.metrics[key] !== 0) throw new Error('metric');
++      }
++    }
++    if (!isRecordMetrics(arm.metrics, metricKeys)) throw new Error('metric');
++    for (const key of metricKeys) {
++      const expected = probeMetrics.reduce((sum, metrics) => sum + (metrics[key] as number), 0) / 10;
++      if (arm.metrics[key] !== expected) throw new Error('metric');
++    }
++  }
++}
++
++function isRecordMetrics(value: unknown, keys: readonly string[]): value is JsonRecord {
++  if (!isRecord(value) || JSON.stringify(Object.keys(value)) !== JSON.stringify(keys)) return false;
++  return keys.every((key) => finiteMetric(value[key]) && (value[key] as number) >= 0 && (value[key] as number) <= 1);
++}
++
++function isRecord(value: unknown): value is JsonRecord {
++  return value !== null && typeof value === 'object' && !Array.isArray(value);
++}
++
++export function validateHoldoutComparisonForTest(report: unknown, expectedRunId: string): void {
++  validateComparison(report, expectedRunId);
++}
++
++export function validateHoldoutIntervalForTest(
++  pairs: readonly { scenarioId: string; probeId: string }[],
++  interval: any,
++  derivedSeed: number,
++): void {
++  if (pairs.length !== 20 || new Set(pairs.map((pair) => `${pair.scenarioId}\0${pair.probeId}`)).size !== 20
++    || interval?.seed !== derivedSeed || interval?.outcome !== 'measured' || interval?.pairedProbes !== 20
++    || interval?.resamples !== 2000 || interval?.level !== 0.95
++    || !finiteMetric(interval?.point) || !finiteMetric(interval?.lower) || !finiteMetric(interval?.upper)
++    || !finiteMetric(interval?.oneSidedLower) || interval.point < 0 || interval.oneSidedLower < 0) throw new Error('metric');
++}
++
++function normalized(value: number): number {
++  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error('metric');
++  return Object.is(value, -0) ? 0 : value;
++}
++
++function laneSummary(report: any, lane: 'recall-at-10' | 'precision-at-5'): JsonRecord {
++  return {
++    lane,
++    control: { recallAtK: normalized(report.control.metrics.recallAtK), precisionAtK: normalized(report.control.metrics.precisionAtK) },
++    candidate: { recallAtK: normalized(report.candidate.metrics.recallAtK), precisionAtK: normalized(report.candidate.metrics.precisionAtK) },
++    delta: {
++      recallAtK: normalized(report.candidate.metrics.recallAtK - report.control.metrics.recallAtK),
++      precisionAtK: normalized(report.candidate.metrics.precisionAtK - report.control.metrics.precisionAtK),
++    },
++    safety: {
++      staleLeakRate: report.candidate.metrics.staleLeakRate,
++      isolationLeakRate: report.candidate.metrics.isolationLeakRate,
++      duplicateRate: report.candidate.metrics.duplicateRate,
++      unknownResultRate: report.candidate.metrics.unknownResultRate,
++    },
++  };
++}
++
++type PublicationHook = (stage: 'after-open' | 'before-rename', path: string) => Promise<void>;
++
++async function validateOutputParent(runnerTemp: string, output: string): Promise<void> {
++  const root = resolve(runnerTemp);
++  const rootInfo = await lstat(root, { bigint: true });
++  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || await realpath(root) !== root) throw new Error('custody');
++  const parent = dirname(resolve(output));
++  const suffix = relative(root, parent);
++  if (suffix.startsWith('..') || resolve(root, suffix) !== parent) throw new Error('custody');
++  let current = root;
++  for (const part of suffix.split(sep).filter(Boolean)) {
++    current = resolve(current, part);
++    const info = await lstat(current, { bigint: true });
++    if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== rootInfo.dev || await realpath(current) !== current) throw new Error('custody');
++  }
++}
++
++async function absent(path: string): Promise<void> {
++  try { await lstat(path); throw new Error('custody'); } catch (error) {
++    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
++  }
++}
++
++function exactRecord(value: unknown, keys: readonly string[]): JsonRecord {
++  const item = record(value);
++  if (JSON.stringify(Object.keys(item)) !== JSON.stringify(keys)) throw new Error('artifact');
++  return item;
++}
++
++export function validateHoldoutPublicRecordForTest(value: unknown): void {
++  const item = record(value);
++  if (item.decision === 'failed') {
++    exactRecord(item, ['schemaVersion', 'decision', 'failureClass', 'stage', 'gitCommit', 'nodeMajor', 'nodeVersion', 'workflowRunId', 'workflowRunAttempt']);
++    if (item.schemaVersion !== '1' || item.failureClass !== 'qualification'
++      || typeof item.stage !== 'string' || !['source-integrity', 'approval', 'evaluation', 'publication'].includes(item.stage)
++    ) throw new Error('artifact');
++    validateRuntimeIdentityRecord({
++      gitCommit: item.gitCommit, nodeMajor: item.nodeMajor, nodeVersion: item.nodeVersion,
++      workflowRunId: item.workflowRunId, workflowRunAttempt: item.workflowRunAttempt,
++    });
++    return;
++  }
++  exactRecord(item, ['schemaVersion', 'decision', 'qualificationSha', 'approvalDigest', 'approvedDevelopment', 'recall', 'precision', 'efficiency', 'custody']);
++  if (item.schemaVersion !== '1' || item.decision !== 'passed'
++    || typeof item.qualificationSha !== 'string' || !/^[0-9a-f]{40}$/.test(item.qualificationSha)
++    || typeof item.approvalDigest !== 'string' || !/^[0-9a-f]{64}$/.test(item.approvalDigest)) throw new Error('artifact');
++  const approved = exactRecord(item.approvedDevelopment, [
++    'sourceCommit', 'modelBlob', 'providerContractBlob', 'adapterBlob', 'aggregateResultSha256',
++    'node20ManifestSha256', 'node22ManifestSha256', 'node20Version', 'node22Version',
++    'developmentWorkflowRunId', 'developmentWorkflowRunAttempt', 'repository', 'workflowConclusion',
++    'node20JobConclusion', 'node22JobConclusion', 'node20ArtifactName', 'node22ArtifactName',
++    'datasetDescriptorSha256', 'inputSha256', 'oracleSha256', 'devPolicySha256', 'developmentSeed',
++  ]);
++  if (typeof approved.sourceCommit !== 'string' || !/^[0-9a-f]{40}$/.test(approved.sourceCommit)
++    || ['modelBlob', 'providerContractBlob', 'adapterBlob'].some((key) => typeof approved[key] !== 'string' || !/^[0-9a-f]{40}$/.test(approved[key] as string))
++    || ['aggregateResultSha256', 'node20ManifestSha256', 'node22ManifestSha256', 'datasetDescriptorSha256', 'inputSha256', 'oracleSha256', 'devPolicySha256']
++      .some((key) => typeof approved[key] !== 'string' || !/^[0-9a-f]{64}$/.test(approved[key] as string))
++    || typeof approved.node20Version !== 'string' || !/^v20\.[0-9]+\.[0-9]+$/.test(approved.node20Version)
++    || typeof approved.node22Version !== 'string' || !/^v22\.[0-9]+\.[0-9]+$/.test(approved.node22Version)
++    || typeof approved.developmentWorkflowRunId !== 'string' || !/^[1-9][0-9]*$/.test(approved.developmentWorkflowRunId)
++    || !Number.isSafeInteger(approved.developmentWorkflowRunAttempt) || (approved.developmentWorkflowRunAttempt as number) < 1
++    || approved.repository !== 'AP3X-Dev/memberry' || approved.workflowConclusion !== 'success'
++    || approved.node20JobConclusion !== 'success' || approved.node22JobConclusion !== 'success'
++    || approved.node20ArtifactName !== `memberry-ret010-development-node-20-${approved.developmentWorkflowRunId}-${approved.developmentWorkflowRunAttempt}`
++    || approved.node22ArtifactName !== `memberry-ret010-development-node-22-${approved.developmentWorkflowRunId}-${approved.developmentWorkflowRunAttempt}`
++    || !Number.isInteger(approved.developmentSeed) || (approved.developmentSeed as number) < 0
++    || (approved.developmentSeed as number) > 0xffffffff) throw new Error('artifact');
++  for (const laneName of ['recall', 'precision']) {
++    const lane = exactRecord(item[laneName], ['lane', 'control', 'candidate', 'delta', 'safety']);
++    if (lane.lane !== (laneName === 'recall' ? 'recall-at-10' : 'precision-at-5')) throw new Error('artifact');
++    for (const group of ['control', 'candidate', 'delta']) {
++      const values = exactRecord(lane[group], ['recallAtK', 'precisionAtK']);
++      if (Object.values(values).some((entry) => !finiteMetric(entry))) throw new Error('artifact');
++    }
++    const safety = exactRecord(lane.safety, ['staleLeakRate', 'isolationLeakRate', 'duplicateRate', 'unknownResultRate']);
++    if (Object.values(safety).some((entry) => !finiteMetric(entry) || entry !== 0)) throw new Error('artifact');
++  }
++  const efficiency = exactRecord(item.efficiency, ['pairedProbes', 'resamples', 'level', 'seed', 'point', 'lower', 'upper', 'oneSidedLower']);
++  if (efficiency.pairedProbes !== 20 || efficiency.resamples !== 2000 || efficiency.level !== 0.95
++    || !Number.isInteger(efficiency.seed) || (efficiency.seed as number) < 0 || (efficiency.seed as number) > 0xffffffff
++    || Object.values(efficiency).slice(4).some((entry) => !finiteMetric(entry))
++    || (efficiency.point as number) < 0 || (efficiency.oneSidedLower as number) < 0) throw new Error('artifact');
++  const custody = exactRecord(item.custody, ['gitCommit', 'nodeMajor', 'nodeVersion', 'workflowRunId', 'workflowRunAttempt']);
++  validateRuntimeIdentityRecord(custody);
++  if (custody.gitCommit !== item.qualificationSha) throw new Error('artifact');
++}
++
++export interface RuntimeIdentity {
++  gitCommit: string;
++  nodeMajor: '20' | '22';
++  nodeVersion: string;
++  workflowRunId: string;
++  workflowRunAttempt: number;
++}
++
++function validateRuntimeIdentityRecord(value: JsonRecord): RuntimeIdentity {
++  if (JSON.stringify(Object.keys(value)) !== JSON.stringify(['gitCommit', 'nodeMajor', 'nodeVersion', 'workflowRunId', 'workflowRunAttempt'])
++    || typeof value.gitCommit !== 'string' || !/^(?!0{40}$)[0-9a-f]{40}$/.test(value.gitCommit)
++    || (value.nodeMajor !== '20' && value.nodeMajor !== '22')
++    || typeof value.nodeVersion !== 'string' || !new RegExp(`^v${value.nodeMajor}\\.[0-9]+\\.[0-9]+$`).test(value.nodeVersion)
++    || typeof value.workflowRunId !== 'string' || !/^[1-9][0-9]*$/.test(value.workflowRunId)
++    || !Number.isSafeInteger(value.workflowRunAttempt) || (value.workflowRunAttempt as number) < 1) throw new Error('custody');
++  return value as unknown as RuntimeIdentity;
++}
++
++export function validateRuntimeIdentityForTest(value: unknown): void {
++  validateRuntimeIdentityRecord(record(value));
++}
++
++interface OutputBoundary {
++  runnerTemp: string;
++  output: string;
++  rootIdentity: { dev: bigint; ino: bigint };
++  parentIdentity: { dev: bigint; ino: bigint };
++}
++
++async function verifiedOutputBoundary(runnerTemp: string, output: string): Promise<OutputBoundary> {
++  if (!runnerTemp || !output) throw new Error('custody');
++  const root = resolve(runnerTemp);
++  const leaf = resolve(output);
++  const outputRelative = relative(root, leaf);
++  if (!outputRelative || outputRelative.startsWith('..') || resolve(root, outputRelative) !== leaf) throw new Error('custody');
++  await validateOutputParent(root, leaf);
++  const rootInfo = await lstat(root, { bigint: true });
++  const parentInfo = await lstat(dirname(leaf), { bigint: true });
++  if (!rootInfo.isDirectory() || !parentInfo.isDirectory() || rootInfo.dev !== parentInfo.dev) throw new Error('custody');
++  return {
++    runnerTemp: root, output: leaf,
++    rootIdentity: { dev: rootInfo.dev, ino: rootInfo.ino },
++    parentIdentity: { dev: parentInfo.dev, ino: parentInfo.ino },
++  };
++}
++
++async function recheckOutputBoundary(boundary: OutputBoundary): Promise<void> {
++  await validateOutputParent(boundary.runnerTemp, boundary.output);
++  const rootInfo = await lstat(boundary.runnerTemp, { bigint: true });
++  const parentInfo = await lstat(dirname(boundary.output), { bigint: true });
++  if (rootInfo.dev !== boundary.rootIdentity.dev || rootInfo.ino !== boundary.rootIdentity.ino
++    || parentInfo.dev !== boundary.parentIdentity.dev || parentInfo.ino !== boundary.parentIdentity.ino) throw new Error('custody');
++}
++
++async function quarantineLeaf(boundary: OutputBoundary, path: string): Promise<void> {
++  await recheckOutputBoundary(boundary);
++  try { await lstat(path, { bigint: true }); } catch (error) {
++    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
++    throw error;
++  }
++  const quarantineParent = await mkdtemp(resolve(boundary.runnerTemp, '.ret010-holdout-quarantine-'));
++  const quarantineParentInfo = await lstat(quarantineParent, { bigint: true });
++  if (!quarantineParentInfo.isDirectory() || quarantineParentInfo.isSymbolicLink()
++    || quarantineParentInfo.dev !== boundary.rootIdentity.dev || await realpath(quarantineParent) !== quarantineParent) throw new Error('custody');
++  const quarantine = resolve(quarantineParent, 'leaf');
++  await recheckOutputBoundary(boundary);
++  const current = await lstat(path, { bigint: true });
++  await absent(quarantine);
++  await rename(path, quarantine);
++  const moved = await lstat(quarantine, { bigint: true });
++  if (moved.dev !== current.dev || moved.ino !== current.ino) throw new Error('custody');
++  await absent(path);
++}
++
++async function clearDisposableLeaves(boundary: OutputBoundary): Promise<void> {
++  await quarantineLeaf(boundary, boundary.output);
++  await quarantineLeaf(boundary, `${boundary.output}.staging`);
++  await recheckOutputBoundary(boundary);
++  await absent(boundary.output);
++  await absent(`${boundary.output}.staging`);
++}
++
++async function safeWriteReceipt(
++  value: JsonRecord,
++  output = process.env.RET010_HOLDOUT_RECEIPT_PATH ?? '',
++  runnerTemp = process.env.RUNNER_TEMP ?? '',
++  hook?: PublicationHook,
++): Promise<void> {
++  const boundary = await verifiedOutputBoundary(runnerTemp, output);
++  const staging = `${boundary.output}.staging`;
++  await clearDisposableLeaves(boundary);
++  validateHoldoutPublicRecordForTest(value);
++  const expected = canonicalBytes(value);
++  const handle = await open(staging, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
++  let identity: { dev: bigint; ino: bigint } | undefined;
++  try {
++    const opened = await handle.stat({ bigint: true });
++    if (!opened.isFile()) throw new Error('custody');
++    identity = { dev: opened.dev, ino: opened.ino };
++    await hook?.('after-open', staging);
++    await handle.writeFile(expected);
++    await handle.sync();
++    const written = await handle.stat({ bigint: true });
++    if (written.dev !== identity.dev || written.ino !== identity.ino || written.size !== BigInt(expected.byteLength)) throw new Error('custody');
++    await hook?.('before-rename', staging);
++    await recheckOutputBoundary(boundary);
++    const pathInfo = await lstat(staging, { bigint: true });
++    if (!pathInfo.isFile() || pathInfo.isSymbolicLink() || pathInfo.dev !== identity.dev || pathInfo.ino !== identity.ino) throw new Error('custody');
++    await quarantineLeaf(boundary, boundary.output);
++    await recheckOutputBoundary(boundary);
++    const finalStage = await lstat(staging, { bigint: true });
++    if (!finalStage.isFile() || finalStage.isSymbolicLink()
++      || finalStage.dev !== identity.dev || finalStage.ino !== identity.ino) throw new Error('custody');
++    await absent(boundary.output);
++    await rename(staging, boundary.output);
++    const published = await lstat(boundary.output, { bigint: true });
++    if (!published.isFile() || published.isSymbolicLink() || published.dev !== identity.dev || published.ino !== identity.ino) throw new Error('custody');
++    const verifyHandle = await open(boundary.output, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
++    try {
++      const verified = await verifyHandle.stat({ bigint: true });
++      const verifiedBytes = await verifyHandle.readFile();
++      if (verified.dev !== identity.dev || verified.ino !== identity.ino || !verifiedBytes.equals(expected)) throw new Error('custody');
++    } finally { await verifyHandle.close(); }
++  } catch (error) {
++    try { await quarantineLeaf(boundary, staging); } catch { /* a later clear/publisher must prove absence */ }
++    try { await quarantineLeaf(boundary, boundary.output); } catch { /* a later clear/publisher must prove absence */ }
++    throw error;
++  } finally { await handle.close(); }
++}
++
++export async function publishHoldoutReceiptForTest(
++  runnerTemp: string,
++  output: string,
++  value: JsonRecord,
++  hook?: PublicationHook,
++): Promise<void> {
++  await safeWriteReceipt(value, output, runnerTemp, hook);
++}
++
++export async function clearHoldoutOutputForTest(runnerTemp: string, output: string): Promise<void> {
++  const boundary = await verifiedOutputBoundary(runnerTemp, output);
++  await clearDisposableLeaves(boundary);
++}
++
++async function clearConfiguredOutput(): Promise<void> {
++  const boundary = await verifiedOutputBoundary(process.env.RUNNER_TEMP ?? '', process.env.RET010_HOLDOUT_RECEIPT_PATH ?? '');
++  await clearDisposableLeaves(boundary);
++}
++
++function runtimeCustody(head: string): RuntimeIdentity {
++  const nodeMajor = process.versions.node.split('.')[0];
++  const workflowRunId = process.env.GITHUB_RUN_ID ?? '';
++  const attemptText = process.env.GITHUB_RUN_ATTEMPT ?? '';
++  const workflowRunAttempt = /^[1-9][0-9]*$/.test(attemptText) ? Number(attemptText) : Number.NaN;
++  if ((nodeMajor !== '20' && nodeMajor !== '22') || !new RegExp(`^v${nodeMajor}\\.[0-9]+\\.[0-9]+$`).test(process.version)
++    || !/^[1-9][0-9]*$/.test(workflowRunId)
++    || !Number.isSafeInteger(workflowRunAttempt) || workflowRunAttempt < 1 || !/^[0-9a-f]{40}$/.test(head)) throw new Error('custody');
++  return { gitCommit: head, nodeMajor, nodeVersion: process.version, workflowRunId, workflowRunAttempt };
++}
++
++function assertCurrentRuntimeIdentity(identity: RuntimeIdentity): void {
++  const current = runtimeCustody(gitText(['rev-parse', 'HEAD']));
++  if (JSON.stringify(current) !== JSON.stringify(identity)) throw new Error('custody');
++}
++
++type GateStage = 'source-integrity' | 'approval' | 'evaluation' | 'publication';
++
++function tombstone(identity: RuntimeIdentity, stage: GateStage): JsonRecord {
++  return {
++    schemaVersion: '1', decision: 'failed', failureClass: 'qualification', stage,
++    gitCommit: identity.gitCommit, nodeMajor: identity.nodeMajor, nodeVersion: identity.nodeVersion,
++    workflowRunId: identity.workflowRunId, workflowRunAttempt: identity.workflowRunAttempt,
++  };
++}
++
++export interface GateRunDependencies<TApproval, TResult> {
++  acquireIdentity(): Promise<RuntimeIdentity>;
++  prepareOutput(identity: RuntimeIdentity): Promise<void>;
++  validateSourceAndLineage(identity: RuntimeIdentity): Promise<SourceLineage>;
++  validateApproval(lineage: SourceLineage, identity: RuntimeIdentity): Promise<TApproval>;
++  evaluate(approval: TApproval, identity: RuntimeIdentity): Promise<TResult>;
++  publishSuccess(result: TResult, identity: RuntimeIdentity): Promise<void>;
++  publishFailure(value: JsonRecord, identity: RuntimeIdentity): Promise<void>;
++  clearOutput(): Promise<void>;
++  emitFailure(): void;
++  onSuppressedOutput?(stdout: string, stderr: string): Promise<void>;
++}
++
++export async function runHoldoutQualificationForTest<TApproval, TResult>(
++  dependencies: GateRunDependencies<TApproval, TResult>,
++): Promise<'passed' | 'failed'> {
++  let identity: RuntimeIdentity | undefined;
++  let outputControlled = false;
++  let stage: GateStage = 'source-integrity';
++  const stdoutWrite = process.stdout.write; const stderrWrite = process.stderr.write;
++  let suppressedStdout = ''; let suppressedStderr = ''; let outputRestored = false;
++  const restoreOutput = (): void => {
++    if (outputRestored) return;
++    process.stdout.write = stdoutWrite; process.stderr.write = stderrWrite; outputRestored = true;
++  };
++  process.stdout.write = ((chunk: unknown) => { suppressedStdout += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk); return true; }) as typeof process.stdout.write;
++  process.stderr.write = ((chunk: unknown) => { suppressedStderr += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk); return true; }) as typeof process.stderr.write;
++  try {
++    identity = await dependencies.acquireIdentity();
++    validateRuntimeIdentityRecord(identity as unknown as JsonRecord);
++    await dependencies.prepareOutput(identity);
++    outputControlled = true;
++    const lineage = await dependencies.validateSourceAndLineage(identity);
++    stage = 'approval';
++    const approval = await dependencies.validateApproval(lineage, identity);
++    stage = 'evaluation';
++    const result = await dependencies.evaluate(approval, identity);
++    stage = 'publication';
++    await dependencies.publishSuccess(result, identity);
++    restoreOutput();
++    await dependencies.onSuppressedOutput?.(suppressedStdout, suppressedStderr);
++    return 'passed';
++  } catch {
++    if (identity !== undefined && outputControlled) {
++      try { await dependencies.publishFailure(tombstone(identity, stage), identity); }
++      catch { try { await dependencies.clearOutput(); } catch { /* upload must fail if leaf control is unprovable */ } }
++    } else {
++      try { await dependencies.clearOutput(); } catch { /* upload must fail if boundary is unprovable */ }
++    }
++    restoreOutput();
++    await dependencies.onSuppressedOutput?.(suppressedStdout, suppressedStderr);
++    dependencies.emitFailure();
++    return 'failed';
++  }
++}
++
++export interface HoldoutEvaluationDependencies {
++  verifySource(): Promise<void>;
++  loadScenarios(dimension: 'recall' | 'precision'): Promise<readonly any[]>;
++  compare(options: JsonRecord): Promise<any>;
++  pairedEfficiencyInterval(pairs: readonly any[]): any;
++  pairedVectorSeed(pairs: readonly any[]): number;
++  readPolicy(): Promise<unknown>;
++}
++
++async function evaluateHoldout(
++  approval: Approval,
++  identity: RuntimeIdentity,
++  injected?: HoldoutEvaluationDependencies,
++): Promise<JsonRecord> {
++  let dependencies = injected;
++  if (dependencies === undefined) {
++    await assertCleanSource(identity.gitCommit);
++    await assertTrackedFile(APPROVAL_PATH, identity.gitCommit);
++    const [{ loadG2HoldoutScenariosForScoring }, { compareRegisteredAdapters }, statsModule] = await Promise.all([
++      import('../datasets/load-suite.js'), import('../registered-adapters.js'), import('../stats.js'),
++    ]);
++    dependencies = {
++      verifySource: async () => { await assertCleanSource(identity.gitCommit); await assertTrackedFile(APPROVAL_PATH, identity.gitCommit); },
++      loadScenarios: async (dimension) => loadG2HoldoutScenariosForScoring(dimension, REPO_ROOT),
++      compare: async (options) => compareRegisteredAdapters(options as any),
++      pairedEfficiencyInterval: (pairs) => statsModule.pairedEfficiencyInterval(pairs as any),
++      pairedVectorSeed: (pairs) => statsModule.pairedVectorSeed(pairs as any),
++      readPolicy: async () => JSON.parse(await readFile(resolve(HERE, 'holdout-policy.json'), 'utf8')),
++    };
++  }
++  await dependencies.verifySource();
++  const policy = record(await dependencies.readPolicy());
++  const expectedPolicy = {
++    schemaVersion: 1, controlAdapterId: CONTROL_ID, candidateAdapterId: CANDIDATE_ID,
++    dataset: { id: 'memberry-g2-holdout-holdout', split: 'holdout' },
++    lanes: {
++      recall: { dimension: 'recall', probes: 10, k: 10, minimumDelta: 0 },
++      precision: { dimension: 'precision', probes: 10, k: 5, minimumDelta: 0 },
++    },
++    safety: { maxStaleLeakRate: 0, maxIsolationLeakRate: 0, maxDuplicateRate: 0, maxUnknownResultRate: 0 },
++    pairedVectorOrder: ['recall', 'precision'], withinLaneSortKeys: ['scenarioId', 'probeId'],
++    efficiency: {
++      outcome: 'measured', method: 'paired-bootstrap', confidenceLevel: 0.95,
++      minimumPointDeltaInclusive: 0, minimumOneSided95LowerBound: 0,
++      resamples: 2000, minimumPairedProbes: 10, seedRule: 'vector-derived',
++    },
++  };
++  if (JSON.stringify(policy) !== JSON.stringify(expectedPolicy)) throw new Error('custody');
++  const recallScenarios = await dependencies.loadScenarios('recall');
++  const precisionScenarios = await dependencies.loadScenarios('precision');
++  validateLaneScenarios(recallScenarios, 'recall', 10);
++  validateLaneScenarios(precisionScenarios, 'precision', 5);
++  const basePolicy = {
++    minRecallAtK: 0, minPrecisionAtK: 0, minAnswerCoverage: 0,
++    maxStaleLeakRate: 0, maxIsolationLeakRate: 0, maxDuplicateRate: 0, maxUnknownResultRate: 0,
++    maxQualityRegression: 1,
++  };
++  const recallReport = await dependencies.compare({
++    runId: 'ret010-holdout-recall', controlId: CONTROL_ID, candidateId: CANDIDATE_ID,
++    scenarios: recallScenarios, splits: ['holdout'], policy: basePolicy, repoRoot: REPO_ROOT,
++  });
++  const precisionReport = await dependencies.compare({
++    runId: 'ret010-holdout-precision', controlId: CONTROL_ID, candidateId: CANDIDATE_ID,
++    scenarios: precisionScenarios, splits: ['holdout'], policy: basePolicy, repoRoot: REPO_ROOT,
++  });
++  validateComparison(recallReport, 'ret010-holdout-recall');
++  validateComparison(precisionReport, 'ret010-holdout-precision');
++  const recall = laneSummary(recallReport, 'recall-at-10');
++  const precision = laneSummary(precisionReport, 'precision-at-5');
++  const pairs = [
++    ...paired(recallReport).sort((a, b) => a.scenarioId.localeCompare(b.scenarioId) || a.probeId.localeCompare(b.probeId)),
++    ...paired(precisionReport).sort((a, b) => a.scenarioId.localeCompare(b.scenarioId) || a.probeId.localeCompare(b.probeId)),
++  ];
++  const interval = dependencies.pairedEfficiencyInterval(pairs);
++  const recallDelta = (recall.delta as JsonRecord).recallAtK as number;
++  const precisionDelta = (precision.delta as JsonRecord).precisionAtK as number;
++  const safety = [recall.safety, precision.safety].flatMap((value) => Object.values(value as JsonRecord));
++  validateHoldoutIntervalForTest(pairs, interval, dependencies.pairedVectorSeed(pairs));
++  if (recallDelta < 0 || precisionDelta < 0 || safety.some((value) => value !== 0)) throw new Error('metric');
++  await dependencies.verifySource();
++  if (injected === undefined) assertCurrentRuntimeIdentity(identity);
++  return {
++    schemaVersion: '1', decision: 'passed', qualificationSha: identity.gitCommit,
++    approvalDigest: process.env.RET010_APPROVAL_DIGEST,
++    approvedDevelopment: {
++      sourceCommit: approval.devSourceCommit, modelBlob: approval.modelBlob,
++      providerContractBlob: approval.providerContractBlob, adapterBlob: approval.adapterBlob,
++      aggregateResultSha256: approval.aggregateResultSha256,
++      node20ManifestSha256: approval.node20ManifestSha256, node22ManifestSha256: approval.node22ManifestSha256,
++      node20Version: approval.node20Version, node22Version: approval.node22Version,
++      developmentWorkflowRunId: approval.workflowRunId, developmentWorkflowRunAttempt: approval.workflowRunAttempt,
++      repository: approval.repository, workflowConclusion: approval.workflowConclusion,
++      node20JobConclusion: approval.node20JobConclusion, node22JobConclusion: approval.node22JobConclusion,
++      node20ArtifactName: approval.node20ArtifactName, node22ArtifactName: approval.node22ArtifactName,
++      datasetDescriptorSha256: approval.datasetDescriptorSha256, inputSha256: approval.inputSha256,
++      oracleSha256: approval.oracleSha256, devPolicySha256: approval.devPolicySha256, developmentSeed: approval.seed,
++    },
++    recall, precision,
++    efficiency: {
++      pairedProbes: 20, resamples: 2000, level: 0.95, seed: interval.seed,
++      point: normalized(interval.point), lower: normalized(interval.lower), upper: normalized(interval.upper),
++      oneSidedLower: normalized(interval.oneSidedLower),
++    },
++    custody: identity,
++  };
++}
++
++export async function evaluateHoldoutForTest(
++  approval: Approval,
++  identity: RuntimeIdentity,
++  dependencies: HoldoutEvaluationDependencies,
++): Promise<JsonRecord> {
++  return evaluateHoldout(approval, identity, dependencies);
++}
++
++export async function runRet010HoldoutQualification(): Promise<void> {
++  const result = await runHoldoutQualificationForTest({
++    acquireIdentity: async () => {
++      const head = gitText(['rev-parse', 'HEAD']);
++      return runtimeCustody(head);
++    },
++    prepareOutput: async () => { await clearConfiguredOutput(); },
++    validateSourceAndLineage: async (identity) => validateSourceAndLineage(identity.gitCommit),
++    validateApproval: async (lineage) => validateApproval(lineage),
++    evaluate: evaluateHoldout,
++    publishSuccess: async (receipt, identity) => {
++      await safeWriteReceipt(receipt, undefined, undefined, async (publicationStage) => {
++        if (publicationStage !== 'before-rename') return;
++        assertCurrentRuntimeIdentity(identity);
++        await assertCleanSource(identity.gitCommit);
++        await assertTrackedFile(APPROVAL_PATH, identity.gitCommit);
++      });
++    },
++    publishFailure: async (receipt, identity) => {
++      await safeWriteReceipt(receipt, undefined, undefined, async (publicationStage) => {
++        if (publicationStage === 'before-rename') assertCurrentRuntimeIdentity(identity);
++      });
++    },
++    clearOutput: clearConfiguredOutput,
++    emitFailure: () => { process.stderr.write(SAFE_FAILURE); },
++  });
++  if (result === 'failed') process.exitCode = 1;
++}
++
++if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await runRet010HoldoutQualification();
++
++
