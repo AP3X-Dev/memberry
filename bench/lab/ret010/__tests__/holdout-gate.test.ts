@@ -29,12 +29,12 @@ afterEach(async () => {
   for (const root of temporaryRoots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
-function cleanEnvironment(): NodeJS.ProcessEnv {
+function cleanEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = Object.create(null) as NodeJS.ProcessEnv;
-  for (const [name, value] of Object.entries(process.env)) {
+  for (const [name, value] of Object.entries(source)) {
     const folded = name.toUpperCase();
     if (folded.startsWith('GITHUB_') || folded.startsWith('RET010_')
-      || folded === 'NODE_OPTIONS' || folded === 'NODE_PATH' || folded === 'NODE_ENV') continue;
+      || folded === 'RUNNER_TEMP' || folded.startsWith('NODE_')) continue;
     Object.defineProperty(environment, name, {
       value, enumerable: true, writable: true, configurable: true,
     });
@@ -1249,6 +1249,18 @@ const APPROVAL_AUTHORITY_ROWS: readonly LineageHarnessRow[] = Object.freeze([
 ]);
 
 describe('RET-010 holdout fixture boundary', () => {
+  it('isolates spawned children from hosted identity and Node bootstrap controls', () => {
+    const environment = cleanEnvironment({
+      RUNNER_TEMP: '/hosted/runner/temp', GITHUB_SHA: 'a'.repeat(40),
+      RET010_HOLDOUT_TEST_FIXTURE: '1', NODE_ENV: 'production', NODE_OPTIONS: '--inspect',
+      NODE_PATH: '/hosted/node-path', NODE_DEBUG: '*', NODE_CHANNEL_FD: '3',
+      NODE_CHANNEL_SERIALIZATION_MODE: 'advanced', NODE_UNIQUE_ID: 'worker-1',
+      SAFE_FIXTURE_VALUE: 'preserved',
+    });
+    expect(Object.getPrototypeOf(environment)).toBeNull();
+    expect(Object.entries(environment)).toEqual([['SAFE_FIXTURE_VALUE', 'preserved']]);
+  });
+
   it('freezes approval-authority lineage, Git blob/transport, and node-distinctness row inventories', () => {
     expect(LINEAGE_ROWS).toHaveLength(22);
     expect(GIT_TRANSPORT_ROWS).toHaveLength(5);
