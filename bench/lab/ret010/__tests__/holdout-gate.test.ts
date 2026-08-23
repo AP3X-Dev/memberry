@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -2158,15 +2158,14 @@ describe('RET-010 holdout fixture boundary', () => {
 });
 
 describe('RET-010 holdout pre-flight and finalize fallback receipts', () => {
-  it('classifies a run rejected before identity into a family-level pre-flight receipt', async () => {
+  it('classifies a run rejected before identity into a fixed-path pre-flight receipt', async () => {
     const input = await holdoutRunFixture(901);
     const environment = { ...input.environment };
     delete environment.RET010_HOLDOUT_TEST_RUN_ID;
     const result = await spawnGate('run', environment);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toBe('RET010_HOLDOUT_GATE_FAILED\n');
+    expect(result).toEqual({ status: 1, stdout: '', stderr: 'RET010_HOLDOUT_GATE_FAILED\n' });
     await expect(lstat(input.receipt)).rejects.toThrow();
-    const preflight = resolve(input.runner, 'memberry-ret010-holdout', 'preflight-failure.json');
+    const preflight = resolve(input.runner, 'memberry-ret010-holdout', 'fallback', 'preflight-failure.json');
     expect(JSON.parse(await readFile(preflight, 'utf8'))).toEqual({
       schemaVersion: '1', decision: 'failed', failureClass: 'custody',
       stage: 'preflight-environment',
@@ -2174,29 +2173,30 @@ describe('RET-010 holdout pre-flight and finalize fallback receipts', () => {
     });
   });
 
-  it('publishes a content-free fallback bundle when the finalizer cannot certify', async () => {
+  it('writes a fixed-path finalize receipt with no structured output when certification fails', async () => {
     const input = await holdoutFailureFixture(902);
     const environment = { ...input.environment };
-    // The run root exists but under a different attempt, so certification
-    // rejects at finalize-receipt exactly as a missing gate receipt would.
+    // The run root exists under attempt 1, so attempt 2 rejects at
+    // finalize-receipt exactly as a missing gate receipt would.
     environment.RET010_HOLDOUT_TEST_RUN_ATTEMPT = '2';
     const result = await spawnGate('finalize', environment);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toBe('RET010_HOLDOUT_FINALIZE_FAILED\n');
-    const output = await readFile(input.output, 'utf8');
-    const match = /^upload_path=(.+)\n$/.exec(output);
-    expect(match).not.toBeNull();
-    const leaf = match![1]!;
-    expect(basename(leaf)).toMatch(/^ret010-holdout-fallback-[0-9a-f]{64}$/);
-    const names = (await readdir(leaf)).sort();
-    expect(names).toEqual(['carried-1-holdout-receipt.json', 'finalize-failure.json']);
-    expect(JSON.parse(await readFile(resolve(leaf, 'finalize-failure.json'), 'utf8'))).toEqual({
+    expect(result).toEqual({ status: 1, stdout: '', stderr: 'RET010_HOLDOUT_FINALIZE_FAILED\n' });
+    expect(await readFile(input.output, 'utf8')).toBe('');
+    const fallback = resolve(input.environment.RET010_HOLDOUT_TEST_RUNNER_TEMP!,
+      'memberry-ret010-holdout', 'fallback');
+    expect((await readdir(fallback)).sort()).toEqual(['finalize-failure.json']);
+    expect(JSON.parse(await readFile(resolve(fallback, 'finalize-failure.json'), 'utf8'))).toEqual({
       schemaVersion: '1', decision: 'failed', failureClass: 'custody', stage: 'finalize-receipt',
       gateOutcome: 'failure',
+      gateReceipt: { decision: 'failed', failureClass: 'custody', stage: 'artifact' },
       nodeMajor: process.versions.node.split('.')[0], nodeVersion: process.version,
     });
-    const carried = JSON.parse(await readFile(resolve(leaf, 'carried-1-holdout-receipt.json'), 'utf8'));
-    expect(carried.decision).toBe('failed');
-    expect(carried.workflowRunAttempt).toBe('1');
+  });
+
+  it('attaches the fixed fallback path from the workflow without a structured output', async () => {
+    const workflow = await readFile(resolve(ROOT, '.github/workflows/ret010-holdout-qualification.yml'), 'utf8');
+    expect(workflow).toContain("if: ${{ always() && steps.ret010_holdout_finalize.outcome != 'success' }}");
+    expect(workflow).toContain('path: ${{ runner.temp }}/memberry-ret010-holdout/fallback');
+    expect(workflow.match(/uses: actions\/upload-artifact@/g)).toHaveLength(2);
   });
 });

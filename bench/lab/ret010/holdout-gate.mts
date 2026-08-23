@@ -7,7 +7,7 @@ import {
   fstatSync, read as fsRead,
 } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { types as utilTypes } from 'node:util';
 
@@ -52,6 +52,7 @@ const FAILURE_CLASS_BY_STAGE = Object.freeze({
   'finalize-preflight': 'custody', 'finalize-receipt': 'custody', 'finalize-bundle': 'custody',
 } as const);
 type Stage = keyof typeof FAILURE_CLASS_BY_STAGE;
+const FALLBACK_DIRECTORY = 'fallback';
 const PREFLIGHT_RECEIPT = 'preflight-failure.json';
 const FINALIZE_RECEIPT = 'finalize-failure.json';
 const REJECTION = new Error('ret010');
@@ -1047,73 +1048,69 @@ async function runGate(hooks: {
   }
 }
 
-function receiptFamily(): string | undefined {
+function fallbackDirectory(): string | undefined {
   const test = Object.hasOwn(process.env, 'RET010_HOLDOUT_TEST_FIXTURE');
   const value = test ? process.env.RET010_HOLDOUT_TEST_RUNNER_TEMP : process.env.RUNNER_TEMP;
   if (typeof value !== 'string' || value.length === 0 || value !== resolve(value)) return undefined;
-  return resolve(value, 'memberry-ret010-holdout');
+  return resolve(value, 'memberry-ret010-holdout', FALLBACK_DIRECTORY);
 }
 function runtimeOnly(): JsonRecord {
   return { nodeMajor: process.versions.node.split('.')[0], nodeVersion: process.version };
 }
-// A pre-flight rejection has no validated identity to bind to, so its receipt
-// carries only the fixed stage label and the Node runtime, and lives at the
-// family level beside the per-run roots. It is best-effort by design: every
-// failure inside it is swallowed because the sentinel is the fallback signal.
-async function writePreflightReceipt(stage: Stage): Promise<void> {
+// Fallback receipts never travel through GITHUB_OUTPUT: a rejected finalizer
+// must not steer the certified upload step anywhere. They live at one fixed
+// path under the runner temp that the workflow attaches on its own, carry only
+// labels from the frozen taxonomy plus the Node runtime, and are best-effort
+// by design because the fixed sentinel remains the signal of last resort.
+async function writeFallbackReceipt(name: string, value: JsonRecord): Promise<void> {
   try {
-    const family = receiptFamily();
-    if (family === undefined) return;
-    await directory(resolve(family, '..'));
-    await mkdir(family, { recursive: true, mode: 0o700 });
-    await writeExclusive(family, PREFLIGHT_RECEIPT, {
-      schemaVersion: '1', decision: 'failed', failureClass: FAILURE_CLASS_BY_STAGE[stage], stage,
-      ...runtimeOnly(),
-    });
+    const fallback = fallbackDirectory();
+    if (fallback === undefined) return;
+    await directory(resolve(fallback, '..', '..'));
+    await mkdir(fallback, { recursive: true, mode: 0o700 });
+    await writeExclusive(fallback, name, value);
   } catch { /* fixed sentinel only */ }
 }
-// When certification fails the finalizer still publishes a bundle: its own
-// stage receipt plus any receipt the gate left behind. Carried receipts are
-// content-free by construction (stage labels or aggregate metrics only) and
-// are re-emitted through the same canonical writer. The upload path is emitted
-// even though the step exits 1 so the workflow can attach it on always().
-async function publishFallbackBundle(stage: Stage,
-  random: (size: number) => Buffer = randomBytes): Promise<void> {
+async function writePreflightReceipt(stage: Stage): Promise<void> {
+  await writeFallbackReceipt(PREFLIGHT_RECEIPT, {
+    schemaVersion: '1', decision: 'failed', failureClass: FAILURE_CLASS_BY_STAGE[stage], stage,
+    ...runtimeOnly(),
+  });
+}
+// The gate's own receipt, if one exists, is summarised by label only. Its
+// bytes are never copied: a planted file cannot smuggle content through here
+// because only values already present in the taxonomy are admitted.
+async function gateReceiptSummary(): Promise<JsonRecord | null> {
+  const fallback = fallbackDirectory();
+  if (fallback === undefined) return null;
+  const runs = resolve(fallback, '..', 'runs');
+  let names: string[];
+  try { names = (await readdir(runs)).sort(); } catch { return null; }
+  if (names.length !== 1) return names.length === 0 ? null : { decision: 'ambiguous' };
+  let parsed: JsonRecord;
   try {
-    const family = receiptFamily();
-    if (family === undefined) return;
-    await directory(resolve(family, '..'));
-    await mkdir(family, { recursive: true, mode: 0o700 });
-    const leaf = resolve(family, 'ret010-holdout-fallback-' + random(32).toString('hex'));
-    await mkdir(leaf, { recursive: false, mode: 0o700 });
-    const test = Object.hasOwn(process.env, 'RET010_HOLDOUT_TEST_FIXTURE');
-    const outcome = test ? process.env.RET010_HOLDOUT_TEST_GATE_OUTCOME : process.env.RET010_HOLDOUT_GATE_OUTCOME;
-    await writeExclusive(leaf, FINALIZE_RECEIPT, {
-      schemaVersion: '1', decision: 'failed', failureClass: FAILURE_CLASS_BY_STAGE[stage], stage,
-      gateOutcome: outcome === 'success' || outcome === 'failure' ? outcome : 'unknown',
-      ...runtimeOnly(),
-    });
-    const carried: string[] = [resolve(family, PREFLIGHT_RECEIPT)];
-    try {
-      for (const name of (await readdir(resolve(family, 'runs'))).sort()) {
-        carried.push(resolve(family, 'runs', name, 'holdout-receipt.json'));
-      }
-    } catch { /* the gate never created a run root */ }
-    let ordinal = 0;
-    for (const source of carried) {
-      let bytes: Buffer;
-      try { bytes = await readFile(source); } catch { continue; }
-      if (bytes.length > 2_000_000) continue;
-      let parsed: JsonRecord;
-      try { parsed = record(parseJson(bytes)); } catch { continue; }
-      ordinal += 1;
-      await writeExclusive(leaf, `carried-${ordinal}-${basename(source)}`, parsed);
-    }
-    const output = process.env.GITHUB_OUTPUT;
-    if (typeof output === 'string' && output.length > 0) {
-      await appendStructuredOutput(output, `upload_path=${leaf}\n`);
-    }
-  } catch { /* fixed sentinel only */ }
+    const bytes = await readFile(resolve(runs, names[0]!, 'holdout-receipt.json'));
+    if (bytes.length > 2_000_000) return { decision: 'unreadable' };
+    parsed = record(parseJson(bytes));
+  } catch { return { decision: 'unreadable' }; }
+  if (parsed.decision === 'passed') return { decision: 'passed' };
+  if (parsed.decision === 'failed' && typeof parsed.stage === 'string'
+    && Object.hasOwn(FAILURE_CLASS_BY_STAGE, parsed.stage)) {
+    const stage = parsed.stage as Stage;
+    return { decision: 'failed', failureClass: FAILURE_CLASS_BY_STAGE[stage], stage };
+  }
+  return { decision: 'unreadable' };
+}
+async function writeFinalizeReceipt(stage: Stage): Promise<void> {
+  const test = Object.hasOwn(process.env, 'RET010_HOLDOUT_TEST_FIXTURE');
+  const outcome = test ? process.env.RET010_HOLDOUT_TEST_GATE_OUTCOME : process.env.RET010_HOLDOUT_GATE_OUTCOME;
+  let gateReceipt: JsonRecord | null = null;
+  try { gateReceipt = await gateReceiptSummary(); } catch { gateReceipt = null; }
+  await writeFallbackReceipt(FINALIZE_RECEIPT, {
+    schemaVersion: '1', decision: 'failed', failureClass: FAILURE_CLASS_BY_STAGE[stage], stage,
+    gateOutcome: outcome === 'success' || outcome === 'failure' ? outcome : 'unknown',
+    gateReceipt, ...runtimeOnly(),
+  });
 }
 
 function checkpointIdentity(test: boolean, expected: JsonRecord): void {
@@ -1129,7 +1126,7 @@ async function finalizeGate(hooks: {
   try {
     await finalizeCertified(hooks, (next) => { stage = next; });
   } catch {
-    await publishFallbackBundle(stage, hooks.randomBytes);
+    await writeFinalizeReceipt(stage);
     throw REJECTION;
   }
 }
@@ -1223,7 +1220,7 @@ async function main(): Promise<void> {
     if (Object.hasOwn(process.env, 'NODE_OPTIONS') || Object.hasOwn(process.env, 'NODE_PATH')) reject();
   } catch {
     if (command === 'run') await writePreflightReceipt('preflight-environment');
-    else await publishFallbackBundle('finalize-preflight');
+    else await writeFinalizeReceipt('finalize-preflight');
     throw REJECTION;
   }
   if (command === 'run') await runGate();

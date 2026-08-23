@@ -93,14 +93,26 @@ jobs:
           set -euo pipefail
           node --import tsx bench/lab/ret010/holdout-gate.mts finalize
 
-      # The finalizer emits upload_path on its fallback path too, so a failed
-      # finalize still publishes a content-free stage bundle instead of nothing.
       - name: Upload finalized RET-010 holdout evidence
-        if: ${{ always() && steps.ret010_holdout_finalize.outputs.upload_path != '' }}
+        if: ${{ always() && steps.ret010_holdout_finalize.outcome == 'success' && steps.ret010_holdout_finalize.outputs.upload_path != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: memberry-ret010-holdout-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.ret010_holdout_finalize.outputs.upload_path }}
           if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+
+      # A rejected gate or finalizer leaves only fixed-label stage receipts at
+      # this path and never a structured output, so the certified upload above
+      # cannot be steered by a failure. This step attaches those receipts so a
+      # failed run is classifiable instead of publishing nothing at all.
+      - name: Upload RET-010 holdout fallback receipts
+        if: ${{ always() && steps.ret010_holdout_finalize.outcome != 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memberry-ret010-holdout-fallback-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memberry-ret010-holdout/fallback
+          if-no-files-found: warn
           include-hidden-files: true
           retention-days: 14
