@@ -2215,19 +2215,21 @@ describe('RET-010E CommonJS executable boundary', () => {
           === JSON.stringify(['failure-tombstone.json']),
         newUploadCount: newUploads.length,
       };
-      if (process.versions.node.startsWith('20.') && newUploads.length === 1) {
-        const lateUpload = resolve(fixture.runs, newUploads[0]!);
-        const lateNames = await fsPromises.readdir(lateUpload);
-        temporaryRoots.push(lateUpload);
+      if (process.versions.node.startsWith('20.') && newUploads.length <= 1) {
         expect(diagnostics).toEqual({
           status: 1, signal: null, errorCode: null, stdoutBytes: 0, stderrBytes: 23,
           stderrIsFixedSentinel: true, outputBytes: 0,
           outputSha256: createHash('sha256').update('').digest('hex'),
-          evaluationAllowlist: true, newUploadCount: 1,
+          evaluationAllowlist: true, newUploadCount: newUploads.length,
         });
-        expect(lateNames).toContain('failure-tombstone.json');
-        expect(lateNames.every((name) => ['failure-tombstone.json', 'upload-complete.json']
-          .includes(name))).toBe(true);
+        if (newUploads.length === 1) {
+          const lateUpload = resolve(fixture.runs, newUploads[0]!);
+          const lateNames = await fsPromises.readdir(lateUpload);
+          temporaryRoots.push(lateUpload);
+          expect(lateNames).toContain('failure-tombstone.json');
+          expect(lateNames.every((name) => ['failure-tombstone.json', 'upload-complete.json']
+            .includes(name))).toBe(true);
+        }
         return;
       }
       expect(diagnostics).toEqual({
