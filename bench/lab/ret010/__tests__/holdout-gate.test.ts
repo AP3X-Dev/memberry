@@ -2203,8 +2203,7 @@ describe('RET-010 holdout pre-flight and finalize fallback receipts', () => {
   it('counts only the holdout split from the dual-split scoring loader', async () => {
     const source = await readFile(GATE, 'utf8');
     const run = source.slice(source.indexOf('async function runGate('),
-      source.indexOf('
-function holdoutSplitOnly<'));
+      source.indexOf('\nfunction holdoutSplitOnly<'));
     expect(run).toContain("holdoutSplitOnly(await loadG2HoldoutScenariosForScoring('recall'))");
     expect(run).toContain("holdoutSplitOnly(await loadG2HoldoutScenariosForScoring('precision'))");
     expect(run).not.toMatch(/const \w+Scenarios = await loadG2HoldoutScenariosForScoring/);
