@@ -341,7 +341,10 @@ async function validateHostedDispatch(): Promise<ApprovalDispatch> {
   const event = record(parseJson(await readFile(env.GITHUB_EVENT_PATH)));
   const repository = record(event.repository); const inputs = record(event.inputs);
   exact(inputs, ['qualification_sha', 'approval_digest']);
-  if (repository.full_name !== 'AP3X-Dev/memberry' || event.ref !== 'master'
+  // The dispatch payload carries the fully qualified ref, exactly like
+  // GITHUB_REF above; comparing it to the bare branch name rejected every
+  // genuine master dispatch at this line (runs 32628615537, 32635749100).
+  if (repository.full_name !== 'AP3X-Dev/memberry' || event.ref !== 'refs/heads/master'
     || inputs.qualification_sha !== env.RET010_HOLDOUT_QUALIFICATION_SHA
     || inputs.approval_digest !== env.RET010_HOLDOUT_APPROVAL_DIGEST) reject();
   const head = hardenedGit(['rev-parse', 'HEAD']).toString('utf8');

@@ -2193,6 +2193,13 @@ describe('RET-010 holdout pre-flight and finalize fallback receipts', () => {
     });
   });
 
+  it('compares the dispatch payload ref in its fully qualified form', async () => {
+    const source = await readFile(GATE, 'utf8');
+    expect(source).toContain("env.GITHUB_REF !== 'refs/heads/master'");
+    expect(source).toContain("event.ref !== 'refs/heads/master'");
+    expect(source).not.toMatch(/event\.ref !== 'master'/);
+  });
+
   it('attaches the fixed fallback path from the workflow without a structured output', async () => {
     const workflow = await readFile(resolve(ROOT, '.github/workflows/ret010-holdout-qualification.yml'), 'utf8');
     expect(workflow).toContain("if: ${{ always() && steps.ret010_holdout_finalize.outcome != 'success' }}");
