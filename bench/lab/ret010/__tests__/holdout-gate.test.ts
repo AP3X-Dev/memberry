@@ -90,12 +90,10 @@ type SyncChildOptions = Readonly<{
   cwd: string;
   encoding: 'utf8';
   env: NodeJS.ProcessEnv;
-  reserveFd3?: boolean;
 }>;
 function spawnBounded(args: readonly string[], options: SyncChildOptions) {
-  const { reserveFd3, ...childOptions } = options;
   const result = spawnSync(process.execPath, [...args], {
-    ...childOptions, ...(reserveFd3 ? { stdio: ['ignore', 'pipe', 'pipe', 'ignore'] } : {}),
+    ...options,
     timeout: 3_000, killSignal: 'SIGKILL',
   });
   expect(result.error).toBeUndefined();
@@ -173,9 +171,15 @@ const pairedEfficiencyInterval = (...args: Parameters<typeof __rawPairedEfficien
   return __rawPairedEfficiencyInterval(...args);
 };`;
   expect(source.split(statsImport)).toHaveLength(2);
-  const instrumentedCore = source.replace(statsImport, statsInstrumentation);
+  const publishCall = "await writeExclusive(root, 'holdout-receipt.json', receipt);";
+  const publishInstrumentation = `if ((globalThis as Record<symbol, unknown>)[
+    Symbol.for('ret010.holdout.skip-instrumented-publish')] !== true) ${publishCall}`;
+  expect(source.split(publishCall)).toHaveLength(2);
+  const instrumentedCore = source.replace(statsImport, statsInstrumentation)
+    .replace(publishCall, publishInstrumentation);
   const instrumented = instrumentedCore + testExport;
-  expect(instrumented.slice(0, -testExport.length).replace(statsInstrumentation, statsImport)).toBe(source);
+  expect(instrumented.slice(0, -testExport.length).replace(statsInstrumentation, statsImport)
+    .replace(publishInstrumentation, publishCall)).toBe(source);
   await writeFile(gatePath, instrumented);
   const statsBytes = await readFile(STATS);
   await writeFile(statsPath, statsBytes);
@@ -220,6 +224,7 @@ const intervalCallKey = Symbol.for('ret010.holdout.interval.calls');
 const intervalVectorKey = Symbol.for('ret010.holdout.interval.vector');
 globalThis[intervalCallKey] = 0;
 globalThis[intervalVectorKey] = [];
+globalThis[Symbol.for('ret010.holdout.skip-instrumented-publish')] = action === 'run-fixture';
 const loaderChannel = new MessageChannel();
 loaderChannel.port1.unref();
 register(${JSON.stringify(pathToFileURL(loaderPath).href)}, {
@@ -1552,7 +1557,7 @@ describe('RET-010 holdout fixture boundary', () => {
     expect(result.stderr).toBe('RET010_HOLDOUT_GATE_FAILED\n');
   });
 
-  it('runs the exact fixture CLI through one sealed fd3 without reaching real holdout imports', async () => {
+  it('runs the exact fixture CLI through one sealed fd3 and publishes the full receipt', async () => {
     const payload = Buffer.from(`${JSON.stringify(fixture())}\n`);
     const exact = await holdoutRunFixture(1);
     const result = await spawnGate('run', exact.environment, payload);
@@ -1574,16 +1579,18 @@ describe('RET-010 holdout fixture boundary', () => {
         upper: 1.9999999999999973, oneSidedLower: 1.9999999999999973 },
       safety: { staleLeakRate: 0, isolationLeakRate: 0, duplicateRate: 0, unknownResultRate: 0 },
     });
+  });
 
+  it('runs the isolated fixture harness without reaching real holdout imports', async () => {
+    const payload = Buffer.from(`${JSON.stringify(fixture())}\n`);
     const harness = await instrumentedHoldoutHarness();
     const instrumented = await holdoutRunFixture(2);
     const guarded = spawnBounded(['--import', 'tsx', harness, 'run-fixture'], {
       cwd: ROOT, encoding: 'utf8',
-      reserveFd3: true,
       env: { ...instrumented.environment, HARNESS_PAYLOAD_BASE64: payload.toString('base64') },
     });
-    expect(guarded.status).toBe(0);
     expect(guarded.stderr).toBe('');
+    expect(guarded.status).toBe(0);
     const guardedProof = JSON.parse(guarded.stdout) as Record<string, unknown>;
     expect(guardedProof).toMatchObject({
       rejected: false, fstats: 2, fixtureCloseAttempts: 1, realImports: 0,
