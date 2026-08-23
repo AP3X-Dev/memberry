@@ -171,3 +171,23 @@ describe('LAB-011 G2 production binding', () => {
     }
   });
 });
+
+describe('RET-010E workflow ownership', () => {
+  it('keeps the baseline process unable to invoke the authoritative gate', async () => {
+    const source = await readFile(CI_GATE, 'utf8');
+    expect(source).toContain("RET010_DEVELOPMENT_GATE_OWNERSHIP = 'workflow-direct-only'");
+    expect(source).not.toMatch(/dev-gate\.(?:cjs|ts)/i);
+  });
+
+  it('freezes the development gate, finalizer, and conjunctive terminal upload', async () => {
+    const workflow = await readFile(resolve(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+    expect(workflow.match(/id: ret010_development_gate/g)).toHaveLength(1);
+    expect(workflow.match(/id: ret010_finalize/g)).toHaveLength(1);
+    expect(workflow).toContain('node --import tsx bench/lab/ret010/dev-gate.cjs run');
+    expect(workflow).toContain('RET010_DEVELOPMENT_GATE_OUTCOME: ${{ steps.ret010_development_gate.outcome }}');
+    expect(workflow).toContain("always() && steps.ret010_finalize.outcome == 'success' && steps.ret010_finalize.outputs.upload_path != ''");
+    expect(workflow).toContain('path: ${{ steps.ret010_finalize.outputs.upload_path }}');
+    expect(workflow).toContain('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02');
+    expect(workflow).toContain('include-hidden-files: true');
+  });
+});

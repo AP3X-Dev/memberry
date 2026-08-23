@@ -72,21 +72,33 @@ jobs:
           [[ -z "$(git status --porcelain --untracked-files=no)" ]]
 
       - name: Run closed RET-010 qualification gate
+        id: ret010_holdout_gate
         shell: bash
         env:
-          RET010_QUALIFICATION_SHA: ${{ inputs.qualification_sha }}
-          RET010_APPROVAL_DIGEST: ${{ inputs.approval_digest }}
-          RET010_HOLDOUT_RECEIPT_PATH: ${{ runner.temp }}/ret010-holdout-qualification/receipt-or-tombstone.json
+          RET010_HOLDOUT_QUALIFICATION_SHA: ${{ inputs.qualification_sha }}
+          RET010_HOLDOUT_APPROVAL_DIGEST: ${{ inputs.approval_digest }}
         run: |
           set -euo pipefail
-          mkdir -p "$(dirname "$RET010_HOLDOUT_RECEIPT_PATH")"
-          node --import tsx bench/lab/ret010/holdout-gate.mts
+          node --import tsx bench/lab/ret010/holdout-gate.mts run
 
-      - name: Upload closed aggregate receipt or tombstone
-        if: always()
+      - name: Finalize closed RET-010 holdout evidence
+        id: ret010_holdout_finalize
+        if: ${{ always() }}
+        shell: bash
+        env:
+          RET010_HOLDOUT_QUALIFICATION_SHA: ${{ inputs.qualification_sha }}
+          RET010_HOLDOUT_APPROVAL_DIGEST: ${{ inputs.approval_digest }}
+          RET010_HOLDOUT_GATE_OUTCOME: ${{ steps.ret010_holdout_gate.outcome }}
+        run: |
+          set -euo pipefail
+          node --import tsx bench/lab/ret010/holdout-gate.mts finalize
+
+      - name: Upload finalized RET-010 holdout evidence
+        if: ${{ always() && steps.ret010_holdout_finalize.outcome == 'success' && steps.ret010_holdout_finalize.outputs.upload_path != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ret010-holdout-qualification-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ret010-holdout-qualification/receipt-or-tombstone.json
+          name: memberry-ret010-holdout-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.ret010_holdout_finalize.outputs.upload_path }}
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 14

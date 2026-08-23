@@ -30,7 +30,21 @@ test('CI jobs that verify immutable Git baselines fetch complete history', async
     .replace(/\r\n?/g, '\n');
   const gateJobs = workflow
     .split(/\n(?= {2}[A-Za-z0-9_-]+:\s*\n)/)
-    .filter((block) => block.includes('run: npm run bench:lab:ci'));
+    .filter((block) => {
+      const lines = block.split('\n');
+      return lines.some((line, index) => {
+        const run = /^(\s*)run:\s*\|\s*$/.exec(line);
+        if (!run) return false;
+        const runIndent = run[1]!.length;
+        for (const command of lines.slice(index + 1)) {
+          if (command.trim() === '') continue;
+          const commandIndent = /^\s*/.exec(command)![0].length;
+          if (commandIndent <= runIndent) return false;
+          if (command.trim() === 'npm run bench:lab:ci') return true;
+        }
+        return false;
+      });
+    });
 
   assert.ok(gateJobs.length > 0, 'CI must execute the deterministic evaluation-lab gate');
   for (const job of gateJobs) {
