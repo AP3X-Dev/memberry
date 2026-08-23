@@ -1116,7 +1116,7 @@ describe('RET-010E CommonJS executable boundary', () => {
       'efficiency-interval.json': { method: 8, flags: 0x0808, descriptor: 'signed' },
       'aggregate-result.json': { flags: 0x0008, descriptor: 'unsigned', madeBy: 0x0014, external: 0x20 },
       'custody-manifest.json': { external: ((0o100000 << 16) >>> 0) },
-      'upload-complete.json': { external: (((0o100777 << 16) | 0x20) >>> 0) },
+      'upload-complete.json': { madeBy: 0x032d, external: (((0o100777 << 16) | 0x20) >>> 0) },
     });
     const parsed = gate.__testZip(fixture.bytes);
     expect(Object.keys(parsed).sort()).toEqual([...ZIP_NAMES].sort());
@@ -1232,7 +1232,7 @@ describe('RET-010E CommonJS executable boundary', () => {
     }
     for (const host of [0, 3]) {
       for (let version = 0; version <= 0xff; version += 1) {
-        if (version === 20) continue;
+        if (version === 20 || (host === 3 && version === 45)) continue;
         const bytes = Buffer.from(baseline.bytes);
         bytes.writeUInt16LE((host << 8) | version, first.centralStart + 4);
         expect(() => gate.__testZip(bytes)).toThrow('ret010');

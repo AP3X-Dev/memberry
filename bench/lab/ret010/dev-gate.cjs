@@ -1206,7 +1206,7 @@ function zip(bytes, hooks = {}) {
     const diskStart = u16(bytes, cursor + 34); const internal = u16(bytes, cursor + 36);
     const external = u32(bytes, cursor + 38);
     const offset = u32(bytes, cursor + 42);
-    if (![0x0014, 0x0314].includes(made) || needed !== 20 || (flags & ~0x0808)
+    if (![0x0014, 0x0314, 0x032d].includes(made) || needed !== 20 || (flags & ~0x0808)
       || ![0, 8].includes(method) || extra || comment || diskStart || internal
       || compressed === 0xffffffff || uncompressed === 0xffffffff || offset === 0xffffffff
       || starts.has(offset)) reject();
