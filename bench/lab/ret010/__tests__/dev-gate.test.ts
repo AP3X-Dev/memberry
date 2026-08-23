@@ -2215,7 +2215,7 @@ describe('RET-010E CommonJS executable boundary', () => {
           === JSON.stringify(['failure-tombstone.json']),
         newUploadCount: newUploads.length,
       };
-      if (process.versions.node.startsWith('v20.') && newUploads.length === 1) {
+      if (process.versions.node.startsWith('20.') && newUploads.length === 1) {
         const lateUpload = resolve(fixture.runs, newUploads[0]!);
         const lateNames = await fsPromises.readdir(lateUpload);
         temporaryRoots.push(lateUpload);
