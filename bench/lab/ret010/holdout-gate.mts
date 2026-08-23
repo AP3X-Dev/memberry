@@ -7,7 +7,7 @@ import {
   fstatSync, read as fsRead,
 } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { types as utilTypes } from 'node:util';
 
@@ -44,10 +44,16 @@ const ROW_KEYS = [
 ] as const;
 const ORDINALS = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10'] as const;
 const FAILURE_CLASS_BY_STAGE = Object.freeze({
+  'preflight-environment': 'custody', 'preflight-identity': 'custody',
+  'preflight-source': 'custody', 'preflight-runner': 'custody',
   'source-integrity': 'custody', approval: 'custody', 'load-holdout': 'harness',
   'recall-comparison': 'model', 'precision-comparison': 'model', efficiency: 'metric',
   'quality-policy': 'metric', 'safety-policy': 'safety', artifact: 'custody',
+  'finalize-preflight': 'custody', 'finalize-receipt': 'custody', 'finalize-bundle': 'custody',
 } as const);
+type Stage = keyof typeof FAILURE_CLASS_BY_STAGE;
+const PREFLIGHT_RECEIPT = 'preflight-failure.json';
+const FINALIZE_RECEIPT = 'finalize-failure.json';
 const REJECTION = new Error('ret010');
 const APPROVAL_PATH = 'bench/lab/ret010/approved-dev.json';
 const arrayIsArray = Array.isArray;
@@ -409,7 +415,8 @@ export function validateHoldoutFixtureRecord(value: unknown): Readonly<JsonRecor
   } catch { reject(); }
 }
 
-function identity(test: boolean): JsonRecord {
+function identity(test: boolean, setStage: (stage: Stage) => void = () => {}): JsonRecord {
+  setStage('preflight-identity');
   const env = process.env;
   const prefix = test ? 'RET010_HOLDOUT_TEST_' : '';
   const gitCommit = test ? env.RET010_HOLDOUT_TEST_GIT_COMMIT : env.GITHUB_SHA;
@@ -422,6 +429,7 @@ function identity(test: boolean): JsonRecord {
     || !['20', '22'].includes(nodeMajor)
     || !(new RegExp(`^v${nodeMajor}\\.[0-9]+\\.[0-9]+$`)).test(process.version)) reject();
   if (!test) {
+    setStage('preflight-source');
     const head = hardenedGit(['rev-parse', 'HEAD']).toString('utf8');
     const dirty = hardenedGit(['status', '--porcelain=v1', '--untracked-files=all']);
     if (head !== `${gitCommit}\n` || dirty.length !== 0) reject();
@@ -917,10 +925,23 @@ async function runGate(hooks: {
   fixtureIo?: FixtureFdIo;
   beforeRealImports?: () => Promise<void>;
 } = {}): Promise<void> {
-  const test = fixtureMode('run');
-  const id = identity(test); const parent = await runnerRoot(test, true);
-  const root = resolve(parent, receiptName(id));
-  await mkdir(root, { recursive: false, mode: 0o700 });
+  // Nothing before this point has a validated identity, so a rejection here
+  // cannot be written into the per-run receipt root. It is classified into the
+  // family-level pre-flight receipt instead; otherwise the only signal left is
+  // the fixed sentinel, which is exactly how run 32635749100 published nothing.
+  let preflight: Stage = 'preflight-environment';
+  let test = false; let id: JsonRecord = {}; let parent = ''; let root = '';
+  try {
+    test = fixtureMode('run');
+    id = identity(test, (next) => { preflight = next; });
+    preflight = 'preflight-runner';
+    parent = await runnerRoot(test, true);
+    root = resolve(parent, receiptName(id));
+    await mkdir(root, { recursive: false, mode: 0o700 });
+  } catch {
+    await writePreflightReceipt(preflight);
+    throw REJECTION;
+  }
   let stage: keyof typeof FAILURE_CLASS_BY_STAGE = 'source-integrity';
   try {
     if (!test) closeInheritedFd3();
@@ -1026,6 +1047,75 @@ async function runGate(hooks: {
   }
 }
 
+function receiptFamily(): string | undefined {
+  const test = Object.hasOwn(process.env, 'RET010_HOLDOUT_TEST_FIXTURE');
+  const value = test ? process.env.RET010_HOLDOUT_TEST_RUNNER_TEMP : process.env.RUNNER_TEMP;
+  if (typeof value !== 'string' || value.length === 0 || value !== resolve(value)) return undefined;
+  return resolve(value, 'memberry-ret010-holdout');
+}
+function runtimeOnly(): JsonRecord {
+  return { nodeMajor: process.versions.node.split('.')[0], nodeVersion: process.version };
+}
+// A pre-flight rejection has no validated identity to bind to, so its receipt
+// carries only the fixed stage label and the Node runtime, and lives at the
+// family level beside the per-run roots. It is best-effort by design: every
+// failure inside it is swallowed because the sentinel is the fallback signal.
+async function writePreflightReceipt(stage: Stage): Promise<void> {
+  try {
+    const family = receiptFamily();
+    if (family === undefined) return;
+    await directory(resolve(family, '..'));
+    await mkdir(family, { recursive: true, mode: 0o700 });
+    await writeExclusive(family, PREFLIGHT_RECEIPT, {
+      schemaVersion: '1', decision: 'failed', failureClass: FAILURE_CLASS_BY_STAGE[stage], stage,
+      ...runtimeOnly(),
+    });
+  } catch { /* fixed sentinel only */ }
+}
+// When certification fails the finalizer still publishes a bundle: its own
+// stage receipt plus any receipt the gate left behind. Carried receipts are
+// content-free by construction (stage labels or aggregate metrics only) and
+// are re-emitted through the same canonical writer. The upload path is emitted
+// even though the step exits 1 so the workflow can attach it on always().
+async function publishFallbackBundle(stage: Stage,
+  random: (size: number) => Buffer = randomBytes): Promise<void> {
+  try {
+    const family = receiptFamily();
+    if (family === undefined) return;
+    await directory(resolve(family, '..'));
+    await mkdir(family, { recursive: true, mode: 0o700 });
+    const leaf = resolve(family, 'ret010-holdout-fallback-' + random(32).toString('hex'));
+    await mkdir(leaf, { recursive: false, mode: 0o700 });
+    const test = Object.hasOwn(process.env, 'RET010_HOLDOUT_TEST_FIXTURE');
+    const outcome = test ? process.env.RET010_HOLDOUT_TEST_GATE_OUTCOME : process.env.RET010_HOLDOUT_GATE_OUTCOME;
+    await writeExclusive(leaf, FINALIZE_RECEIPT, {
+      schemaVersion: '1', decision: 'failed', failureClass: FAILURE_CLASS_BY_STAGE[stage], stage,
+      gateOutcome: outcome === 'success' || outcome === 'failure' ? outcome : 'unknown',
+      ...runtimeOnly(),
+    });
+    const carried: string[] = [resolve(family, PREFLIGHT_RECEIPT)];
+    try {
+      for (const name of (await readdir(resolve(family, 'runs'))).sort()) {
+        carried.push(resolve(family, 'runs', name, 'holdout-receipt.json'));
+      }
+    } catch { /* the gate never created a run root */ }
+    let ordinal = 0;
+    for (const source of carried) {
+      let bytes: Buffer;
+      try { bytes = await readFile(source); } catch { continue; }
+      if (bytes.length > 2_000_000) continue;
+      let parsed: JsonRecord;
+      try { parsed = record(parseJson(bytes)); } catch { continue; }
+      ordinal += 1;
+      await writeExclusive(leaf, `carried-${ordinal}-${basename(source)}`, parsed);
+    }
+    const output = process.env.GITHUB_OUTPUT;
+    if (typeof output === 'string' && output.length > 0) {
+      await appendStructuredOutput(output, `upload_path=${leaf}\n`);
+    }
+  } catch { /* fixed sentinel only */ }
+}
+
 function checkpointIdentity(test: boolean, expected: JsonRecord): void {
   if (JSON.stringify(identity(test)) !== JSON.stringify(expected)) reject();
 }
@@ -1035,12 +1125,26 @@ async function finalizeGate(hooks: {
   closeHandle?: (owner: RetainedOwner) => Promise<void>;
   randomBytes?: (size: number) => Buffer;
 } = {}): Promise<void> {
+  let stage: Stage = 'finalize-preflight';
+  try {
+    await finalizeCertified(hooks, (next) => { stage = next; });
+  } catch {
+    await publishFallbackBundle(stage, hooks.randomBytes);
+    throw REJECTION;
+  }
+}
+async function finalizeCertified(hooks: {
+  beforeUploadPathOutput?: (paths: { evaluation: string; upload: string }) => Promise<void>;
+  closeHandle?: (owner: RetainedOwner) => Promise<void>;
+  randomBytes?: (size: number) => Buffer;
+}, setStage: (stage: Stage) => void): Promise<void> {
   const test = fixtureMode('finalize');
   closeInheritedFd3();
   if (!test) await validateHostedDispatch();
   const id = identity(test); const parent = await runnerRoot(test, false);
   const outcome = test ? process.env.RET010_HOLDOUT_TEST_GATE_OUTCOME : process.env.RET010_HOLDOUT_GATE_OUTCOME;
   if (outcome !== 'success' && outcome !== 'failure') reject();
+  setStage('finalize-receipt');
   const sourceRoot = resolve(parent, receiptName(id));
   const upload = await retainedCustody(async (scope) => {
     const sourceRootOwner = await retainDirectory(scope, sourceRoot);
@@ -1051,6 +1155,7 @@ async function finalizeGate(hooks: {
     const receipt = validateReceipt(parseJson(sourceBytes), id);
     if (!canonical(receipt).equals(sourceBytes)
       || (outcome === 'success' ? receipt.decision !== 'passed' : receipt.decision !== 'failed')) reject();
+    setStage('finalize-bundle');
 
     // Frozen source/runtime identity is reacquired while the receipt remains
     // pinned and before any upload leaf exists.
@@ -1111,11 +1216,18 @@ async function finalizeGate(hooks: {
 
 async function main(): Promise<void> {
   if (process.argv.length !== 3 || JSON.stringify(process.execArgv) !== JSON.stringify(['--import', 'tsx'])) reject();
-  environmentNames();
-  if (Object.hasOwn(process.env, 'NODE_OPTIONS') || Object.hasOwn(process.env, 'NODE_PATH')) reject();
-  if (process.argv[2] === 'run') await runGate();
-  else if (process.argv[2] === 'finalize') await finalizeGate();
-  else reject();
+  const command = process.argv[2];
+  if (command !== 'run' && command !== 'finalize') reject();
+  try {
+    environmentNames();
+    if (Object.hasOwn(process.env, 'NODE_OPTIONS') || Object.hasOwn(process.env, 'NODE_PATH')) reject();
+  } catch {
+    if (command === 'run') await writePreflightReceipt('preflight-environment');
+    else await publishFallbackBundle('finalize-preflight');
+    throw REJECTION;
+  }
+  if (command === 'run') await runGate();
+  else await finalizeGate();
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

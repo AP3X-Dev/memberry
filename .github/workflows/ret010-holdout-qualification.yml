@@ -93,8 +93,10 @@ jobs:
           set -euo pipefail
           node --import tsx bench/lab/ret010/holdout-gate.mts finalize
 
+      # The finalizer emits upload_path on its fallback path too, so a failed
+      # finalize still publishes a content-free stage bundle instead of nothing.
       - name: Upload finalized RET-010 holdout evidence
-        if: ${{ always() && steps.ret010_holdout_finalize.outcome == 'success' && steps.ret010_holdout_finalize.outputs.upload_path != '' }}
+        if: ${{ always() && steps.ret010_holdout_finalize.outputs.upload_path != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: memberry-ret010-holdout-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}

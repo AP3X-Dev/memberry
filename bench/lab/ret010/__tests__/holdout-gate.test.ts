@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -2154,5 +2154,49 @@ describe('RET-010 holdout fixture boundary', () => {
       intervalCalls: 0, intervalVector: [],
       failureShape: ['Error'], codeGetterCalls: 0,
     });
+  });
+});
+
+describe('RET-010 holdout pre-flight and finalize fallback receipts', () => {
+  it('classifies a run rejected before identity into a family-level pre-flight receipt', async () => {
+    const input = await holdoutRunFixture(901);
+    const environment = { ...input.environment };
+    delete environment.RET010_HOLDOUT_TEST_RUN_ID;
+    const result = await spawnGate('run', environment);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('RET010_HOLDOUT_GATE_FAILED\n');
+    await expect(lstat(input.receipt)).rejects.toThrow();
+    const preflight = resolve(input.runner, 'memberry-ret010-holdout', 'preflight-failure.json');
+    expect(JSON.parse(await readFile(preflight, 'utf8'))).toEqual({
+      schemaVersion: '1', decision: 'failed', failureClass: 'custody',
+      stage: 'preflight-environment',
+      nodeMajor: process.versions.node.split('.')[0], nodeVersion: process.version,
+    });
+  });
+
+  it('publishes a content-free fallback bundle when the finalizer cannot certify', async () => {
+    const input = await holdoutFailureFixture(902);
+    const environment = { ...input.environment };
+    // The run root exists but under a different attempt, so certification
+    // rejects at finalize-receipt exactly as a missing gate receipt would.
+    environment.RET010_HOLDOUT_TEST_RUN_ATTEMPT = '2';
+    const result = await spawnGate('finalize', environment);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('RET010_HOLDOUT_FINALIZE_FAILED\n');
+    const output = await readFile(input.output, 'utf8');
+    const match = /^upload_path=(.+)\n$/.exec(output);
+    expect(match).not.toBeNull();
+    const leaf = match![1]!;
+    expect(basename(leaf)).toMatch(/^ret010-holdout-fallback-[0-9a-f]{64}$/);
+    const names = (await readdir(leaf)).sort();
+    expect(names).toEqual(['carried-1-holdout-receipt.json', 'finalize-failure.json']);
+    expect(JSON.parse(await readFile(resolve(leaf, 'finalize-failure.json'), 'utf8'))).toEqual({
+      schemaVersion: '1', decision: 'failed', failureClass: 'custody', stage: 'finalize-receipt',
+      gateOutcome: 'failure',
+      nodeMajor: process.versions.node.split('.')[0], nodeVersion: process.version,
+    });
+    const carried = JSON.parse(await readFile(resolve(leaf, 'carried-1-holdout-receipt.json'), 'utf8'));
+    expect(carried.decision).toBe('failed');
+    expect(carried.workflowRunAttempt).toBe('1');
   });
 });
