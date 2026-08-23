@@ -23,6 +23,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..', '..', '..');
 const ARTIFACT_DIR = resolve(REPO_ROOT, 'node_modules', '.cache', 'memberry-lab', 'runs');
 
+/** RET-010E evaluation is owned only by the workflow's final direct command. */
+export const RET010_DEVELOPMENT_GATE_OWNERSHIP = 'workflow-direct-only' as const;
+
 export function requireGateResult<T>(name: string, result: T | null | undefined): T {
   if (result === null || result === undefined) throw new Error(`Required gate ${name} did not return a result; refusing to skip`);
   return result;

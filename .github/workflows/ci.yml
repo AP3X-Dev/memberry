@@ -57,10 +57,32 @@ jobs:
       # against the independent control over physically separated dev/holdout oracles.
       # It is deliberately offline; external datasets and live adapters run separately.
       - name: Evaluation-lab deterministic gate
-        run: npm run bench:lab:ci
+        id: ret010_development_gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run bench:lab:ci
+          node --import tsx bench/lab/ret010/dev-gate.cjs run
         env:
           REDIS_URL: ""
           NEO4J_URI: ""
+
+      - name: Finalize RET-010 development evidence
+        id: ret010_finalize
+        if: ${{ always() }}
+        env:
+          RET010_DEVELOPMENT_GATE_OUTCOME: ${{ steps.ret010_development_gate.outcome }}
+        run: node bench/lab/ret010/dev-gate.cjs finalize
+
+      - name: Upload finalized RET-010 development evidence
+        if: ${{ always() && steps.ret010_finalize.outcome == 'success' && steps.ret010_finalize.outputs.upload_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memberry-ret010-development-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.ret010_finalize.outputs.upload_path }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
 
   # Full job: integration tests with Redis + Neo4j service containers
   integration:

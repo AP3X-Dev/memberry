@@ -32,6 +32,7 @@ import {
   type AssemblerMemoryLayer,
 } from '../../../packages/retrieval/src/assembler.js';
 import type { FeedbackRedisLayer } from '../../../packages/retrieval/src/feedback.js';
+import { createServedRerankerProviderV1 } from '../../../packages/retrieval/src/served-reranker.js';
 
 /** assembler.ts MAX_ASSEMBLER_MEMORY_SOURCES. */
 const MAX_MEMORY_SOURCES = 512;
@@ -51,6 +52,12 @@ const FIXTURE_EMBEDDING_DIMENSIONS = 8;
 const FIXTURE_EMBEDDING_MODULUS = 1_000_003;
 
 const TEXT_BYTES = new TextEncoder();
+
+function appendOwn<T>(target: T[], value: T): void {
+  Object.defineProperty(target, target.length, {
+    value, enumerable: true, writable: true, configurable: true,
+  });
+}
 
 /**
  * Empty graph. getCollectionSize sees no `count(s)` record, so cachedCollectionSize
@@ -73,8 +80,10 @@ const FIXTURE_FEEDBACK_STORE: FeedbackRedisLayer = {
 };
 
 /** Deterministic hash vector. No network, no model: same text, same vector, always. */
-function fixtureVector(text: string): number[] {
-  const vector = new Array<number>(FIXTURE_EMBEDDING_DIMENSIONS).fill(0);
+export function fixtureVector(text: string): number[] {
+  // Array.from uses own-property creation for every index. That keeps hostile
+  // inherited numeric setters from observing or substituting fixture evidence.
+  const vector = Array.from({ length: FIXTURE_EMBEDDING_DIMENSIONS }, () => 0);
   for (let index = 0; index < text.length; index += 1) {
     const slot = index % FIXTURE_EMBEDDING_DIMENSIONS;
     vector[slot] = (vector[slot]! * 31 + text.charCodeAt(index)) % FIXTURE_EMBEDDING_MODULUS;
@@ -128,8 +137,8 @@ function memoryMarkdown(memories: readonly LabMemory[]): { markdown: string; sou
     const size = TEXT_BYTES.encode(section).length;
     if (bytes + size > MAX_MEMORY_MARKDOWN_BYTES) break;
     bytes += size;
-    sections.push(section);
-    sources.push(memory.id);
+    appendOwn(sections, section);
+    appendOwn(sources, memory.id);
   }
   return { markdown: sections.join(''), sources };
 }
@@ -168,14 +177,39 @@ function fixtureLayers(memories: readonly LabMemory[]): {
   };
 }
 
+/** Preserve the assembler's post-budget presentation order exactly. */
+export function projectAssemblyResults(
+  sections: readonly { items: readonly { id: string; score: number }[] }[],
+  limit: number,
+): LabQueryResult[] {
+  return sections
+    .flatMap((section) => section.items)
+    .map((item) => ({ id: item.id, score: item.score }))
+    .slice(0, limit);
+}
+
 /** Scores the production retrieval assembler over a fixture-persisted corpus. */
 export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
-  readonly id: string = 'memberry-retrieval-core-v1';
-  readonly displayName: string = 'MemBerry production retrieval core';
+  readonly id: string;
+  readonly displayName: string;
   readonly executionMode = 'fixture' as const;
   readonly capabilities: ReadonlySet<AdapterCapability> = new Set([
     'namespaces', 'feedback', 'stats', 'cleanup', 'project-scope', 'tenant-scope', 'temporal-filtering',
   ]);
+
+  constructor(private readonly rerankerMode: 'legacy' | 'disabled' | 'served' = 'legacy') {
+    super();
+    this.id = rerankerMode === 'disabled'
+      ? 'memberry-retrieval-core-disabled-v1'
+      : rerankerMode === 'served'
+        ? 'memberry-retrieval-core-served-v1'
+        : 'memberry-retrieval-core-v1';
+    this.displayName = rerankerMode === 'served'
+      ? 'MemBerry production retrieval core (served reranker)'
+      : rerankerMode === 'disabled'
+        ? 'MemBerry production retrieval core (reranker disabled)'
+        : 'MemBerry production retrieval core';
+  }
 
   async query(request: QueryRequest): Promise<QueryResponse> {
     this.queryCount += 1;
@@ -192,6 +226,8 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
       layers.codeLayer,
       layers.memoryLayer,
       FIXTURE_EMBEDDING,
+      null,
+      this.rerankerMode === 'served' ? createServedRerankerProviderV1() : null,
     );
     // 'ranked', never 'auto': 'auto' would route through classifyIntent, whose
     // decision depends on this fixture embedding provider and can select GRAPH,
@@ -206,17 +242,13 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
       include_arch: false,
       include_memory: true,
       max_tokens: request.tokenBudget ?? DEFAULT_MAX_TOKENS,
+      ...(this.rerankerMode === 'disabled' ? { servedRerankerDisabled: true as const } : {}),
     });
     // Only id and score cross this boundary. context.assembled_at is wall clock,
     // and nothing derived from it may enter a lab result.
     //
-    // groupAndBudget emits sections grouped by source_type, which is presentation
-    // order, not rank; sorting by the assembler's own final score recovers the
-    // ranking it actually produced. The id tie-break keeps that total.
-    const ranked = context.sections
-      .flatMap((section) => section.items)
-      .map((item) => ({ id: item.id, score: item.score }))
-      .sort((left, right) => right.score - left.score || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
-    return { results: ranked.slice(0, request.limit) };
+    // The returned section/item sequence is the production presentation and
+    // budget decision. Re-sorting here would create a lab-only ranking path.
+    return { results: projectAssemblyResults(context.sections, request.limit) };
   }
 }
