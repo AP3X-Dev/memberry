@@ -50,6 +50,8 @@ ENTRYPOINT ["/usr/local/bin/node"]
 CMD ["--permission", "--allow-fs-read=/run/input.json", "--allow-fs-write=/tmp/memberry-sandbox-write-probe", "--disable-proto=throw", "/app/worker.mjs", "/run/input.json"]
 `;
 
+let diagnosticStageV1 = 'init';
+
 export interface AdmissionCandidateBuildReceiptV1 extends AdmissionSandboxAttestationV1 {
   readonly receiptVersion: 'memberry.admission-build-receipt.v1';
 }
@@ -249,7 +251,7 @@ function safeResultV1(result: DockerCommandResultV1, allowStderr = false): Uint8
     || result.exitCode !== 0 || (!allowStderr && result.stderr.byteLength !== 0)) {
     throw new Error('candidate image command failed');
   }
-  return new Uint8Array(result.stdout);
+  return snapshotExactUint8ArrayV1(result.stdout, 0, 134_219_776);
 }
 
 function safeTextV1(result: DockerCommandResultV1, allowStderr = false): string {
@@ -373,20 +375,67 @@ function expectedCandidateEnvironmentV1(base: any): readonly string[] {
   return Object.freeze([...retained, 'LANG=C.UTF-8', 'LC_ALL=C.UTF-8', 'TZ=UTC']);
 }
 
+function hasExactDockerImageArgsEscapedV1(config: unknown): boolean {
+  if (typeof config !== 'object' || config === null || nodeUtilTypes.isProxy(config)) return false;
+  const descriptor = Object.getOwnPropertyDescriptor(config, 'ArgsEscaped');
+  return descriptor !== undefined
+    && Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    && descriptor.value === true
+    && descriptor.enumerable === true
+    && descriptor.writable === true
+    && descriptor.configurable === true;
+}
+
+function hasExactCandidateRootFsExtensionV1(
+  baseLayers: readonly string[],
+  candidateLayers: readonly string[],
+): boolean {
+  return candidateLayers.length === baseLayers.length + 2
+    && baseLayers.every((layer, index) => candidateLayers[index] === layer);
+}
+
 function verifyImageV1(base: any, image: any, imageId: string, candidate: string, source: string): readonly string[] {
   const baseLayers = rootFsLayersV1(base);
   const layers = rootFsLayersV1(image);
   const config = image?.Config;
   const allowedConfigKeys = new Set([
     'User', 'Env', 'Entrypoint', 'Cmd', 'WorkingDir', 'Labels', 'Volumes', 'Healthcheck',
-    'Shell', 'OnBuild', 'ExposedPorts', 'StopSignal',
+    'Shell', 'OnBuild', 'ExposedPorts', 'StopSignal', 'ArgsEscaped',
   ]);
+  const diagnosticChecks: ReadonlyArray<readonly [string, boolean]> = [
+    ['base-digest', Array.isArray(base?.RepoDigests)
+      && base.RepoDigests.includes(APPROVED_NODE_BASE_IMAGE_V1)],
+    ['base-platform', base?.Os === 'linux' && base?.Architecture === 'amd64'],
+    ['image-id', image?.Id === imageId],
+    ['image-platform', image?.Os === 'linux' && image?.Architecture === 'amd64'],
+    ['layer-count', layers.length === baseLayers.length + 2],
+    ['layer-prefix', baseLayers.every((layer, index) => layers[index] === layer)],
+    ['config-record', typeof config === 'object' && config !== null],
+    ['config-keys', typeof config === 'object' && config !== null
+      && !Object.keys(config).some((key) => !allowedConfigKeys.has(key))],
+    ['user', config?.User === '65532:65532'],
+    ['environment', exactStrings(config?.Env, expectedCandidateEnvironmentV1(base))],
+    ['args-escaped', hasExactDockerImageArgsEscapedV1(config)],
+    ['entrypoint', exactStrings(config?.Entrypoint, ['/usr/local/bin/node'])],
+    ['command', exactStrings(config?.Cmd, CANDIDATE_ARGUMENTS)],
+    ['working-directory', config?.WorkingDir === '/app'],
+    ['null-optionals', config?.Volumes == null && config?.Healthcheck == null
+      && config?.Shell == null && config?.ExposedPorts == null && config?.StopSignal == null],
+    ['onbuild', config?.OnBuild == null || exactStrings(config.OnBuild, [])],
+    ['labels', Object.keys(config?.Labels ?? {}).length === 3
+      && config?.Labels?.['org.memberry.candidate.sha256'] === candidate
+      && config?.Labels?.['org.memberry.source.sha256'] === source
+      && config?.Labels?.['org.memberry.base.image'] === APPROVED_NODE_BASE_IMAGE_V1],
+  ];
+  const diagnosticFailure = diagnosticChecks.find(([, passed]) => !passed);
+  if (diagnosticFailure) diagnosticStageV1 = `candidate-verify-${diagnosticFailure[0]}`;
   if (!Array.isArray(base?.RepoDigests) || !base.RepoDigests.includes(APPROVED_NODE_BASE_IMAGE_V1)
     || base?.Os !== 'linux' || base?.Architecture !== 'amd64'
     || image?.Id !== imageId || image?.Os !== 'linux' || image?.Architecture !== 'amd64'
-    || layers.length !== baseLayers.length + 1 || !baseLayers.every((layer, index) => layers[index] === layer)
+    || !hasExactCandidateRootFsExtensionV1(baseLayers, layers)
     || typeof config !== 'object' || config === null || Object.keys(config).some((key) => !allowedConfigKeys.has(key))
     || config.User !== '65532:65532' || !exactStrings(config.Env, expectedCandidateEnvironmentV1(base))
+    || !hasExactDockerImageArgsEscapedV1(config)
     || config.Env.some((entry: string) => PRELOAD_ENV_PATTERN.test(entry))
     || !exactStrings(config.Entrypoint, ['/usr/local/bin/node']) || !exactStrings(config.Cmd, CANDIDATE_ARGUMENTS)
     || config.WorkingDir !== '/app' || config.Volumes != null || config.Healthcheck != null
@@ -475,13 +524,16 @@ async function withStoppedProofV1<T>(
   runner: DockerCommandRunnerV1,
   inspect: (id: string) => Promise<T>,
 ): Promise<T> {
+  const proofKind = requestedImage === APPROVED_NODE_BASE_IMAGE_V1 ? 'base' : 'candidate';
   const temporary = await createOwnedTemporaryDirectoryV1('admission-build');
   let id: string | undefined;
   let creationAttempted = false;
   let outcome: T | undefined;
   let failed = false;
+  let failedStage: string | undefined;
   let createStdout: string | undefined;
   try {
+    diagnosticStageV1 = `${proofKind}.create`;
     creationAttempted = true;
     const created = await runner(createDockerCommandInvocationV1([
       'create', `--cidfile=${temporary.cidFile}`, '--platform=linux/amd64', '--pull=never',
@@ -494,21 +546,29 @@ async function withStoppedProofV1<T>(
     } catch {
       createStdout = undefined;
     }
+    diagnosticStageV1 = `${proofKind}.create-result`;
     safeResultV1(createdSnapshot);
+    diagnosticStageV1 = `${proofKind}.cid`;
     const cidId = await readOwnedContainerIdFileV1(temporary);
     if (!cidId || (createStdout !== undefined && createStdout.length > 0 && createStdout !== cidId)) {
       throw new Error('proof identity mismatch');
     }
     id = cidId;
+    diagnosticStageV1 = `${proofKind}.inspect`;
     await inspectOwnedProofV1(id, requestedImage, expectedImageId, temporary.runToken, runner);
+    diagnosticStageV1 = `${proofKind}.content`;
     outcome = await inspect(id);
   } catch {
     failed = true;
+    failedStage = diagnosticStageV1;
   }
   const containersClean = await cleanupProofV1(
     requestedImage, expectedImageId, temporary, runner, id, creationAttempted, createStdout,
   );
   const hostClean = containersClean && await cleanupOwnedTemporaryDirectoryV1(temporary);
+  diagnosticStageV1 = failedStage ?? (!containersClean
+    ? `${proofKind}.cleanup-container`
+    : !hostClean ? `${proofKind}.cleanup-host` : `${proofKind}.complete`);
   if (failed || !containersClean || !hostClean || outcome === undefined) throw new Error('build proof failed');
   return outcome;
 }
@@ -516,6 +576,7 @@ async function withStoppedProofV1<T>(
 async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   runner: DockerCommandRunnerV1,
 ): Promise<Omit<AdmissionCandidateBuildReceiptV1, 'receiptVersion'>> {
+  diagnosticStageV1 = 'snapshot';
   const snapshot = await captureAdmissionCandidateSnapshotV1();
   const dockerfile = new TextDecoder('utf-8', { fatal: true }).decode(snapshot.files.get('container/Dockerfile')!);
   const dockerignore = new TextDecoder('utf-8', { fatal: true })
@@ -527,6 +588,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   )) as unknown;
   validateAdmissionCandidateBuildAssetsV1({ dockerfile, manifest });
 
+  diagnosticStageV1 = 'base-image-inspect';
   const baseInspection = JSON.parse(safeTextV1(await runner(createDockerCommandInvocationV1([
     'image', 'inspect', '--format={{json .}}', APPROVED_NODE_BASE_IMAGE_V1,
   ]))));
@@ -537,14 +599,22 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
     || baseInspection?.Os !== 'linux' || baseInspection?.Architecture !== 'amd64') {
     throw new Error('approved base inspection mismatch');
   }
+  diagnosticStageV1 = 'base-proof';
   const baseNode = await withStoppedProofV1(
     APPROVED_NODE_BASE_IMAGE_V1, baseInspection.Id, runner, async (id) => {
+      diagnosticStageV1 = 'base.content-copy-command';
       const copied = await runner(createDockerCommandInvocationV1([
         'container', 'cp', `${id}:/usr/local/bin/node`, '-',
       ], undefined, 134_219_776));
-      return inspectDockerCopyArchiveV1(safeResultV1(copied), 'node');
+      diagnosticStageV1 = 'base.content-copy-result';
+      const copiedBytes = safeResultV1(copied);
+      diagnosticStageV1 = Object.isExtensible(copiedBytes)
+        ? 'base.content-copy-archive-extensible'
+        : 'base.content-copy-archive-sealed';
+      return inspectDockerCopyArchiveV1(copiedBytes, 'node');
     },
   );
+  diagnosticStageV1 = 'base.content-complete';
   const nodeSha256 = sha256(baseNode);
   const contentAttestation = new TextEncoder().encode(JSON.stringify({
     baseImage: APPROVED_NODE_BASE_IMAGE_V1,
@@ -552,6 +622,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
     sourceSha256: snapshot.sourceSha256,
     nodeSha256,
   }));
+  diagnosticStageV1 = 'candidate-build-context';
   const context = createCanonicalBuildContextV1([
     { path: '.dockerignore', bytes: snapshot.files.get('.dockerignore')! },
     { path: 'container/Dockerfile', bytes: snapshot.files.get('container/Dockerfile')! },
@@ -559,6 +630,7 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
     { path: 'container/manifest.json', bytes: snapshot.files.get('container/manifest.json')! },
     { path: 'container/worker.mjs', bytes: snapshot.files.get('container/worker.mjs')! },
   ]);
+  diagnosticStageV1 = 'candidate-build';
   const built = await runner(Object.freeze({
     ...createDockerCommandInvocationV1([
       'build', '--quiet', '--platform=linux/amd64', '--pull=false', '--network=none', '--target=candidate',
@@ -572,14 +644,22 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   }));
   const imageSha256 = safeTextV1(built, true).trim();
   if (!IMAGE_PATTERN.test(imageSha256)) throw new Error('invalid built image ID');
-  const imageInspection = JSON.parse(safeTextV1(await runner(createDockerCommandInvocationV1([
+  diagnosticStageV1 = 'candidate-image-inspect-command';
+  const candidateInspect = await runner(createDockerCommandInvocationV1([
     'image', 'inspect', '--format={{json .}}', imageSha256,
-  ]))));
+  ]));
+  diagnosticStageV1 = 'candidate-image-inspect-result';
+  const candidateInspectText = safeTextV1(candidateInspect);
+  diagnosticStageV1 = 'candidate-image-inspect-parse';
+  const imageInspection = JSON.parse(candidateInspectText);
+  diagnosticStageV1 = 'candidate-image-verify';
   const rootFsLayers = verifyImageV1(
     baseInspection, imageInspection, imageSha256, snapshot.candidateSha256, snapshot.sourceSha256,
   );
+  diagnosticStageV1 = 'candidate-image-config';
   const imageConfigSha256 = canonicalImageConfigSha256V1(imageInspection.Config);
 
+  diagnosticStageV1 = 'candidate-proof';
   await withStoppedProofV1(imageSha256, imageSha256, runner, async (id) => {
     const copiedWorker = inspectDockerCopyArchiveV1(safeResultV1(await runner(
       createDockerCommandInvocationV1(['container', 'cp', `${id}:/app/worker.mjs`, '-'], undefined, 1_048_576),
@@ -617,5 +697,9 @@ export async function buildAdmissionFeatureCandidateImageV1(
   ...rejectedOverrides: readonly unknown[]
 ): Promise<AdmissionCandidateBuildReceiptV1> {
   if (rejectedOverrides.length !== 0) throw new Error('build overrides are forbidden');
-  return immutableReceiptV1(await buildAdmissionFeatureCandidateImageWithRunnerV1(runDockerCommandV1));
+  try {
+    return immutableReceiptV1(await buildAdmissionFeatureCandidateImageWithRunnerV1(runDockerCommandV1));
+  } catch {
+    throw new Error(`diagnostic:${diagnosticStageV1}`);
+  }
 }

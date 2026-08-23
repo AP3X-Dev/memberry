@@ -244,7 +244,10 @@ export function inspectDockerCopyArchiveV1(
     || !header.subarray(157, 257).every((byte) => byte === 0)
     || !header.subarray(257, 263).every((byte, index) => byte === [0x75, 0x73, 0x74, 0x61, 0x72, 0][index])
     || !header.subarray(263, 265).every((byte, index) => byte === [0x30, 0x30][index])
-    || !header.subarray(265, 512).every((byte) => byte === 0)
+    || !header.subarray(265, 329).every((byte) => byte === 0)
+    || !exactTarOctalFieldV1(header.subarray(329, 337), 0)
+    || !exactTarOctalFieldV1(header.subarray(337, 345), 0)
+    || !header.subarray(345, 512).every((byte) => byte === 0)
     || !header.subarray(148, 156).every((byte, index) => byte
       === new TextEncoder().encode(`${calculatedChecksum.toString(8).padStart(6, '0')}\0 `)[index])
     || storedChecksum !== calculatedChecksum || archive.byteLength !== expectedLength
@@ -1076,6 +1079,31 @@ function rootFsLayersV1(inspection: any): readonly string[] {
   return layers;
 }
 
+export function hasExactCandidateRootFsExtensionV1(
+  baseLayers: unknown,
+  candidateLayers: unknown,
+): boolean {
+  const snapshot = (value: unknown): readonly string[] | undefined => {
+    if (!Array.isArray(value) || nodeUtilTypes.isProxy(value)
+      || Object.getPrototypeOf(value) !== Array.prototype
+      || value.length < 1 || value.length > 256
+      || Reflect.ownKeys(value).length !== value.length + 1) return undefined;
+    const layers: string[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+        || typeof descriptor.value !== 'string' || !IMAGE_PATTERN.test(descriptor.value)) return undefined;
+      layers.push(descriptor.value);
+    }
+    return layers;
+  };
+  const base = snapshot(baseLayers);
+  const candidate = snapshot(candidateLayers);
+  return base !== undefined && candidate !== undefined
+    && candidate.length === base.length + 2
+    && base.every((layer, index) => candidate[index] === layer);
+}
+
 function verifyImageInspectionV1(
   baseInspection: any,
   inspection: any,
@@ -1088,8 +1116,7 @@ function verifyImageInspectionV1(
     || !baseInspection.RepoDigests.includes(APPROVED_NODE_BASE_IMAGE_V1)
     || baseInspection?.Os !== 'linux' || baseInspection?.Architecture !== 'amd64'
     || inspection?.Os !== 'linux' || inspection?.Architecture !== 'amd64'
-    || imageLayers.length !== baseLayers.length + 1
-    || !baseLayers.every((layer, index) => imageLayers[index] === layer)
+    || !hasExactCandidateRootFsExtensionV1(baseLayers, imageLayers)
     || !exactStringArray(imageLayers, job.expectedAttestation.rootFsLayers)
     || inspection?.Id !== job.image || typeof labels !== 'object' || labels === null
     || canonicalImageConfigSha256V1(inspection?.Config) !== job.expectedAttestation.imageConfigSha256
@@ -1263,10 +1290,12 @@ async function executeAdmissionSandboxDockerWithRunnerV1(
   let authoritativeId: string | undefined;
   let creationAttempted = false;
   let createStdout: string | undefined;
+  let diagnosticStage = 'base-image-inspect';
   try {
     const baseInspection = parseJsonResult(await runner(createDockerCommandInvocationV1([
       'image', 'inspect', '--format={{json .}}', APPROVED_NODE_BASE_IMAGE_V1,
     ])));
+    diagnosticStage = 'candidate-image-inspect-and-verify';
     attestation = verifyImageInspectionV1(
       baseInspection,
       parseJsonResult(await runner(createDockerCommandInvocationV1([
@@ -1274,6 +1303,7 @@ async function executeAdmissionSandboxDockerWithRunnerV1(
       ]))),
       job,
     );
+    diagnosticStage = 'container-create';
     creationAttempted = true;
     const create = await runner(buildAdmissionFeatureSandboxInvocationV1({
       image: job.image,
@@ -1288,11 +1318,13 @@ async function executeAdmissionSandboxDockerWithRunnerV1(
       createStdout = undefined;
     }
     resultText(createSnapshot);
+    diagnosticStage = 'container-identity';
     const cidId = await readOwnedContainerIdFileV1(job.temporary);
     if (!cidId || (createStdout !== undefined && createStdout.length > 0 && createStdout !== cidId)) {
       throw new Error('container identity mismatch');
     }
     authoritativeId = cidId;
+    diagnosticStage = 'container-inspect-and-verify';
     verifyContainerInspectionV1(
       parseJsonResult(await runner(createDockerCommandInvocationV1([
         'container', 'inspect', '--format={{json .}}', cidId,
@@ -1300,6 +1332,7 @@ async function executeAdmissionSandboxDockerWithRunnerV1(
       job,
       cidId,
     );
+    diagnosticStage = 'worker-copy-and-verify';
     const workerArchive = snapshotDockerCommandResultV1(await runner(createDockerCommandInvocationV1([
       'container', 'cp', `${cidId}:/app/worker.mjs`, '-',
     ], undefined, 1_048_576)));
@@ -1314,6 +1347,7 @@ async function executeAdmissionSandboxDockerWithRunnerV1(
     )) !== job.expectedAttestation.candidateSha256) {
       throw new Error('candidate content mismatch');
     }
+    diagnosticStage = 'attestation-copy-and-verify';
     const attestationArchive = snapshotDockerCommandResultV1(await runner(createDockerCommandInvocationV1([
       'container', 'cp', `${cidId}:/app/attestation.json`, '-',
     ], undefined, 1_048_576)));
@@ -1326,10 +1360,17 @@ async function executeAdmissionSandboxDockerWithRunnerV1(
       inspectDockerCopyArchiveV1(attestationArchive.stdout, 'attestation.json'),
       job.expectedAttestation,
     );
-    resultText(await runner(createDockerCommandInvocationV1(
+    diagnosticStage = 'input-copy';
+    const inputCopy = snapshotDockerCommandResultV1(await runner(createDockerCommandInvocationV1(
       ['container', 'cp', '-a', '-', `${cidId}:/`],
       job.inputArchive,
     )));
+    process.stderr.write(`input-copy-shape:${inputCopy.exitCode}:${Number(inputCopy.launchFailed)}:${Number(inputCopy.timedOut)}:${Number(Boolean(inputCopy.outputExceeded))}:${Number(Boolean(inputCopy.stderrExceeded))}:${inputCopy.stdout.byteLength}:${inputCopy.stderr.byteLength}\n`);
+    const inputCopyError = new TextDecoder('utf-8', { fatal: true }).decode(inputCopy.stderr)
+      .replace(/[0-9a-f]{64}/g, '<container-id>');
+    process.stderr.write(`input-copy-error:${inputCopyError}`);
+    resultText(inputCopy);
+    diagnosticStage = 'container-start';
     const started = snapshotDockerCommandResultV1(await runner(
       createDockerCommandInvocationV1(['container', 'start', '--attach', cidId]),
     ));
@@ -1344,6 +1385,7 @@ async function executeAdmissionSandboxDockerWithRunnerV1(
       launchFailed: started.launchFailed,
     };
   } catch {
+    process.stderr.write(`sandbox-stage:${diagnosticStage}\n`);
     execution = { ...execution, launchFailed: true };
   }
   const cleanupVerified = await cleanupOwnedContainersV1(
