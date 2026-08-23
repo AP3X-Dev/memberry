@@ -2200,6 +2200,17 @@ describe('RET-010 holdout pre-flight and finalize fallback receipts', () => {
     expect(source).not.toMatch(/event\.ref !== 'master'/);
   });
 
+  it('counts only the holdout split from the dual-split scoring loader', async () => {
+    const source = await readFile(GATE, 'utf8');
+    const run = source.slice(source.indexOf('async function runGate('),
+      source.indexOf('
+function holdoutSplitOnly<'));
+    expect(run).toContain("holdoutSplitOnly(await loadG2HoldoutScenariosForScoring('recall'))");
+    expect(run).toContain("holdoutSplitOnly(await loadG2HoldoutScenariosForScoring('precision'))");
+    expect(run).not.toMatch(/const \w+Scenarios = await loadG2HoldoutScenariosForScoring/);
+    expect(source).toContain("scenario.input.split === 'holdout'");
+  });
+
   it('attaches the fixed fallback path from the workflow without a structured output', async () => {
     const workflow = await readFile(resolve(ROOT, '.github/workflows/ret010-holdout-qualification.yml'), 'utf8');
     expect(workflow).toContain("if: ${{ always() && steps.ret010_holdout_finalize.outcome != 'success' }}");

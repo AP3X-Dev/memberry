@@ -969,7 +969,10 @@ async function runGate(hooks: {
       stage = 'load-holdout';
       const { loadG2HoldoutScenariosForScoring } = await import('../datasets/load-suite.js');
       const { compareRegisteredAdapters } = await import('../registered-adapters.js');
-      const recallScenarios = await loadG2HoldoutScenariosForScoring('recall');
+      // The scoring loader returns both splits by contract and relies on the
+      // runner's split binding to drop the dev half; the count below is the
+      // holdout lane alone, so the dev scenarios are removed here first.
+      const recallScenarios = holdoutSplitOnly(await loadG2HoldoutScenariosForScoring('recall'));
       if (recallScenarios.length !== 10
         || new Set(recallScenarios.map((item) => item.input.id)).size !== 10) reject();
       stage = 'recall-comparison';
@@ -984,7 +987,7 @@ async function runGate(hooks: {
         control: recallControl, candidate: recallCandidate, delta: recallCandidate - recallControl };
       if (recall.delta < 0) reject();
       stage = 'load-holdout';
-      const precisionScenarios = await loadG2HoldoutScenariosForScoring('precision');
+      const precisionScenarios = holdoutSplitOnly(await loadG2HoldoutScenariosForScoring('precision'));
       if (precisionScenarios.length !== 10
         || new Set(precisionScenarios.map((item) => item.input.id)).size !== 10) reject();
       stage = 'precision-comparison';
@@ -1114,6 +1117,10 @@ async function writeFinalizeReceipt(stage: Stage): Promise<void> {
     gateOutcome: outcome === 'success' || outcome === 'failure' ? outcome : 'unknown',
     gateReceipt, ...runtimeOnly(),
   });
+}
+
+function holdoutSplitOnly<T extends { input: { split?: unknown } }>(scenarios: readonly T[]): readonly T[] {
+  return scenarios.filter((scenario) => scenario.input.split === 'holdout');
 }
 
 function checkpointIdentity(test: boolean, expected: JsonRecord): void {
