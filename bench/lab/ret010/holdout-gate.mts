@@ -3,7 +3,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  close as fsClose, constants as fsConstants, fstat as fsFstat, fstatSync, read as fsRead,
+  close as fsClose, closeSync as fsCloseSync, constants as fsConstants, fstat as fsFstat,
+  fstatSync, read as fsRead,
 } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -700,12 +701,29 @@ function fixtureMode(command: 'run' | 'finalize'): boolean {
   for (const key of required) if (!Object.hasOwn(process.env, key)) reject();
   return true;
 }
-function rejectOpenFd3(): void {
+type InheritedFd3Io = {
+  fstat?: (fd: number) => {
+    mode: number;
+    isFIFO(): boolean;
+    isSocket?(): boolean;
+    isFile?(): boolean;
+    isDirectory?(): boolean;
+    isCharacterDevice?(): boolean;
+    isBlockDevice?(): boolean;
+  };
+  close?: (fd: number) => void;
+};
+function closeInheritedFd3(io: InheritedFd3Io = {}): void {
+  const fstat = io.fstat ?? fstatSync;
+  const close = io.close ?? fsCloseSync;
   try {
-    const stat = fstatSync(3);
-    if ((stat.mode & fsConstants.S_IFMT) !== 0 || stat.isFIFO() || stat.isSocket()
-      || stat.isFile() || stat.isDirectory() || stat.isCharacterDevice() || stat.isBlockDevice()) reject();
-    return;
+    const stat = fstat(3);
+    const typed = (stat.mode & fsConstants.S_IFMT) !== 0 || stat.isFIFO()
+      || stat.isSocket?.() === true || stat.isFile?.() === true
+      || stat.isDirectory?.() === true || stat.isCharacterDevice?.() === true
+      || stat.isBlockDevice?.() === true;
+    if (!typed) return;
+    close(3);
   } catch (error) {
     if (rejectionCode(error) === 'EBADF') return;
     reject();
@@ -900,13 +918,13 @@ async function runGate(hooks: {
   beforeRealImports?: () => Promise<void>;
 } = {}): Promise<void> {
   const test = fixtureMode('run');
-  if (!test) rejectOpenFd3();
   const id = identity(test); const parent = await runnerRoot(test, true);
   const root = resolve(parent, receiptName(id));
   await mkdir(root, { recursive: false, mode: 0o700 });
   let stage: keyof typeof FAILURE_CLASS_BY_STAGE = 'source-integrity';
   try {
-    if (test) stage = 'load-holdout';
+    if (!test) closeInheritedFd3();
+    else stage = 'load-holdout';
     const fixtureInput = test ? await fixtureBytes(hooks.fixtureIo) : undefined;
     const dispatch = test ? undefined : await validateHostedDispatch();
     const approvalBytes = dispatch?.approvalBytes;
@@ -1018,7 +1036,7 @@ async function finalizeGate(hooks: {
   randomBytes?: (size: number) => Buffer;
 } = {}): Promise<void> {
   const test = fixtureMode('finalize');
-  rejectOpenFd3();
+  closeInheritedFd3();
   if (!test) await validateHostedDispatch();
   const id = identity(test); const parent = await runnerRoot(test, false);
   const outcome = test ? process.env.RET010_HOLDOUT_TEST_GATE_OUTCOME : process.env.RET010_HOLDOUT_GATE_OUTCOME;
