@@ -345,7 +345,6 @@ if (typeof originalWebSocket === 'function') {
   restorers.unshift(() => defineOwn(globalThis, 'WebSocket', descriptor));
 }
 syncBuiltinESMExports();
-guardActive = action === 'run-fixture';
 const { __testAggregateFixture, __testFailureReceipt, __testFinalizeGate, __testFixtureBytes,
   __testRetainedCustody, __testRunGate } = await import(
   ${JSON.stringify(pathToFileURL(gatePath).href)});
