@@ -22,6 +22,7 @@
 import type {
   AdapterCapability,
   LabMemory,
+  LabQueryResult,
   QueryRequest,
   QueryResponse,
 } from '../contracts/adapter.js';

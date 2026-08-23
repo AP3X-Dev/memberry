@@ -82,11 +82,15 @@ describe('RET-010A qualification and binding boundary', () => {
     expect(workflow.indexOf('Reverify exact tracked source before qualification'))
       .toBeLessThan(workflow.indexOf('Run closed RET-010 qualification gate'));
     expect(workflow).toContain('bench/lab/ret010/holdout-gate.mts');
-    expect(workflow).toContain('RET010_QUALIFICATION_SHA: ${{ inputs.qualification_sha }}');
-    expect(workflow).toContain('RET010_APPROVAL_DIGEST: ${{ inputs.approval_digest }}');
-    expect(workflow).toContain('if: always()');
+    expect(workflow.match(/RET010_HOLDOUT_QUALIFICATION_SHA: \$\{\{ inputs\.qualification_sha \}\}/g))
+      .toHaveLength(2);
+    expect(workflow.match(/RET010_HOLDOUT_APPROVAL_DIGEST: \$\{\{ inputs\.approval_digest \}\}/g))
+      .toHaveLength(2);
+    expect(workflow).not.toContain('RET010_QUALIFICATION_SHA');
+    expect(workflow).not.toContain('RET010_APPROVAL_DIGEST');
+    expect(workflow).toContain('if: ${{ always() }}');
     expect(workflow).toContain('if-no-files-found: error');
-    expect(workflow).toContain('path: ${{ runner.temp }}/ret010-holdout-qualification/receipt-or-tombstone.json');
+    expect(workflow).toContain('path: ${{ steps.ret010_holdout_finalize.outputs.upload_path }}');
     expect(workflow).not.toMatch(/path:.*(?:bench\/lab\/datasets|input\.jsonl|oracle\.jsonl)/);
     const uses = [...workflow.matchAll(/uses:\s*([^\s]+)/g)].map((match) => match[1]!);
     expect(uses).toEqual([

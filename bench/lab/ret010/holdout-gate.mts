@@ -582,6 +582,7 @@ async function writeExclusive(root: string, name: string, value: JsonRecord): Pr
 type FixtureFdStat = {
   dev: bigint; ino: bigint; mode: bigint;
   isFIFO(): boolean;
+  isSocket?(): boolean;
 };
 type FixtureFdIo = {
   fstat?: (fd: number) => Promise<FixtureFdStat>;
@@ -611,7 +612,9 @@ function closeFd(fd: number): Promise<void> {
 }
 function fixturePipe(stat: FixtureFdStat): boolean {
   const format = stat.mode & BigInt(fsConstants.S_IFMT);
-  return stat.isFIFO() || format === BigInt(fsConstants.S_IFIFO);
+  return stat.isFIFO() || stat.isSocket?.() === true
+    || format === BigInt(fsConstants.S_IFIFO)
+    || (typeof fsConstants.S_IFSOCK === 'number' && format === BigInt(fsConstants.S_IFSOCK));
 }
 function fixtureFdIdentity(stat: FixtureFdStat): readonly [bigint, bigint, bigint] {
   const identity: [bigint, bigint, bigint] = [stat.dev, stat.ino, stat.mode];
@@ -699,12 +702,14 @@ function fixtureMode(command: 'run' | 'finalize'): boolean {
 }
 function rejectOpenFd3(): void {
   try {
-    fstatSync(3);
+    const stat = fstatSync(3);
+    if ((stat.mode & fsConstants.S_IFMT) !== 0 || stat.isFIFO() || stat.isSocket()
+      || stat.isFile() || stat.isDirectory() || stat.isCharacterDevice() || stat.isBlockDevice()) reject();
+    return;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EBADF') return;
+    if (rejectionCode(error) === 'EBADF') return;
     reject();
   }
-  reject();
 }
 function aggregateFixture(value: Readonly<JsonRecord>,
   setStage: (stage: keyof typeof FAILURE_CLASS_BY_STAGE) => void = () => {}): JsonRecord {

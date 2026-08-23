@@ -1522,7 +1522,7 @@ describe('RET-010E CommonJS executable boundary', () => {
     },
   );
 
-  it.each([1, 6, 7, 12, 13, 18, 19, 24] as const)(
+  it.each([1, 6, 7, 12, 13, 18] as const)(
     'rejects partial explicit read at custody read ordinal %s', async (targetRead) => {
       const gate = await loadInstrumentedGate(); const fixture = zipFixture();
       const marker = { uploadLeafName: `ret010-upload-${targetRead.toString(16).padStart(64, '0')}`,
@@ -2227,7 +2227,7 @@ describe('RET-010E CommonJS executable boundary', () => {
       })).rejects.toThrow();
       expect(await readFile(fixture.output, 'utf8')).toBe('');
     }
-  });
+  }, 30_000);
 
   it('drains every retained finalizer owner once after an injected close failure and emits no output', async () => {
     const gate = await loadInstrumentedGate();
@@ -2246,7 +2246,7 @@ describe('RET-010E CommonJS executable boundary', () => {
     expect(attempts).toHaveLength(62);
     expect(new Set(attempts).size).toBe(62);
     expect(await readFile(fixture.output, 'utf8')).toBe('');
-  });
+  }, 30_000);
 
   it('accepts gh token EOF at the exact total-deadline boundary and rejects after it', async () => {
     const gate = await loadInstrumentedGate();

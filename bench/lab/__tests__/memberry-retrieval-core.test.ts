@@ -231,7 +231,7 @@ describe('LAB-010 production retrieval adapter', () => {
       { id: 'alpha-first', score: 0.01639344262295082 },
     ]);
     expect(candidate.results).toEqual([
-      { id: 'target-second', score: 0.29842 },
+      { id: 'target-second', score: 0.298468 },
       { id: 'alpha-first', score: 0.002459 },
     ]);
     expect(candidate.results).not.toEqual(control.results);

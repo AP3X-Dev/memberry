@@ -2050,6 +2050,8 @@ describe('RET-010 holdout fixture boundary', () => {
     expect(result.stderr).toBe('');
     expect(JSON.parse(result.stdout)).toEqual({
       rejected: true, attempts: 0, uniqueAttempts: 0, acceptedLength: null,
+      aggregateResult: null, aggregateInputStable: null, aggregateDecision: null,
+      failureReceiptResult: null,
       fstats: 0, readCalls: 0, fixtureCloseAttempts: 0, realImports: 0,
       fixtureForbiddenFileAttempts: 0, fixtureNetworkAttempts: 0,
       fixtureForbiddenLoaderAttempts: 0, negativeControlsCaught: 0, output: '',
@@ -2071,6 +2073,8 @@ describe('RET-010 holdout fixture boundary', () => {
     expect(result.stderr).toBe('');
     expect(JSON.parse(result.stdout)).toEqual({
       rejected: true, attempts: 5, uniqueAttempts: 5, acceptedLength: null,
+      aggregateResult: null, aggregateInputStable: null, aggregateDecision: null,
+      failureReceiptResult: null,
       fstats: 0, readCalls: 0, fixtureCloseAttempts: 0, realImports: 0,
       fixtureForbiddenFileAttempts: 0, fixtureNetworkAttempts: 0,
       fixtureForbiddenLoaderAttempts: 0, negativeControlsCaught: 0, output: '',
