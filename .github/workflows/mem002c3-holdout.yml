@@ -24,7 +24,10 @@ jobs:
       HISTORICAL_CANDIDATE_SUBTREE_OID: 03d7c50515f6ab767fd41b7d41bd231531a4ab58
       CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID: 1f1318ce97934145d496cc55642fdd37a3f4437d
       RETIRED_V1_ONE_SHOT_KEY: 334f7e05460d405878a758a6172057fbc1fdac5d3696fc5a8dbe17b8ab070935
+      RETIRED_V2_ONE_SHOT_KEY: e500407fcd48106f66131f75a3e6ee2f127758ae0c6f8b37835c968672c9bc98
+      RETIRED_V2_BURN_TARGET_SHA: 35dd27581e1457294b4d8d8ac86a648356dcded7
       KNOWN_FAILED_V1_RUN_ID: "32001044115"
+      KNOWN_FAILED_V2_RUN_ID: "32686004041"
       INPUT_SHA256: sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24
       OUTPUT_SHA256: sha256:5b43576a3b7b2f19c8dc8280b4259783c53643a2f620aa35abea7dfaa8586a83
       BASE_IMAGE: node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9
@@ -76,30 +79,42 @@ jobs:
           authority_counts="$(
             gh api --method GET --paginate --slurp \
               "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
-              | RETIRED_KEY="$RETIRED_V1_ONE_SHOT_KEY" V2_KEY="$one_shot_key" node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let retired = 0; let v2 = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); for (const artifact of page.artifacts) { if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact) || typeof artifact.name !== "string") process.exit(2); if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED_KEY}-`)) retired += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.V2_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.V2_KEY}-`)) v2 += 1; } } process.stdout.write(`${retired} ${v2}`);'
+              | RETIRED_KEY="$RETIRED_V1_ONE_SHOT_KEY" RETIRED2_KEY="$RETIRED_V2_ONE_SHOT_KEY" V3_KEY="$one_shot_key" node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let retired = 0; let retired2 = 0; let v3 = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); for (const artifact of page.artifacts) { if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact) || typeof artifact.name !== "string") process.exit(2); if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED_KEY}-`)) retired += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED2_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED2_KEY}-`)) retired2 += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.V3_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.V3_KEY}-`)) v3 += 1; } } process.stdout.write(`${retired} ${retired2} ${v3}`);'
           )"
-          read -r retired_artifacts v2_artifacts <<<"$authority_counts"
-          [[ "$retired_artifacts" =~ ^[0-9]+$ && "$v2_artifacts" =~ ^[0-9]+$ ]]
+          read -r retired_artifacts retired_v2_artifacts v3_artifacts <<<"$authority_counts"
+          [[ "$retired_artifacts" =~ ^[0-9]+$ && "$retired_v2_artifacts" =~ ^[0-9]+$ && "$v3_artifacts" =~ ^[0-9]+$ ]]
           failed_run_artifacts="$(
             gh api --method GET --paginate --slurp \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${KNOWN_FAILED_V1_RUN_ID}/artifacts?per_page=100" \
               | node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); count += page.artifacts.length; } process.stdout.write(String(count));'
           )"
           [[ "$failed_run_artifacts" =~ ^[0-9]+$ ]]
+          failed_v2_run_artifacts="$(
+            gh api --method GET --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${KNOWN_FAILED_V2_RUN_ID}/artifacts?per_page=100" \
+              | node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); count += page.artifacts.length; } process.stdout.write(String(count));'
+          )"
+          [[ "$failed_v2_run_artifacts" =~ ^[0-9]+$ ]]
           api_root="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
           retired_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V1_ONE_SHOT_KEY}")"
-          v2_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${one_shot_key}")"
+          retired_v2_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V2_ONE_SHOT_KEY}")"
+          retired_v2_target_sha="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V2_ONE_SHOT_KEY}" | node -e 'const ref = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (ref === null || typeof ref !== "object" || ref.object === null || typeof ref.object !== "object" || typeof ref.object.sha !== "string") process.exit(2); process.stdout.write(ref.object.sha);')"
+          [[ "$retired_v2_target_sha" == "$RETIRED_V2_BURN_TARGET_SHA" ]]
+          v3_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${one_shot_key}")"
           npx tsx "$SCORER_ENTRY" burn-authority-authorize \
-            "$retired_lookup_status" "$v2_lookup_status" "$retired_artifacts" \
-            "$v2_artifacts" "$failed_run_artifacts"
+            "$retired_lookup_status" "$retired_v2_lookup_status" "$v3_lookup_status" \
+            "$retired_artifacts" "$retired_v2_artifacts" "$v3_artifacts" \
+            "$failed_run_artifacts" "$failed_v2_run_artifacts"
           {
             printf 'MEMBERRY_ONE_SHOT_KEY=%s\n' "$one_shot_key"
             printf 'MEMBERRY_BURN_ARTIFACT_NAME=%s\n' "$burn_artifact_name"
             printf 'MEMBERRY_RESULT_ARTIFACT_NAME=%s\n' "$result_artifact_name"
             printf 'MEMBERRY_PRIOR_AUTHORITATIVE_RECEIPTS=0\n'
             printf 'MEMBERRY_RETIRED_V1_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_artifacts"
-            printf 'MEMBERRY_PRIOR_EVIDENCE_ARTIFACT_COUNT=%s\n' "$v2_artifacts"
+            printf 'MEMBERRY_RETIRED_V2_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_v2_artifacts"
+            printf 'MEMBERRY_PRIOR_EVIDENCE_ARTIFACT_COUNT=%s\n' "$v3_artifacts"
             printf 'MEMBERRY_KNOWN_FAILED_V1_RUN_ARTIFACT_COUNT=%s\n' "$failed_run_artifacts"
+            printf 'MEMBERRY_KNOWN_FAILED_V2_RUN_ARTIFACT_COUNT=%s\n' "$failed_v2_run_artifacts"
           } >>"$GITHUB_ENV"
 
       - name: Export exact candidate-only build context
@@ -359,6 +374,7 @@ jobs:
             "$MEMBERRY_C3_SECRET_DIR/prediction.json" \
             "$MEMBERRY_C3_SECRET_DIR/candidate.stderr" \
             "$MEMBERRY_C3_SECRET_DIR/build.log" \
+            "$MEMBERRY_C3_SECRET_DIR/build-receipt.json" \
             "$MEMBERRY_C3_SECRET_DIR/candidate-run-count"
           rm -rf "$MEMBERRY_C3_CONTEXT_DIR"
           [[ ! -e "$MEMBERRY_C3_SECRET_DIR/prediction.json" ]]

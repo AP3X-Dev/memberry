@@ -586,7 +586,8 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     expect(workflow).toContain("node -e 'const pages = JSON.parse");
     expect(workflow).toContain('typeof artifact.name !== "string"');
     expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED_KEY}`');
-    expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.V2_KEY}`');
+    expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED2_KEY}`');
+    expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.V3_KEY}`');
     expect(workflow).not.toContain('expired == false');
     expect(workflow).toContain('Upload only aggregate receipt evidence');
     expect(workflow).toContain('path: ${{ env.MEMBERRY_C3_PUBLIC_DIR }}/start.json');
@@ -607,16 +608,16 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
       spawnSync(process.execPath, ['-e', parser!], {
         input: JSON.stringify(pages),
         encoding: 'utf8',
-        env: { ...process.env, RETIRED_KEY: 'retired', V2_KEY: 'current' },
+        env: { ...process.env, RETIRED_KEY: 'retired', RETIRED2_KEY: 'retired2', V3_KEY: 'current' },
       });
 
     const valid = run([
       {
-        artifacts: [{ name: 'other' }, { name: 'memberry-mem002c3-burn-retired' }, { name: 'memberry-mem002c3-result-current-123' }],
+        artifacts: [{ name: 'other' }, { name: 'memberry-mem002c3-burn-retired' }, { name: 'memberry-mem002c3-burn-retired2' }, { name: 'memberry-mem002c3-result-current-123' }],
       },
     ]);
     expect(valid.status).toBe(0);
-    expect(valid.stdout).toBe('1 1');
+    expect(valid.stdout).toBe('1 1 1');
 
     for (const malformed of [[], [{}], [{ artifacts: null }], [{ artifacts: [{}] }], [{ artifacts: [{ name: 7 }] }]]) {
       expect(run(malformed).status).not.toBe(0);
