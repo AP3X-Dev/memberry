@@ -177,6 +177,58 @@ export class EpisodicStore {
     }
   }
 
+  /**
+   * MEM-005: keyset continuation window for the promotion fetch. Identical
+   * eligibility, exclusion, and ordering to findPromotable, plus a keyset
+   * predicate over the computed tier so a pass can resume strictly after the
+   * position `after` instead of restarting from the head — the fix for the
+   * head-of-order starvation findPromotable alone cannot avoid.
+   */
+  async findPromotableKeyset(
+    scope: string | undefined,
+    limit: number,
+    tenantId: string | undefined,
+    after: { classTier: number; createdAt: string; id: string },
+  ): Promise<EpisodicNode[]> {
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `MATCH (e:Episodic)
+         WHERE ($scope IS NULL OR e.scope = $scope)
+           AND ($tenantId IS NULL OR coalesce(e.tenant_id, $tenantId) = $tenantId)
+           AND (
+             (e.memory_type = 'decision' AND e.outcome = 'approved')
+             OR e.embedding IS NOT NULL
+           )
+           AND NOT EXISTS { MATCH (:Semantic)-[:PROMOTED_FROM]->(e) }
+         WITH e, CASE
+           WHEN e.memory_type = 'decision' AND e.outcome = 'approved' THEN 0
+           WHEN e.memory_type IN ['pattern', 'convention'] THEN 1
+           ELSE 2
+         END AS tier
+         WHERE tier > $afterTier
+            OR (tier = $afterTier AND e.created_at > $afterCreatedAt)
+            OR (tier = $afterTier AND e.created_at = $afterCreatedAt AND e.id > $afterId)
+         RETURN e
+         ORDER BY tier ASC, e.created_at ASC, e.id ASC
+         LIMIT toInteger($limit)`,
+        {
+          scope: scope ?? null,
+          tenantId: tenantId ?? null,
+          limit,
+          afterTier: after.classTier,
+          afterCreatedAt: after.createdAt,
+          afterId: after.id,
+        },
+      );
+      return result.records.map((r) =>
+        this.mapEpisodic(r.get('e').properties as Record<string, unknown>),
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
   /** Shared Episodic mapping so getById and findPromotable build the node
    *  IDENTICALLY — single source of truth, no drift. */
   private mapEpisodic(props: Record<string, unknown>): EpisodicNode {

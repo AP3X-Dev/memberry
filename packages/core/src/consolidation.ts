@@ -14,6 +14,13 @@ import { extractFacts } from './extract.js';
 import { readEnv } from './config/settings.js';
 import type { LlmClient } from './llm.js';
 import { clusterHasIndependentCorroborationV1 } from './evidence-diversity.js';
+import {
+  advancePromotionCursorV1,
+  parsePromotionCursorV1,
+  planPromotionFetchV1,
+  promotionCursorRedisKeyV1,
+  serializePromotionCursorV1,
+} from './promotion-scheduler.js';
 
 // ─── Runtime validators ──────────────────────────────────────────────────────
 
@@ -251,6 +258,12 @@ export interface ConsolidationRedisLayer {
   cache: {
     invalidateByNodeId(nodeId: string): Promise<number>;
   };
+  /** MEM-005: plain string KV used only to persist the promotion keyset cursor.
+   *  All three are optional — a layer without them (every existing adapter and
+   *  test double) keeps today's head-only promotion fetch. */
+  get?(key: string): Promise<string | null>;
+  set?(key: string, value: string): Promise<void>;
+  del?(key: string): Promise<void>;
 }
 
 export interface ConsolidationFactLayer {
@@ -299,6 +312,15 @@ export interface ConsolidationNeo4jLayer {
       scope: string | undefined,
       limit: number,
       tenantId?: string,
+    ): Promise<EpisodicNode[]>;
+    /** MEM-005: keyset continuation of the findPromotable order, resuming
+     *  strictly after `after`. Optional — without it the engine performs
+     *  exactly one full-limit findPromotable fetch, as it always has. */
+    findPromotableKeyset?(
+      scope: string | undefined,
+      limit: number,
+      tenantId: string | undefined,
+      after: { classTier: number; createdAt: string; id: string },
     ): Promise<EpisodicNode[]>;
     /** OPT-45: batched tenant_id projection for many episodes in ONE query
      *  (optional — _deriveTenantFromEpisodes falls back to per-id getById when
@@ -639,7 +661,54 @@ export class ConsolidationEngine {
 
     let candidates: EpisodicNode[];
     try {
-      candidates = await accessor.findPromotable(scopeFilter, cfg.maxCandidates, this.tenantId);
+      // MEM-005: dual-window fetch. The head window keeps today's first-pass
+      // semantics; a persisted keyset cursor drives a continuation window so a
+      // stuck eligible-but-unpromotable backlog cannot starve newer evidence.
+      // Any scheduler/redis failure degrades to today's full-limit head-only
+      // fetch — scheduling must never break a promotion pass. Concurrent runs
+      // may race the unguarded cursor read-modify-write; the drift is benign
+      // (the cursor jumps; wrap-around still visits every episode).
+      let scheduled: EpisodicNode[] | null = null;
+      const keyset = accessor.findPromotableKeyset?.bind(accessor);
+      if (keyset) {
+        try {
+          if (
+            typeof this.redis.get !== 'function' ||
+            typeof this.redis.set !== 'function' ||
+            typeof this.redis.del !== 'function'
+          ) {
+            throw new Error('redis cursor store unavailable');
+          }
+          const { headLimit, continuationLimit } = planPromotionFetchV1(cfg.maxCandidates);
+          const cursorKey = promotionCursorRedisKeyV1(scopeFilter ?? null, this.tenantId ?? null);
+          const cursor = parsePromotionCursorV1(await this.redis.get(cursorKey));
+          const headBatch = await accessor.findPromotable(scopeFilter, headLimit, this.tenantId);
+          // Seed pass (no valid cursor): no continuation fetch; the cursor is
+          // seeded from the head batch so pass 2 continues after the window.
+          const continuationBatch = cursor
+            ? await keyset(scopeFilter, continuationLimit, this.tenantId, cursor)
+            : null;
+          const next = advancePromotionCursorV1(continuationBatch, continuationLimit, headBatch, headLimit);
+          if (next) await this.redis.set(cursorKey, serializePromotionCursorV1(next));
+          else await this.redis.del(cursorKey);
+          // Union by episode id, head wins — an episode straddling both
+          // windows must enter the downstream pipeline exactly once.
+          const byId = new Map<string, EpisodicNode>();
+          for (const episode of headBatch) byId.set(episode.id, episode);
+          for (const episode of continuationBatch ?? []) {
+            if (!byId.has(episode.id)) byId.set(episode.id, episode);
+          }
+          scheduled = [...byId.values()];
+        } catch (schedErr: unknown) {
+          console.error(
+            '[consolidation] scheduler: degraded to head-only fetch:',
+            schedErr instanceof Error ? schedErr.message : schedErr,
+          );
+          scheduled = null;
+        }
+      }
+      candidates =
+        scheduled ?? (await accessor.findPromotable(scopeFilter, cfg.maxCandidates, this.tenantId));
     } catch (err: unknown) {
       console.error(
         '[consolidation] findPromotable failed; skipping promote pass:',
