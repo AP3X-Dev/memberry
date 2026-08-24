@@ -84,12 +84,17 @@ function parseBoundedFloat(envVar: string, def: number, min: number, max: number
   return parsed;
 }
 
-/** Enum with a warn-and-disable fallback: an unrecognized value must never enable the pass. */
-function parseMode(): 'disabled' | 'live' {
-  const raw = (readEnv('MEMBERRY_LIFECYCLE_V1') ?? 'disabled').trim().toLowerCase();
+/**
+ * Enum with a warn-and-disable fallback: an unrecognized value must never
+ * enable the pass. Parameterized (MEM-007) so the anti-entropy sub-flag shares
+ * the exact MEM-006 semantics; the MEMBERRY_LIFECYCLE_V1 behavior and warning
+ * text are byte-identical to the pre-parameterized helper.
+ */
+function parseMode(envVar: string): 'disabled' | 'live' {
+  const raw = (readEnv(envVar) ?? 'disabled').trim().toLowerCase();
   if (raw === 'live') return 'live';
   if (raw !== 'disabled' && raw !== '') {
-    console.warn('[lifecycle] MEMBERRY_LIFECYCLE_V1 has an unrecognized value; treating as disabled.');
+    console.warn(`[lifecycle] ${envVar} has an unrecognized value; treating as disabled.`);
   }
   return 'disabled';
 }
@@ -109,7 +114,7 @@ export function resolveLifecycleConfig(defaultExportDir: string): LifecycleConfi
     throw new LifecycleConfigError('blank_value', 'MEMBERRY_LIFECYCLE_EXPORT_DIR');
   }
   return {
-    mode: parseMode(),
+    mode: parseMode('MEMBERRY_LIFECYCLE_V1'),
     dryRun: TRUTHY.has((readEnv('MEMBERRY_LIFECYCLE_DRY_RUN') ?? '').trim().toLowerCase()),
     // 0 would delete every non-protected row — rejected as degenerate (min 100).
     sidecarBudget: parseBoundedInt('MEMBERRY_LIFECYCLE_SIDECAR_BUDGET', 5000, 100, 1_000_000),
@@ -120,5 +125,37 @@ export function resolveLifecycleConfig(defaultExportDir: string): LifecycleConfi
     decayCooldownDays: parseBoundedInt('MEMBERRY_LIFECYCLE_DECAY_COOLDOWN_DAYS', 30, 1, 365),
     batchRows: parseBoundedInt('MEMBERRY_LIFECYCLE_BATCH_ROWS', 1000, 100, 10_000),
     exportDir: exportDirRaw ?? defaultExportDir,
+  };
+}
+
+// ─── MEM-007 anti-entropy sub-flag ──────────────────────────────────────────
+//
+// Deliberately a SEPARATE resolved object, not new fields on LifecycleConfig:
+// the MEM-006 retention/archive pass is already live, and its config shape
+// (and tests) must stay byte-equivalent. The sub-flag exists so the first
+// automated graph writes outside bootstrap are killable without disabling
+// sidecar retention/archive.
+
+export interface AntiEntropyConfig {
+  /** Sub-flag gate: the anti-entropy pass runs only when BOTH this and the MEM-006 mode are 'live'. */
+  mode: 'disabled' | 'live';
+  /** Only consumers idle longer than this (with an empty PEL) are GC'd. */
+  consumerGcIdleMs: number;
+}
+
+/**
+ * Resolve the anti-entropy configuration from the environment. Dry-run, batch
+ * rows, and the export dir are reused from resolveLifecycleConfig — no new
+ * knobs for report-only classes.
+ */
+export function resolveAntiEntropyConfig(): AntiEntropyConfig {
+  return {
+    mode: parseMode('MEMBERRY_LIFECYCLE_ANTIENTROPY'),
+    // 7d default, floor 1h, ceiling 365d — far above the 60s stream reclaim
+    // idle and any plausible consolidation gap, so only genuinely dead
+    // consumer names qualify.
+    consumerGcIdleMs: parseBoundedInt(
+      'MEMBERRY_ANTIENTROPY_CONSUMER_GC_IDLE_MS', 604_800_000, 3_600_000, 31_536_000_000,
+    ),
   };
 }

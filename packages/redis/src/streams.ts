@@ -21,6 +21,20 @@ export interface ConsumedSignal extends ScopedStreamSignal {
 const SIGNALS_STREAM = 'amp:signals';
 const EPISODIC_BUFFER_STREAM = 'amp:episodic-buffer';
 
+export interface ConsumerHealth {
+  name: string;
+  pending: number;
+  idleMs: number;
+}
+
+export interface GroupHealth {
+  /** Total PEL depth for the group (XPENDING summary). */
+  pelCount: number;
+  /** Age of the oldest pending entry, derived from its stream-id timestamp. */
+  oldestIdleMs: number;
+  consumers: ConsumerHealth[];
+}
+
 /** Parse a flat [key, value, key, value, ...] array into a plain object. */
 function parseFields(fields: string[]): Record<string, string> {
   const obj: Record<string, string> = {};
@@ -191,10 +205,87 @@ export class SignalStream {
     }
     return Number(results[0]?.[1] ?? 0);
   }
+
+  /**
+   * Health snapshot of one consumer group on amp:signals (MEM-007 report path).
+   * An absent group reads as zeros — the anti-entropy pass reports, it never
+   * creates groups (absent means no signals were ever consumed).
+   *
+   * Why consumer names need GC at all: every ConsolidationEngine instance
+   * mints a fresh `consolidation-engine-<nanoid>` consumer name — one per MCP
+   * process start and per tenant engine, NOT per consolidation run (there is
+   * no consolidation cron minting names) — so the group's consumer list grows
+   * slowly but unboundedly across process restarts.
+   */
+  async groupHealth(group: string): Promise<GroupHealth> {
+    try {
+      // XPENDING summary form: [count, minId, maxId, [[consumer, count], ...]].
+      const summary = (await (this.redis as unknown as {
+        xpending: (...args: unknown[]) => Promise<unknown>;
+      }).xpending(SIGNALS_STREAM, group)) as
+        [number, string | null, string | null, Array<[string, string]> | null] | null;
+      const consumersRaw = (await (this.redis as unknown as {
+        xinfo: (...args: unknown[]) => Promise<unknown>;
+      }).xinfo('CONSUMERS', SIGNALS_STREAM, group)) as Array<Array<string | number>>;
+      const consumers: ConsumerHealth[] = (consumersRaw ?? []).map((flat) => {
+        const obj: Record<string, string | number> = {};
+        for (let i = 0; i < flat.length; i += 2) obj[String(flat[i])] = flat[i + 1];
+        return {
+          name: String(obj['name'] ?? ''),
+          pending: Number(obj['pending'] ?? 0),
+          idleMs: Number(obj['idle'] ?? 0),
+        };
+      });
+      const pelCount = Number(summary?.[0] ?? 0);
+      const minId = summary?.[1];
+      // Stream ids are `<ms-timestamp>-<seq>`, so the oldest pending age falls
+      // out of the min id without any per-entry XPENDING scan.
+      const oldestIdleMs = pelCount > 0 && minId
+        ? Math.max(0, Date.now() - Number(minId.split('-')[0]))
+        : 0;
+      return { pelCount, oldestIdleMs, consumers };
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.startsWith('NOGROUP')) {
+        return { pelCount: 0, oldestIdleMs: 0, consumers: [] };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * GC dead consumer names (MEM-007 repair path). Hard invariant: NEVER call
+   * XGROUP DELCONSUMER on a consumer with pending entries — Redis drops that
+   * consumer's PEL entries, silently losing undelivered signals. A dead
+   * consumer WITH pending work is left alone (consolidation's own reclaim
+   * drains it within a cycle, see consume() above) and GC'd on a later pass.
+   * The pending check and the DELCONSUMER are two commands; a consumer past
+   * the idle floor cannot acquire new pending entries between them without a
+   * read that resets its idle clock first (accepted race, spec §8 R2).
+   * Removing an absent consumer is a no-op, so re-runs converge.
+   */
+  async removeIdleConsumers(group: string, minIdleMs: number): Promise<string[]> {
+    const health = await this.groupHealth(group);
+    const removed: string[] = [];
+    for (const consumer of health.consumers) {
+      if (consumer.pending !== 0 || consumer.idleMs <= minIdleMs) continue;
+      await this.redis.xgroup('DELCONSUMER', SIGNALS_STREAM, group, consumer.name);
+      removed.push(consumer.name);
+    }
+    return removed;
+  }
 }
 
 export class EpisodicBuffer {
   constructor(private redis: Redis) {}
+
+  /**
+   * XLEN of the buffer stream (MEM-007 report only). Residual entries are
+   * captured-but-unconsumed memory events — they are NEVER auto-deleted, only
+   * surfaced for an operator's eye.
+   */
+  async length(): Promise<number> {
+    return Number(await this.redis.xlen(EPISODIC_BUFFER_STREAM));
+  }
 
   /**
    * Add a micro-event to the episodic buffer stream.

@@ -22,6 +22,11 @@ export class ConsolidationQueue {
     return this.redis.zrem(QUEUE_KEY, member);
   }
 
+  /** ZCARD of the queue — MEM-007 drift report only, never removes members. */
+  async size(): Promise<number> {
+    return this.redis.zcard(QUEUE_KEY);
+  }
+
   async peek(count: number = 10): Promise<Array<{ member: string; score: number }>> {
     const result = await this.redis.zrevrange(QUEUE_KEY, 0, count - 1, 'WITHSCORES');
     const entries: Array<{ member: string; score: number }> = [];
