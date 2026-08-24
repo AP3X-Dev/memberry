@@ -96,3 +96,4 @@ export type {
 export * from './admission-routing.js';
 export * from './confidence-calibration.js';
 export * from './evidence-diversity.js';
+export * from './promotion-scheduler.js';
