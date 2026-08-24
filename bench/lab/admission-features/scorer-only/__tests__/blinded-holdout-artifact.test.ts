@@ -21,9 +21,9 @@ const SHA_C = `sha256:${'c'.repeat(64)}` as const;
 
 function aggregate(overrides: Partial<BlindedHoldoutAggregateV2> = {}): BlindedHoldoutAggregateV2 {
   return {
-    scenarioCount: 3,
-    dimensionCount: 18,
-    agreementCount: 18,
+    scenarioCount: 4,
+    dimensionCount: 24,
+    agreementCount: 24,
     agreementPermille: 1_000,
     availabilityMismatchCount: 0,
     valueMismatchCount: 0,
@@ -101,8 +101,8 @@ describe('MEM-002C3 blinded holdout aggregate-only receipt', () => {
 
   it('reports an aggregate disagreement without case-specific evidence', () => {
     const mismatch = aggregate({
-      agreementCount: 17,
-      agreementPermille: 944,
+      agreementCount: 23,
+      agreementPermille: 958,
       valueMismatchCount: 1,
       passed: false,
     });
@@ -125,8 +125,8 @@ describe('MEM-002C3 blinded holdout aggregate-only receipt', () => {
         runtime(
           22,
           aggregate({
-            agreementCount: 17,
-            agreementPermille: 944,
+            agreementCount: 23,
+            agreementPermille: 958,
             valueMismatchCount: 1,
             passed: false,
           }),

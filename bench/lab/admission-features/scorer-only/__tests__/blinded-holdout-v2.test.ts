@@ -19,6 +19,7 @@ import {
   BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
   BLINDED_HOLDOUT_RETIRED_V1_ONE_SHOT_KEY,
   BLINDED_HOLDOUT_RETIRED_V2_ONE_SHOT_KEY,
+  BLINDED_HOLDOUT_RETIRED_V3_ONE_SHOT_KEY,
   blindedHoldoutOneShotKeyV2,
   parseBlindedHoldoutReceiptV2,
 } from "../blinded-holdout-artifact.js";
@@ -32,9 +33,9 @@ const SCORER_ENTRY = join(
   REPO_ROOT,
   "bench/lab/admission-features/scorer-only/blinded-holdout.ts",
 );
-const POLICY_V2_PATH = join(
+const POLICY_V3_PATH = join(
   REPO_ROOT,
-  "bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v2.json",
+  "bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v3.json",
 );
 const POLICY_V1_PATH = join(
   REPO_ROOT,
@@ -96,7 +97,7 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
     );
     const outputPath = join(temporary, "preflight.json");
     try {
-      const result = runPreflight(POLICY_V2_PATH, outputPath);
+      const result = runPreflight(POLICY_V3_PATH, outputPath);
       expect(result.stderr).toBe("");
       expect(result.status).toBe(0);
       expect(JSON.parse(await readFile(outputPath, "utf8"))).toMatchObject({
@@ -108,16 +109,16 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
       });
 
       const missing = runPreflight(
-        join(temporary, "missing-v2.json"),
+        join(temporary, "missing-v3.json"),
         join(temporary, "missing-preflight.json"),
       );
       expect(missing.status).not.toBe(0);
       expect(missing.stderr).toBe("mem002c3_protocol:policy_authority\n");
 
-      const modifiedV2Path = join(temporary, "modified-v2.json");
+      const modifiedV2Path = join(temporary, "modified-v3.json");
       await writeFile(
         modifiedV2Path,
-        `${await readFile(POLICY_V2_PATH, "utf8")} `,
+        `${await readFile(POLICY_V3_PATH, "utf8")} `,
         "utf8",
       );
       const modified = runPreflight(
@@ -128,7 +129,7 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
       expect(modified.stderr).toBe("mem002c3_protocol:policy_authority\n");
 
       const callerSelectedLegacy = runPreflight(
-        POLICY_V2_PATH,
+        POLICY_V3_PATH,
         join(temporary, "arbitrary-legacy-preflight.json"),
         [POLICY_V1_PATH],
       );
@@ -141,15 +142,15 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
 
   it("splits the repository root and candidate subtree identities without an ambiguous tree field", () => {
     expect(BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID).toBe(
-      "94c75dd3a36a708ce6add1f10eaf606fa4ffea8d",
+      "f6cc81d7b754778be7b772aa3ecddf6ec8e804d7",
     );
     expect(BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID).toBe(
-      "03d7c50515f6ab767fd41b7d41bd231531a4ab58",
+      "08ce328eca824de833d9f762950b4b008a13f723",
     );
     expect(BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID).toBe(
-      "1f1318ce97934145d496cc55642fdd37a3f4437d",
+      "08ce328eca824de833d9f762950b4b008a13f723",
     );
-    expect(BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID).not.toBe(
+    expect(BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID).toBe(
       BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
     );
 
@@ -202,14 +203,18 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
 
     expect(BLINDED_HOLDOUT_RETIRED_V1_ONE_SHOT_KEY).not.toBe(key);
     expect(BLINDED_HOLDOUT_RETIRED_V2_ONE_SHOT_KEY).not.toBe(key);
+    expect(BLINDED_HOLDOUT_RETIRED_V3_ONE_SHOT_KEY).not.toBe(key);
     expect(BLINDED_HOLDOUT_RETIRED_V2_ONE_SHOT_KEY).toBe(
       "sha256:e500407fcd48106f66131f75a3e6ee2f127758ae0c6f8b37835c968672c9bc98",
+    );
+    expect(BLINDED_HOLDOUT_RETIRED_V3_ONE_SHOT_KEY).toBe(
+      "sha256:af2a1940244599d61fe2ab48a922a08966fcad6549f792c4feee4f9d0979305b",
     );
   });
 
   it("derives the exact stable key without invoking hostile object hooks", () => {
     const expected =
-      "sha256:af2a1940244599d61fe2ab48a922a08966fcad6549f792c4feee4f9d0979305b";
+      "sha256:0f55163931d762cbe23f019ac85074be22638c2ea0aabf6b28726757fd62ef11";
     const stable = {
       schemaVersion: "memberry.admission-feature-blinded-holdout-key.v3",
       candidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
@@ -277,7 +282,7 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
 
   it("is invariant to ambient JSON and Object prototype drift with zero hooks", () => {
     const expected =
-      "sha256:af2a1940244599d61fe2ab48a922a08966fcad6549f792c4feee4f9d0979305b";
+      "sha256:0f55163931d762cbe23f019ac85074be22638c2ea0aabf6b28726757fd62ef11";
     const originalJson = globalThis.JSON;
     const originalOwnKeys = Reflect.ownKeys;
     const originalGetPrototypeOf = Object.getPrototypeOf;
@@ -321,33 +326,41 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
     }
   });
 
-  it("checks retired-v1, retired-v2, and v3 durable and evidence authorities before any start", () => {
+  it("checks all retired keys and the current authority before any start", () => {
     const clean = {
       retiredV1LookupStatus: 404,
       retiredV2LookupStatus: 200,
-      v3LookupStatus: 404,
+      retiredV3LookupStatus: 200,
+      currentLookupStatus: 404,
       retiredV1EvidenceArtifactCount: 0,
       retiredV2EvidenceArtifactCount: 1,
-      v3EvidenceArtifactCount: 0,
+      retiredV3EvidenceArtifactCount: 2,
+      currentEvidenceArtifactCount: 0,
       knownFailedV1RunArtifactCount: 0,
       knownFailedV2RunArtifactCount: 1,
+      knownFailedV3RunArtifactCount: 2,
     };
     expect(validateBlindedHoldoutBurnAuthorityAbsenceV2(clean)).toBe(true);
     expect(validateBlindedHoldoutBurnAuthorityAbsenceV2({
       ...clean,
       retiredV2EvidenceArtifactCount: 0,
+      retiredV3EvidenceArtifactCount: 0,
       knownFailedV2RunArtifactCount: 0,
+      knownFailedV3RunArtifactCount: 0,
     })).toBe(true);
 
     for (const mutation of [
       { retiredV1LookupStatus: 200 },
       { retiredV2LookupStatus: 404 },
-      { v3LookupStatus: 200 },
+      { retiredV3LookupStatus: 404 },
+      { currentLookupStatus: 200 },
       { retiredV1EvidenceArtifactCount: 1 },
       { retiredV2EvidenceArtifactCount: 2 },
-      { v3EvidenceArtifactCount: 1 },
+      { retiredV3EvidenceArtifactCount: 3 },
+      { currentEvidenceArtifactCount: 1 },
       { knownFailedV1RunArtifactCount: 1 },
       { knownFailedV2RunArtifactCount: 2 },
+      { knownFailedV3RunArtifactCount: 3 },
     ]) {
       expect(() =>
         validateBlindedHoldoutBurnAuthorityAbsenceV2({ ...clean, ...mutation }),
@@ -380,21 +393,21 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
     );
 
     expect(protocol).toContain(
-      "'../contracts/c2-runtime-policy-receipt-v2.js'",
+      "'../contracts/c2-runtime-policy-receipt-v3.js'",
     );
-    expect(protocol).toContain("'parseAdmissionC2RuntimePolicyReceiptV2'");
+    expect(protocol).toContain("'parseAdmissionC2RuntimePolicyReceiptV3'");
     expect(
       protocol.match(/await loadPolicyReceipt\(receiptPath\)/g),
     ).toHaveLength(3);
     expect(workflow).toContain(
-      "POLICY_RECEIPT: bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v2.json",
+      "POLICY_RECEIPT: bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v3.json",
     );
     expect(workflow).toMatch(/finalize \\\s+"\$POLICY_RECEIPT"/);
     expect(BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256).toBe(
-      "sha256:ff9d0df0e9e5e47da0e34e56294b713ba8a8ce9b216b6bec590b8826f5818f01",
+      "sha256:2a87f47eed1236fbc41b368ca146597993f0d6ed787637f3fb951e029d9422b5",
     );
     expect(BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256).toBe(
-      "sha256:ebad2b9da6dd555c033ff2e7936f0eeeaa0a6552f61d5016125b0b526e133bcb",
+      "sha256:f8c5ade63a13b24c5abfd39432f358651cf4fc9acf9ec50b33b2e482c9b5ab3c",
     );
   });
 
