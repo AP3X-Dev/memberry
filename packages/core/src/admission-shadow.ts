@@ -5,6 +5,11 @@ import {
   type AdmissionObservationV1,
   type TrustedAdmissionInputV1,
 } from './admission.js';
+import {
+  routeAdmissionTierV1,
+  type TierRoutingConfigV1,
+  type TierRoutingRecommendationV1,
+} from './admission-routing.js';
 
 export const ADMISSION_SHADOW_DEFAULT_TIMEOUT_MS = 50;
 export const ADMISSION_SHADOW_MAX_TIMEOUT_MS = 1_000;
@@ -121,12 +126,32 @@ export interface AdmissionShadowSnapshot {
   readonly lastFailureCode: AdmissionShadowFailureCode | null;
 }
 
+/** Structural boundary implemented by the Neo4j AdmissionRoutingRecommendationStore. */
+export interface AdmissionRoutingRecommendationSink {
+  persist(
+    scope: AdmissionObservationScope,
+    recommendation: TierRoutingRecommendationV1,
+  ): Promise<void>;
+}
+
 export interface AdmissionShadowRuntimeOptions extends AdmissionShadowConfig {
   readonly sink?: AdmissionObservationSink;
   readonly clock?: AdmissionClock;
+  /** MEM-003 shadow staging: record a sibling routing recommendation after a
+   *  successful observation persist. Fully contained — see persist(). */
+  readonly routing?: {
+    readonly config: TierRoutingConfigV1;
+    readonly sink: AdmissionRoutingRecommendationSink;
+  };
 }
 
 type Settled = 'stored' | 'failed';
+
+// Module-local MEM-003 routing counters. Deliberately unexposed this packet:
+// no AdmissionShadowSnapshot field, /readyz payload, or attempt outcome may
+// ever depend on routing (a status surface is deferred to a later packet).
+let routingRecommended = 0;
+let routingFailed = 0;
 
 function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
   try {
@@ -149,7 +174,12 @@ export class AdmissionShadowRuntime implements AdmissionShadowHook {
   private readonly timeoutMs: number;
   private readonly sink?: AdmissionObservationSink;
   private readonly clock: AdmissionClock;
+  private readonly routing?: AdmissionShadowRuntimeOptions['routing'];
   private readonly inFlight = new Set<Promise<Settled>>();
+  // Routing continuations are drained on shutdown but tracked apart from
+  // `inFlight` so they can never consume begin() capacity or move the
+  // snapshot's inFlight gauge (§ containment: routing touches no snapshot field).
+  private readonly routingInFlight = new Set<Promise<void>>();
   private stopping = false;
   private reserved = 0;
   private prepared = 0;
@@ -174,6 +204,7 @@ export class AdmissionShadowRuntime implements AdmissionShadowHook {
     this.enabled = options.enabled;
     this.timeoutMs = options.timeoutMs;
     this.sink = options.sink;
+    this.routing = options.routing;
     this.clock = options.clock ?? { now: () => new Date() };
   }
 
@@ -272,6 +303,32 @@ export class AdmissionShadowRuntime implements AdmissionShadowHook {
       });
     this.inFlight.add(tracked);
 
+    // MEM-003 routing shadow: a SEPARATE continuation chained off the
+    // observation persist's success. It is never raced against the shadow
+    // timeout, holds no begin() capacity, and carries its own terminal catch,
+    // so routing latency or failure cannot touch any snapshot field, the
+    // attempt outcome, or the observation itself. Drained via stopAndDrain.
+    if (this.routing) {
+      const routing = this.routing;
+      let routed!: Promise<void>;
+      routed = tracked
+        .then(async (settled) => {
+          if (settled !== 'stored') return;
+          const recommendation = routeAdmissionTierV1(observation.safeFacts, null, routing.config);
+          await routing.sink.persist(scope, recommendation);
+          routingRecommended += 1;
+        })
+        .catch(() => {
+          routingFailed += 1;
+          // Content-free by construction: no scope, tier, or error detail.
+          console.error('[admission-routing] recommendation shadow persist failed');
+        })
+        .finally(() => {
+          this.routingInFlight.delete(routed);
+        });
+      this.routingInFlight.add(routed);
+    }
+
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<'timed-out'>((resolve) => {
       timer = setTimeout(() => resolve('timed-out'), this.timeoutMs);
@@ -305,7 +362,7 @@ export class AdmissionShadowRuntime implements AdmissionShadowHook {
 
   async stopAndDrain(requestedMs = ADMISSION_SHADOW_MAX_DRAIN_MS): Promise<void> {
     this.stopping = true;
-    if (this.inFlight.size === 0) return;
+    if (this.inFlight.size === 0 && this.routingInFlight.size === 0) return;
     const timeoutMs = Number.isFinite(requestedMs)
       ? Math.max(0, Math.min(Math.floor(requestedMs), ADMISSION_SHADOW_MAX_DRAIN_MS))
       : ADMISSION_SHADOW_MAX_DRAIN_MS;
@@ -316,7 +373,7 @@ export class AdmissionShadowRuntime implements AdmissionShadowHook {
     });
     try {
       await Promise.race([
-        Promise.allSettled([...this.inFlight]).then(() => undefined),
+        Promise.allSettled([...this.inFlight, ...this.routingInFlight]).then(() => undefined),
         deadline,
       ]);
     } catch {

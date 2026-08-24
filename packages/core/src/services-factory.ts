@@ -29,6 +29,7 @@ import {
   FactStore,
   AuditLogStore,
   AdmissionObservationStore,
+  AdmissionRoutingRecommendationStore,
   BlockStore as Neo4jBlockStore,
 } from '@memberry/neo4j';
 import { AMPService } from './service.js';
@@ -42,6 +43,11 @@ import { ExtractionConsumer } from './extraction-consumer.js';
 import { EMBEDDING_DIM, type EmbeddingProvider, type AMPConfig } from './types.js';
 import { readEnv, defaultExportPath } from './config/settings.js';
 import { AdmissionShadowRuntime, resolveAdmissionShadowConfig } from './admission-shadow.js';
+import {
+  AdmissionRoutingModeError,
+  resolveAdmissionRoutingModeV1,
+  resolveTierRoutingConfig,
+} from './admission-routing.js';
 
 export interface CoreServicesEnv {
   neo4jUri?: string;
@@ -131,6 +137,16 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   // Strict shadow configuration is validated before allocating clients so a
   // malformed opt-in cannot leak partially constructed Redis/Neo4j handles.
   const admissionShadowConfig = resolveAdmissionShadowConfig();
+  // MEM-003 routing shadow staging, also resolved before any client allocation:
+  // the routing seam lives inside the shadow attempt and cannot run without it,
+  // and a malformed flag or threshold must not leak Redis/Neo4j handles.
+  const admissionRoutingMode = resolveAdmissionRoutingModeV1();
+  if (admissionRoutingMode === 'shadow' && !admissionShadowConfig.enabled) {
+    throw new AdmissionRoutingModeError('prerequisite_unavailable');
+  }
+  const admissionRoutingConfig = admissionRoutingMode === 'shadow'
+    ? resolveTierRoutingConfig()
+    : undefined;
 
   const redis = createRedisClient(redisUrl);
   const driver = createNeo4jDriver(neo4jUri, neo4jUser, neo4jPassword);
@@ -211,6 +227,14 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   const admissionShadow = new AdmissionShadowRuntime({
     ...admissionShadowConfig,
     ...(admissionShadowConfig.enabled ? { sink: new AdmissionObservationStore(driver) } : {}),
+    ...(admissionRoutingConfig
+      ? {
+          routing: {
+            config: admissionRoutingConfig,
+            sink: new AdmissionRoutingRecommendationStore(driver),
+          },
+        }
+      : {}),
   });
 
   const ampService = new AMPService(

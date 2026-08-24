@@ -54,6 +54,7 @@ MEMBERRY_WIKI_AUTOREFRESH=true
 MEMBERRY_WIKI_OUTPUT_DIR=<INSTALL_DIR>/wiki
 MEMBERRY_ADMISSION_SHADOW_ENABLED=false
 MEMBERRY_ADMISSION_SHADOW_TIMEOUT_MS=50
+MEMBERRY_ADMISSION_ROUTING_V1=disabled
 ```
 
 `MEMBERRY_ADMISSION_SHADOW_ENABLED=true` records content-free baseline-parity
@@ -67,6 +68,14 @@ because this optional observer is degraded. Shutdown stops new observations,
 drains already-started writes for at most one second, then closes the driver.
 Rollback is to set the flag to `false` (or unset it) and restart; existing
 sidecars remain inert audit evidence and are not deleted automatically.
+
+`MEMBERRY_ADMISSION_ROUTING_V1=shadow` additionally records a content-free
+tier-routing recommendation sidecar next to each observation. It requires
+`MEMBERRY_ADMISSION_SHADOW_ENABLED=true` (startup fails loud otherwise), never
+changes what is stored, and never delays a store beyond the existing shadow
+timeout budget. The value `served` is reserved and rejected until enforcement
+is explicitly approved. Rollback: set `MEMBERRY_ADMISSION_ROUTING_V1=disabled`
+(or unset it) and restart.
 
 Lock it down — it holds secrets:
 

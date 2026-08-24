@@ -36,6 +36,14 @@ export type {
   AdmissionObservationScopeV1,
   AdmissionObservationStoreErrorCode,
 } from './admission-observation.js';
+export {
+  AdmissionRoutingRecommendationStore,
+  AdmissionRoutingRecommendationStoreError,
+} from './admission-routing-recommendation.js';
+export type {
+  AdmissionRoutingRecommendationScopeV1,
+  AdmissionRoutingRecommendationStoreErrorCode,
+} from './admission-routing-recommendation.js';
 export { SemanticStore } from './semantic.js';
 export { ProvenanceTraversal } from './provenance.js';
 export type { ProvenanceNode } from './provenance.js';

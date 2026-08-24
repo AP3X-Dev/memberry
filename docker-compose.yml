@@ -93,6 +93,9 @@ services:
       # Default-off MEM-001 observation only; no admission/routing behavior.
       MEMBERRY_ADMISSION_SHADOW_ENABLED: ${MEMBERRY_ADMISSION_SHADOW_ENABLED:-false}
       MEMBERRY_ADMISSION_SHADOW_TIMEOUT_MS: ${MEMBERRY_ADMISSION_SHADOW_TIMEOUT_MS:-50}
+      # MEM-003 routing shadow: disabled | shadow (requires the shadow observer
+      # above); "served" is reserved and rejected. Recommendation-only sidecars.
+      MEMBERRY_ADMISSION_ROUTING_V1: ${MEMBERRY_ADMISSION_ROUTING_V1:-disabled}
       MEMBERRY_EMBEDDING_DIM: ${MEMBERRY_EMBEDDING_DIM:-}
       MEMBERRY_MODEL_EXTRACTION: ${MEMBERRY_MODEL_EXTRACTION:-}
       MEMBERRY_MODEL_SYNTHESIS: ${MEMBERRY_MODEL_SYNTHESIS:-}
