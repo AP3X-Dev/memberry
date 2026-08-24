@@ -53,6 +53,7 @@ export {
 export type {
   AdmissionObservationScope,
   AdmissionObservationSink,
+  AdmissionRoutingRecommendationSink,
   AdmissionShadowAttempt,
   AdmissionShadowAppendResult,
   AdmissionShadowConfig,

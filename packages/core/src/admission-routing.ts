@@ -218,7 +218,11 @@ const ENV_VAR_BY_KEY: Readonly<Record<TierRoutingConfigKey, string>> = Object.fr
  * Environment resolution for the routing thresholds. Unset variables keep the
  * frozen defaults; set variables must be digits-only, and the combined result
  * must still satisfy the full config contract (bounds and band invariant).
- * There is no enable flag: MEM-003 ships no live activation to enable.
+ * Activation is staged separately through MEMBERRY_ADMISSION_ROUTING_V1
+ * (resolveAdmissionRoutingModeV1): `disabled` (default) or `shadow`, which
+ * only records sibling recommendations inside the admission shadow attempt.
+ * `served` is a reserved token — enforcement that changes what is stored is
+ * destructive-class and stays owner-gated for a later packet.
  */
 export function resolveTierRoutingConfig(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -249,6 +253,39 @@ export function tierRoutingConfigIdentityV1(config: unknown): `sha256:${string}`
   return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
 }
 
+export const ADMISSION_ROUTING_MODE_ENV = 'MEMBERRY_ADMISSION_ROUTING_V1' as const;
+
+export type AdmissionRoutingModeV1 = 'disabled' | 'shadow';
+
+export type AdmissionRoutingModeErrorCode =
+  | 'invalid_mode'
+  | 'served_not_qualified'
+  | 'prerequisite_unavailable';
+
+/** Closed configuration failures name only the code, never the supplied value. */
+export class AdmissionRoutingModeError extends Error {
+  constructor(readonly code: AdmissionRoutingModeErrorCode) {
+    super(`admission_routing:${code}`);
+    this.name = 'AdmissionRoutingModeError';
+  }
+}
+
+/**
+ * Strict staging-flag resolution: exact strings only, no trimming, coercion,
+ * aliases, or value reflection. `served` parses but is rejected — the token is
+ * reserved so the staging ladder stays explicit while enforcement remains
+ * owner-gated.
+ */
+export function resolveAdmissionRoutingModeV1(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): AdmissionRoutingModeV1 {
+  const raw = env[ADMISSION_ROUTING_MODE_ENV];
+  if (raw === undefined || raw === '' || raw === 'disabled') return 'disabled';
+  if (raw === 'shadow') return 'shadow';
+  if (raw === 'served') throw new AdmissionRoutingModeError('served_not_qualified');
+  throw new AdmissionRoutingModeError('invalid_mode');
+}
+
 function dimensionValue(
   envelope: AdmissionFeatureEnvelopeV1 | null,
   dimension: AdmissionFeatureDimension,
@@ -260,8 +297,9 @@ function dimensionValue(
 
 /**
  * Pure, deterministic five-tier routing policy over content-free inputs.
- * Shadow-side only: nothing in the live write path consumes this yet, so the
- * baseline episodic route (MEM-FR-3) is untouched by construction.
+ * Shadow-side only: the live seam records recommendations as sidecars without
+ * consuming them, so the baseline episodic route (MEM-FR-3) is untouched by
+ * construction.
  */
 export function routeAdmissionTierV1(
   facts: AdmissionSafeFactsV1,

@@ -80,6 +80,13 @@ export class TenantAdmin {
          CALL { WITH o DETACH DELETE o } IN TRANSACTIONS OF 1000 ROWS`,
         { tenant },
       );
+      // Same sidecar rule for the MEM-003 routing sibling: not a TenantCounts
+      // category, removed before Episodic so RECOMMENDS_FOR never dangles.
+      await session.run(
+        `MATCH (r:AdmissionRoutingRecommendation {tenant_id: $tenant})
+         CALL { WITH r DETACH DELETE r } IN TRANSACTIONS OF 1000 ROWS`,
+        { tenant },
+      );
       for (const label of TENANT_LABELS) {
         // Batch to avoid a huge single transaction on large tenants.
         await session.run(
