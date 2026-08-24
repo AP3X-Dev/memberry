@@ -6,7 +6,8 @@
 // restart) plus two env-derived runtime facts — surfaced for visibility, not
 // yet editable from the UI.
 
-import { loadRawSettings, resolveNumber, readEnv, getSettingsPath, DEFAULT_SETTINGS, type HookSettings, type ResolvedNumber } from './settings.js';
+import { loadRawSettings, resolveNumber, readEnv, getSettingsPath, DEFAULT_SETTINGS, defaultExportPath, type HookSettings, type ResolvedNumber } from './settings.js';
+import { DECAY_HALF_LIVES_DAYS, resolveLifecycleConfig, type LifecycleConfig } from './lifecycle.js';
 
 export interface ConfigStatus {
   settingsPath: string;
@@ -22,6 +23,15 @@ export interface ConfigStatus {
     decayHalfLivesDays: { volatile: number; stable: number; permanent: number };
     requireProjectTag: boolean;
     embeddings: 'openai' | 'zero-vector';
+    /** MEM-006 lifecycle pass: flag state + budgets (read-only visibility). */
+    lifecycle: {
+      mode: LifecycleConfig['mode'];
+      sidecarBudget: number;
+      sidecarMaxAgeDays: number;
+      archiveHalfLifeMultiplier: number;
+      maxDecayProposalsPerScope: number;
+      decayCooldownDays: number;
+    };
   };
 }
 
@@ -47,10 +57,35 @@ export function getConfigStatus(): ConfigStatus {
         ),
         signalThreshold: 3,
       },
-      decayHalfLivesDays: { volatile: 14, stable: 90, permanent: 365 },
+      // Single source of truth shared with the lifecycle decay engine (MEM-006).
+      decayHalfLivesDays: { ...DECAY_HALF_LIVES_DAYS },
       // Live, env-derived (the wiki service shares the MCP server's env file).
       requireProjectTag: readEnv('MEMBERRY_REQUIRE_PROJECT_TAG') !== 'false',
       embeddings: (process.env['OPENAI_API_KEY'] ?? '').trim() ? 'openai' : 'zero-vector',
+      lifecycle: lifecycleStatus(),
     },
+  };
+}
+
+/** Effective lifecycle knobs for the settings panel. A malformed env var must
+ *  not crash the read-only status page — it degrades to disabled + defaults
+ *  (the lifecycle job itself fails loudly on the same input). */
+function lifecycleStatus(): ConfigStatus['server']['lifecycle'] {
+  let config: LifecycleConfig;
+  try {
+    config = resolveLifecycleConfig(defaultExportPath());
+  } catch {
+    return {
+      mode: 'disabled', sidecarBudget: 5000, sidecarMaxAgeDays: 180,
+      archiveHalfLifeMultiplier: 2, maxDecayProposalsPerScope: 25, decayCooldownDays: 30,
+    };
+  }
+  return {
+    mode: config.mode,
+    sidecarBudget: config.sidecarBudget,
+    sidecarMaxAgeDays: config.sidecarMaxAgeDays,
+    archiveHalfLifeMultiplier: config.archiveHalfLifeMultiplier,
+    maxDecayProposalsPerScope: config.maxDecayProposalsPerScope,
+    decayCooldownDays: config.decayCooldownDays,
   };
 }

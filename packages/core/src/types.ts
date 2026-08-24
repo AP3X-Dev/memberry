@@ -29,6 +29,8 @@ export interface EpisodicNode {
   tags?: string[];
   /** Tenant this node belongs to (defaults to DEFAULT_TENANT). */
   tenant_id?: string;
+  /** MEM-006 reversible lifecycle flag: excluded from retrieval, kept by export/import. */
+  archived?: boolean;
 }
 
 export interface SemanticNode {
@@ -48,6 +50,8 @@ export interface SemanticNode {
   tenant_id?: string;
   valid_at?: string;
   invalid_at?: string;
+  /** MEM-006 reversible lifecycle flag: excluded from retrieval, kept by export/import. */
+  archived?: boolean;
 }
 
 export interface EntityNode {

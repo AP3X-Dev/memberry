@@ -39,7 +39,7 @@ const APPROVED_DECISION_CONFIDENCE = 0.9;
 const CONSOLIDATION_LOCK_TTL_SECONDS = 30;
 const CONSOLIDATION_LOCK_HEARTBEAT_MS = 10_000;
 
-function stableId(prefix: string, parts: string[]): string {
+export function stableId(prefix: string, parts: string[]): string {
   const digest = createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 24);
   return `${prefix}-${digest}`;
 }

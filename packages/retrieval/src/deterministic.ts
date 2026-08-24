@@ -4,7 +4,7 @@
 
 import { Integer as Neo4jInteger, Record as Neo4jRecord, type Driver } from 'neo4j-driver';
 import { isProxy } from 'node:util/types';
-import { activeRelationshipFilter, tenantWhere, resolveTenant, TENANT_PARAM } from '@memberry/neo4j';
+import { activeRelationshipFilter, tenantWhere, resolveTenant, TENANT_PARAM, archivedWhere } from '@memberry/neo4j';
 import type { ContextSection, ContextItem } from './types.js';
 import { DeterministicRuntimeTraceAdapter } from './runtime-trace.js';
 import { assertBoundedQueryInput } from './query-input.js';
@@ -707,6 +707,7 @@ export class DeterministicAssembler {
            MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {id: targetId})
            WHERE ${activeRelationshipFilter('r', asOf ? 'asOf' : undefined)}
              AND ${tenantWhere('s', tenantId)}${temporalFilter}
+             AND ${archivedWhere('s')}
              AND $projectScope IS NOT NULL
              AND (toLower(COALESCE(s.scope, '')) = $projectScope
                OR (s.scope IS NULL AND ANY(tag IN COALESCE(s.tags, []) WHERE toLower(tag) = $projectScope)))
@@ -722,6 +723,7 @@ export class DeterministicAssembler {
            WITH targetName
            MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: targetName})
            WHERE ${tenantWhere('s', tenantId)}${temporalFilter}
+             AND ${archivedWhere('s')}
            RETURN s.id AS id, s.content AS content, s.confidence AS confidence, s.tags AS tags
            ORDER BY s.confidence DESC
            LIMIT 10

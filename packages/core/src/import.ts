@@ -40,6 +40,9 @@ function mapSemanticProps(props: Record<string, unknown>): SemanticNode {
     updated_at: props.updated_at as string,
     decay_class: props.decay_class as SemanticNode['decay_class'],
     tags: (props.tags as string[]) ?? [],
+    // MEM-006: graph-side hashing must see the archived flag, or an archived
+    // node and its exported file would never hash-match as unchanged.
+    ...(props.archived === true ? { archived: true } : {}),
   };
 }
 
@@ -153,6 +156,7 @@ export async function importFromPath(
           updated_at: $updated_at,
           decay_class: $decay_class,
           tags: $tags,
+          archived: $archived,
           valid_at: $created_at
         })
         WITH s
@@ -167,6 +171,9 @@ export async function importFromPath(
           updated_at: now,
           decay_class: node.decay_class,
           tags: node.tags,
+          // null keeps the property absent for non-archived nodes (a Cypher
+          // CREATE map drops null-valued keys), matching pre-MEM-006 shape.
+          archived: node.archived === true ? true : null,
           now,
           strategy,
           action: 'add',
@@ -211,7 +218,8 @@ export async function importFromPath(
              s.signal_count = $signal_count,
              s.updated_at = $now,
              s.decay_class = $decay_class,
-             s.tags = $tags
+             s.tags = $tags,
+             s.archived = $archived
          WITH s
          CREATE (h:HumanEdit { action: $action, imported_at: $now, strategy: $strategy, target_id: s.id })
          CREATE (s)<-[:HUMAN_EDIT]-(h)`,
@@ -223,6 +231,9 @@ export async function importFromPath(
           now,
           decay_class: node.decay_class,
           tags: node.tags,
+          // SET to null clears the flag when the file no longer carries it —
+          // a human removing `archived: true` from the export unarchives.
+          archived: node.archived === true ? true : null,
           strategy,
           action: 'modify',
         },

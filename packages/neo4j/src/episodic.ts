@@ -2,6 +2,7 @@
 import { type Driver } from 'neo4j-driver';
 import { DEFAULT_TENANT, type EpisodicNode, type Signal } from '@memberry/core';
 import { temporalSetClause } from './temporal-edges.js';
+import { archivedWhere } from './query.js';
 
 export class EpisodicStore {
   constructor(private driver: Driver) {}
@@ -155,6 +156,7 @@ export class EpisodicStore {
         `MATCH (e:Episodic)
          WHERE ($scope IS NULL OR e.scope = $scope)
            AND ($tenantId IS NULL OR coalesce(e.tenant_id, $tenantId) = $tenantId)
+           AND ${archivedWhere('e')}
            AND (
              (e.memory_type = 'decision' AND e.outcome = 'approved')
              OR e.embedding IS NOT NULL
@@ -196,6 +198,7 @@ export class EpisodicStore {
         `MATCH (e:Episodic)
          WHERE ($scope IS NULL OR e.scope = $scope)
            AND ($tenantId IS NULL OR coalesce(e.tenant_id, $tenantId) = $tenantId)
+           AND ${archivedWhere('e')}
            AND (
              (e.memory_type = 'decision' AND e.outcome = 'approved')
              OR e.embedding IS NOT NULL

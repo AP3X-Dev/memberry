@@ -88,6 +88,7 @@ async function checkOrphanPages(driver: Driver, projectName: string, thresholds:
       `MATCH (project:Entity {type: 'project'})-[:CONTAINS*0..]->(e:Entity)
        WHERE project.name CONTAINS $projectName AND e.type <> 'project'
        OPTIONAL MATCH (s:Semantic)-[:ABOUT]->(e)
+       WHERE coalesce(s.archived, false) = false
        WITH e, count(s) AS semCount
        WHERE semCount <= $minLinks
        RETURN e.name AS name, e.type AS type, semCount
@@ -126,6 +127,7 @@ async function checkBrokenLinks(driver: Driver, projectName: string): Promise<Li
            WHERE toLower(thisProj.name) = toLower($projectName)
          }
          AND ANY(t IN s.tags WHERE t STARTS WITH 'project:')
+         AND coalesce(s.archived, false) = false
        OPTIONAL MATCH (anyProj:Entity {type: 'project'})-[:CONTAINS*1..]->(e)
        WITH e, count(s) AS refs, collect(DISTINCT anyProj.name) AS otherProjects
        RETURN e.name AS name, e.id AS id, refs, otherProjects
@@ -171,6 +173,7 @@ async function checkMissingLinks(driver: Driver, projectName: string, thresholds
       `MATCH (s:Semantic)-[:ABOUT]->(e1:Entity)
        MATCH (s)-[:ABOUT]->(e2:Entity)
        WHERE e1.name < e2.name
+         AND coalesce(s.archived, false) = false
          AND NOT EXISTS { MATCH (e1)-[:CONTAINS|USES|CALLS|EXTENDS|IMPLEMENTS|EMITS|LISTENS]-(e2) }
        WITH e1.name AS entity1, e2.name AS entity2, count(s) AS cooccurrences
        WHERE cooccurrences >= $minCooccurrence
@@ -233,9 +236,11 @@ async function checkLinkDensity(driver: Driver, projectName: string): Promise<Li
       `MATCH (project:Entity {type: 'project'})-[:CONTAINS*0..]->(e:Entity)
        WHERE project.name CONTAINS $projectName AND e.type <> 'project'
        OPTIONAL MATCH (s:Semantic)-[:ABOUT]->(e)
+       WHERE coalesce(s.archived, false) = false
        WITH e, count(s) AS semCount
        WHERE semCount > 0
        OPTIONAL MATCH (s2:Semantic)-[:ABOUT]->(e)
+       WHERE coalesce(s2.archived, false) = false
        OPTIONAL MATCH (s2)-[:ABOUT]->(other:Entity)
        WHERE other.name <> e.name
        WITH e, semCount, count(DISTINCT other) AS outboundLinks
@@ -266,6 +271,7 @@ async function checkHubDetection(driver: Driver, projectName: string, thresholds
   try {
     const result = await session.run(
       `MATCH (s:Semantic)-[:ABOUT]->(e:Entity)
+       WHERE coalesce(s.archived, false) = false
        WITH e, count(DISTINCT s) AS refCount
        WHERE refCount >= $minLinks
        RETURN e.name AS name, e.type AS type, refCount
@@ -294,6 +300,7 @@ async function checkContradictions(driver: Driver, projectName: string): Promise
   try {
     const result = await session.run(
       `MATCH (ep:Episodic)-[:CONTRADICTS]->(s:Semantic)
+       WHERE coalesce(s.archived, false) = false
        RETURN s.id AS sem_id, s.content AS content, s.confidence AS confidence,
               count(ep) AS contradiction_count
        ORDER BY contradiction_count DESC
@@ -322,6 +329,7 @@ async function checkLowConfidence(driver: Driver, projectName: string, threshold
     const result = await session.run(
       `MATCH (s:Semantic)-[:ABOUT]->(e:Entity)
        WHERE s.confidence <= $maxConfidence
+         AND coalesce(s.archived, false) = false
        RETURN s.id AS id, s.content AS content, s.confidence AS confidence,
               collect(DISTINCT e.name) AS entities
        ORDER BY s.confidence ASC
@@ -351,6 +359,7 @@ async function checkStaleSources(driver: Driver, projectName: string): Promise<L
       `MATCH (src:Source)
        WHERE src.project_tag CONTAINS $projectName
        OPTIONAL MATCH (s:Semantic)-[:CITES]->(src)
+       WHERE coalesce(s.archived, false) = false
        WITH src, count(s) AS citationCount
        WHERE citationCount = 0
        RETURN src.title AS title, src.source_type AS type, src.created_at AS created
@@ -380,6 +389,7 @@ async function checkCoverageGaps(driver: Driver, projectName: string): Promise<L
     const result = await session.run(
       `MATCH (s:Semantic)
        WHERE ANY(t IN s.tags WHERE t = 'project:' + $projectName)
+         AND coalesce(s.archived, false) = false
        UNWIND s.tags AS tag
        WITH s, tag WHERE NOT tag STARTS WITH 'project:'
        RETURN tag, count(*) AS count, avg(s.confidence) AS avgConfidence

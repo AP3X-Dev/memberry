@@ -96,7 +96,7 @@ RETURN s, c`;
 
 const SEMANTIC_QUERY = `
 MATCH (s:Semantic)
-WHERE $projectTag IS NULL OR $projectTag IN s.tags
+WHERE ($projectTag IS NULL OR $projectTag IN s.tags) AND coalesce(s.archived, false) = false
 WITH s ORDER BY s.id LIMIT $limit
 RETURN s`;
 
@@ -125,7 +125,7 @@ RETURN a`;
 
 const EPISODIC_QUERY = `
 MATCH (e:Episodic)
-WHERE $projectTag IS NULL OR e.scope = $projectTag
+WHERE ($projectTag IS NULL OR e.scope = $projectTag) AND coalesce(e.archived, false) = false
 WITH e ORDER BY e.id LIMIT $limit
 RETURN e`;
 

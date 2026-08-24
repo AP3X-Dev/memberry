@@ -45,6 +45,8 @@ const INDEXES: string[] = [
   'CREATE INDEX memblock_session IF NOT EXISTS FOR (b:MemoryBlock) ON (b.session_id)',
   'CREATE INDEX admission_observation_tenant_project IF NOT EXISTS FOR (o:AdmissionObservation) ON (o.tenant_id, o.project_scope)',
   'CREATE INDEX admission_routing_recommendation_tenant_project IF NOT EXISTS FOR (r:AdmissionRoutingRecommendation) ON (r.tenant_id, r.project_scope)',
+  'CREATE INDEX admission_observation_observed_at IF NOT EXISTS FOR (o:AdmissionObservation) ON (o.tenant_id, o.project_scope, o.observed_at)',
+  'CREATE INDEX admission_routing_recommendation_observed_at IF NOT EXISTS FOR (r:AdmissionRoutingRecommendation) ON (r.tenant_id, r.project_scope, r.observed_at)',
   'CREATE INDEX evidence_authority_ledger_scope IF NOT EXISTS FOR (n:EvidenceAuthorityLedger) ON (n.tenant_id, n.project_scope, n.semantic_id)',
   'CREATE INDEX evidence_authority_coverage_scope IF NOT EXISTS FOR (n:EvidenceAuthorityCoverage) ON (n.tenant_id, n.project_scope, n.semantic_id)',
   'CREATE INDEX evidence_authority_case_scope IF NOT EXISTS FOR (n:EvidenceAuthorityCase) ON (n.tenant_id, n.project_scope, n.semantic_id)',

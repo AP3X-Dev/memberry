@@ -112,6 +112,7 @@ const SCOPE_QUERY = `${PROJECT_PROOF}
 MATCH (s:Semantic)-[r:ABOUT]->(target)
 WHERE (s.tenant_id = $tenantId OR (s.tenant_id IS NULL AND $tenantId = $defaultTenant))
   AND (s.scope = $projectScope OR $projectScope IN coalesce(s.tags, []))
+  AND coalesce(s.archived, false) = false
   AND (($asOf IS NULL AND r.invalid_at IS NULL)
     OR ($asOf IS NOT NULL AND coalesce(r.valid_at, '1970-01-01T00:00:00.000Z') <= $asOf
       AND (r.invalid_at IS NULL OR r.invalid_at > $asOf)))

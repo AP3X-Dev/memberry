@@ -54,6 +54,7 @@ export async function fetchEpisodicProjectScopes(driver: Driver): Promise<string
     const result = await session.run(
       `CALL {
          MATCH (ep:Episodic)
+         WHERE coalesce(ep.archived, false) = false
          WITH ep,
               CASE WHEN ep.scope IS NOT NULL AND ep.scope STARTS WITH 'project:'
                    THEN [substring(ep.scope, 8)] ELSE [] END AS scopeNames,
@@ -65,6 +66,7 @@ export async function fetchEpisodicProjectScopes(driver: Driver): Promise<string
          UNION
          MATCH (s:Semantic)
          WHERE NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }
+           AND coalesce(s.archived, false) = false
          WITH s,
               CASE WHEN s.scope IS NOT NULL AND s.scope STARTS WITH 'project:'
                    THEN [substring(s.scope, 8)] ELSE [] END AS scopeNames,
@@ -127,7 +129,8 @@ export async function fetchEntitiesModifiedByProject(driver: Driver, projectScop
     const taskTag = `[project:${projectScope}]`;
     const result = await session.run(
       `MATCH (ep:Episodic)-[:MODIFIED]->(e:Entity)
-       WHERE ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag
+       WHERE (ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag)
+         AND coalesce(ep.archived, false) = false
        RETURN DISTINCT e.id AS id, e.name AS name, e.type AS type, e.description AS description,
               e.aliases AS aliases, e.created_at AS created_at, e.path AS path
        ORDER BY e.name`,
@@ -159,6 +162,7 @@ export async function fetchSemanticsForEntity(driver: Driver, entityName: string
       `MATCH (s:Semantic)-[about:ABOUT]->(e:Entity {name: $name})
        WHERE about.invalid_at IS NULL
          AND NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }
+         AND coalesce(s.archived, false) = false
        OPTIONAL MATCH (s)-[otherAbout:ABOUT]->(other:Entity)
        WHERE other.name <> $name AND otherAbout.invalid_at IS NULL
        RETURN s.id AS id, s.content AS content, s.confidence AS confidence,
@@ -190,6 +194,7 @@ export async function fetchSemanticCountForEntity(driver: Driver, entityName: st
       `MATCH (s:Semantic)-[about:ABOUT]->(e:Entity {name: $name})
        WHERE about.invalid_at IS NULL
          AND NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }
+         AND coalesce(s.archived, false) = false
        RETURN count(s) AS cnt`,
       { name: entityName },
     );
@@ -207,6 +212,7 @@ export async function fetchAllSemantics(driver: Driver): Promise<Array<{
     const result = await session.run(
       `MATCH (s:Semantic)
        WHERE NOT EXISTS { MATCH (:Semantic)-[:SUPERSEDES]->(s) }
+         AND coalesce(s.archived, false) = false
        OPTIONAL MATCH (s)-[about:ABOUT]->(e:Entity)
        WHERE about.invalid_at IS NULL
        RETURN s.id AS id, s.content AS content, s.confidence AS confidence,
@@ -246,7 +252,8 @@ export async function fetchEpisodicsForProject(driver: Driver, projectScope: str
     const taskTag = `[project:${projectScope}]`;
     const result = await session.run(
       `MATCH (ep:Episodic)
-       WHERE ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag
+       WHERE (ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag)
+         AND coalesce(ep.archived, false) = false
        RETURN ep.id AS id, ep.task AS task, ep.content AS content,
               ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at,
               ep.scope AS scope, ep.tags AS tags
@@ -282,6 +289,7 @@ export async function fetchEpisodicsForEntity(
     const result = await session.run(
       `MATCH (ep:Episodic)
        WHERE (ep.scope = $canonTag OR $canonTag IN coalesce(ep.tags, []) OR ep.task CONTAINS $taskTag)
+         AND coalesce(ep.archived, false) = false
          AND ((ep.task CONTAINS $name OR ep.content CONTAINS $name)
               OR ($entityId IS NOT NULL AND EXISTS { MATCH (ep)-[:MODIFIED]->(e:Entity {id: $entityId}) }))
        RETURN DISTINCT ep.id AS id, ep.task AS task, ep.content AS content,
@@ -339,6 +347,7 @@ export async function fetchEpisodicsForEntities(
          WITH entity
          MATCH (ep:Episodic)
          WHERE (ep.scope = $canonTag OR $canonTag IN coalesce(ep.tags, []) OR ep.task CONTAINS $taskTag)
+           AND coalesce(ep.archived, false) = false
            AND ((ep.task CONTAINS entity.name OR ep.content CONTAINS entity.name)
                 OR EXISTS { MATCH (ep)-[:MODIFIED]->(e:Entity) WHERE e.id = entity.id })
          RETURN DISTINCT ep.id AS id, ep.task AS task, ep.content AS content,
@@ -383,6 +392,7 @@ export async function fetchRecentEpisodics(driver: Driver, limit: number): Promi
   try {
     const result = await session.run(
       `MATCH (ep:Episodic)
+       WHERE coalesce(ep.archived, false) = false
        RETURN ep.id AS id, ep.task AS task, ep.content AS content,
               ep.outcome AS outcome, ep.session_id AS session_id, ep.created_at AS created_at,
               ep.scope AS scope, ep.tags AS tags
@@ -463,6 +473,7 @@ export async function fetchBacklinks(driver: Driver, entityName: string): Promis
       `MATCH (s:Semantic)-[:ABOUT]->(target:Entity {name: $name})
        MATCH (s)-[:ABOUT]->(other:Entity)
        WHERE other.name <> $name
+         AND coalesce(s.archived, false) = false
        RETURN DISTINCT other.name AS name, substring(s.content, 0, 120) AS context
        ORDER BY name
        LIMIT 50`,
@@ -538,6 +549,7 @@ export async function fetchClaimsForSource(driver: Driver, sourceId: string): Pr
   try {
     const result = await session.run(
       `MATCH (s:Semantic)-[:CITES]->(src:Source {id: $sourceId})
+       WHERE coalesce(s.archived, false) = false
        OPTIONAL MATCH (s)-[:ABOUT]->(e:Entity)
        RETURN s.id AS id, s.content AS content, s.confidence AS confidence,
               collect(DISTINCT e.name) AS entity_refs
@@ -563,6 +575,7 @@ export async function fetchAllTags(driver: Driver): Promise<Array<{ tag: string;
   try {
     const result = await session.run(
       `MATCH (s:Semantic)
+       WHERE coalesce(s.archived, false) = false
        UNWIND s.tags AS tag
        WITH tag WHERE NOT tag STARTS WITH 'project:'
        WITH tag, count(*) AS cnt
@@ -587,6 +600,7 @@ export async function fetchSemanticsForTag(driver: Driver, tag: string): Promise
     const result = await session.run(
       `MATCH (s:Semantic)
        WHERE $tag IN s.tags
+         AND coalesce(s.archived, false) = false
        OPTIONAL MATCH (s)-[:ABOUT]->(e:Entity)
        RETURN s.content AS content, s.confidence AS confidence,
               collect(DISTINCT e.name) AS entities
@@ -639,6 +653,7 @@ export async function fetchInboundLinkCount(driver: Driver, entityName: string):
       `MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: $name})
        MATCH (s)-[:ABOUT]->(other:Entity)
        WHERE other.name <> $name
+         AND coalesce(s.archived, false) = false
        RETURN count(DISTINCT other) AS cnt`,
       { name: entityName },
     );
@@ -658,6 +673,7 @@ export async function fetchSourcesForEntity(driver: Driver, entityName: string):
     const result = await session.run(
       `MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: $name})
        MATCH (s)-[:CITES]->(src:Source)
+       WHERE coalesce(s.archived, false) = false
        RETURN DISTINCT src.id AS id, src.title AS title, src.source_type AS source_type
        ORDER BY title`,
       { name: entityName },

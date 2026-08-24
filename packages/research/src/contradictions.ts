@@ -52,6 +52,7 @@ export class ContradictionDetector {
       const conflicted = await session.run(
         `MATCH (s:Semantic)
          WHERE ANY(t IN s.tags WHERE t = $campaignTag OR t = 'research')
+           AND coalesce(s.archived, false) = false
          OPTIONAL MATCH (reinforce:Episodic)-[:REINFORCES]->(s)
          WHERE reinforce.campaign_id = $campaignId
          WITH s, count(reinforce) AS reinforceCount
@@ -102,6 +103,7 @@ export class ContradictionDetector {
       const result = await session.run(
         `MATCH (s:Semantic)
          WHERE ANY(t IN s.tags WHERE t = $campaignTag OR t = 'research')
+           AND coalesce(s.archived, false) = false
            AND s.confidence <= $maxConfidence
            AND s.confidence > 0.1
          RETURN s.id AS id, s.content AS claim, s.confidence AS confidence,

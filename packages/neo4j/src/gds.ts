@@ -1,5 +1,6 @@
 // packages/neo4j/src/gds.ts
 import { type Driver } from 'neo4j-driver';
+import { archivedWhere } from './query.js';
 
 export interface SimilarPair {
   nodeA: string;
@@ -36,7 +37,7 @@ export class GDSAlgorithms {
       // Try GDS cosine similarity first
       const result = await session.run(
         `MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: $entityName})
-         WHERE s.embedding IS NOT NULL
+         WHERE s.embedding IS NOT NULL AND ${archivedWhere('s')}
          WITH collect({id: s.id, embedding: s.embedding}) AS nodes
          UNWIND nodes AS a
          UNWIND nodes AS b
@@ -71,6 +72,7 @@ export class GDSAlgorithms {
     try {
       const result = await session.run(
         `MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: $entityName})
+         WHERE ${archivedWhere('s')}
          WITH s, (s.signal_count * s.confidence) AS score
          RETURN s.id AS id, s.content AS content, score
          ORDER BY score DESC`,
@@ -97,6 +99,7 @@ export class GDSAlgorithms {
     try {
       const result = await session.run(
         `MATCH (s:Semantic)
+         WHERE ${archivedWhere('s')}
          OPTIONAL MATCH (s)-[:ABOUT]->(e:Entity)
          RETURN s.id AS id, s.content AS content,
                 coalesce(e.id, 'unassigned') AS communityId
@@ -124,6 +127,7 @@ export class GDSAlgorithms {
     try {
       const result = await session.run(
         `MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: $entityName})
+         WHERE ${archivedWhere('s')}
          OPTIONAL MATCH (ep:Episodic)-[:CORRECTS]->(s)
          WITH s, count(ep) AS correctionCount
          WHERE correctionCount > 0

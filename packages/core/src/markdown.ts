@@ -40,6 +40,12 @@ export function renderToMarkdown(node: SemanticNode | EpisodicNode): string {
       lines.push('tags: []');
     }
 
+    // MEM-006: emitted only when true so non-archived nodes render byte-identically
+    // to pre-lifecycle exports (content-hash diffs stay stable).
+    if (node.archived === true) {
+      lines.push('archived: true');
+    }
+
     lines.push(`created_at: "${node.created_at}"`);
     lines.push(`updated_at: "${node.updated_at}"`);
   } else {
@@ -55,6 +61,10 @@ export function renderToMarkdown(node: SemanticNode | EpisodicNode): string {
 
     if (node.ttl !== undefined) {
       lines.push(`ttl: ${node.ttl}`);
+    }
+
+    if (node.archived === true) {
+      lines.push('archived: true');
     }
 
     lines.push(`created_at: "${node.created_at}"`);
@@ -139,6 +149,8 @@ export function parseFromMarkdown(md: string): SemanticNode {
   const tags = (fields['tags'] as string[]) ?? [];
   const created_at = String(fields['created_at'] ?? '');
   const updated_at = String(fields['updated_at'] ?? '');
+  // parseScalar has no boolean form; the flag round-trips as the string 'true'.
+  const archived = fields['archived'] === 'true' || fields['archived'] === true;
 
   return {
     id,
@@ -149,6 +161,7 @@ export function parseFromMarkdown(md: string): SemanticNode {
     tags,
     created_at,
     updated_at,
+    ...(archived ? { archived: true } : {}),
   };
 }
 
