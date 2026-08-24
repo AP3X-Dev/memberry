@@ -13,6 +13,7 @@ import { SIGNAL_WEIGHTS, DEFAULT_TENANT } from './types.js';
 import { extractFacts } from './extract.js';
 import { readEnv } from './config/settings.js';
 import type { LlmClient } from './llm.js';
+import { clusterHasIndependentCorroborationV1 } from './evidence-diversity.js';
 
 // ─── Runtime validators ──────────────────────────────────────────────────────
 
@@ -690,13 +691,9 @@ export class ConsolidationEngine {
         return false;
       })
       .filter((c) => {
-        const independentSources = new Set(
-          c.map((episode) => `${episode.agent_id}\u0000${episode.session_id}`),
-        ).size;
-        const distinctEvidence = new Set(
-          c.map((episode) => episode.content.trim().toLowerCase().replace(/\s+/g, ' ')),
-        ).size;
-        if (independentSources >= cfg.minClusterSize && distinctEvidence >= 2) return true;
+        if (clusterHasIndependentCorroborationV1(c, { minSources: cfg.minClusterSize, minDistinctEvidence: 2 })) {
+          return true;
+        }
         console.error(
           `[consolidation] promote: dropped a ${c.length}-episode cluster without independent corroboration`,
         );

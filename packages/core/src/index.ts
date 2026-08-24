@@ -94,3 +94,5 @@ export type {
   CapabilityScopeV1,
 } from './capability-policy.js';
 export * from './admission-routing.js';
+export * from './confidence-calibration.js';
+export * from './evidence-diversity.js';
