@@ -30,6 +30,22 @@ export interface RetrievalOptions {
   as_of?: string;
 }
 
+// === Code-plane status (COD-010 fail-loud) ===
+
+export type CodePlaneUnsupportedReason =
+  | 'code-layer-missing'     // no code layer wired
+  | 'tenant-scope'           // non-default tenant: Symbol nodes are not tenant-stamped
+  | 'stable-id-lane'         // resolved-entity stable-ID lane bypasses search channels
+  | 'deterministic-strategy' // deterministic assembly has no code channel
+  | 'candidate-channel';     // candidate runtime composes memory/arch only
+
+export interface CodePlaneStatusV1 {
+  readonly outcome: 'served' | 'no-results' | 'unsupported' | 'failed';
+  readonly reason?: CodePlaneUnsupportedReason | 'query-failed' | 'invalid-result' | 'budget-evicted';
+  readonly results?: number;    // DELIVERED symbol items (K) — what the response actually contains
+  readonly candidates?: number; // channel rows before dedup/rerank/budget (N)
+}
+
 // === Unified context (the super-load output) ===
 
 export interface UnifiedContext {
@@ -38,6 +54,9 @@ export interface UnifiedContext {
   sections: ContextSection[];
   token_count: number;
   assembled_at: string;
+  // Present exactly when the caller requested code (include_code true after
+  // defaulting): why the response does or does not contain code evidence.
+  code_plane?: CodePlaneStatusV1;
 }
 
 export interface ContextSection {

@@ -11,6 +11,7 @@ import type {
   RetrievalResult,
   RetrievalOptions,
   BoostFactors,
+  CodePlaneStatusV1,
 } from './types.js';
 import { rrfFusion, dedup } from './fusion.js';
 import { DeterministicAssembler, normalizeResolvedEntityIds } from './deterministic.js';
@@ -714,6 +715,7 @@ export class UnifiedAssembler {
           sections: result.sections,
           token_count: tokenCount,
           assembled_at: new Date().toISOString(),
+          ...deterministicCodePlane(opts),
         },
         trace: result.trace,
       };
@@ -792,7 +794,8 @@ export class UnifiedAssembler {
       }
     }
     const provenance = Object.entries(sourceCounts).map(([type, count]) => `${type}:${count}`).join(', ');
-    lines.push(`**Strategy:** ${ctx.strategy} | **Tokens:** ~${ctx.token_count} | **Sources:** ${provenance || 'none'} | **IDs:** ${sourceIds.length}`);
+    const codeSegment = ctx.code_plane ? ` | **Code:** ${renderCodePlaneSegment(ctx.code_plane)}` : '';
+    lines.push(`**Strategy:** ${ctx.strategy} | **Tokens:** ~${ctx.token_count} | **Sources:** ${provenance || 'none'} | **IDs:** ${sourceIds.length}${codeSegment}`);
     lines.push('');
 
     for (const section of ctx.sections) {
@@ -845,6 +848,11 @@ export class UnifiedAssembler {
     const tenant = resolveTenant(opts.tenantId);
     const stableIdLane = opts.resolvedEntityIds !== undefined;
     const servedAttempt = this.servedReranker !== null && opts.servedRerankerDisabled !== true;
+    // One gate predicate for the code-search channel AND the trace's includeCode
+    // flag — the two must never disagree (COD-010 fail-loud status is derived
+    // from the same local).
+    const codePlaneEligible = !stableIdLane && opts.include_code && this.codeLayer != null && isDefaultTenant(tenant);
+    let codePlaneFailure: 'query-failed' | 'invalid-result' | undefined;
 
     // Intent-aware query expansion
     const expansion = expandQuery(task, intent);
@@ -918,7 +926,7 @@ export class UnifiedAssembler {
     // Force the channel OFF for non-default tenants — mirrors the deterministic
     // strategy's tenant guard in tools.ts. Default tenant owns the shared/legacy
     // graph, so it keeps the channel.
-    if (!stableIdLane && opts.include_code && this.codeLayer && isDefaultTenant(tenant)) {
+    if (codePlaneEligible && this.codeLayer) {
       const codeOptions = {
         limit: 20,
         include_semantics: false,
@@ -965,8 +973,9 @@ export class UnifiedAssembler {
             }
           })
           .catch((err) => {
-            const code: RetrievalTraceFailureCode = isAssemblerProviderResultError(err)
+            const code: 'query-failed' | 'invalid-result' = isAssemblerProviderResultError(err)
               ? 'invalid-result' : 'query-failed';
+            codePlaneFailure = code;
             if (traced) settledObservations!.code = structuralObservationFromError(err) ?? {
               channels: [{ channel: 'code.fulltext', outcome: 'safe-failure', code }],
               candidates: [], finalIds: [],
@@ -1089,7 +1098,7 @@ export class UnifiedAssembler {
 
     // Fuse all lists via RRF (dynamic k, normalization, text boost, then MMR diversity)
     const traceAdapter = traced ? new RankedRuntimeTraceAdapter(observations!, lists, {
-      includeCode: !stableIdLane && opts.include_code && this.codeLayer != null && isDefaultTenant(tenant),
+      includeCode: codePlaneEligible,
       includeArchitecture: opts.include_arch,
       includeMemory: opts.include_memory && this.memoryLayer != null,
       projectScopeApplied: Boolean(opts.project_name || memoryTagScope?.some((tag) => /^project:/i.test(tag))),
@@ -1120,12 +1129,40 @@ export class UnifiedAssembler {
       0,
     );
 
+    // COD-010: fail-loud code-plane status. K counts DELIVERED symbol items in
+    // the final sections (post dedup/rerank/budget), so the status can never
+    // contradict the rendered **Sources:** provenance on the same line.
+    let codePlane: CodePlaneStatusV1 | undefined;
+    if (opts.include_code) {
+      if (!codePlaneEligible) {
+        codePlane = {
+          outcome: 'unsupported',
+          reason: !isDefaultTenant(tenant) ? 'tenant-scope'
+            : this.codeLayer == null ? 'code-layer-missing'
+            : 'stable-id-lane',
+        };
+      } else if (codePlaneFailure !== undefined) {
+        codePlane = { outcome: 'failed', reason: codePlaneFailure };
+      } else {
+        const candidates = settledLists.code?.length ?? 0;
+        const results = sections.reduce(
+          (sum, section) => section.source_type === 'symbol' ? sum + section.items.length : sum, 0,
+        );
+        codePlane = candidates === 0
+          ? { outcome: 'no-results' }
+          : results === 0
+          ? { outcome: 'no-results', reason: 'budget-evicted', candidates }
+          : { outcome: 'served', results, candidates };
+      }
+    }
+
     const context: UnifiedContext = {
       task,
       strategy: 'ranked',
       sections,
       token_count: tokenCount,
       assembled_at: new Date().toISOString(),
+      ...(codePlane !== undefined ? { code_plane: codePlane } : {}),
     };
     return { context, ...(traceAdapter ? { trace: traceAdapter.finalize() } : {}) };
   }
@@ -1156,6 +1193,7 @@ export class UnifiedAssembler {
       sections,
       token_count: tokenCount,
       assembled_at: new Date().toISOString(),
+      ...deterministicCodePlane(opts),
     };
   }
 
@@ -2059,6 +2097,29 @@ function logRankedFailure(
 ): void {
   if (traced || code === 'invalid-result') console.error(`[memberry-retrieval] ${layer} failed [${code}]`);
   else console.error(`[memberry-retrieval] ${layer} failed:`, error instanceof Error ? error.message : error);
+}
+
+// COD-010: deterministic assembly has no code channel — when code was requested,
+// say so instead of returning a successful-looking context without code. A named
+// tenant reports tenant-scope (categorically true regardless of strategy).
+function deterministicCodePlane(opts: TenantRetrievalOptions): { code_plane: CodePlaneStatusV1 } | Record<string, never> {
+  if (opts.include_code !== true) return {};
+  return {
+    code_plane: {
+      outcome: 'unsupported',
+      reason: isDefaultTenant(resolveTenant(opts.tenantId)) ? 'deterministic-strategy' : 'tenant-scope',
+    },
+  };
+}
+
+function renderCodePlaneSegment(status: CodePlaneStatusV1): string {
+  switch (status.outcome) {
+    case 'served': return `served (${status.results ?? 0} of ${status.candidates ?? 0})`;
+    case 'no-results': return status.reason === 'budget-evicted'
+      ? `budget-evicted (0 of ${status.candidates ?? 0})` : 'none found';
+    case 'unsupported': return `unavailable (${status.reason})`;
+    case 'failed': return `failed (${status.reason})`;
+  }
 }
 
 function groupAndBudget(results: readonly RetrievalResult[], maxTokens: number): ContextSection[] {
