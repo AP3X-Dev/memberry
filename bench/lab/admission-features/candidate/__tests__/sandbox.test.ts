@@ -41,8 +41,8 @@ async function fixedInputs(): Promise<unknown[]> {
   const load = async (path: string) => (await readFile(resolve(root, path), 'utf8'))
     .replace(/\r\n?/g, '\n').split('\n').filter(Boolean).map((line) => JSON.parse(line) as unknown);
   return [
-    ...await load('bench/lab/admission-features/fixtures/v1/dev/input.jsonl'),
-    ...await load('bench/lab/admission-features/fixtures/v1/holdout/input.jsonl'),
+    ...await load('bench/lab/admission-features/fixtures/v2/dev/input.jsonl'),
+    ...await load('bench/lab/admission-features/fixtures/v2/holdout/input.jsonl'),
   ];
 }
 

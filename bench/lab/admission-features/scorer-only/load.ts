@@ -7,8 +7,8 @@ import {
 } from '../contract.js';
 
 const ORACLE_PATHS = [
-  'bench/lab/admission-features/scorer-only/v1/dev/oracle.jsonl',
-  'bench/lab/admission-features/scorer-only/v1/holdout/oracle.jsonl',
+  'bench/lab/admission-features/scorer-only/v2/dev/oracle.jsonl',
+  'bench/lab/admission-features/scorer-only/v2/holdout/oracle.jsonl',
 ] as const;
 let oracleOpenAttempts = 0;
 
@@ -32,7 +32,7 @@ export async function loadAdmissionFeatureOracles(repoRoot = process.cwd()): Pro
   const oracles = parseAdmissionFeatureOracleListV1(contents.flatMap((content, index) => parseJsonLines(content, ORACLE_PATHS[index]!)));
   const dev = oracles.filter(({ split }) => split === 'dev').length;
   const holdout = oracles.filter(({ split }) => split === 'holdout').length;
-  if (dev !== 3 || holdout !== 3) throw new Error('admission_feature_oracle:split_count_mismatch');
+  if (dev !== 9 || holdout !== 4) throw new Error('admission_feature_oracle:split_count_mismatch');
   return oracles;
 }
 

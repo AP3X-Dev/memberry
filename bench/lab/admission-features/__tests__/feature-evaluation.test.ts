@@ -34,9 +34,9 @@ describe('MEM-002B admission feature evaluation contract', () => {
     const oracles = await loadAdmissionFeatureOracles();
 
     expect(ADMISSION_FEATURE_DATASET_ID).toBe('memberry.synthetic-admission-feature-labels');
-    expect(ADMISSION_FEATURE_DATASET_VERSION).toBe('1.0.0');
-    expect(inputs).toHaveLength(6);
-    expect(oracles).toHaveLength(6);
+    expect(ADMISSION_FEATURE_DATASET_VERSION).toBe('2.0.0');
+    expect(inputs).toHaveLength(13);
+    expect(oracles).toHaveLength(13);
     expect(new Set(inputs.map(({ split }) => split))).toEqual(new Set(['dev', 'holdout']));
     expect(new Set(oracles.map(({ split }) => split))).toEqual(new Set(['dev', 'holdout']));
     expect(JSON.stringify(inputs)).not.toMatch(/dimensions|valuePermille|oracle|expected/i);
@@ -50,7 +50,7 @@ describe('MEM-002B admission feature evaluation contract', () => {
     expect(ADMISSION_FEATURE_AGREEMENT_POLICY.requiredAgreementPermille).toBe(1_000);
     expect(report.passed).toBe(true);
     expect(report.metrics.agreementPermille).toBe(1_000);
-    expect(report.metrics.dimensionCount).toBe(36);
+    expect(report.metrics.dimensionCount).toBe(78);
     expect(report.metrics.unavailableLabelCount).toBeGreaterThan(0);
     expect(report.metrics.unavailableAgreementCount).toBe(report.metrics.unavailableLabelCount);
     expect(report.metrics.availabilityMismatchCount).toBe(0);
@@ -77,8 +77,8 @@ describe('MEM-002B admission feature evaluation contract', () => {
 
     const report = scoreAdmissionFeatureAgreement({ inputs, oracles, predictions });
     expect(report.passed).toBe(false);
-    expect(report.metrics.agreementCount).toBe(35);
-    expect(report.metrics.agreementPermille).toBe(972);
+    expect(report.metrics.agreementCount).toBe(77);
+    expect(report.metrics.agreementPermille).toBe(987);
     expect(report.metrics.valueMismatchCount).toBe(1);
     expect(report.failures).toContain('agreementPermille: expected at least 1000');
   });
@@ -92,10 +92,10 @@ describe('MEM-002B admission feature evaluation contract', () => {
 
     expect(canonical).toBe(canonicalAdmissionFeatureEvaluationArtifact(buildAdmissionFeatureEvaluationArtifact({ inputs, oracles, report })));
     expect(canonical).not.toMatch(/node|platform|arch|timestamp|secret|password|token|credential/i);
-    expect(artifact.dataset.inputHash).toBe('sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24');
-    expect(artifact.dataset.oracleHash).toBe('sha256:3a50b28cba28aa451967b3fbf3bcddfcc8c8f13f11c806cada1096d1f2807574');
+    expect(artifact.dataset.inputHash).toBe('sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428');
+    expect(artifact.dataset.oracleHash).toBe('sha256:840bc97373705daad00d0caa830335e07cfd54671437a7628a0f4e451c672441');
     expect(admissionFeatureEvaluationArtifactIdentity(artifact)).toBe(
-      'sha256:986e27b44324f1283058b38ea2f4916f366d2a28a9fd2db1389b53b0f3e49a55',
+      'sha256:68647278b4f91e2959f1e00054480ab17a5a8b82487cdc024b133fbb54692460',
     );
 
     const forgedReport = structuredClone(report);

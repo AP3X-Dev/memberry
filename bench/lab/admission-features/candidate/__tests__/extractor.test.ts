@@ -38,7 +38,7 @@ function signals(overrides: Record<string, string> = {}): Record<string, string>
 function scenario(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     datasetId: 'memberry.synthetic-admission-feature-labels',
-    datasetVersion: '1.0.0',
+    datasetVersion: '2.0.0',
     scenarioId: 'af-dev-001',
     split: 'dev',
     fixtureCode: 'case-001',
@@ -55,8 +55,8 @@ function dimension(valuePermille?: number) {
 
 describe('MEM-002C1 blind deterministic extractor', () => {
   it('reproduces every permitted DEV oracle envelope exactly', async () => {
-    const inputs = await jsonLines('bench/lab/admission-features/fixtures/v1/dev/input.jsonl');
-    const oracles = await jsonLines('bench/lab/admission-features/scorer-only/v1/dev/oracle.jsonl') as any[];
+    const inputs = await jsonLines('bench/lab/admission-features/fixtures/v2/dev/input.jsonl');
+    const oracles = await jsonLines('bench/lab/admission-features/scorer-only/v2/dev/oracle.jsonl') as any[];
 
     expect(inputs.map((input) => predictAdmissionFeatureScenarioV1(input))).toEqual(
       oracles.map((oracle) => ({
@@ -74,12 +74,12 @@ describe('MEM-002C1 blind deterministic extractor', () => {
 
   it('maps every closed categorical signal and unknown to unavailable', () => {
     const cases = [
-      ['priority', 'salience', [['none', 0], ['normal', 100], ['explicit', 1_000], ['unknown', undefined]]],
-      ['noveltyEvidence', 'novelty', [['none', 0], ['partial', 500], ['independent', 1_000], ['unknown', undefined]]],
-      ['retentionHorizon', 'durability', [['transient', 100], ['session', 700], ['durable', 800], ['unknown', undefined]]],
-      ['evidenceSupport', 'evidenceQuality', [['none', 0], ['single', 500], ['corroborated', 1_000], ['unknown', undefined]]],
-      ['scopeBinding', 'scopeConfidence', [['missing', 0], ['inferred', 500], ['explicit', 1_000], ['unknown', undefined]]],
-      ['sensitivitySignal', 'sensitivity', [['none', 0], ['possible', 50], ['confirmed', 1_000], ['unknown', undefined]]],
+      ['priority', 'salience', [['none', 25], ['normal', 100], ['explicit', 850], ['unknown', undefined]]],
+      ['noveltyEvidence', 'novelty', [['none', 50], ['partial', 500], ['independent', 900], ['unknown', undefined]]],
+      ['retentionHorizon', 'durability', [['transient', 150], ['session', 700], ['durable', 800], ['unknown', undefined]]],
+      ['evidenceSupport', 'evidenceQuality', [['none', 0], ['single', 450], ['corroborated', 1_000], ['unknown', undefined]]],
+      ['scopeBinding', 'scopeConfidence', [['missing', 100], ['inferred', 600], ['explicit', 1_000], ['unknown', undefined]]],
+      ['sensitivitySignal', 'sensitivity', [['none', 0], ['possible', 50], ['confirmed', 900], ['unknown', undefined]]],
     ] as const;
 
     for (const [signal, feature, values] of cases) {
@@ -95,8 +95,20 @@ describe('MEM-002C1 blind deterministic extractor', () => {
       noveltyEvidence: 'partial', evidenceSupport: 'corroborated',
     })).dimensions.novelty).toEqual(dimension(200));
     expect(extractAdmissionFeatureEnvelopeV1(signals({
+      noveltyEvidence: 'none', evidenceSupport: 'corroborated',
+    })).dimensions.novelty).toEqual(dimension(0));
+    expect(extractAdmissionFeatureEnvelopeV1(signals({
+      noveltyEvidence: 'independent', evidenceSupport: 'corroborated',
+    })).dimensions.novelty).toEqual(dimension(600));
+    expect(extractAdmissionFeatureEnvelopeV1(signals({
       scopeBinding: 'explicit', sensitivitySignal: 'possible',
     })).dimensions.scopeConfidence).toEqual(dimension(900));
+    expect(extractAdmissionFeatureEnvelopeV1(signals({
+      scopeBinding: 'inferred', sensitivitySignal: 'confirmed',
+    })).dimensions.scopeConfidence).toEqual(dimension(350));
+    expect(extractAdmissionFeatureEnvelopeV1(signals({
+      scopeBinding: 'missing', sensitivitySignal: 'confirmed',
+    })).dimensions.scopeConfidence).toEqual(dimension(0));
   });
 
   it('is independent of scenario and fixture IDs', () => {
@@ -160,18 +172,18 @@ describe('MEM-002C1 blind deterministic extractor', () => {
 
   it('emits exact canonical bounded prediction artifact bytes', async () => {
     const inputs = [
-      ...await jsonLines('bench/lab/admission-features/fixtures/v1/dev/input.jsonl'),
-      ...await jsonLines('bench/lab/admission-features/fixtures/v1/holdout/input.jsonl'),
+      ...await jsonLines('bench/lab/admission-features/fixtures/v2/dev/input.jsonl'),
+      ...await jsonLines('bench/lab/admission-features/fixtures/v2/holdout/input.jsonl'),
     ];
     const predictions = predictAdmissionFeatureScenariosV1(inputs);
     const bytes = encodeAdmissionFeatureCandidateArtifactV1(inputs);
     const expected = JSON.stringify({
       artifactVersion: '1.0.0',
       datasetId: 'memberry.synthetic-admission-feature-labels',
-      datasetVersion: '1.0.0',
+      datasetVersion: '2.0.0',
       evaluationContractVersion: '1.0.0',
       featureContractVersion: '1.0.0',
-      inputHash: 'sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24',
+      inputHash: 'sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428',
       predictions,
     });
 

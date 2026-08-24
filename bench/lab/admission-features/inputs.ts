@@ -8,8 +8,8 @@ import {
 } from './contract.js';
 
 const INPUT_PATHS = [
-  'bench/lab/admission-features/fixtures/v1/dev/input.jsonl',
-  'bench/lab/admission-features/fixtures/v1/holdout/input.jsonl',
+  'bench/lab/admission-features/fixtures/v2/dev/input.jsonl',
+  'bench/lab/admission-features/fixtures/v2/holdout/input.jsonl',
 ] as const;
 
 function parseJsonLines(content: string, field: string): unknown[] {
@@ -21,7 +21,7 @@ function parseJsonLines(content: string, field: string): unknown[] {
 function exactSplits(inputs: readonly AdmissionFeatureScenarioInputV1[]): boolean {
   const counts = new Map<AdmissionFeatureFixtureSplit, number>([['dev', 0], ['holdout', 0]]);
   for (const input of inputs) counts.set(input.split, (counts.get(input.split) ?? 0) + 1);
-  return counts.get('dev') === 3 && counts.get('holdout') === 3;
+  return counts.get('dev') === 9 && counts.get('holdout') === 4;
 }
 
 export async function loadAdmissionFeatureInputs(repoRoot = process.cwd()): Promise<readonly AdmissionFeatureScenarioInputV1[]> {

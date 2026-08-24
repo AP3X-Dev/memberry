@@ -18,14 +18,21 @@ import { scoreAdmissionFeatureAgreement, type AdmissionFeatureAgreementReportV1 
 export const ADMISSION_FEATURE_PREDICTION_ARTIFACT_VERSION = '1.0.0' as const;
 export const ADMISSION_FEATURE_PREDICTION_ARTIFACT_MAX_BYTES = 32_768 as const;
 const ADMISSION_FEATURE_FIXED_INPUT_HASH =
-  'sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24' as const;
+  'sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428' as const;
 const ADMISSION_FEATURE_FIXED_SCENARIOS = Object.freeze([
   Object.freeze({ scenarioId: 'af-dev-001', split: 'dev' }),
   Object.freeze({ scenarioId: 'af-dev-002', split: 'dev' }),
   Object.freeze({ scenarioId: 'af-dev-003', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-004', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-005', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-006', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-007', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-008', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-009', split: 'dev' }),
   Object.freeze({ scenarioId: 'af-holdout-001', split: 'holdout' }),
   Object.freeze({ scenarioId: 'af-holdout-002', split: 'holdout' }),
   Object.freeze({ scenarioId: 'af-holdout-003', split: 'holdout' }),
+  Object.freeze({ scenarioId: 'af-holdout-004', split: 'holdout' }),
 ] as const);
 
 export interface AdmissionFeaturePredictionArtifactV1 {

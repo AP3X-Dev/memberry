@@ -51,14 +51,14 @@ describe('MEM-002B data-only prediction artifact boundary', () => {
     const { inputs, bytes } = await exactArtifact();
     const artifact = parseAdmissionFeaturePredictionArtifactV1(bytes, inputs);
 
-    expect(artifact.predictions).toHaveLength(6);
-    expect(artifact.inputHash).toBe('sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24');
+    expect(artifact.predictions).toHaveLength(13);
+    expect(artifact.inputHash).toBe('sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428');
     expect(Object.isFrozen(artifact)).toBe(true);
     expect(Object.isFrozen(artifact.predictions)).toBe(true);
     expect(Object.isFrozen(artifact.predictions[0]!.features)).toBe(true);
     expect(Object.isFrozen(artifact.predictions[0]!.features.dimensions)).toBe(true);
     expect(admissionFeaturePredictionArtifactIdentityV1(artifact)).toBe(
-      'sha256:a437043418f4cd545b65a116e7a84aeb41011d05c3cf1a1ed8a770f65cfaa636',
+      'sha256:c5611f810d34fcecce7c2ed9ab1c258d0cea2e855526a10730993b73f7d92d3a',
     );
   });
 
@@ -74,7 +74,7 @@ describe('MEM-002B data-only prediction artifact boundary', () => {
     ['unknown root metadata', (bytes: Uint8Array) => mutateCanonical(bytes, (value) => { value.metadata = {}; })],
     ['wrong input hash', (bytes: Uint8Array) => mutateCanonical(bytes, (value) => { value.inputHash = `sha256:${'0'.repeat(64)}`; })],
     ['wrong artifact version', (bytes: Uint8Array) => mutateCanonical(bytes, (value) => { value.artifactVersion = '2.0.0'; })],
-    ['wrong dataset version', (bytes: Uint8Array) => mutateCanonical(bytes, (value) => { value.datasetVersion = '2.0.0'; })],
+    ['wrong dataset version', (bytes: Uint8Array) => mutateCanonical(bytes, (value) => { value.datasetVersion = '1.0.0'; })],
     ['scenario substitution', (bytes: Uint8Array) => mutateCanonical(bytes, (value) => { value.predictions[0].scenarioId = 'af-dev-999'; })],
     ['split substitution', (bytes: Uint8Array) => mutateCanonical(bytes, (value) => { value.predictions[0].split = 'holdout'; })],
     ['duplicate scenario', (bytes: Uint8Array) => mutateCanonical(bytes, (value) => { value.predictions[1].scenarioId = value.predictions[0].scenarioId; })],
@@ -137,7 +137,7 @@ describe('MEM-002B data-only prediction artifact boundary', () => {
     expect(exact.report.passed).toBe(true);
     expect(exact.report.metrics.agreementPermille).toBe(1_000);
     expect(exact.predictionArtifactIdentity).toBe(
-      'sha256:a437043418f4cd545b65a116e7a84aeb41011d05c3cf1a1ed8a770f65cfaa636',
+      'sha256:c5611f810d34fcecce7c2ed9ab1c258d0cea2e855526a10730993b73f7d92d3a',
     );
     expect(admissionFeatureOracleOpenAttemptsForTest()).toBe(1);
 
@@ -150,7 +150,7 @@ describe('MEM-002B data-only prediction artifact boundary', () => {
     const mismatchBytes = encodeAdmissionFeaturePredictionArtifactV1({ inputs, predictions });
     const mismatch = await runAdmissionFeaturePredictionEvidence(mismatchBytes);
     expect(mismatch.report.passed).toBe(false);
-    expect(mismatch.report.metrics.agreementPermille).toBe(972);
+    expect(mismatch.report.metrics.agreementPermille).toBe(987);
     expect(mismatch.report.metrics.valueMismatchCount).toBe(1);
   });
 });
