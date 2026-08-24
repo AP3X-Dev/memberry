@@ -498,7 +498,21 @@ export function registerRetrievalTools(
           : assembler.assembleCandidateExecution(
             args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
           );
-        const md = assembler.renderMarkdown(assembled.context);
+        // COD-010: the candidate runtime composes memory/arch only — when code
+        // was requested, disclose the drop instead of returning a successful-
+        // looking context without code. tenant-scope outranks candidate-channel
+        // so the stated reason matches the legacy path for the same request.
+        const md = assembler.renderMarkdown(
+          args.include_code === true
+            ? {
+              ...assembled.context,
+              code_plane: {
+                outcome: 'unsupported',
+                reason: tenantId !== DEFAULT_TENANT ? 'tenant-scope' : 'candidate-channel',
+              },
+            }
+            : assembled.context,
+        );
         if (args.include_trace !== true) return textContent(md);
         if (!assembled.trace) throw new Error('candidate_runtime:unavailable');
         if (args.explain !== true) return tracedTextContent(md, serializeApprovedRetrievalTrace(assembled.trace));
