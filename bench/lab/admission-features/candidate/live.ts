@@ -97,9 +97,9 @@ export interface AdmissionFeatureCandidateLiveEvidenceV1 {
   readonly schemaVersion: 'memberry.admission-feature-candidate-live-evidence.v1';
   readonly ok: true;
   readonly cleanupVerified: true;
-  readonly scenarioCount: 6;
-  readonly devScenarioCount: 3;
-  readonly holdoutScenarioCount: 3;
+  readonly scenarioCount: 13;
+  readonly devScenarioCount: 9;
+  readonly holdoutScenarioCount: 4;
   readonly baseImage: string;
   readonly candidateSha256: `sha256:${string}`;
   readonly sourceSha256: `sha256:${string}`;
@@ -118,7 +118,7 @@ function successfulEvidenceV1(
 ): AdmissionFeatureCandidateLiveEvidenceV1 {
   const devScenarioCount = inputs.filter((input) => input.split === 'dev').length;
   const holdoutScenarioCount = inputs.filter((input) => input.split === 'holdout').length;
-  if (inputs.length !== 6 || devScenarioCount !== 3 || holdoutScenarioCount !== 3) {
+  if (inputs.length !== 13 || devScenarioCount !== 9 || holdoutScenarioCount !== 4) {
     throw fixedFailureV1('INPUT_MANIFEST_INVALID', 'SOURCE_SNAPSHOT');
   }
   if (result.hashes.candidateSha256 !== receipt.candidateSha256
@@ -130,9 +130,9 @@ function successfulEvidenceV1(
     schemaVersion: 'memberry.admission-feature-candidate-live-evidence.v1',
     ok: true,
     cleanupVerified: true,
-    scenarioCount: 6,
-    devScenarioCount: 3,
-    holdoutScenarioCount: 3,
+    scenarioCount: 13,
+    devScenarioCount: 9,
+    holdoutScenarioCount: 4,
     baseImage: receipt.baseImage,
     candidateSha256: receipt.candidateSha256,
     sourceSha256: receipt.sourceSha256,

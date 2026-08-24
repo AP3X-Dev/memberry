@@ -6,17 +6,25 @@ export const ADMISSION_FEATURE_CANDIDATE_MAX_BYTES = 32_768 as const;
 
 const DATASET_ID = 'memberry.synthetic-admission-feature-labels' as const;
 const VERSION = '1.0.0' as const;
+const DATASET_VERSION = '2.0.0' as const;
 const CONTRACT_ID = 'memberry.admission-feature-envelope' as const;
 const EXTRACTOR_ID = 'memberry.precomputed-feature-signals' as const;
 const FIXED_INPUT_HASH =
-  'sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24' as const;
+  'sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428' as const;
 const FIXED_SCENARIOS = Object.freeze([
   Object.freeze({ scenarioId: 'af-dev-001', split: 'dev' }),
   Object.freeze({ scenarioId: 'af-dev-002', split: 'dev' }),
   Object.freeze({ scenarioId: 'af-dev-003', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-004', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-005', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-006', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-007', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-008', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-009', split: 'dev' }),
   Object.freeze({ scenarioId: 'af-holdout-001', split: 'holdout' }),
   Object.freeze({ scenarioId: 'af-holdout-002', split: 'holdout' }),
   Object.freeze({ scenarioId: 'af-holdout-003', split: 'holdout' }),
+  Object.freeze({ scenarioId: 'af-holdout-004', split: 'holdout' }),
 ] as const);
 
 const SIGNAL_KEYS = [
@@ -51,7 +59,7 @@ export interface CandidateAdmissionFeatureSignalsV1 {
 
 export interface CandidateAdmissionFeatureInputV1 {
   readonly datasetId: typeof DATASET_ID;
-  readonly datasetVersion: typeof VERSION;
+  readonly datasetVersion: typeof DATASET_VERSION;
   readonly scenarioId: string;
   readonly split: Split;
   readonly fixtureCode: string;
@@ -174,7 +182,7 @@ function parseInput(value: unknown): CandidateAdmissionFeatureInputV1 {
   if (record.datasetId !== DATASET_ID) {
     throw new CandidateAdmissionFeatureError('invalid_identity', 'input.datasetId');
   }
-  if (record.datasetVersion !== VERSION) {
+  if (record.datasetVersion !== DATASET_VERSION) {
     throw new CandidateAdmissionFeatureError('invalid_identity', 'input.datasetVersion');
   }
   const split = enumValue(record.split, 'input.split', ['dev', 'holdout']);
@@ -189,7 +197,7 @@ function parseInput(value: unknown): CandidateAdmissionFeatureInputV1 {
   }
   return Object.freeze({
     datasetId: DATASET_ID,
-    datasetVersion: VERSION,
+    datasetVersion: DATASET_VERSION,
     scenarioId: record.scenarioId,
     split,
     fixtureCode: record.fixtureCode,
@@ -246,40 +254,43 @@ function mapped<T extends string>(category: T, values: Readonly<Record<T, number
 }
 
 /**
- * Pure, content-free C1 extraction. Values are a closed translation of public
- * categories; the two adjustments are the minimal rules required to reconcile
- * repeated categories in the permitted DEV evidence.
+ * Pure, content-free C1 extraction implementing the public v2 labeling function
+ * (fixtures/v2/MAPPING.md): per-dimension base tables plus two floor-at-zero
+ * adjustment rules, all fully determined by the permitted DEV evidence.
  */
 export function extractAdmissionFeatureEnvelopeV1(signals: unknown): CandidateAdmissionFeatureEnvelopeV1 {
   const parsed = parseSignals(signals);
 
   const salience = mapped(parsed.priority, {
-    none: 0, normal: 100, explicit: 1_000, unknown: undefined,
+    none: 25, normal: 100, explicit: 850, unknown: undefined,
   });
 
   const noveltyBase = {
-    none: 0, partial: 500, independent: 1_000, unknown: undefined,
+    none: 50, partial: 500, independent: 900, unknown: undefined,
   }[parsed.noveltyEvidence];
   const novelty = noveltyBase === undefined
     ? unavailable()
     : available(Math.max(0, noveltyBase - (parsed.evidenceSupport === 'corroborated' ? 300 : 0)));
 
   const durability = mapped(parsed.retentionHorizon, {
-    transient: 100, session: 700, durable: 800, unknown: undefined,
+    transient: 150, session: 700, durable: 800, unknown: undefined,
   });
   const evidenceQuality = mapped(parsed.evidenceSupport, {
-    none: 0, single: 500, corroborated: 1_000, unknown: undefined,
+    none: 0, single: 450, corroborated: 1_000, unknown: undefined,
   });
 
   const scopeBase = {
-    missing: 0, inferred: 500, explicit: 1_000, unknown: undefined,
+    missing: 100, inferred: 600, explicit: 1_000, unknown: undefined,
   }[parsed.scopeBinding];
+  const scopeReduction = parsed.sensitivitySignal === 'possible'
+    ? 100
+    : parsed.sensitivitySignal === 'confirmed' ? 250 : 0;
   const scopeConfidence = scopeBase === undefined
     ? unavailable()
-    : available(Math.max(0, scopeBase - (parsed.sensitivitySignal === 'possible' ? 100 : 0)));
+    : available(Math.max(0, scopeBase - scopeReduction));
 
   const sensitivity = mapped(parsed.sensitivitySignal, {
-    none: 0, possible: 50, confirmed: 1_000, unknown: undefined,
+    none: 0, possible: 50, confirmed: 900, unknown: undefined,
   });
 
   return Object.freeze({
@@ -336,7 +347,7 @@ export function encodeAdmissionFeatureCandidateArtifactV1(value: unknown): Uint8
   const artifact = Object.freeze({
     artifactVersion: VERSION,
     datasetId: DATASET_ID,
-    datasetVersion: VERSION,
+    datasetVersion: DATASET_VERSION,
     evaluationContractVersion: VERSION,
     featureContractVersion: VERSION,
     inputHash: FIXED_INPUT_HASH,

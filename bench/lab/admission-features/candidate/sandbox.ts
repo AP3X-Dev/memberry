@@ -45,11 +45,18 @@ const EXACT_INPUT_IDENTITIES_V1 = Object.freeze([
   Object.freeze({ scenarioId: 'af-dev-001', split: 'dev' }),
   Object.freeze({ scenarioId: 'af-dev-002', split: 'dev' }),
   Object.freeze({ scenarioId: 'af-dev-003', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-004', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-005', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-006', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-007', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-008', split: 'dev' }),
+  Object.freeze({ scenarioId: 'af-dev-009', split: 'dev' }),
   Object.freeze({ scenarioId: 'af-holdout-001', split: 'holdout' }),
   Object.freeze({ scenarioId: 'af-holdout-002', split: 'holdout' }),
   Object.freeze({ scenarioId: 'af-holdout-003', split: 'holdout' }),
+  Object.freeze({ scenarioId: 'af-holdout-004', split: 'holdout' }),
 ] as const);
-const EXACT_INPUT_HASH_V1 = 'sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24';
+const EXACT_INPUT_HASH_V1 = 'sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428';
 const IMAGE_PATTERN = /^sha256:([0-9a-f]{64})$/;
 const SOURCE_FILES_V1 = Object.freeze([
   '.gitattributes', '.dockerignore', 'extractor.ts', 'protocol.ts', 'worker.ts',
@@ -66,8 +73,8 @@ const IMMUTABLE_CANDIDATE_GIT_BLOBS_V1 = Object.freeze({
     sha256: 'sha256:c9afff73aa8272fc505880c5c820eda36b3ba23805e06f10b473cbaa7dd78670',
   }),
   'extractor.ts': Object.freeze({
-    oid: '6a84fdf09c1652b121168196323d388151aa88ad',
-    sha256: 'sha256:da0b6d633dc7920f71b376da9fc3450259bd7cee2a3a12aedd2d397ab48bede7',
+    oid: '3dc01843016e5c618bd3c8a5703006dd0420f2f3',
+    sha256: 'sha256:bbfb5eba75fc6dfbe4b4452606d2ef53ef8970aa75bc96a50ff802604fa768b1',
   }),
   'protocol.ts': Object.freeze({
     oid: '17ee9adde52bbc52e351153b465ce38db1714b5b',
@@ -86,8 +93,8 @@ const IMMUTABLE_CANDIDATE_GIT_BLOBS_V1 = Object.freeze({
     sha256: 'sha256:20acbfad6167d75727b66c2d58fbc4fac0364f232f249b2b856f2972e6600c46',
   }),
   'container/worker.mjs': Object.freeze({
-    oid: '529ab77b19d43fdb604c5b6d1194486ac7f08d8d',
-    sha256: 'sha256:474459f8359fe8a117547453dc1e728b4aab9a69f69f7faa4cf188e27e4742ca',
+    oid: 'd5638734f59b662ecad119838b77f931c29cf696',
+    sha256: 'sha256:778331a12e3720b1373c600f49ef7bd6299946ed10ddfde465b61f2f5c9ec982',
   }),
 } as const);
 const TYPED_ARRAY_PROTOTYPE_V1 = Object.getPrototypeOf(Uint8Array.prototype);
@@ -497,7 +504,7 @@ function canonicalInputBytesV1(value: unknown): Uint8Array {
     const signals = descriptorCopy(input.signals, SIGNAL_KEYS);
     const expectedIdentity = EXACT_INPUT_IDENTITIES_V1[index]!;
     if (input.datasetId !== 'memberry.synthetic-admission-feature-labels'
-      || input.datasetVersion !== '1.0.0' || input.scenarioId !== expectedIdentity.scenarioId
+      || input.datasetVersion !== '2.0.0' || input.scenarioId !== expectedIdentity.scenarioId
       || input.split !== expectedIdentity.split || typeof input.fixtureCode !== 'string'
       || !/^case-[0-9]{3}$/.test(input.fixtureCode as string)
       || !['none', 'normal', 'explicit', 'unknown'].includes(signals.priority as string)
@@ -575,7 +582,7 @@ export function validateAdmissionArtifactBytesV1(
     const artifact = descriptorCopy(parsed, ARTIFACT_KEYS_V1);
     if (artifact.artifactVersion !== '1.0.0'
       || artifact.datasetId !== 'memberry.synthetic-admission-feature-labels'
-      || artifact.datasetVersion !== '1.0.0' || artifact.evaluationContractVersion !== '1.0.0'
+      || artifact.datasetVersion !== '2.0.0' || artifact.evaluationContractVersion !== '1.0.0'
       || artifact.featureContractVersion !== '1.0.0' || artifact.inputHash !== EXACT_INPUT_HASH_V1) return false;
     const predictions = exactJsonArrayV1(artifact.predictions, EXACT_INPUT_IDENTITIES_V1.length);
     predictions.forEach((prediction, index) => {

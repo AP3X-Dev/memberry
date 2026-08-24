@@ -73,20 +73,20 @@ const signals = Object.freeze({
   sensitivitySignal: 'none' as const,
 });
 const inputs: readonly AdmissionFeatureScenarioInputV1[] = Object.freeze([
-  ...Array.from({ length: 3 }, (_, index) => Object.freeze({
+  ...Array.from({ length: 9 }, (_, index) => Object.freeze({
     datasetId: 'memberry.synthetic-admission-feature-labels' as const,
-    datasetVersion: '1.0.0' as const,
+    datasetVersion: '2.0.0' as const,
     scenarioId: `af-dev-00${index + 1}`,
     split: 'dev' as const,
     fixtureCode: `case-00${index + 1}`,
     signals,
   })),
-  ...Array.from({ length: 3 }, (_, index) => Object.freeze({
+  ...Array.from({ length: 4 }, (_, index) => Object.freeze({
     datasetId: 'memberry.synthetic-admission-feature-labels' as const,
-    datasetVersion: '1.0.0' as const,
+    datasetVersion: '2.0.0' as const,
     scenarioId: `af-holdout-00${index + 1}`,
     split: 'holdout' as const,
-    fixtureCode: `case-00${index + 4}`,
+    fixtureCode: `case-10${index + 1}`,
     signals,
   })),
 ]);
@@ -111,9 +111,9 @@ describe('MEM-002C2 value-free live CLI orchestration', () => {
       schemaVersion: 'memberry.admission-feature-candidate-live-evidence.v1',
       ok: true,
       cleanupVerified: true,
-      scenarioCount: 6,
-      devScenarioCount: 3,
-      holdoutScenarioCount: 3,
+      scenarioCount: 13,
+      devScenarioCount: 9,
+      holdoutScenarioCount: 4,
       baseImage: buildReceipt.baseImage,
       candidateSha256: buildReceipt.candidateSha256,
       sourceSha256: buildReceipt.sourceSha256,

@@ -12,7 +12,7 @@ import {
 } from '../../../packages/core/src/admission-features.js';
 
 export const ADMISSION_FEATURE_DATASET_ID = 'memberry.synthetic-admission-feature-labels' as const;
-export const ADMISSION_FEATURE_DATASET_VERSION = '1.0.0' as const;
+export const ADMISSION_FEATURE_DATASET_VERSION = '2.0.0' as const;
 export const ADMISSION_FEATURE_EVALUATION_CONTRACT_VERSION = '1.0.0' as const;
 export const ADMISSION_FEATURE_SCENARIO_LIMIT = 128 as const;
 
