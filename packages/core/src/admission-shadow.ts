@@ -3,6 +3,7 @@ import {
   createAdmissionObservationV1,
   type AdmissionClock,
   type AdmissionObservationV1,
+  type AdmissionSafeFactsV1,
   type TrustedAdmissionInputV1,
 } from './admission.js';
 import {
@@ -10,6 +11,7 @@ import {
   type TierRoutingConfigV1,
   type TierRoutingRecommendationV1,
 } from './admission-routing.js';
+import type { AdmissionFeatureEnvelopeV2 } from './admission-features-v2.js';
 
 export const ADMISSION_SHADOW_DEFAULT_TIMEOUT_MS = 50;
 export const ADMISSION_SHADOW_MAX_TIMEOUT_MS = 1_000;
@@ -138,10 +140,14 @@ export interface AdmissionShadowRuntimeOptions extends AdmissionShadowConfig {
   readonly sink?: AdmissionObservationSink;
   readonly clock?: AdmissionClock;
   /** MEM-003 shadow staging: record a sibling routing recommendation after a
-   *  successful observation persist. Fully contained — see persist(). */
+   *  successful observation persist. Fully contained — see persist().
+   *  MEM-002: when `produceEnvelope` is set (producer flag live), the
+   *  recommendation consumes a produced v2 feature envelope; producer failure
+   *  degrades to the null-envelope path, never blocking the observation. */
   readonly routing?: {
     readonly config: TierRoutingConfigV1;
     readonly sink: AdmissionRoutingRecommendationSink;
+    readonly produceEnvelope?: (facts: AdmissionSafeFactsV1) => AdmissionFeatureEnvelopeV2;
   };
 }
 
@@ -152,6 +158,7 @@ type Settled = 'stored' | 'failed';
 // ever depend on routing (a status surface is deferred to a later packet).
 let routingRecommended = 0;
 let routingFailed = 0;
+let producerFailures = 0;
 
 function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
   try {
@@ -314,7 +321,18 @@ export class AdmissionShadowRuntime implements AdmissionShadowHook {
       routed = tracked
         .then(async (settled) => {
           if (settled !== 'stored') return;
-          const recommendation = routeAdmissionTierV1(observation.safeFacts, null, routing.config);
+          let envelope: AdmissionFeatureEnvelopeV2 | null = null;
+          if (routing.produceEnvelope) {
+            try {
+              envelope = routing.produceEnvelope(observation.safeFacts);
+            } catch {
+              producerFailures += 1;
+              // Content-free by construction: fixed string, no facts or error detail.
+              console.error('[admission-features] live producer failed');
+              envelope = null;
+            }
+          }
+          const recommendation = routeAdmissionTierV1(observation.safeFacts, envelope, routing.config);
           await routing.sink.persist(scope, recommendation);
           routingRecommended += 1;
         })

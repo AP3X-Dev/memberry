@@ -67,3 +67,41 @@ results, standard streams, paths, command lines, environment values, or tokens.
 Local development is limited to synthetic scorer-only tests and static workflow
 validation. The real one-shot must run only through the manual hosted workflow;
 it must not be rehearsed locally or rerun after a burned attempt.
+
+## MEM-002 productionization (v3)
+
+The v1/v2 lookup-table candidate (`candidate/extractor.ts`) is a RETIRED lab
+fixture with no production role: its bytes back the consumed blinded-holdout
+evidence chain (pinned subtree OIDs and receipts) and are frozen, but nothing
+in the product executes it. The live producer is
+`packages/core/src/admission-feature-producer.ts`
+(`memberry.safe-facts-feature-producer@1.0.0`), which emits the narrowed
+three-dimension v2 envelope (`durability`, `evidenceQuality`, `sensitivity`)
+from safe facts only and is consumed inside the admission routing shadow when
+`MEMBERRY_ADMISSION_FEATURE_PRODUCER_V1=live`.
+
+v3 instrument map (new files only; every v1/v2 instrument stays frozen):
+
+- `contract-v3.ts` — dataset `memberry.synthetic-admission-feature-labels@3.0.0`;
+  scenario input is the closed five-key safe-facts subset; oracle/prediction are
+  three-dimension v2 shapes.
+- `scorer-v3.ts` — same agreement semantics over the three v2 dimensions at the
+  re-declared frozen `requiredAgreementPermille=1000` gate.
+- `fixtures/v3/MAPPING.md` + `fixtures/v3/dev/input.jsonl` — published labeling
+  function and the 14-scenario dev split.
+- `scorer-only/v3/dev/oracle.jsonl` — dev labels, opened by scorer code only.
+- `scorer-only/blinded-holdout-artifact-v3.ts` — v3 attempt identity core:
+  all four retired one-shot keys, the v4 key derivation, custodian seal
+  contract, and the extended burn-authority absence check.
+- `candidate-v3/worker.ts` — container adapter executing the PRODUCTION
+  producer (no lab copy of the mapping).
+- `contracts/c2-runtime-policy-receipt-v4.ts` — receipt-chain extension for the
+  fresh attempt (canonical `.v4.json` instance is produced by the owner-gated
+  hosted attestation run).
+- `__tests__/producer-v3-dev-agreement.test.ts` — the pre-holdout dev gate
+  (42/42 cells at 1000 permille).
+
+Holdout fixtures (`fixtures/v3/holdout/input.jsonl`,
+`scorer-only/v3/holdout/oracle.jsonl`) are authored under scorer/owner custody
+by applying the published mapping; the sealed oracle is never opened outside
+one-shot scoring custody.

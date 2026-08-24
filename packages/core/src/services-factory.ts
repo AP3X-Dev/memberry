@@ -48,6 +48,11 @@ import {
   resolveAdmissionRoutingModeV1,
   resolveTierRoutingConfig,
 } from './admission-routing.js';
+import {
+  AdmissionFeatureProducerModeError,
+  resolveAdmissionFeatureProducerModeV1,
+} from './admission-features-v2.js';
+import { produceAdmissionFeatureEnvelopeV2 } from './admission-feature-producer.js';
 
 export interface CoreServicesEnv {
   neo4jUri?: string;
@@ -147,6 +152,13 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   const admissionRoutingConfig = admissionRoutingMode === 'shadow'
     ? resolveTierRoutingConfig()
     : undefined;
+  // MEM-002 producer staging, resolved before any client allocation: the
+  // producer's only seam is the routing continuation, so `live` requires the
+  // routing shadow to already be staged.
+  const admissionFeatureProducerMode = resolveAdmissionFeatureProducerModeV1();
+  if (admissionFeatureProducerMode === 'live' && admissionRoutingMode !== 'shadow') {
+    throw new AdmissionFeatureProducerModeError('prerequisite_unavailable');
+  }
 
   const redis = createRedisClient(redisUrl);
   const driver = createNeo4jDriver(neo4jUri, neo4jUser, neo4jPassword);
@@ -232,6 +244,9 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
           routing: {
             config: admissionRoutingConfig,
             sink: new AdmissionRoutingRecommendationStore(driver),
+            ...(admissionFeatureProducerMode === 'live'
+              ? { produceEnvelope: produceAdmissionFeatureEnvelopeV2 }
+              : {}),
           },
         }
       : {}),

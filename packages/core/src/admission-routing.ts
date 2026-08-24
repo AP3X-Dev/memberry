@@ -10,7 +10,13 @@ import {
   parseAdmissionFeatureEnvelopeV1,
   type AdmissionFeatureDimension,
   type AdmissionFeatureEnvelopeV1,
+  type AdmissionFeatureValueV1,
 } from './admission-features.js';
+import {
+  ADMISSION_FEATURE_CONTRACT_VERSION_V2,
+  parseAdmissionFeatureEnvelopeV2,
+  type AdmissionFeatureEnvelopeV2,
+} from './admission-features-v2.js';
 
 export const TIER_ROUTING_POLICY_ID = 'tier-routing-admission' as const;
 export const TIER_ROUTING_POLICY_VERSION = '1.0.0' as const;
@@ -221,6 +227,9 @@ const ENV_VAR_BY_KEY: Readonly<Record<TierRoutingConfigKey, string>> = Object.fr
  * Activation is staged separately through MEMBERRY_ADMISSION_ROUTING_V1
  * (resolveAdmissionRoutingModeV1): `disabled` (default) or `shadow`, which
  * only records sibling recommendations inside the admission shadow attempt.
+ * On top of `shadow`, MEMBERRY_ADMISSION_FEATURE_PRODUCER_V1=live
+ * (resolveAdmissionFeatureProducerModeV1) feeds the routing continuation a
+ * produced v2 feature envelope instead of null.
  * `served` is a reserved token — enforcement that changes what is stored is
  * destructive-class and stays owner-gated for a later packet.
  */
@@ -287,27 +296,39 @@ export function resolveAdmissionRoutingModeV1(
 }
 
 function dimensionValue(
-  envelope: AdmissionFeatureEnvelopeV1 | null,
+  envelope: AdmissionFeatureEnvelopeV1 | AdmissionFeatureEnvelopeV2 | null,
   dimension: AdmissionFeatureDimension,
 ): number | null {
   if (envelope === null) return null;
-  const value = envelope.dimensions[dimension];
+  // A v2 envelope is closed on three dimensions; the removed v1 dimensions are
+  // structurally absent and behave exactly like v1 `unavailable` in every rule.
+  const dimensions: Partial<Record<AdmissionFeatureDimension, AdmissionFeatureValueV1>> = envelope.dimensions;
+  const value = dimensions[dimension];
+  if (value === undefined) return null;
   return value.availability === 'available' ? value.valuePermille : null;
 }
 
 /**
  * Pure, deterministic five-tier routing policy over content-free inputs.
- * Shadow-side only: the live seam records recommendations as sidecars without
- * consuming them, so the baseline episodic route (MEM-FR-3) is untouched by
- * construction.
+ * Shadow-side: the live seam consumes a produced v2 envelope when the
+ * MEM-002 producer flag is live (null otherwise) and records the resulting
+ * recommendation as a sidecar, so the baseline episodic route (MEM-FR-3) is
+ * untouched by construction.
  */
 export function routeAdmissionTierV1(
   facts: AdmissionSafeFactsV1,
-  envelope: AdmissionFeatureEnvelopeV1 | null,
+  envelope: AdmissionFeatureEnvelopeV1 | AdmissionFeatureEnvelopeV2 | null,
   config: TierRoutingConfigV1,
 ): TierRoutingRecommendationV1 {
   const safeFacts = parseAdmissionSafeFactsV1(facts);
-  const features = envelope === null ? null : parseAdmissionFeatureEnvelopeV1(envelope);
+  // Version dispatch reads only the own DATA property (no getter can execute);
+  // everything that is not exactly a v2 envelope falls through to the v1
+  // parser, which continues to reject every other shape.
+  const features = envelope === null
+    ? null
+    : Object.getOwnPropertyDescriptor(envelope, 'contractVersion')?.value === ADMISSION_FEATURE_CONTRACT_VERSION_V2
+      ? parseAdmissionFeatureEnvelopeV2(envelope)
+      : parseAdmissionFeatureEnvelopeV1(envelope);
   const resolvedConfig = parseTierRoutingConfigV1(config);
   const configIdentity = tierRoutingConfigIdentityV1(resolvedConfig);
 
@@ -341,6 +362,10 @@ export function routeAdmissionTierV1(
       return { tier: 'semantic-candidate', reason: 'feature-candidate' };
     }
 
+    // Rule 6 is dormant-by-absence under v2 envelopes: salience is
+    // structurally absent from every produced envelope, so this branch stays
+    // reachable only for v1 envelopes (lab/replay) or a future producer that
+    // re-establishes salience honestly.
     const salience = dimensionValue(features, 'salience');
     if (salience !== null && durability !== null
       && salience <= resolvedConfig.discardSalienceMaxPermille
