@@ -93,3 +93,4 @@ export type {
   CapabilityOperationV1,
   CapabilityScopeV1,
 } from './capability-policy.js';
+export * from './admission-routing.js';
