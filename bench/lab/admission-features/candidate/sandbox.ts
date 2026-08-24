@@ -504,7 +504,7 @@ function canonicalInputBytesV1(value: unknown): Uint8Array {
     const signals = descriptorCopy(input.signals, SIGNAL_KEYS);
     const expectedIdentity = EXACT_INPUT_IDENTITIES_V1[index]!;
     if (input.datasetId !== 'memberry.synthetic-admission-feature-labels'
-      || input.datasetVersion !== '1.0.0' || input.scenarioId !== expectedIdentity.scenarioId
+      || input.datasetVersion !== '2.0.0' || input.scenarioId !== expectedIdentity.scenarioId
       || input.split !== expectedIdentity.split || typeof input.fixtureCode !== 'string'
       || !/^case-[0-9]{3}$/.test(input.fixtureCode as string)
       || !['none', 'normal', 'explicit', 'unknown'].includes(signals.priority as string)
