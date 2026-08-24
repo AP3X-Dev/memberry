@@ -3,6 +3,7 @@ import { type Driver } from 'neo4j-driver';
 import { type SemanticNode, type EmbeddingProvider, DEFAULT_TENANT } from '@memberry/core';
 import { temporalSetClause } from './temporal-edges.js';
 import { normalizeSemanticSignalCount } from './semantic-signal-count.js';
+import { archivedWhere } from './query.js';
 
 /**
  * Canonical project scope for a semantic node: the explicit scope when set,
@@ -176,6 +177,7 @@ export class SemanticStore {
         `MATCH (s:Semantic)
          WHERE s.id IN $ids
            AND ($tenantId IS NULL OR coalesce(s.tenant_id, $defaultTenant) = $tenantId)
+           AND ${archivedWhere('s')}
          RETURN s.id AS id`,
         { ids, tenantId: tenantId ?? null, defaultTenant: DEFAULT_TENANT },
       );

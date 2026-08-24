@@ -50,6 +50,17 @@ function projectScopeWhere(alias: string): string {
   return `(${alias}.scope = $projectScope OR $projectScope IN ${alias}.tags)`;
 }
 
+/**
+ * MEM-006: WHERE fragment excluding lifecycle-archived memory from retrieval.
+ * `archived` is a reversible boolean with no backfill, so the coalesce form is
+ * correct for every legacy node lacking the property. Exports/imports and the
+ * lifecycle run artifact deliberately KEEP archived nodes; by-id fetches used
+ * for consolidation hydration and provenance stay unfiltered by design.
+ */
+export function archivedWhere(alias: string): string {
+  return `coalesce(${alias}.archived, false) = false`;
+}
+
 // ─── Cypher read-only validation ─────────────────────────────────────────────
 
 /**
@@ -245,6 +256,7 @@ export class ScopedQuery {
         `MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {name: $entityName})
          WHERE ${relFilter}
            AND ${tenantWhere('s', tenant)}
+           AND ${archivedWhere('s')}
          RETURN s { .*, embedding: null } AS s
          ORDER BY s.confidence DESC, s.updated_at DESC
          LIMIT $limit`,
@@ -266,6 +278,7 @@ export class ScopedQuery {
         `MATCH (s:Semantic)
          WHERE $tag IN s.tags
            AND ${tenantWhere('s', tenant)}
+           AND ${archivedWhere('s')}
          RETURN s { .*, embedding: null } AS s
          ORDER BY s.confidence DESC, s.updated_at DESC
          LIMIT $limit`,
@@ -291,7 +304,9 @@ export class ScopedQuery {
       if (asOf) params.asOf = asOf;
 
       const relFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
-      const tFilter = tenantWhere('s', tenantId); // mandatory tenant isolation
+      // Mandatory tenant isolation + MEM-006 archived exclusion; chained here so
+      // every one of the six byScope branches carries both predicates.
+      const tFilter = `${tenantWhere('s', tenantId)} AND ${archivedWhere('s')}`;
 
       // Structural tenancy: project scope is a hard predicate, never advisory.
       let pFilter = '';
@@ -402,6 +417,7 @@ export class ScopedQuery {
         `CALL db.index.vector.queryNodes('semantic_embedding', $fetch, $embedding)
          YIELD node, score
          WHERE ${tenantWhere('node', tenant)}${pFilter}
+           AND ${archivedWhere('node')}
          RETURN node { .*, embedding: null } AS node, score
          LIMIT $limit`,
         params,
@@ -451,6 +467,7 @@ export class ScopedQuery {
         `CALL db.index.vector.queryNodes('episodic_embedding', $fetch, $embedding)
          YIELD node, score
          WHERE ${tenantWhere('node', tenant)}${pFilter}
+           AND ${archivedWhere('node')}
          RETURN node { .*, embedding: null } AS node, score
          LIMIT $limit`,
         params,
@@ -566,6 +583,7 @@ export class ScopedQuery {
         `MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {name: $entityName})
          WHERE ${aboutFilter}
            AND ${tenantWhere('s', tenant)}
+           AND ${archivedWhere('s')}
          RETURN s { .*, embedding: null } AS s
          ORDER BY s.confidence DESC, s.updated_at DESC`,
         semParams,
@@ -582,6 +600,7 @@ export class ScopedQuery {
         `MATCH (ep:Episodic)-[r:REFERENCES]->(e:Entity {name: $entityName})
          WHERE ${refFilter}
            AND ${tenantWhere('ep', tenant)}
+           AND ${archivedWhere('ep')}
          RETURN ep
          ORDER BY ep.created_at DESC`,
         epParams,
@@ -647,6 +666,7 @@ export class ScopedQuery {
              AND r3.invalid_at IS NULL
              AND NOT toLower(e2.name) IN $lowerNames
              AND ${tenantWhere('s2', tenant)}
+             AND ${archivedWhere('s2')}
            RETURN DISTINCT s2 { .*, embedding: null } AS node, 0.2 AS hopScore
            ORDER BY node.confidence DESC
            LIMIT $maxPerHop`
@@ -657,6 +677,7 @@ export class ScopedQuery {
              AND r3.invalid_at IS NULL
              AND NOT toLower(e2.name) IN $lowerNames
              AND ${tenantWhere('s2', tenant)}
+             AND ${archivedWhere('s2')}
            RETURN DISTINCT s2 { .*, embedding: null } AS node, 0.3 AS hopScore
            ORDER BY node.confidence DESC
            LIMIT $maxPerHop`;
@@ -668,6 +689,7 @@ export class ScopedQuery {
            AND NOT toLower(e2.name) IN $lowerNames
            AND ${relFilter}
            AND ${tenantWhere('s', tenant)}
+           AND ${archivedWhere('s')}
          RETURN DISTINCT s { .*, embedding: null } AS node, 0.25 AS hopScore
          ORDER BY node.confidence DESC
          LIMIT $maxPerHop`;

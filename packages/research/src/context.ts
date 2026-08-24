@@ -144,6 +144,7 @@ export class ResearchContextBuilder {
       const result = await session.run(
         `MATCH (s:Semantic)
          WHERE ANY(t IN s.tags WHERE t = $campaignTag OR t = 'research')
+           AND coalesce(s.archived, false) = false
          OPTIONAL MATCH (e:Experiment {campaign_id: $campaignId})-[:VALIDATES|REFUTES|REINFORCES|CORRECTS|CONTRADICTS]->(s)
          WITH s, count(e) AS expCount
          RETURN s.id AS id, s.content AS claim, s.confidence AS confidence,

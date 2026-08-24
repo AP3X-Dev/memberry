@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the MemBerry lifecycle pass nightly (off-peak, after snapshot+dream)
+
+[Timer]
+# 04:00 sequences after snapshot (03:00) and dream (03:30), so the nightly
+# snapshot commit always precedes any lifecycle mutation — a second independent
+# rollback layer. Persistent=true catches up if the machine was asleep.
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+Unit=memberry-lifecycle.service
+
+[Install]
+WantedBy=timers.target

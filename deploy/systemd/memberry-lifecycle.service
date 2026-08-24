@@ -1,0 +1,19 @@
+[Unit]
+Description=MemBerry lifecycle pass (sidecar budgets, decay proposals, archive)
+After=network.target neo4j.service redis-server.service
+Documentation=https://github.com/AP3X-Dev/memberry
+
+# Template — substitute <USER>, <INSTALL_DIR>, and the EnvironmentFile path.
+# The pass runs only when MEMBERRY_LIFECYCLE_V1=live is set in the env file.
+# See guides/install-systemd.md.
+[Service]
+Type=oneshot
+User=<USER>
+WorkingDirectory=<INSTALL_DIR>
+# Load NEO4J_*, REDIS_URL, MEMBERRY_LIFECYCLE_* from the machine env file.
+EnvironmentFile=/etc/memberry/env
+# Run via tsx: the @memberry/* workspace packages export their TS source
+# (package.json "exports".import -> ./src/index.ts), matching `npm run dev` and
+# the readyz check. `node dist/cli.js` cannot resolve those source exports.
+ExecStart=/usr/bin/npx tsx packages/core/src/cli.ts lifecycle
+TimeoutStartSec=900

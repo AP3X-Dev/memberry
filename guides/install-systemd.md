@@ -183,7 +183,7 @@ restrict it to loopback-only (falls back to `MEMBERRY_HOST`, then `HOST`).
 
 ## 5. The background timers
 
-Three periodic jobs ship as `oneshot` services paired with timers. Each unit
+Four periodic jobs ship as `oneshot` services paired with timers. Each unit
 sets `WorkingDirectory=<INSTALL_DIR>` and `EnvironmentFile=<ENV_FILE>`.
 
 ### Dream pass — nightly gap-filling + abductive hypotheses
@@ -218,6 +218,34 @@ commits it (the snapshot path is force-added since `.memberry/` is gitignored);
 ExecStart=/usr/bin/npx tsx packages/core/src/cli.ts snapshot --path ./.memberry --commit
 ```
 
+### Lifecycle pass — nightly retention + decay proposals + archive
+
+`memberry-lifecycle.service` runs the per-scope lifecycle pass (sidecar
+retention budgets, review-gated decay proposals, reversible archive);
+`memberry-lifecycle.timer` fires nightly at 04:00 — deliberately after snapshot
+(03:00) and dream (03:30) so the snapshot commit always precedes any lifecycle
+mutation:
+
+```ini
+# memberry-lifecycle.service (ExecStart)
+ExecStart=/usr/bin/npx tsx packages/core/src/cli.ts lifecycle
+TimeoutStartSec=900
+```
+
+```ini
+# memberry-lifecycle.timer
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+Unit=memberry-lifecycle.service
+```
+
+The pass is flag-gated: it exits immediately unless `MEMBERRY_LIFECYCLE_V1=live`
+is set in `<ENV_FILE>`. Before every mutation it writes a rollback artifact to
+`<exportDir>/lifecycle/`. Rollback: set the flag back to `disabled`, run
+`sudo systemctl disable --now memberry-lifecycle.timer`, and reverse individual
+archives with `memberry lifecycle unarchive --id <id>` from the run artifact.
+
 ### Wiki recompile — every 6 hours (optional safety net)
 
 `memberry-wiki-compile.service` recompiles the wiki; `memberry-wiki-compile.timer`
@@ -251,6 +279,7 @@ sudo systemctl enable --now memberry-wiki.service        # optional
 # Periodic timers
 sudo systemctl enable --now memberry-dream.timer
 sudo systemctl enable --now memberry-snapshot.timer
+sudo systemctl enable --now memberry-lifecycle.timer     # requires MEMBERRY_LIFECYCLE_V1=live
 sudo systemctl enable --now memberry-wiki-compile.timer
 ```
 

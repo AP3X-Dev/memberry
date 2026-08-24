@@ -31,6 +31,8 @@ function mapSemanticProps(props: Record<string, unknown>): SemanticNode {
     updated_at: props.updated_at as string,
     decay_class: props.decay_class as SemanticNode['decay_class'],
     tags: (props.tags as string[]) ?? [],
+    // MEM-006: the archived flag must survive canonical export/import.
+    ...(props.archived === true ? { archived: true } : {}),
   };
 }
 
@@ -44,6 +46,7 @@ function mapEpisodicProps(props: Record<string, unknown>): EpisodicNode {
     outcome: props.outcome as EpisodicNode['outcome'] ?? undefined,
     created_at: props.created_at as string,
     ttl: props.ttl != null ? (props.ttl as number) : undefined,
+    ...(props.archived === true ? { archived: true } : {}),
   };
 }
 

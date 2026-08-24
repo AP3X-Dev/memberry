@@ -763,7 +763,9 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         // Structural tenancy: scope matches the enforced scope column (or a
         // project tag on legacy rows) — not free text in the task.
         const scopeFilter = args.scope ? ' AND (e.scope = $grepScope OR $grepScope IN e.tags)' : '';
-        const cypher = `MATCH (e:Episodic) WHERE (${matchExpr('e.content')} OR ${matchExpr('e.task')})${scopeFilter} AND ${tFilter('e')} RETURN e ORDER BY e.created_at DESC`;
+        // MEM-006: lifecycle-archived episodes stay out of grep (coalesce passes
+        // validateReadOnlyCypher; legacy rows lack the property).
+        const cypher = `MATCH (e:Episodic) WHERE (${matchExpr('e.content')} OR ${matchExpr('e.task')})${scopeFilter} AND ${tFilter('e')} AND coalesce(e.archived, false) = false RETURN e ORDER BY e.created_at DESC`;
         try {
           const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams, grepTimeoutMs);
           for (const row of rows) {
@@ -787,7 +789,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
 
       if (nodeTypes.includes('semantic')) {
         const scopeFilter = args.scope ? ' AND (s.scope = $grepScope OR $grepScope IN s.tags)' : '';
-        const cypher = `MATCH (s:Semantic) WHERE ${matchExpr('s.content')}${scopeFilter} AND ${tFilter('s')} RETURN s ORDER BY s.confidence DESC`;
+        const cypher = `MATCH (s:Semantic) WHERE ${matchExpr('s.content')}${scopeFilter} AND ${tFilter('s')} AND coalesce(s.archived, false) = false RETURN s ORDER BY s.confidence DESC`;
         try {
           const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams, grepTimeoutMs);
           for (const row of rows) {

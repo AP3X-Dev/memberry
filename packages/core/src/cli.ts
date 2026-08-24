@@ -4,9 +4,9 @@
 // Usage: npx memberry <command> [options]
 
 import { execFileSync } from 'child_process';
-import { createNeo4jDriver, TenantAdmin } from '@memberry/neo4j';
+import { createNeo4jDriver, TenantAdmin, LifecycleStore } from '@memberry/neo4j';
 import { writeFileSync } from 'fs';
-import { createRedisClient } from '@memberry/redis';
+import { createRedisClient, ProposalStore } from '@memberry/redis';
 import { exportAll, exportFiltered } from './export.js';
 import { defaultExportPath } from './config/settings.js';
 import { importFromPath, type ImportStrategy } from './import.js';
@@ -19,6 +19,8 @@ import { runConfigure } from './cli/configure.js';
 import { runProject } from './cli/project.js';
 import { runDoctor } from './cli/doctor.js';
 import { createCoreServices, buildDreamEngine } from './services-factory.js';
+import { LifecycleEngine } from './lifecycle.js';
+import { resolveLifecycleConfig } from './config/lifecycle.js';
 
 // ─── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -181,6 +183,50 @@ async function runDream(flags: Record<string, string | boolean>): Promise<void> 
   }
 }
 
+async function runLifecycle(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  const config = resolveLifecycleConfig(defaultExportPath());
+
+  // `memberry lifecycle unarchive --id <id>` — the rollback path. Deliberately
+  // NOT behind the flag gate: rollback must work after the flag is turned off.
+  if (positionals[0] === 'unarchive') {
+    const id = typeof flags['id'] === 'string' ? (flags['id'] as string) : '';
+    if (!id) throw new Error('Pass a node id: memberry lifecycle unarchive --id <id>');
+    const { neo4jUri, neo4jUser, neo4jPassword } = loadEnv();
+    const driver = createNeo4jDriver(neo4jUri, neo4jUser, neo4jPassword);
+    try {
+      const count = await new LifecycleStore(driver).setArchived([id], false, new Date().toISOString(), config.batchRows);
+      console.log(count > 0 ? `Unarchived ${id}.` : `No Episodic/Semantic node found with id ${id}.`);
+    } finally {
+      await driver.close();
+    }
+    return;
+  }
+
+  // Flag gate: the pass runs only when MEMBERRY_LIFECYCLE_V1=live.
+  if (config.mode !== 'live') {
+    console.log('[lifecycle] MEMBERRY_LIFECYCLE_V1 is not "live" — nothing to do.');
+    return;
+  }
+
+  const core = createCoreServices();
+  try {
+    const engine = new LifecycleEngine({
+      store: new LifecycleStore(core.driver),
+      proposals: new ProposalStore(core.redis),
+      config,
+    });
+    const result = await engine.run({
+      ...(typeof flags['scope'] === 'string' ? { scope: flags['scope'] as string } : {}),
+      ...(flags['dry-run'] === true ? { dryRun: true } : {}),
+    });
+    console.log(JSON.stringify(result, null, 2));
+    // A failed scope must surface to systemd; successful scopes stay applied.
+    if (result.failures.length > 0) process.exitCode = 1;
+  } finally {
+    await core.close();
+  }
+}
+
 async function runExtraction(positionals: string[], _flags: Record<string, string | boolean>): Promise<void> {
   const sub = positionals[0] ?? 'status';
   const core = createCoreServices();
@@ -261,6 +307,12 @@ async function main(): Promise<void> {
       await runDream(flags);
       break;
 
+    case 'lifecycle':
+      // `memberry lifecycle [--scope project:x] [--dry-run]` — flag-gated pass;
+      // `memberry lifecycle unarchive --id <id>` — reverse one archive.
+      await runLifecycle(positionals, flags);
+      break;
+
     case 'extraction':
       // `memberry extraction status|replay` — durable fact-extraction queue admin.
       await runExtraction(positionals, flags);
@@ -323,6 +375,7 @@ async function main(): Promise<void> {
       console.error('');
       console.error('Background memory commands:');
       console.error('  dream      [--scope project:x] [--max-entities N] [--no-cards]');
+      console.error('  lifecycle  [--scope project:x] [--dry-run] | unarchive --id <id>   (MEMBERRY_LIFECYCLE_V1=live gates the pass)');
       console.error('  extraction status|replay   (durable fact-extraction queue: counts / replay dead-letters)');
       console.error('  tenant stats|export|delete --tenant <name> [--out file] [--yes]   (per-tenant admin)');
       console.error('');

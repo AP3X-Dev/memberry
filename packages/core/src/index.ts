@@ -77,6 +77,19 @@ export {
 export type { AmpSettings, HookSettings, ResolvedNumber, SettingSource } from './config/settings.js';
 export { getConfigStatus } from './config/status.js';
 export type { ConfigStatus } from './config/status.js';
+export {
+  DECAY_HALF_LIVES_DAYS,
+  LifecycleConfigError,
+  resolveLifecycleConfig,
+} from './config/lifecycle.js';
+export type { LifecycleConfig, LifecycleConfigErrorCode } from './config/lifecycle.js';
+export { LifecycleEngine, computeDecay } from './lifecycle.js';
+export type {
+  LifecycleStorePort,
+  LifecycleProposalsPort,
+  LifecycleRunResult,
+  LifecycleScopeResult,
+} from './lifecycle.js';
 export { getAllowedBaseDir } from './config/paths.js';
 export { resolvePort } from './config/port.js';
 export { getHooksStatus } from './cli/install.js';

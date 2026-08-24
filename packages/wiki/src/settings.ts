@@ -200,6 +200,7 @@ function serverCard(c: ConfigStatus): string {
       ${kv('Cache TTL (default/context/embedding)', `${s.cacheTTLSeconds.default}s / ${s.cacheTTLSeconds.context}s / ${s.cacheTTLSeconds.embedding}s`)}
       ${kv('Consolidation', `autoApply=${s.consolidation.autoApply}, signalThreshold=${s.consolidation.signalThreshold}`)}
       ${kv('Decay half-lives (volatile/stable/permanent)', `${s.decayHalfLivesDays.volatile}d / ${s.decayHalfLivesDays.stable}d / ${s.decayHalfLivesDays.permanent}d`)}
+      ${kv('Lifecycle pass', `${s.lifecycle.mode}, sidecarBudget=${s.lifecycle.sidecarBudget}, sidecarMaxAge=${s.lifecycle.sidecarMaxAgeDays}d, archiveMultiplier=${s.lifecycle.archiveHalfLifeMultiplier}x, decayCap=${s.lifecycle.maxDecayProposalsPerScope}/scope, cooldown=${s.lifecycle.decayCooldownDays}d`)}
     </div>
   </div>`;
 }

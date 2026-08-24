@@ -208,6 +208,7 @@ export class ResearchConsolidation {
       const result = await session.run(
         `MATCH (s:Semantic)
          WHERE ANY(t IN s.tags WHERE t = $campaignTag OR t = 'research')
+           AND coalesce(s.archived, false) = false
          OPTIONAL MATCH (keep:Experiment {campaign_id: $campaignId, status: 'keep'})-[:MODIFIED]->(c:Component)
          WHERE c.domain IN [t IN s.tags WHERE t <> $campaignTag AND t <> 'research']
          WITH s, count(keep) AS keepCount
