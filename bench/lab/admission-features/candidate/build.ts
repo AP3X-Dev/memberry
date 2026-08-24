@@ -680,7 +680,10 @@ async function cleanupProofV1(
     }
     if (selectCidFileCleanupAuthorityV1(cidId, createStdout, discovered) !== id) return false;
     await inspectOwnedProofV1(id, requestedImage, expectedImageId, temporary.runToken, runner);
-    safeTextV1(await runner(createDockerCommandInvocationV1(['container', 'rm', '-fv', id])));
+    safeTextV1(await runner(Object.freeze({
+      ...createDockerCommandInvocationV1(['container', 'rm', '-fv', id]),
+      timeoutMs: 60_000,
+    })));
     return (await discoverProofV1(temporary.runToken, runner)).length === 0;
   } catch {
     return false;
@@ -701,11 +704,14 @@ async function withStoppedProofV1<T>(
   let createStdout: string | undefined;
   try {
     creationAttempted = true;
-    const created = await runner(createDockerCommandInvocationV1([
-      'create', `--cidfile=${temporary.cidFile}`, '--platform=linux/amd64', '--pull=never',
-      `--label=org.memberry.build-token=${temporary.runToken}`, '--entrypoint=/usr/local/bin/node',
-      requestedImage, '--version',
-    ]));
+    const created = await runner(Object.freeze({
+      ...createDockerCommandInvocationV1([
+        'create', `--cidfile=${temporary.cidFile}`, '--platform=linux/amd64', '--pull=never',
+        `--label=org.memberry.build-token=${temporary.runToken}`, '--entrypoint=/usr/local/bin/node',
+        requestedImage, '--version',
+      ]),
+      timeoutMs: 60_000,
+    }));
     const createdSnapshot = snapshotDockerCommandResultV1(created);
     try {
       createStdout = new TextDecoder('utf-8', { fatal: true }).decode(createdSnapshot.stdout).trim();
@@ -761,9 +767,12 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
   phase = 'BASE_PROOF';
   const baseNode = await withStoppedProofV1(
     APPROVED_NODE_BASE_IMAGE_V1, baseInspection.Id, runner, async (id) => {
-      const copied = await runner(createDockerCommandInvocationV1([
-        'container', 'cp', `${id}:/usr/local/bin/node`, '-',
-      ], undefined, 134_219_776));
+      const copied = await runner(Object.freeze({
+        ...createDockerCommandInvocationV1([
+          'container', 'cp', `${id}:/usr/local/bin/node`, '-',
+        ], undefined, 134_219_776),
+        timeoutMs: 60_000,
+      }));
       return inspectDockerCopyArchiveV1(safeResultV1(copied), 'node');
     },
   );
@@ -818,11 +827,12 @@ async function buildAdmissionFeatureCandidateImageWithRunnerV1(
     if (!Buffer.from(copiedAttestation).equals(Buffer.from(contentAttestation))) {
       throw new Error('built attestation mismatch');
     }
-    const copiedNode = inspectDockerCopyArchiveV1(safeResultV1(await runner(
-      createDockerCommandInvocationV1(
+    const copiedNode = inspectDockerCopyArchiveV1(safeResultV1(await runner(Object.freeze({
+      ...createDockerCommandInvocationV1(
         ['container', 'cp', `${id}:/usr/local/bin/node`, '-'], undefined, 134_219_776,
       ),
-    )), 'node');
+      timeoutMs: 60_000,
+    }))), 'node');
     if (sha256(copiedNode) !== nodeSha256) throw new Error('candidate Node binary mismatch');
     return true;
   });

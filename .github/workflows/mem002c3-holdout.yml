@@ -22,12 +22,11 @@ jobs:
       CANDIDATE_COMMIT_SHA: 5a111761668d9370d5163f64e195f0dda44b55af
       REPOSITORY_ROOT_TREE_OID: 94c75dd3a36a708ce6add1f10eaf606fa4ffea8d
       HISTORICAL_CANDIDATE_SUBTREE_OID: 03d7c50515f6ab767fd41b7d41bd231531a4ab58
-      CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID: 9e578491f2e38bf1c9df21ee13261a4d5d64e2ec
+      CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID: 1f1318ce97934145d496cc55642fdd37a3f4437d
       RETIRED_V1_ONE_SHOT_KEY: 334f7e05460d405878a758a6172057fbc1fdac5d3696fc5a8dbe17b8ab070935
       KNOWN_FAILED_V1_RUN_ID: "32001044115"
       INPUT_SHA256: sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24
       OUTPUT_SHA256: sha256:5b43576a3b7b2f19c8dc8280b4259783c53643a2f620aa35abea7dfaa8586a83
-      IMAGE_SHA256: sha256:a1cd73a3036419932ff777d0418690831495059a09d3ffbf9ae68b668d695843
       BASE_IMAGE: node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9
       PLATFORM: linux/amd64
 
@@ -164,13 +163,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker build --pull=false --network=none --platform "$PLATFORM" \
-            --file "$MEMBERRY_C3_CONTEXT_DIR/container/Dockerfile" \
-            --tag "$MEMBERRY_C3_IMAGE_REF" "$MEMBERRY_C3_CONTEXT_DIR" \
-            >"$MEMBERRY_C3_SECRET_DIR/build.log" 2>&1
-          image_id="$(docker image inspect --format '{{.Id}}' "$MEMBERRY_C3_IMAGE_REF")"
+          npx tsx -e "import { buildAdmissionFeatureCandidateImageV1 } from './bench/lab/admission-features/candidate/build.ts'; buildAdmissionFeatureCandidateImageV1().then((receipt) => { process.stdout.write(JSON.stringify(receipt) + '\n'); }).catch(() => { process.stderr.write('mem002c3_protocol:candidate_build\n'); process.exit(1); });" \
+            >"$MEMBERRY_C3_SECRET_DIR/build-receipt.json"
+          expected_candidate_sha256="$(jq -er '.binding.candidateSha256' "$POLICY_RECEIPT")"
+          expected_source_sha256="$(jq -er '.binding.sourceSha256' "$POLICY_RECEIPT")"
+          expected_node_sha256="$(jq -er '.binding.nodeSha256' "$POLICY_RECEIPT")"
+          built_candidate_sha256="$(jq -er '.candidateSha256' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          built_source_sha256="$(jq -er '.sourceSha256' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          built_node_sha256="$(jq -er '.nodeSha256' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          built_base_image="$(jq -er '.baseImage' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          image_id="$(jq -er '.imageSha256' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          [[ "$built_candidate_sha256" == "$expected_candidate_sha256" ]]
+          [[ "$built_source_sha256" == "$expected_source_sha256" ]]
+          [[ "$built_node_sha256" == "$expected_node_sha256" ]]
+          [[ "$built_base_image" == "$BASE_IMAGE" ]]
           [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$image_id" == "$IMAGE_SHA256" ]]
+          docker tag "$image_id" "$MEMBERRY_C3_IMAGE_REF"
           {
             printf 'MEMBERRY_C3_IMAGE_ID=%s\n' "$image_id"
           } >>"$GITHUB_ENV"
