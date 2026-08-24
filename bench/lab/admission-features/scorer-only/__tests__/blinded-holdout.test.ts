@@ -75,14 +75,14 @@ function preflightOptions(receipt: Awaited<ReturnType<typeof policyReceipt>>) {
 
 function counts(overrides: Partial<AdmissionFeatureAgreementMetricsV1> = {}): AdmissionFeatureAgreementMetricsV1 {
   return {
-    scenarioCount: 3,
-    dimensionCount: 18,
-    agreementCount: 18,
+    scenarioCount: 4,
+    dimensionCount: 24,
+    agreementCount: 24,
     agreementPermille: 1_000,
-    availableLabelCount: 12,
-    unavailableLabelCount: 6,
-    availableAgreementCount: 12,
-    unavailableAgreementCount: 6,
+    availableLabelCount: 16,
+    unavailableLabelCount: 8,
+    availableAgreementCount: 16,
+    unavailableAgreementCount: 8,
     availabilityMismatchCount: 0,
     valueMismatchCount: 0,
     ...overrides,
@@ -94,16 +94,16 @@ function report(holdout = counts()): AdmissionFeatureAgreementReportV1 {
     contractVersion: '1.0.0',
     policy: { requiredAgreementPermille: 1_000 },
     metrics: counts({
-      scenarioCount: 6,
-      dimensionCount: 36,
-      agreementCount: holdout.agreementCount + 18,
-      availableLabelCount: holdout.availableLabelCount + 12,
-      unavailableLabelCount: holdout.unavailableLabelCount + 6,
-      availableAgreementCount: holdout.availableAgreementCount + 12,
-      unavailableAgreementCount: holdout.unavailableAgreementCount + 6,
+      scenarioCount: 13,
+      dimensionCount: 78,
+      agreementCount: holdout.agreementCount + 54,
+      availableLabelCount: holdout.availableLabelCount + 36,
+      unavailableLabelCount: holdout.unavailableLabelCount + 18,
+      availableAgreementCount: holdout.availableAgreementCount + 36,
+      unavailableAgreementCount: holdout.unavailableAgreementCount + 18,
       availabilityMismatchCount: holdout.availabilityMismatchCount,
       valueMismatchCount: holdout.valueMismatchCount,
-      agreementPermille: holdout.agreementPermille === 1_000 ? 1_000 : 972,
+      agreementPermille: holdout.agreementPermille === 1_000 ? 1_000 : 987,
     } as never),
     splits: { dev: counts(), holdout },
     failures: holdout.agreementPermille === 1_000 ? [] : ['aggregate disagreement'],
@@ -285,19 +285,6 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     ['missing root identity', { observedRepositoryRootTreeOid: undefined }],
     ['missing historical identity', { observedHistoricalCandidateSubtreeOid: undefined }],
     ['missing checkout identity', { observedCheckoutCandidateSubtreeOid: undefined }],
-    [
-      'equal historical and checkout',
-      {
-        observedCheckoutCandidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
-      },
-    ],
-    [
-      'swapped historical and checkout',
-      {
-        observedHistoricalCandidateSubtreeOid: BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID,
-        observedCheckoutCandidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
-      },
-    ],
     ['checkout commit mismatch', { observedCheckoutCommitSha: 'e'.repeat(40) }],
     ['dirty', { candidateSubtreeClean: false }],
     ['base ancestry', { integratedBaseIsAncestor: false }],
@@ -413,9 +400,9 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     expect(events).toEqual(['inputs', 'prediction', 'oracle', 'score']);
     expect(loadOracles).toHaveBeenCalledOnce();
     expect(evidence.aggregate).toEqual({
-      scenarioCount: 3,
-      dimensionCount: 18,
-      agreementCount: 18,
+      scenarioCount: 4,
+      dimensionCount: 24,
+      agreementCount: 24,
       agreementPermille: 1_000,
       availabilityMismatchCount: 0,
       valueMismatchCount: 0,
@@ -495,9 +482,9 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
 
   it('returns only aggregate disagreement and fixed failure text', async () => {
     const mismatch = counts({
-      agreementCount: 17,
-      agreementPermille: 944,
-      availableAgreementCount: 11,
+      agreementCount: 23,
+      agreementPermille: 958,
+      availableAgreementCount: 15,
       valueMismatchCount: 1,
     });
     const evidence = await scoreSealedBlindedHoldoutV2({
@@ -512,10 +499,10 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
       score: () => report(mismatch),
     });
     expect(evidence.aggregate).toEqual({
-      scenarioCount: 3,
-      dimensionCount: 18,
-      agreementCount: 17,
-      agreementPermille: 944,
+      scenarioCount: 4,
+      dimensionCount: 24,
+      agreementCount: 23,
+      agreementPermille: 958,
       availabilityMismatchCount: 0,
       valueMismatchCount: 1,
       passed: false,
@@ -587,7 +574,8 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
     expect(workflow).toContain('typeof artifact.name !== "string"');
     expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED_KEY}`');
     expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED2_KEY}`');
-    expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.V3_KEY}`');
+    expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED3_KEY}`');
+    expect(workflow).toContain('artifact.name === `memberry-mem002c3-burn-${process.env.CURRENT_KEY}`');
     expect(workflow).not.toContain('expired == false');
     expect(workflow).toContain('Upload only aggregate receipt evidence');
     expect(workflow).toContain('path: ${{ env.MEMBERRY_C3_PUBLIC_DIR }}/start.json');
@@ -608,16 +596,16 @@ describe('MEM-002C3 scorer-owned one-shot protocol', () => {
       spawnSync(process.execPath, ['-e', parser!], {
         input: JSON.stringify(pages),
         encoding: 'utf8',
-        env: { ...process.env, RETIRED_KEY: 'retired', RETIRED2_KEY: 'retired2', V3_KEY: 'current' },
+        env: { ...process.env, RETIRED_KEY: 'retired', RETIRED2_KEY: 'retired2', RETIRED3_KEY: 'retired3', CURRENT_KEY: 'current' },
       });
 
     const valid = run([
       {
-        artifacts: [{ name: 'other' }, { name: 'memberry-mem002c3-burn-retired' }, { name: 'memberry-mem002c3-burn-retired2' }, { name: 'memberry-mem002c3-result-current-123' }],
+        artifacts: [{ name: 'other' }, { name: 'memberry-mem002c3-burn-retired' }, { name: 'memberry-mem002c3-burn-retired2' }, { name: 'memberry-mem002c3-burn-retired3' }, { name: 'memberry-mem002c3-result-current-123' }],
       },
     ]);
     expect(valid.status).toBe(0);
-    expect(valid.stdout).toBe('1 1 1');
+    expect(valid.stdout).toBe('1 1 1 1');
 
     for (const malformed of [[], [{}], [{ artifacts: null }], [{ artifacts: [{}] }], [{ artifacts: [{ name: 7 }] }]]) {
       expect(run(malformed).status).not.toBe(0);

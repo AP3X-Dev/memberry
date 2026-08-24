@@ -40,8 +40,9 @@ const REGISTERED_PREFLIGHTS = new WeakSet<object>();
 const REGISTERED_START_RECEIPTS = new WeakSet<object>();
 const REGISTERED_TOMBSTONE_SPECS = new WeakSet<object>();
 const REGISTERED_TOMBSTONE_EVIDENCE = new WeakSet<object>();
-const NEUTRAL_POLICY_V2_MODULE = '../contracts/c2-runtime-policy-receipt-v2.js';
-const NEUTRAL_POLICY_V2_PARSER_EXPORT = 'parseAdmissionC2RuntimePolicyReceiptV2';
+const NEUTRAL_POLICY_V3_MODULE = '../contracts/c2-runtime-policy-receipt-v3.js';
+const NEUTRAL_POLICY_V3_PARSER_EXPORT = 'parseAdmissionC2RuntimePolicyReceiptV3';
+const NEUTRAL_POLICY_V2_RECEIPT = new URL('../contracts/c2-runtime-policy-receipt.v2.json', import.meta.url);
 const NEUTRAL_POLICY_V1_RECEIPT = new URL('../contracts/c2-runtime-policy-receipt.v1.json', import.meta.url);
 
 type AdmissionC2RuntimePolicyReceiptV2 = Readonly<{
@@ -98,25 +99,32 @@ function plainRecord(value: unknown): Record<string, unknown> {
 export function validateBlindedHoldoutBurnAuthorityAbsenceV2(options: {
   readonly retiredV1LookupStatus: number;
   readonly retiredV2LookupStatus: number;
-  readonly v3LookupStatus: number;
+  readonly retiredV3LookupStatus: number;
+  readonly currentLookupStatus: number;
   readonly retiredV1EvidenceArtifactCount: number;
   readonly retiredV2EvidenceArtifactCount: number;
-  readonly v3EvidenceArtifactCount: number;
+  readonly retiredV3EvidenceArtifactCount: number;
+  readonly currentEvidenceArtifactCount: number;
   readonly knownFailedV1RunArtifactCount: number;
   readonly knownFailedV2RunArtifactCount: number;
+  readonly knownFailedV3RunArtifactCount: number;
 }): true {
   const counts = [
     options.retiredV1EvidenceArtifactCount, options.retiredV2EvidenceArtifactCount,
-    options.v3EvidenceArtifactCount, options.knownFailedV1RunArtifactCount,
-    options.knownFailedV2RunArtifactCount,
+    options.retiredV3EvidenceArtifactCount, options.currentEvidenceArtifactCount,
+    options.knownFailedV1RunArtifactCount, options.knownFailedV2RunArtifactCount,
+    options.knownFailedV3RunArtifactCount,
   ];
   if (counts.some((count) => !Number.isSafeInteger(count) || count < 0)) fail('burn_authority');
-  if (options.v3LookupStatus === 200) fail('burn_preexisting');
-  if (options.retiredV1LookupStatus !== 404 || options.v3LookupStatus !== 404) fail('burn_lookup');
-  if (options.retiredV2LookupStatus !== 200) fail('burn_lookup');
-  if (options.retiredV1EvidenceArtifactCount !== 0 || options.v3EvidenceArtifactCount !== 0
+  if (options.currentLookupStatus === 200) fail('burn_preexisting');
+  if (options.retiredV1LookupStatus !== 404 || options.currentLookupStatus !== 404) fail('burn_lookup');
+  if (options.retiredV2LookupStatus !== 200 || options.retiredV3LookupStatus !== 200) fail('burn_lookup');
+  if (options.retiredV1EvidenceArtifactCount !== 0 || options.currentEvidenceArtifactCount !== 0
     || options.knownFailedV1RunArtifactCount !== 0) fail('legacy_authority');
   if (options.retiredV2EvidenceArtifactCount > 1 || options.knownFailedV2RunArtifactCount > 1) {
+    fail('legacy_authority');
+  }
+  if (options.retiredV3EvidenceArtifactCount > 2 || options.knownFailedV3RunArtifactCount > 2) {
     fail('legacy_authority');
   }
   return true;
@@ -634,9 +642,9 @@ export async function scoreSealedBlindedHoldoutV2<
     valueMismatchCount: holdout.valueMismatchCount,
     passed:
       report.passed &&
-      holdout.scenarioCount === 3 &&
-      holdout.dimensionCount === 18 &&
-      holdout.agreementCount === 18 &&
+      holdout.scenarioCount === 4 &&
+      holdout.dimensionCount === 24 &&
+      holdout.agreementCount === 24 &&
       holdout.agreementPermille === 1_000 &&
       holdout.availabilityMismatchCount === 0 &&
       holdout.valueMismatchCount === 0,
@@ -692,12 +700,15 @@ function gitAncestor(base: string, head: string): boolean {
 
 async function loadPolicyReceipt(path: string): Promise<AdmissionC2RuntimePolicyReceiptV2> {
   try {
-    const neutralModule = (await import(NEUTRAL_POLICY_V2_MODULE)) as Record<string, unknown>;
-    const parser = neutralModule[NEUTRAL_POLICY_V2_PARSER_EXPORT];
+    const neutralModule = (await import(NEUTRAL_POLICY_V3_MODULE)) as Record<string, unknown>;
+    const parser = neutralModule[NEUTRAL_POLICY_V3_PARSER_EXPORT];
     if (typeof parser !== 'function') fail('policy_authority');
-    const [receiptBytes, legacyReceiptBytes] = await Promise.all([readFile(path), readFile(NEUTRAL_POLICY_V1_RECEIPT)]);
+    const [receiptBytes, retiredReceiptBytes, legacyReceiptBytes] = await Promise.all([
+      readFile(path), readFile(NEUTRAL_POLICY_V2_RECEIPT), readFile(NEUTRAL_POLICY_V1_RECEIPT),
+    ]);
     const parsedReceipt = parser(
       new Uint8Array(receiptBytes),
+      new Uint8Array(retiredReceiptBytes),
       new Uint8Array(legacyReceiptBytes),
     ) as Omit<AdmissionC2RuntimePolicyReceiptV2, 'canonicalBytesSha256'>;
     if (
@@ -830,24 +841,30 @@ async function commandTombstoneAuthorize(
 async function commandBurnAuthorityAuthorize(
   retiredV1LookupStatus: string,
   retiredV2LookupStatus: string,
-  v3LookupStatus: string,
+  retiredV3LookupStatus: string,
+  currentLookupStatus: string,
   retiredV1EvidenceArtifactCount: string,
   retiredV2EvidenceArtifactCount: string,
-  v3EvidenceArtifactCount: string,
+  retiredV3EvidenceArtifactCount: string,
+  currentEvidenceArtifactCount: string,
   knownFailedV1RunArtifactCount: string,
   knownFailedV2RunArtifactCount: string,
+  knownFailedV3RunArtifactCount: string,
 ): Promise<void> {
   validateBlindedHoldoutBurnAuthorityAbsenceV2({
     retiredV1LookupStatus: Number(retiredV1LookupStatus),
     retiredV2LookupStatus: Number(retiredV2LookupStatus),
-    v3LookupStatus: Number(v3LookupStatus),
+    retiredV3LookupStatus: Number(retiredV3LookupStatus),
+    currentLookupStatus: Number(currentLookupStatus),
     retiredV1EvidenceArtifactCount: Number(retiredV1EvidenceArtifactCount),
     retiredV2EvidenceArtifactCount: Number(retiredV2EvidenceArtifactCount),
-    v3EvidenceArtifactCount: Number(v3EvidenceArtifactCount),
+    retiredV3EvidenceArtifactCount: Number(retiredV3EvidenceArtifactCount),
+    currentEvidenceArtifactCount: Number(currentEvidenceArtifactCount),
     knownFailedV1RunArtifactCount: Number(knownFailedV1RunArtifactCount),
     knownFailedV2RunArtifactCount: Number(knownFailedV2RunArtifactCount),
+    knownFailedV3RunArtifactCount: Number(knownFailedV3RunArtifactCount),
   });
-  process.stdout.write('{"ok":true,"schemaVersion":"memberry.admission-feature-blinded-holdout-burn-authority.v3"}\n');
+  process.stdout.write('{"ok":true,"schemaVersion":"memberry.admission-feature-blinded-holdout-burn-authority.v4"}\n');
 }
 
 async function readApiResponse(path: string): Promise<unknown> {
@@ -1024,9 +1041,10 @@ async function main(args: readonly string[]): Promise<void> {
   if (command === 'tombstone-authorize' && paths.length === 4) {
     return commandTombstoneAuthorize(paths[0]!, paths[1]!, paths[2]!, paths[3]!);
   }
-  if (command === 'burn-authority-authorize' && paths.length === 8) {
+  if (command === 'burn-authority-authorize' && paths.length === 11) {
     return commandBurnAuthorityAuthorize(
       paths[0]!, paths[1]!, paths[2]!, paths[3]!, paths[4]!, paths[5]!, paths[6]!, paths[7]!,
+      paths[8]!, paths[9]!, paths[10]!,
     );
   }
   if (command === 'tombstone-verify' && paths.length === 6) {

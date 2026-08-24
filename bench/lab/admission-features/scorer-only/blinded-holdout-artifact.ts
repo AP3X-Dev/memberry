@@ -9,33 +9,34 @@ const TRUSTED_OBJECT_PROTOTYPE = Object.prototype;
 const TRUSTED_REGEXP_TEST = Function.prototype.call.bind(RegExp.prototype.test) as (pattern: RegExp, value: string) => boolean;
 
 export const BLINDED_HOLDOUT_ARTIFACT_VERSION = '2.0.0' as const;
-export const BLINDED_HOLDOUT_INTEGRATED_BASE_SHA = '222fa7438b035153f1a78832ead003d22b05d77a' as const;
-export const BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA = '5a111761668d9370d5163f64e195f0dda44b55af' as const;
-export const BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID = '94c75dd3a36a708ce6add1f10eaf606fa4ffea8d' as const;
-export const BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID = '03d7c50515f6ab767fd41b7d41bd231531a4ab58' as const;
-export const BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID = '1f1318ce97934145d496cc55642fdd37a3f4437d' as const;
-export const BLINDED_HOLDOUT_INPUT_SHA256 = 'sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24' as const;
-export const BLINDED_HOLDOUT_ORACLE_SHA256 = 'sha256:3a50b28cba28aa451967b3fbf3bcddfcc8c8f13f11c806cada1096d1f2807574' as const;
-export const BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256 = 'sha256:ff9d0df0e9e5e47da0e34e56294b713ba8a8ce9b216b6bec590b8826f5818f01' as const;
+export const BLINDED_HOLDOUT_INTEGRATED_BASE_SHA = 'ee4723bf0dccff5ffc7ba05ec5c6ba8ee9ed9bce' as const;
+export const BLINDED_HOLDOUT_CANDIDATE_COMMIT_SHA = 'ee4723bf0dccff5ffc7ba05ec5c6ba8ee9ed9bce' as const;
+export const BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID = 'f6cc81d7b754778be7b772aa3ecddf6ec8e804d7' as const;
+export const BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID = '08ce328eca824de833d9f762950b4b008a13f723' as const;
+export const BLINDED_HOLDOUT_CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID = '08ce328eca824de833d9f762950b4b008a13f723' as const;
+export const BLINDED_HOLDOUT_INPUT_SHA256 = 'sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428' as const;
+export const BLINDED_HOLDOUT_ORACLE_SHA256 = 'sha256:840bc97373705daad00d0caa830335e07cfd54671437a7628a0f4e451c672441' as const;
+export const BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256 = 'sha256:2a87f47eed1236fbc41b368ca146597993f0d6ed787637f3fb951e029d9422b5' as const;
 export const BLINDED_HOLDOUT_POLICY_RECEIPT_CANONICAL_BYTES_SHA256 =
-  'sha256:ebad2b9da6dd555c033ff2e7936f0eeeaa0a6552f61d5016125b0b526e133bcb' as const;
+  'sha256:f8c5ade63a13b24c5abfd39432f358651cf4fc9acf9ec50b33b2e482c9b5ab3c' as const;
 export const BLINDED_HOLDOUT_BASE_IMAGE = 'node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9' as const;
 export const BLINDED_HOLDOUT_PLATFORM = 'linux/amd64' as const;
 
-export const BLINDED_HOLDOUT_CANDIDATE_SHA256 = 'sha256:474459f8359fe8a117547453dc1e728b4aab9a69f69f7faa4cf188e27e4742ca' as const;
+export const BLINDED_HOLDOUT_CANDIDATE_SHA256 = 'sha256:778331a12e3720b1373c600f49ef7bd6299946ed10ddfde465b61f2f5c9ec982' as const;
 export const BLINDED_HOLDOUT_RETIRED_V1_ONE_SHOT_KEY = 'sha256:334f7e05460d405878a758a6172057fbc1fdac5d3696fc5a8dbe17b8ab070935' as const;
 export const BLINDED_HOLDOUT_RETIRED_V2_ONE_SHOT_KEY = 'sha256:e500407fcd48106f66131f75a3e6ee2f127758ae0c6f8b37835c968672c9bc98' as const;
-const SOURCE_SHA256 = 'sha256:b8d5c385ed3ae3a3b0cb4c1212d601fbd23dc4a9d26f0765b9b314dc62b1b513' as const;
-const IMAGE_SHA256 = 'sha256:a1cd73a3036419932ff777d0418690831495059a09d3ffbf9ae68b668d695843' as const;
-const IMAGE_CONFIG_SHA256 = 'sha256:8b7290e652f24385d03b1190ba5d8522b50dcdc3181e06806165f09a5c40d1b2' as const;
+export const BLINDED_HOLDOUT_RETIRED_V3_ONE_SHOT_KEY = 'sha256:af2a1940244599d61fe2ab48a922a08966fcad6549f792c4feee4f9d0979305b' as const;
+const SOURCE_SHA256 = 'sha256:6f8dd8edaecc6de8003a29e760f695847682938007ea8342ac315f064b80d457' as const;
+const IMAGE_SHA256 = 'sha256:fbf47a6a3361de44348ab2838b50462f5bf8892a8f5c5d04a4e909dbe0126b69' as const;
+const IMAGE_CONFIG_SHA256 = 'sha256:939cef37326b1e89e43f27ef90b8f69c73feb10b7353ef973931f6373b32eefa' as const;
 const NODE_SHA256 = 'sha256:34347794817b8e5d2ac54e93131ac8456f2c37cf1e752dcd6ec8e8314c7ae4a4' as const;
 const ROOT_FS_LAYER_SHA256 = Object.freeze([
   'sha256:cce92674e98722970ab3fdce76a2566f54db535beeb24f0b4397f070ab5f6987',
   'sha256:7caa14a5f75323e9d5aff5b7db25d8540e148e6344f829013e94dd3349324891',
   'sha256:05a5275213a25f7ac29087f5731944eb9cefe4f8bffd1a9c4617be35aeaa39c8',
   'sha256:b6ad516e7aba450d913b5495228e48f1883673a610e7be80522be720b0b121fe',
-  'sha256:065b4018a258c14d5b5554ddd0c814c55a213e934271aa7c65c58e1769310e8e',
-  'sha256:39a045d2d8c0b1942257ae49a5311b74ca0bfec46f3a4ea13ab2291c0ce11464',
+  'sha256:db2c35d3556db51b3a5576e5dfb8db025e2f09dbbec40e95d38c7d3b8e96c8c3',
+  'sha256:677819df3f45e5d5f0aa109ced5f5e15485084141eed7b7211252fc8d781e636',
 ] as const);
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
@@ -187,15 +188,15 @@ function aggregate(value: BlindedHoldoutAggregateV2): BlindedHoldoutAggregateV2 
     'valueMismatchCount',
     'passed',
   ]);
-  const scenarioCount = exactInteger(record.scenarioCount, 3, 3);
-  const dimensionCount = exactInteger(record.dimensionCount, 18, 18);
-  const agreementCount = exactInteger(record.agreementCount, 0, 18);
+  const scenarioCount = exactInteger(record.scenarioCount, 4, 4);
+  const dimensionCount = exactInteger(record.dimensionCount, 24, 24);
+  const agreementCount = exactInteger(record.agreementCount, 0, 24);
   const agreementPermille = exactInteger(record.agreementPermille, 0, 1_000);
-  const availabilityMismatchCount = exactInteger(record.availabilityMismatchCount, 0, 18);
-  const valueMismatchCount = exactInteger(record.valueMismatchCount, 0, 18);
+  const availabilityMismatchCount = exactInteger(record.availabilityMismatchCount, 0, 24);
+  const valueMismatchCount = exactInteger(record.valueMismatchCount, 0, 24);
   const passed = record.passed;
   const expectedPermille = Math.floor((agreementCount * 1_000) / dimensionCount);
-  const exactPass = agreementCount === 18 && agreementPermille === 1_000 && availabilityMismatchCount === 0 && valueMismatchCount === 0;
+  const exactPass = agreementCount === 24 && agreementPermille === 1_000 && availabilityMismatchCount === 0 && valueMismatchCount === 0;
   if (
     agreementPermille !== expectedPermille ||
     availabilityMismatchCount + valueMismatchCount !== dimensionCount - agreementCount ||

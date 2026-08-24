@@ -17,19 +17,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      POLICY_RECEIPT: bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v2.json
+      POLICY_RECEIPT: bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v3.json
       SCORER_ENTRY: bench/lab/admission-features/scorer-only/blinded-holdout.ts
-      CANDIDATE_COMMIT_SHA: 5a111761668d9370d5163f64e195f0dda44b55af
-      REPOSITORY_ROOT_TREE_OID: 94c75dd3a36a708ce6add1f10eaf606fa4ffea8d
-      HISTORICAL_CANDIDATE_SUBTREE_OID: 03d7c50515f6ab767fd41b7d41bd231531a4ab58
-      CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID: 1f1318ce97934145d496cc55642fdd37a3f4437d
+      CANDIDATE_COMMIT_SHA: ee4723bf0dccff5ffc7ba05ec5c6ba8ee9ed9bce
+      REPOSITORY_ROOT_TREE_OID: f6cc81d7b754778be7b772aa3ecddf6ec8e804d7
+      HISTORICAL_CANDIDATE_SUBTREE_OID: 08ce328eca824de833d9f762950b4b008a13f723
+      CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID: 08ce328eca824de833d9f762950b4b008a13f723
       RETIRED_V1_ONE_SHOT_KEY: 334f7e05460d405878a758a6172057fbc1fdac5d3696fc5a8dbe17b8ab070935
       RETIRED_V2_ONE_SHOT_KEY: e500407fcd48106f66131f75a3e6ee2f127758ae0c6f8b37835c968672c9bc98
       RETIRED_V2_BURN_TARGET_SHA: 35dd27581e1457294b4d8d8ac86a648356dcded7
+      RETIRED_V3_ONE_SHOT_KEY: af2a1940244599d61fe2ab48a922a08966fcad6549f792c4feee4f9d0979305b
+      RETIRED_V3_BURN_TARGET_SHA: 251fd78583217ddc6eba51d4696d68c6a44837d6
       KNOWN_FAILED_V1_RUN_ID: "32001044115"
       KNOWN_FAILED_V2_RUN_ID: "32686004041"
-      INPUT_SHA256: sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24
-      OUTPUT_SHA256: sha256:5b43576a3b7b2f19c8dc8280b4259783c53643a2f620aa35abea7dfaa8586a83
+      KNOWN_FAILED_V3_RUN_ID: "32688150402"
+      INPUT_SHA256: sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428
+      OUTPUT_SHA256: sha256:c5611f810d34fcecce7c2ed9ab1c258d0cea2e855526a10730993b73f7d92d3a
       BASE_IMAGE: node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9
       PLATFORM: linux/amd64
 
@@ -79,10 +82,10 @@ jobs:
           authority_counts="$(
             gh api --method GET --paginate --slurp \
               "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
-              | RETIRED_KEY="$RETIRED_V1_ONE_SHOT_KEY" RETIRED2_KEY="$RETIRED_V2_ONE_SHOT_KEY" V3_KEY="$one_shot_key" node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let retired = 0; let retired2 = 0; let v3 = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); for (const artifact of page.artifacts) { if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact) || typeof artifact.name !== "string") process.exit(2); if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED_KEY}-`)) retired += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED2_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED2_KEY}-`)) retired2 += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.V3_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.V3_KEY}-`)) v3 += 1; } } process.stdout.write(`${retired} ${retired2} ${v3}`);'
+              | RETIRED_KEY="$RETIRED_V1_ONE_SHOT_KEY" RETIRED2_KEY="$RETIRED_V2_ONE_SHOT_KEY" RETIRED3_KEY="$RETIRED_V3_ONE_SHOT_KEY" CURRENT_KEY="$one_shot_key" node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let retired = 0; let retired2 = 0; let retired3 = 0; let current = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); for (const artifact of page.artifacts) { if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact) || typeof artifact.name !== "string") process.exit(2); if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED_KEY}-`)) retired += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED2_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED2_KEY}-`)) retired2 += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED3_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED3_KEY}-`)) retired3 += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.CURRENT_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.CURRENT_KEY}-`)) current += 1; } } process.stdout.write(`${retired} ${retired2} ${retired3} ${current}`);'
           )"
-          read -r retired_artifacts retired_v2_artifacts v3_artifacts <<<"$authority_counts"
-          [[ "$retired_artifacts" =~ ^[0-9]+$ && "$retired_v2_artifacts" =~ ^[0-9]+$ && "$v3_artifacts" =~ ^[0-9]+$ ]]
+          read -r retired_artifacts retired_v2_artifacts retired_v3_artifacts current_artifacts <<<"$authority_counts"
+          [[ "$retired_artifacts" =~ ^[0-9]+$ && "$retired_v2_artifacts" =~ ^[0-9]+$ && "$retired_v3_artifacts" =~ ^[0-9]+$ && "$current_artifacts" =~ ^[0-9]+$ ]]
           failed_run_artifacts="$(
             gh api --method GET --paginate --slurp \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${KNOWN_FAILED_V1_RUN_ID}/artifacts?per_page=100" \
@@ -95,16 +98,26 @@ jobs:
               | node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); count += page.artifacts.length; } process.stdout.write(String(count));'
           )"
           [[ "$failed_v2_run_artifacts" =~ ^[0-9]+$ ]]
+          failed_v3_run_artifacts="$(
+            gh api --method GET --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${KNOWN_FAILED_V3_RUN_ID}/artifacts?per_page=100" \
+              | node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); count += page.artifacts.length; } process.stdout.write(String(count));'
+          )"
+          [[ "$failed_v3_run_artifacts" =~ ^[0-9]+$ ]]
           api_root="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
           retired_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V1_ONE_SHOT_KEY}")"
           retired_v2_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V2_ONE_SHOT_KEY}")"
           retired_v2_target_sha="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V2_ONE_SHOT_KEY}" | node -e 'const ref = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (ref === null || typeof ref !== "object" || ref.object === null || typeof ref.object !== "object" || typeof ref.object.sha !== "string") process.exit(2); process.stdout.write(ref.object.sha);')"
           [[ "$retired_v2_target_sha" == "$RETIRED_V2_BURN_TARGET_SHA" ]]
-          v3_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${one_shot_key}")"
+          retired_v3_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V3_ONE_SHOT_KEY}")"
+          retired_v3_target_sha="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V3_ONE_SHOT_KEY}" | node -e 'const ref = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (ref === null || typeof ref !== "object" || ref.object === null || typeof ref.object !== "object" || typeof ref.object.sha !== "string") process.exit(2); process.stdout.write(ref.object.sha);')"
+          [[ "$retired_v3_target_sha" == "$RETIRED_V3_BURN_TARGET_SHA" ]]
+          current_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${one_shot_key}")"
           npx tsx "$SCORER_ENTRY" burn-authority-authorize \
-            "$retired_lookup_status" "$retired_v2_lookup_status" "$v3_lookup_status" \
-            "$retired_artifacts" "$retired_v2_artifacts" "$v3_artifacts" \
-            "$failed_run_artifacts" "$failed_v2_run_artifacts"
+            "$retired_lookup_status" "$retired_v2_lookup_status" "$retired_v3_lookup_status" \
+            "$current_lookup_status" "$retired_artifacts" "$retired_v2_artifacts" \
+            "$retired_v3_artifacts" "$current_artifacts" "$failed_run_artifacts" \
+            "$failed_v2_run_artifacts" "$failed_v3_run_artifacts"
           {
             printf 'MEMBERRY_ONE_SHOT_KEY=%s\n' "$one_shot_key"
             printf 'MEMBERRY_BURN_ARTIFACT_NAME=%s\n' "$burn_artifact_name"
@@ -112,9 +125,11 @@ jobs:
             printf 'MEMBERRY_PRIOR_AUTHORITATIVE_RECEIPTS=0\n'
             printf 'MEMBERRY_RETIRED_V1_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_artifacts"
             printf 'MEMBERRY_RETIRED_V2_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_v2_artifacts"
-            printf 'MEMBERRY_PRIOR_EVIDENCE_ARTIFACT_COUNT=%s\n' "$v3_artifacts"
+            printf 'MEMBERRY_RETIRED_V3_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_v3_artifacts"
+            printf 'MEMBERRY_PRIOR_EVIDENCE_ARTIFACT_COUNT=%s\n' "$current_artifacts"
             printf 'MEMBERRY_KNOWN_FAILED_V1_RUN_ARTIFACT_COUNT=%s\n' "$failed_run_artifacts"
             printf 'MEMBERRY_KNOWN_FAILED_V2_RUN_ARTIFACT_COUNT=%s\n' "$failed_v2_run_artifacts"
+            printf 'MEMBERRY_KNOWN_FAILED_V3_RUN_ARTIFACT_COUNT=%s\n' "$failed_v3_run_artifacts"
           } >>"$GITHUB_ENV"
 
       - name: Export exact candidate-only build context
@@ -132,7 +147,7 @@ jobs:
           observed_checkout_candidate_subtree_oid="$(git rev-parse \
             "HEAD:bench/lab/admission-features/candidate")"
           [[ "$observed_checkout_candidate_subtree_oid" == "$CURRENT_CHECKOUT_CANDIDATE_SUBTREE_OID" ]]
-          [[ "$observed_checkout_candidate_subtree_oid" != "$observed_historical_candidate_subtree_oid" ]]
+          [[ "$observed_checkout_candidate_subtree_oid" == "$observed_historical_candidate_subtree_oid" ]]
           git archive --format=tar \
             "${CANDIDATE_COMMIT_SHA}:bench/lab/admission-features/candidate" \
             | tar -xf - -C "$MEMBERRY_C3_CONTEXT_DIR"
@@ -161,8 +176,8 @@ jobs:
         env:
           MEMBERRY_OBSERVED_PLATFORM: linux/amd64
           MEMBERRY_OBSERVED_BASE_IMAGE: node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9
-          MEMBERRY_OBSERVED_CANDIDATE_COMMIT_SHA: 5a111761668d9370d5163f64e195f0dda44b55af
-          MEMBERRY_OBSERVED_INPUT_SHA256: sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24
+          MEMBERRY_OBSERVED_CANDIDATE_COMMIT_SHA: ee4723bf0dccff5ffc7ba05ec5c6ba8ee9ed9bce
+          MEMBERRY_OBSERVED_INPUT_SHA256: sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428
         run: |
           set -euo pipefail
           npx tsx "$SCORER_ENTRY" preflight "$POLICY_RECEIPT" "$MEMBERRY_C3_SECRET_DIR/preflight.json"
@@ -268,8 +283,8 @@ jobs:
         env:
           MEMBERRY_OBSERVED_PLATFORM: linux/amd64
           MEMBERRY_OBSERVED_BASE_IMAGE: node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9
-          MEMBERRY_OBSERVED_CANDIDATE_COMMIT_SHA: 5a111761668d9370d5163f64e195f0dda44b55af
-          MEMBERRY_OBSERVED_INPUT_SHA256: sha256:41ef02bbe9df03e4f7b4f95b248265a71635aefa7cbe69c585a1eb8647936b24
+          MEMBERRY_OBSERVED_CANDIDATE_COMMIT_SHA: ee4723bf0dccff5ffc7ba05ec5c6ba8ee9ed9bce
+          MEMBERRY_OBSERVED_INPUT_SHA256: sha256:457d5483b8c22f62415f5952ffa743936f0b34348cf72bafe315dd8432448428
         run: |
           set -euo pipefail
           [[ "$MEMBERRY_DURABLE_TOMBSTONE_VERIFIED" == 'true' ]]
