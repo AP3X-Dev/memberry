@@ -97,16 +97,28 @@ function plainRecord(value: unknown): Record<string, unknown> {
 
 export function validateBlindedHoldoutBurnAuthorityAbsenceV2(options: {
   readonly retiredV1LookupStatus: number;
-  readonly v2LookupStatus: number;
+  readonly retiredV2LookupStatus: number;
+  readonly v3LookupStatus: number;
   readonly retiredV1EvidenceArtifactCount: number;
-  readonly v2EvidenceArtifactCount: number;
+  readonly retiredV2EvidenceArtifactCount: number;
+  readonly v3EvidenceArtifactCount: number;
   readonly knownFailedV1RunArtifactCount: number;
+  readonly knownFailedV2RunArtifactCount: number;
 }): true {
-  const counts = [options.retiredV1EvidenceArtifactCount, options.v2EvidenceArtifactCount, options.knownFailedV1RunArtifactCount];
+  const counts = [
+    options.retiredV1EvidenceArtifactCount, options.retiredV2EvidenceArtifactCount,
+    options.v3EvidenceArtifactCount, options.knownFailedV1RunArtifactCount,
+    options.knownFailedV2RunArtifactCount,
+  ];
   if (counts.some((count) => !Number.isSafeInteger(count) || count < 0)) fail('burn_authority');
-  if (options.retiredV1LookupStatus === 200 || options.v2LookupStatus === 200) fail('burn_preexisting');
-  if (options.retiredV1LookupStatus !== 404 || options.v2LookupStatus !== 404) fail('burn_lookup');
-  if (counts.some((count) => count !== 0)) fail('legacy_authority');
+  if (options.v3LookupStatus === 200) fail('burn_preexisting');
+  if (options.retiredV1LookupStatus !== 404 || options.v3LookupStatus !== 404) fail('burn_lookup');
+  if (options.retiredV2LookupStatus !== 200) fail('burn_lookup');
+  if (options.retiredV1EvidenceArtifactCount !== 0 || options.v3EvidenceArtifactCount !== 0
+    || options.knownFailedV1RunArtifactCount !== 0) fail('legacy_authority');
+  if (options.retiredV2EvidenceArtifactCount > 1 || options.knownFailedV2RunArtifactCount > 1) {
+    fail('legacy_authority');
+  }
   return true;
 }
 
@@ -817,19 +829,25 @@ async function commandTombstoneAuthorize(
 
 async function commandBurnAuthorityAuthorize(
   retiredV1LookupStatus: string,
-  v2LookupStatus: string,
+  retiredV2LookupStatus: string,
+  v3LookupStatus: string,
   retiredV1EvidenceArtifactCount: string,
-  v2EvidenceArtifactCount: string,
+  retiredV2EvidenceArtifactCount: string,
+  v3EvidenceArtifactCount: string,
   knownFailedV1RunArtifactCount: string,
+  knownFailedV2RunArtifactCount: string,
 ): Promise<void> {
   validateBlindedHoldoutBurnAuthorityAbsenceV2({
     retiredV1LookupStatus: Number(retiredV1LookupStatus),
-    v2LookupStatus: Number(v2LookupStatus),
+    retiredV2LookupStatus: Number(retiredV2LookupStatus),
+    v3LookupStatus: Number(v3LookupStatus),
     retiredV1EvidenceArtifactCount: Number(retiredV1EvidenceArtifactCount),
-    v2EvidenceArtifactCount: Number(v2EvidenceArtifactCount),
+    retiredV2EvidenceArtifactCount: Number(retiredV2EvidenceArtifactCount),
+    v3EvidenceArtifactCount: Number(v3EvidenceArtifactCount),
     knownFailedV1RunArtifactCount: Number(knownFailedV1RunArtifactCount),
+    knownFailedV2RunArtifactCount: Number(knownFailedV2RunArtifactCount),
   });
-  process.stdout.write('{"ok":true,"schemaVersion":"memberry.admission-feature-blinded-holdout-burn-authority.v2"}\n');
+  process.stdout.write('{"ok":true,"schemaVersion":"memberry.admission-feature-blinded-holdout-burn-authority.v3"}\n');
 }
 
 async function readApiResponse(path: string): Promise<unknown> {
@@ -1006,8 +1024,10 @@ async function main(args: readonly string[]): Promise<void> {
   if (command === 'tombstone-authorize' && paths.length === 4) {
     return commandTombstoneAuthorize(paths[0]!, paths[1]!, paths[2]!, paths[3]!);
   }
-  if (command === 'burn-authority-authorize' && paths.length === 5) {
-    return commandBurnAuthorityAuthorize(paths[0]!, paths[1]!, paths[2]!, paths[3]!, paths[4]!);
+  if (command === 'burn-authority-authorize' && paths.length === 8) {
+    return commandBurnAuthorityAuthorize(
+      paths[0]!, paths[1]!, paths[2]!, paths[3]!, paths[4]!, paths[5]!, paths[6]!, paths[7]!,
+    );
   }
   if (command === 'tombstone-verify' && paths.length === 6) {
     return commandTombstoneVerify(paths[0]!, paths[1]!, paths[2]!, paths[3]!, paths[4]!, paths[5]!);

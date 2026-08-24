@@ -24,6 +24,7 @@ export const BLINDED_HOLDOUT_PLATFORM = 'linux/amd64' as const;
 
 export const BLINDED_HOLDOUT_CANDIDATE_SHA256 = 'sha256:474459f8359fe8a117547453dc1e728b4aab9a69f69f7faa4cf188e27e4742ca' as const;
 export const BLINDED_HOLDOUT_RETIRED_V1_ONE_SHOT_KEY = 'sha256:334f7e05460d405878a758a6172057fbc1fdac5d3696fc5a8dbe17b8ab070935' as const;
+export const BLINDED_HOLDOUT_RETIRED_V2_ONE_SHOT_KEY = 'sha256:e500407fcd48106f66131f75a3e6ee2f127758ae0c6f8b37835c968672c9bc98' as const;
 const SOURCE_SHA256 = 'sha256:b8d5c385ed3ae3a3b0cb4c1212d601fbd23dc4a9d26f0765b9b314dc62b1b513' as const;
 const IMAGE_SHA256 = 'sha256:a1cd73a3036419932ff777d0418690831495059a09d3ffbf9ae68b668d695843' as const;
 const IMAGE_CONFIG_SHA256 = 'sha256:8b7290e652f24385d03b1190ba5d8522b50dcdc3181e06806165f09a5c40d1b2' as const;
@@ -288,7 +289,7 @@ export interface BlindedHoldoutStablePairV2 {
 }
 
 const DEFAULT_STABLE_PAIR = Object.freeze({
-  schemaVersion: 'memberry.admission-feature-blinded-holdout-key.v2',
+  schemaVersion: 'memberry.admission-feature-blinded-holdout-key.v3',
   candidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
   candidateSha256: BLINDED_HOLDOUT_CANDIDATE_SHA256,
   inputSha256: BLINDED_HOLDOUT_INPUT_SHA256,

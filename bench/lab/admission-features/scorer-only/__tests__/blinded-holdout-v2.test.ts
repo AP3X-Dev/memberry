@@ -18,6 +18,7 @@ import {
   BLINDED_HOLDOUT_POLICY_RECEIPT_SHA256,
   BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID,
   BLINDED_HOLDOUT_RETIRED_V1_ONE_SHOT_KEY,
+  BLINDED_HOLDOUT_RETIRED_V2_ONE_SHOT_KEY,
   blindedHoldoutOneShotKeyV2,
   parseBlindedHoldoutReceiptV2,
 } from "../blinded-holdout-artifact.js";
@@ -163,7 +164,7 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
   it("binds the stable pair only and cannot be reopened by infrastructure identity changes", () => {
     const stablePair = {
       schemaVersion:
-        "memberry.admission-feature-blinded-holdout-key.v2" as const,
+        "memberry.admission-feature-blinded-holdout-key.v3" as const,
       candidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
       candidateSha256: BLINDED_HOLDOUT_CANDIDATE_SHA256,
       inputSha256: BLINDED_HOLDOUT_INPUT_SHA256,
@@ -189,7 +190,7 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
     for (const mutation of [
       {
         ...stablePair,
-        schemaVersion: "memberry.admission-feature-blinded-holdout-key.v3",
+        schemaVersion: "memberry.admission-feature-blinded-holdout-key.v2",
       },
       { ...stablePair, candidateSubtreeOid: "0".repeat(40) },
       { ...stablePair, candidateSha256: `sha256:${"1".repeat(64)}` },
@@ -200,13 +201,17 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
     }
 
     expect(BLINDED_HOLDOUT_RETIRED_V1_ONE_SHOT_KEY).not.toBe(key);
+    expect(BLINDED_HOLDOUT_RETIRED_V2_ONE_SHOT_KEY).not.toBe(key);
+    expect(BLINDED_HOLDOUT_RETIRED_V2_ONE_SHOT_KEY).toBe(
+      "sha256:e500407fcd48106f66131f75a3e6ee2f127758ae0c6f8b37835c968672c9bc98",
+    );
   });
 
   it("derives the exact stable key without invoking hostile object hooks", () => {
     const expected =
-      "sha256:e500407fcd48106f66131f75a3e6ee2f127758ae0c6f8b37835c968672c9bc98";
+      "sha256:af2a1940244599d61fe2ab48a922a08966fcad6549f792c4feee4f9d0979305b";
     const stable = {
-      schemaVersion: "memberry.admission-feature-blinded-holdout-key.v2",
+      schemaVersion: "memberry.admission-feature-blinded-holdout-key.v3",
       candidateSubtreeOid: BLINDED_HOLDOUT_HISTORICAL_CANDIDATE_SUBTREE_OID,
       candidateSha256: BLINDED_HOLDOUT_CANDIDATE_SHA256,
       inputSha256: BLINDED_HOLDOUT_INPUT_SHA256,
@@ -272,7 +277,7 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
 
   it("is invariant to ambient JSON and Object prototype drift with zero hooks", () => {
     const expected =
-      "sha256:e500407fcd48106f66131f75a3e6ee2f127758ae0c6f8b37835c968672c9bc98";
+      "sha256:af2a1940244599d61fe2ab48a922a08966fcad6549f792c4feee4f9d0979305b";
     const originalJson = globalThis.JSON;
     const originalOwnKeys = Reflect.ownKeys;
     const originalGetPrototypeOf = Object.getPrototypeOf;
@@ -316,22 +321,33 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
     }
   });
 
-  it("checks both retired-v1 and v2 durable and evidence authorities before any start", () => {
+  it("checks retired-v1, retired-v2, and v3 durable and evidence authorities before any start", () => {
     const clean = {
       retiredV1LookupStatus: 404,
-      v2LookupStatus: 404,
+      retiredV2LookupStatus: 200,
+      v3LookupStatus: 404,
       retiredV1EvidenceArtifactCount: 0,
-      v2EvidenceArtifactCount: 0,
+      retiredV2EvidenceArtifactCount: 1,
+      v3EvidenceArtifactCount: 0,
       knownFailedV1RunArtifactCount: 0,
+      knownFailedV2RunArtifactCount: 1,
     };
     expect(validateBlindedHoldoutBurnAuthorityAbsenceV2(clean)).toBe(true);
+    expect(validateBlindedHoldoutBurnAuthorityAbsenceV2({
+      ...clean,
+      retiredV2EvidenceArtifactCount: 0,
+      knownFailedV2RunArtifactCount: 0,
+    })).toBe(true);
 
     for (const mutation of [
       { retiredV1LookupStatus: 200 },
-      { v2LookupStatus: 200 },
+      { retiredV2LookupStatus: 404 },
+      { v3LookupStatus: 200 },
       { retiredV1EvidenceArtifactCount: 1 },
-      { v2EvidenceArtifactCount: 1 },
+      { retiredV2EvidenceArtifactCount: 2 },
+      { v3EvidenceArtifactCount: 1 },
       { knownFailedV1RunArtifactCount: 1 },
+      { knownFailedV2RunArtifactCount: 2 },
     ]) {
       expect(() =>
         validateBlindedHoldoutBurnAuthorityAbsenceV2({ ...clean, ...mutation }),
