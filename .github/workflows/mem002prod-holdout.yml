@@ -1,0 +1,500 @@
+name: MEM-002PROD blinded holdout one-shot
+
+permissions:
+  contents: write
+  actions: read
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: memberry-mem002prod-blinded-holdout-v3
+  cancel-in-progress: false
+
+jobs:
+  blinded-holdout:
+    name: scorer-owned one-shot
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      POLICY_RECEIPT: bench/lab/admission-features/contracts/c2-runtime-policy-receipt.v4.json
+      SCORER_ENTRY: bench/lab/admission-features/scorer-only/blinded-holdout-v3.ts
+      SEAL_PATH: bench/lab/admission-features/scorer-only/v3/seal.json
+      RETIRED_V1_ONE_SHOT_KEY: 334f7e05460d405878a758a6172057fbc1fdac5d3696fc5a8dbe17b8ab070935
+      RETIRED_V2_ONE_SHOT_KEY: e500407fcd48106f66131f75a3e6ee2f127758ae0c6f8b37835c968672c9bc98
+      RETIRED_V2_BURN_TARGET_SHA: 35dd27581e1457294b4d8d8ac86a648356dcded7
+      RETIRED_V3_ONE_SHOT_KEY: af2a1940244599d61fe2ab48a922a08966fcad6549f792c4feee4f9d0979305b
+      RETIRED_V3_BURN_TARGET_SHA: 251fd78583217ddc6eba51d4696d68c6a44837d6
+      RETIRED_V4_ONE_SHOT_KEY: 0f55163931d762cbe23f019ac85074be22638c2ea0aabf6b28726757fd62ef11
+      RETIRED_V4_BURN_TARGET_SHA: 8c9a22f5800162ff2a4be1a1722b6549b6b3a603
+      KNOWN_FAILED_V1_RUN_ID: "32001044115"
+      KNOWN_FAILED_V2_RUN_ID: "32686004041"
+      KNOWN_FAILED_V3_RUN_ID: "32688150402"
+      KNOWN_PASSED_V4_RUN_ID: "32698797178"
+      BASE_IMAGE: node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9
+      PLATFORM: linux/amd64
+
+    steps:
+      - name: Check out exact scorer commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 22 for oracle-free preflight
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frozen dependencies
+        run: npm ci
+
+      - name: Initialize private custody and public receipt directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          secret_dir="${RUNNER_TEMP}/memberry-mem002c3-secret-${GITHUB_RUN_ID}"
+          public_dir="${RUNNER_TEMP}/memberry-mem002c3-public-${GITHUB_RUN_ID}"
+          context_dir="${secret_dir}/candidate-context"
+          image_ref="memberry-mem002c3:${GITHUB_RUN_ID}"
+          mkdir -p "$secret_dir" "$public_dir" "$context_dir"
+          chmod 0700 "$secret_dir" "$public_dir" "$context_dir"
+          {
+            printf 'MEMBERRY_C3_SECRET_DIR=%s\n' "$secret_dir"
+            printf 'MEMBERRY_C3_PUBLIC_DIR=%s\n' "$public_dir"
+            printf 'MEMBERRY_C3_CONTEXT_DIR=%s\n' "$context_dir"
+            printf 'MEMBERRY_C3_IMAGE_REF=%s\n' "$image_ref"
+          } >>"$GITHUB_ENV"
+
+      - name: Derive sealed one-shot key and reject retired or current authority
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          one_shot_key="$(npx tsx -e "import { readFileSync } from 'node:fs'; import { parseBlindedHoldoutSealV3, blindedHoldoutSealedOneShotKeyV3 } from './bench/lab/admission-features/scorer-only/blinded-holdout-artifact-v3.ts'; process.stdout.write(blindedHoldoutSealedOneShotKeyV3(parseBlindedHoldoutSealV3(new Uint8Array(readFileSync(process.env.SEAL_PATH!)))).slice(7));")"
+          [[ "$one_shot_key" =~ ^[0-9a-f]{64}$ ]]
+          burn_artifact_name="memberry-mem002c3-burn-${one_shot_key}"
+          result_artifact_name="memberry-mem002c3-result-${one_shot_key}-${GITHUB_RUN_ID}"
+          authority_counts="$(
+            gh api --method GET --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+              | RETIRED_KEY="$RETIRED_V1_ONE_SHOT_KEY" RETIRED2_KEY="$RETIRED_V2_ONE_SHOT_KEY" RETIRED3_KEY="$RETIRED_V3_ONE_SHOT_KEY" RETIRED4_KEY="$RETIRED_V4_ONE_SHOT_KEY" CURRENT_KEY="$one_shot_key" node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let retired = 0; let retired2 = 0; let retired3 = 0; let retired4 = 0; let current = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); for (const artifact of page.artifacts) { if (artifact === null || typeof artifact !== "object" || Array.isArray(artifact) || typeof artifact.name !== "string") process.exit(2); if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED_KEY}-`)) retired += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED2_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED2_KEY}-`)) retired2 += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED3_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED3_KEY}-`)) retired3 += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.RETIRED4_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.RETIRED4_KEY}-`)) retired4 += 1; if (artifact.name === `memberry-mem002c3-burn-${process.env.CURRENT_KEY}` || artifact.name.startsWith(`memberry-mem002c3-result-${process.env.CURRENT_KEY}-`)) current += 1; } } process.stdout.write(`${retired} ${retired2} ${retired3} ${retired4} ${current}`);'
+          )"
+          read -r retired_artifacts retired_v2_artifacts retired_v3_artifacts retired_v4_artifacts current_artifacts <<<"$authority_counts"
+          [[ "$retired_artifacts" =~ ^[0-9]+$ && "$retired_v2_artifacts" =~ ^[0-9]+$ && "$retired_v3_artifacts" =~ ^[0-9]+$ && "$retired_v4_artifacts" =~ ^[0-9]+$ && "$current_artifacts" =~ ^[0-9]+$ ]]
+          failed_run_artifacts="$(
+            gh api --method GET --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${KNOWN_FAILED_V1_RUN_ID}/artifacts?per_page=100" \
+              | node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); count += page.artifacts.length; } process.stdout.write(String(count));'
+          )"
+          [[ "$failed_run_artifacts" =~ ^[0-9]+$ ]]
+          failed_v2_run_artifacts="$(
+            gh api --method GET --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${KNOWN_FAILED_V2_RUN_ID}/artifacts?per_page=100" \
+              | node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); count += page.artifacts.length; } process.stdout.write(String(count));'
+          )"
+          [[ "$failed_v2_run_artifacts" =~ ^[0-9]+$ ]]
+          failed_v3_run_artifacts="$(
+            gh api --method GET --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${KNOWN_FAILED_V3_RUN_ID}/artifacts?per_page=100" \
+              | node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); count += page.artifacts.length; } process.stdout.write(String(count));'
+          )"
+          [[ "$failed_v3_run_artifacts" =~ ^[0-9]+$ ]]
+          passed_v4_run_artifacts="$(
+            gh api --method GET --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${KNOWN_PASSED_V4_RUN_ID}/artifacts?per_page=100" \
+              | node -e 'const pages = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (!Array.isArray(pages) || pages.length === 0) process.exit(2); let count = 0; for (const page of pages) { if (page === null || typeof page !== "object" || !Array.isArray(page.artifacts)) process.exit(2); count += page.artifacts.length; } process.stdout.write(String(count));'
+          )"
+          [[ "$passed_v4_run_artifacts" =~ ^[0-9]+$ ]]
+          [[ "$passed_v4_run_artifacts" -le 2 ]]
+          api_root="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          retired_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V1_ONE_SHOT_KEY}")"
+          retired_v2_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V2_ONE_SHOT_KEY}")"
+          retired_v2_target_sha="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V2_ONE_SHOT_KEY}" | node -e 'const ref = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (ref === null || typeof ref !== "object" || ref.object === null || typeof ref.object !== "object" || typeof ref.object.sha !== "string") process.exit(2); process.stdout.write(ref.object.sha);')"
+          [[ "$retired_v2_target_sha" == "$RETIRED_V2_BURN_TARGET_SHA" ]]
+          retired_v3_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V3_ONE_SHOT_KEY}")"
+          retired_v3_target_sha="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V3_ONE_SHOT_KEY}" | node -e 'const ref = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (ref === null || typeof ref !== "object" || ref.object === null || typeof ref.object !== "object" || typeof ref.object.sha !== "string") process.exit(2); process.stdout.write(ref.object.sha);')"
+          [[ "$retired_v3_target_sha" == "$RETIRED_V3_BURN_TARGET_SHA" ]]
+          retired_v4_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V4_ONE_SHOT_KEY}")"
+          retired_v4_target_sha="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${RETIRED_V4_ONE_SHOT_KEY}" | node -e 'const ref = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (ref === null || typeof ref !== "object" || ref.object === null || typeof ref.object !== "object" || typeof ref.object.sha !== "string") process.exit(2); process.stdout.write(ref.object.sha);')"
+          [[ "$retired_v4_target_sha" == "$RETIRED_V4_BURN_TARGET_SHA" ]]
+          current_lookup_status="$(curl --silent --show-error --header "Authorization: Bearer ${GH_TOKEN}" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' --output /dev/null --write-out '%{http_code}' "${api_root}/git/ref/tags/memberry-mem002c3-burn/${one_shot_key}")"
+          npx tsx "$SCORER_ENTRY" burn-authority-authorize \
+            "$retired_lookup_status" "$retired_v2_lookup_status" "$retired_v3_lookup_status" \
+            "$retired_v4_lookup_status" "$current_lookup_status" "$retired_artifacts" \
+            "$retired_v2_artifacts" "$retired_v3_artifacts" "$retired_v4_artifacts" \
+            "$current_artifacts" "$failed_run_artifacts" "$failed_v2_run_artifacts" \
+            "$failed_v3_run_artifacts"
+          {
+            printf 'MEMBERRY_ONE_SHOT_KEY=%s\n' "$one_shot_key"
+            printf 'MEMBERRY_BURN_ARTIFACT_NAME=%s\n' "$burn_artifact_name"
+            printf 'MEMBERRY_RESULT_ARTIFACT_NAME=%s\n' "$result_artifact_name"
+            printf 'MEMBERRY_PRIOR_AUTHORITATIVE_RECEIPTS=0\n'
+            printf 'MEMBERRY_RETIRED_V1_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_artifacts"
+            printf 'MEMBERRY_RETIRED_V2_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_v2_artifacts"
+            printf 'MEMBERRY_RETIRED_V3_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_v3_artifacts"
+            printf 'MEMBERRY_RETIRED_V4_EVIDENCE_ARTIFACT_COUNT=%s\n' "$retired_v4_artifacts"
+            printf 'MEMBERRY_PRIOR_EVIDENCE_ARTIFACT_COUNT=%s\n' "$current_artifacts"
+            printf 'MEMBERRY_KNOWN_FAILED_V1_RUN_ARTIFACT_COUNT=%s\n' "$failed_run_artifacts"
+            printf 'MEMBERRY_KNOWN_FAILED_V2_RUN_ARTIFACT_COUNT=%s\n' "$failed_v2_run_artifacts"
+            printf 'MEMBERRY_KNOWN_FAILED_V3_RUN_ARTIFACT_COUNT=%s\n' "$failed_v3_run_artifacts"
+            printf 'MEMBERRY_KNOWN_PASSED_V4_RUN_ARTIFACT_COUNT=%s\n' "$passed_v4_run_artifacts"
+          } >>"$GITHUB_ENV"
+
+      - name: Export exact sealed two-subtree build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          seal_candidate_commit_sha="$(jq -er '.candidateCommitSha' "$SEAL_PATH")"
+          seal_repository_root_tree_oid="$(jq -er '.repositoryRootTreeOid' "$SEAL_PATH")"
+          seal_candidate_subtree_oid="$(jq -er '.candidateSubtreeOid' "$SEAL_PATH")"
+          seal_core_subtree_oid="$(jq -er '.coreSubtreeOid' "$SEAL_PATH")"
+          git cat-file -e "${seal_candidate_commit_sha}^{commit}"
+          observed_checkout_commit_sha="$(git rev-parse HEAD)"
+          [[ "$observed_checkout_commit_sha" == "$GITHUB_SHA" ]]
+          observed_repository_root_tree_oid="$(git rev-parse "${seal_candidate_commit_sha}^{tree}")"
+          [[ "$observed_repository_root_tree_oid" == "$seal_repository_root_tree_oid" ]]
+          observed_candidate_subtree_oid="$(git rev-parse \
+            "${seal_candidate_commit_sha}:bench/lab/admission-features/candidate-v3")"
+          [[ "$observed_candidate_subtree_oid" == "$seal_candidate_subtree_oid" ]]
+          observed_core_subtree_oid="$(git rev-parse \
+            "${seal_candidate_commit_sha}:packages/core/src")"
+          [[ "$observed_core_subtree_oid" == "$seal_core_subtree_oid" ]]
+          observed_checkout_candidate_subtree_oid="$(git rev-parse \
+            "HEAD:bench/lab/admission-features/candidate-v3")"
+          [[ "$observed_checkout_candidate_subtree_oid" == "$seal_candidate_subtree_oid" ]]
+          observed_checkout_core_subtree_oid="$(git rev-parse "HEAD:packages/core/src")"
+          [[ "$observed_checkout_core_subtree_oid" == "$seal_core_subtree_oid" ]]
+          mkdir -p "$MEMBERRY_C3_CONTEXT_DIR/candidate-v3" "$MEMBERRY_C3_CONTEXT_DIR/core-src"
+          git archive --format=tar \
+            "${seal_candidate_commit_sha}:bench/lab/admission-features/candidate-v3" \
+            | tar -xf - -C "$MEMBERRY_C3_CONTEXT_DIR/candidate-v3"
+          git archive --format=tar \
+            "${seal_candidate_commit_sha}:packages/core/src" \
+            | tar -xf - -C "$MEMBERRY_C3_CONTEXT_DIR/core-src"
+          if find "$MEMBERRY_C3_CONTEXT_DIR" -type l -print -quit | grep -q .; then
+            printf '%s\n' 'mem002prod_protocol:candidate_context' >&2
+            exit 1
+          fi
+          resolved_context="$(realpath "$MEMBERRY_C3_CONTEXT_DIR")"
+          resolved_secret="$(realpath "$MEMBERRY_C3_SECRET_DIR")"
+          [[ "$resolved_context" == "$resolved_secret"/* ]]
+          printf 'MEMBERRY_CANDIDATE_CONTEXT_ONLY=true\n' >>"$GITHUB_ENV"
+          printf 'MEMBERRY_OBSERVED_CANDIDATE_COMMIT_SHA=%s\n' "$seal_candidate_commit_sha" >>"$GITHUB_ENV"
+          printf 'MEMBERRY_OBSERVED_REPOSITORY_ROOT_TREE_OID=%s\n' "$observed_repository_root_tree_oid" >>"$GITHUB_ENV"
+          printf 'MEMBERRY_OBSERVED_CANDIDATE_SUBTREE_OID=%s\n' "$observed_candidate_subtree_oid" >>"$GITHUB_ENV"
+          printf 'MEMBERRY_OBSERVED_CORE_SUBTREE_OID=%s\n' "$observed_core_subtree_oid" >>"$GITHUB_ENV"
+
+      - name: Prepare and bind public input before oracle custody
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx "$SCORER_ENTRY" input "$MEMBERRY_C3_SECRET_DIR/input.json"
+          observed="sha256:$(sha256sum "$MEMBERRY_C3_SECRET_DIR/input.json" | cut -d' ' -f1)"
+          [[ "$observed" == "$(jq -er '.inputSha256' "$SEAL_PATH")" ]]
+          printf 'MEMBERRY_OBSERVED_INPUT_SHA256=%s\n' "$observed" >>"$GITHUB_ENV"
+
+      - name: Validate neutral authority and oracle-free preflight
+        shell: bash
+        env:
+          MEMBERRY_OBSERVED_PLATFORM: linux/amd64
+          MEMBERRY_OBSERVED_BASE_IMAGE: node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9
+        run: |
+          set -euo pipefail
+          npx tsx "$SCORER_ENTRY" preflight "$POLICY_RECEIPT" "$MEMBERRY_C3_SECRET_DIR/preflight.json"
+
+      - name: Pull exact approved base before candidate build
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform "$PLATFORM" "$BASE_IMAGE" >/dev/null
+          docker image inspect "$BASE_IMAGE" >/dev/null
+
+      - name: Build frozen candidate-only image without network
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx -e "import { buildAdmissionFeatureCandidateV3ImageV1 } from './bench/lab/admission-features/candidate-v3/build.ts'; buildAdmissionFeatureCandidateV3ImageV1().then((receipt) => { process.stdout.write(JSON.stringify(receipt) + '\n'); }).catch(() => { process.stderr.write('mem002prod_protocol:candidate_build\n'); process.exit(1); });" \
+            >"$MEMBERRY_C3_SECRET_DIR/build-receipt.json"
+          expected_candidate_sha256="$(jq -er '.binding.candidateSha256' "$POLICY_RECEIPT")"
+          expected_source_sha256="$(jq -er '.binding.sourceSha256' "$POLICY_RECEIPT")"
+          expected_node_sha256="$(jq -er '.binding.nodeSha256' "$POLICY_RECEIPT")"
+          sealed_candidate_sha256="$(jq -er '.candidateSha256' "$SEAL_PATH")"
+          built_candidate_sha256="$(jq -er '.candidateSha256' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          built_source_sha256="$(jq -er '.sourceSha256' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          built_node_sha256="$(jq -er '.nodeSha256' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          built_base_image="$(jq -er '.baseImage' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          image_id="$(jq -er '.imageSha256' "$MEMBERRY_C3_SECRET_DIR/build-receipt.json")"
+          [[ "$built_candidate_sha256" == "$expected_candidate_sha256" ]]
+          [[ "$built_candidate_sha256" == "$sealed_candidate_sha256" ]]
+          [[ "$built_source_sha256" == "$expected_source_sha256" ]]
+          [[ "$built_node_sha256" == "$expected_node_sha256" ]]
+          [[ "$built_base_image" == "$BASE_IMAGE" ]]
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker tag "$image_id" "$MEMBERRY_C3_IMAGE_REF"
+          {
+            printf 'MEMBERRY_C3_IMAGE_ID=%s\n' "$image_id"
+          } >>"$GITHUB_ENV"
+
+      - name: Oracle-free sandbox rehearsal without candidate start
+        shell: bash
+        run: |
+          set -euo pipefail
+          rehearsal_id="$(docker container create --interactive \
+            --network none --user 65532:65532 --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --cpus 0.5 --memory 128m \
+            --memory-swap 128m --pids-limit 32 \
+            --env LANG=C.UTF-8 --env LC_ALL=C.UTF-8 --env TZ=UTC \
+            --entrypoint /usr/local/bin/node "$MEMBERRY_C3_IMAGE_ID" \
+            --permission --allow-fs-read=/app/ \
+            --allow-fs-write=/tmp/memberry-sandbox-write-probe \
+            --disable-proto=throw /app/bench/lab/admission-features/candidate-v3/worker.mjs -)"
+          printf '%s\n' "$rehearsal_id" >"$MEMBERRY_C3_SECRET_DIR/rehearsal.id"
+          [[ "$(docker inspect --format '{{.State.Status}}' "$rehearsal_id")" == 'created' ]]
+          [[ "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$rehearsal_id")" == 'none' ]]
+          [[ "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$rehearsal_id")" == 'true' ]]
+          [[ "$(docker inspect --format '{{len .Mounts}}' "$rehearsal_id")" == '0' ]]
+          docker container rm "$rehearsal_id" >/dev/null
+          if docker container inspect "$rehearsal_id" >/dev/null 2>&1; then
+            printf '%s\n' 'mem002prod_protocol:cleanup' >&2
+            exit 1
+          fi
+          rm -f "$MEMBERRY_C3_SECRET_DIR/rehearsal.id"
+
+      - name: Create durable atomic tombstone before candidate start
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api_root="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          api_ref="tags/memberry-mem002c3-burn/${MEMBERRY_ONE_SHOT_KEY}"
+          lookup_status="$(curl --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --output "$MEMBERRY_C3_SECRET_DIR/tombstone.lookup.json" \
+            --write-out '%{http_code}' \
+            "${api_root}/git/ref/${api_ref}")"
+          npx tsx "$SCORER_ENTRY" tombstone-authorize \
+            "$GITHUB_SHA" "$lookup_status" "$MEMBERRY_PRIOR_EVIDENCE_ARTIFACT_COUNT" \
+            "$MEMBERRY_C3_SECRET_DIR/tombstone.payload.json"
+          create_status="$(curl --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'Content-Type: application/json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --data-binary "@$MEMBERRY_C3_SECRET_DIR/tombstone.payload.json" \
+            --output "$MEMBERRY_C3_SECRET_DIR/tombstone.create.json" \
+            --write-out '%{http_code}' \
+            "${api_root}/git/refs")"
+          verification_status="$(curl --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --output "$MEMBERRY_C3_SECRET_DIR/tombstone.verify.json" \
+            --write-out '%{http_code}' \
+            "${api_root}/git/ref/${api_ref}")"
+          npx tsx "$SCORER_ENTRY" tombstone-verify \
+            "$GITHUB_SHA" "$create_status" "$MEMBERRY_C3_SECRET_DIR/tombstone.create.json" \
+            "$verification_status" "$MEMBERRY_C3_SECRET_DIR/tombstone.verify.json" \
+            "$MEMBERRY_C3_SECRET_DIR/tombstone.json"
+          printf 'MEMBERRY_DURABLE_TOMBSTONE_VERIFIED=true\n' >>"$GITHUB_ENV"
+
+      - name: Burn one-shot key before sole candidate start
+        shell: bash
+        env:
+          MEMBERRY_OBSERVED_PLATFORM: linux/amd64
+          MEMBERRY_OBSERVED_BASE_IMAGE: node@sha256:7eb2c0c4b8cf6fd761f0e6a7fed8d3b8ad59186848f0eee59744e546f1b6a3e9
+        run: |
+          set -euo pipefail
+          [[ "$MEMBERRY_DURABLE_TOMBSTONE_VERIFIED" == 'true' ]]
+          npx tsx "$SCORER_ENTRY" start \
+            "$POLICY_RECEIPT" "$MEMBERRY_C3_SECRET_DIR/tombstone.json" \
+            "$MEMBERRY_C3_PUBLIC_DIR/start.json"
+          chmod 0400 "$MEMBERRY_C3_PUBLIC_DIR/start.json"
+          rm -f \
+            "$MEMBERRY_C3_SECRET_DIR/tombstone.lookup.json" \
+            "$MEMBERRY_C3_SECRET_DIR/tombstone.payload.json" \
+            "$MEMBERRY_C3_SECRET_DIR/tombstone.create.json" \
+            "$MEMBERRY_C3_SECRET_DIR/tombstone.verify.json" \
+            "$MEMBERRY_C3_SECRET_DIR/tombstone.json"
+          printf 'MEMBERRY_START_RECEIPT_WRITTEN=true\n' >>"$GITHUB_ENV"
+
+      - name: Persist burn receipt as non-authoritative evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MEMBERRY_BURN_ARTIFACT_NAME }}
+          path: ${{ env.MEMBERRY_C3_PUBLIC_DIR }}/start.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Run frozen candidate exactly once before oracle access
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_id="$(docker container create --interactive \
+            --network none --user 65532:65532 --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --cpus 0.5 --memory 128m \
+            --memory-swap 128m --pids-limit 32 \
+            --env LANG=C.UTF-8 --env LC_ALL=C.UTF-8 --env TZ=UTC \
+            --entrypoint /usr/local/bin/node "$MEMBERRY_C3_IMAGE_ID" \
+            --permission --allow-fs-read=/app/ \
+            --allow-fs-write=/tmp/memberry-sandbox-write-probe \
+            --disable-proto=throw /app/bench/lab/admission-features/candidate-v3/worker.mjs -)"
+          printf '%s\n' "$container_id" >"$MEMBERRY_C3_SECRET_DIR/container.id"
+          printf '1\n' >"$MEMBERRY_C3_SECRET_DIR/candidate-run-count"
+          mkfifo "$MEMBERRY_C3_SECRET_DIR/candidate.stderr.pipe"
+          set +e
+          head -c 1025 <"$MEMBERRY_C3_SECRET_DIR/candidate.stderr.pipe" \
+            >"$MEMBERRY_C3_SECRET_DIR/candidate.stderr" &
+          stderr_capture_pid=$!
+          timeout --signal=KILL 5s docker container start --attach --interactive "$container_id" \
+            <"$MEMBERRY_C3_SECRET_DIR/input.json" \
+            2>"$MEMBERRY_C3_SECRET_DIR/candidate.stderr.pipe" \
+            | head -c 32769 >"$MEMBERRY_C3_SECRET_DIR/prediction.json"
+          pipeline_status=("${PIPESTATUS[@]}")
+          wait "$stderr_capture_pid"
+          stderr_capture_status=$?
+          rm -f "$MEMBERRY_C3_SECRET_DIR/candidate.stderr.pipe"
+          set -e
+          if [[ "${pipeline_status[0]}" -ne 0 || "${pipeline_status[1]}" -ne 0 \
+            || "$stderr_capture_status" -ne 0 ]]; then
+            docker container kill "$container_id" >/dev/null 2>&1 || true
+            printf '%s\n' 'mem002prod_protocol:candidate_execution' >&2
+            exit 1
+          fi
+          [[ "$(cat "$MEMBERRY_C3_SECRET_DIR/candidate-run-count")" == '1' ]]
+          [[ "$(docker inspect --format '{{.State.Running}}' "$container_id")" == 'false' ]]
+          [[ "$(stat -c '%s' "$MEMBERRY_C3_SECRET_DIR/input.json")" -le 32768 ]]
+          [[ "$(stat -c '%s' "$MEMBERRY_C3_SECRET_DIR/prediction.json")" -le 32768 ]]
+          [[ "$(stat -c '%s' "$MEMBERRY_C3_SECRET_DIR/candidate.stderr")" -le 1024 ]]
+          prediction_sha="sha256:$(sha256sum "$MEMBERRY_C3_SECRET_DIR/prediction.json" | cut -d' ' -f1)"
+          [[ "$prediction_sha" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker container rm "$container_id" >/dev/null
+          if docker container inspect "$container_id" >/dev/null 2>&1; then
+            printf '%s\n' 'mem002prod_protocol:cleanup' >&2
+            exit 1
+          fi
+          rm -f "$MEMBERRY_C3_SECRET_DIR/container.id"
+          printf 'MEMBERRY_CANDIDATE_STOPPED=true\nMEMBERRY_CANDIDATE_RUN_COUNT=1\n' >>"$GITHUB_ENV"
+
+      - name: Use Node.js 20 for first scorer custody process
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Score sealed bytes under Node 20
+        env:
+          MEMBERRY_EXPECTED_NODE_MAJOR: "20"
+        run: npx tsx "$SCORER_ENTRY" score "$MEMBERRY_C3_SECRET_DIR/prediction.json" "$MEMBERRY_C3_SECRET_DIR/node20.json"
+
+      - name: Use Node.js 22 for second scorer custody process
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Score the same sealed bytes under Node 22 without candidate rerun
+        env:
+          MEMBERRY_EXPECTED_NODE_MAJOR: "22"
+        run: npx tsx "$SCORER_ENTRY" score "$MEMBERRY_C3_SECRET_DIR/prediction.json" "$MEMBERRY_C3_SECRET_DIR/node22.json"
+
+      - name: Remove exact private candidate and prediction custody
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker image rm "$MEMBERRY_C3_IMAGE_REF" >/dev/null
+          rm -f \
+            "$MEMBERRY_C3_SECRET_DIR/input.json" \
+            "$MEMBERRY_C3_SECRET_DIR/prediction.json" \
+            "$MEMBERRY_C3_SECRET_DIR/candidate.stderr" \
+            "$MEMBERRY_C3_SECRET_DIR/build.log" \
+            "$MEMBERRY_C3_SECRET_DIR/build-receipt.json" \
+            "$MEMBERRY_C3_SECRET_DIR/candidate-run-count"
+          rm -rf "$MEMBERRY_C3_CONTEXT_DIR"
+          [[ ! -e "$MEMBERRY_C3_SECRET_DIR/prediction.json" ]]
+          [[ ! -e "$MEMBERRY_C3_SECRET_DIR/build-receipt.json" ]]
+          [[ ! -e "$MEMBERRY_C3_CONTEXT_DIR" ]]
+          if docker image inspect "$MEMBERRY_C3_IMAGE_ID" >/dev/null 2>&1; then
+            printf '%s\n' 'mem002prod_protocol:cleanup' >&2
+            exit 1
+          fi
+          scorer_sha="sha256:$(cat \
+            bench/lab/admission-features/scorer-only/blinded-holdout-v3.ts \
+            bench/lab/admission-features/scorer-only/blinded-holdout-artifact-v3.ts \
+            | sha256sum | cut -d' ' -f1)"
+          printf 'MEMBERRY_SCORER_SHA256=%s\n' "$scorer_sha" >>"$GITHUB_ENV"
+
+      - name: Finalize canonical aggregate-only receipt
+        env:
+          MEMBERRY_CLEANUP_CANDIDATE_STOPPED: "true"
+          MEMBERRY_CLEANUP_CONTAINER_REMOVED: "true"
+          MEMBERRY_CLEANUP_IMAGE_REMOVED: "true"
+          MEMBERRY_CLEANUP_PREDICTION_REMOVED: "true"
+          MEMBERRY_CLEANUP_TEMPORARY_FILES_REMOVED: "true"
+          MEMBERRY_NO_RAW_ARTIFACTS_PUBLISHED: "true"
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx "$SCORER_ENTRY" finalize \
+            "$POLICY_RECEIPT" \
+            "$MEMBERRY_C3_SECRET_DIR/node20.json" \
+            "$MEMBERRY_C3_SECRET_DIR/node22.json" \
+            "$MEMBERRY_C3_PUBLIC_DIR/start.json" \
+            "$MEMBERRY_C3_SECRET_DIR/preflight.json" \
+            "$MEMBERRY_C3_SECRET_DIR" \
+            "$MEMBERRY_C3_PUBLIC_DIR/receipt.json"
+          printf 'MEMBERRY_FINAL_RECEIPT_WRITTEN=true\n' >>"$GITHUB_ENV"
+
+      - name: Verify receipt and empty scorer custody
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx "$SCORER_ENTRY" verify "$MEMBERRY_C3_PUBLIC_DIR/receipt.json"
+          [[ -z "$(find "$MEMBERRY_C3_SECRET_DIR" -mindepth 1 -print -quit)" ]]
+          rmdir "$MEMBERRY_C3_SECRET_DIR"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = process.env.MEMBERRY_C3_PUBLIC_DIR;
+          const forbidden = /"(?:scenarioId|features|dimensions|valuePermille|fixtureCode|predictions|stdout|stderr|rawPrediction)"|af-(?:dev|holdout)-[0-9]|af3-(?:dev|holdout)-[0-9]|case-[0-9]/i;
+          for (const name of fs.readdirSync(root)) {
+            const bytes = fs.readFileSync(path.join(root, name));
+            if (bytes.length > 16384 || forbidden.test(bytes.toString('utf8'))) process.exit(1);
+          }
+          NODE
+
+      - name: Cleanup exact one-shot residue on every terminal path
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+          if [[ -n "${MEMBERRY_C3_SECRET_DIR:-}" ]]; then
+            for id_file in rehearsal.id container.id; do
+              if [[ -f "$MEMBERRY_C3_SECRET_DIR/$id_file" ]]; then
+                container_id="$(cat "$MEMBERRY_C3_SECRET_DIR/$id_file")"
+                docker container kill "$container_id" >/dev/null 2>&1 || true
+                docker container rm "$container_id" >/dev/null 2>&1 || true
+              fi
+            done
+          fi
+          if [[ -n "${MEMBERRY_C3_IMAGE_REF:-}" ]]; then
+            docker image rm "$MEMBERRY_C3_IMAGE_REF" >/dev/null 2>&1 || true
+          fi
+          if [[ -n "${MEMBERRY_C3_SECRET_DIR:-}" && -d "$MEMBERRY_C3_SECRET_DIR" ]]; then
+            rm -rf "$MEMBERRY_C3_SECRET_DIR"
+          fi
+
+      - name: Upload only aggregate receipt evidence
+        if: ${{ always() && env.MEMBERRY_FINAL_RECEIPT_WRITTEN == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MEMBERRY_RESULT_ARTIFACT_NAME }}
+          path: ${{ env.MEMBERRY_C3_PUBLIC_DIR }}/receipt.json
+          if-no-files-found: error
+          retention-days: 90
