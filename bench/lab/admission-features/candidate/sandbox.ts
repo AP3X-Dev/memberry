@@ -73,8 +73,8 @@ const IMMUTABLE_CANDIDATE_GIT_BLOBS_V1 = Object.freeze({
     sha256: 'sha256:c9afff73aa8272fc505880c5c820eda36b3ba23805e06f10b473cbaa7dd78670',
   }),
   'extractor.ts': Object.freeze({
-    oid: '2384e5e5c886692ec5d8d2a0c0c862b4786da798',
-    sha256: 'sha256:8c6f705b9cb569b67a927168b05964889e0d44e12303548f3828fdd532987bba',
+    oid: '3dc01843016e5c618bd3c8a5703006dd0420f2f3',
+    sha256: 'sha256:bbfb5eba75fc6dfbe4b4452606d2ef53ef8970aa75bc96a50ff802604fa768b1',
   }),
   'protocol.ts': Object.freeze({
     oid: '17ee9adde52bbc52e351153b465ce38db1714b5b',
@@ -93,8 +93,8 @@ const IMMUTABLE_CANDIDATE_GIT_BLOBS_V1 = Object.freeze({
     sha256: 'sha256:20acbfad6167d75727b66c2d58fbc4fac0364f232f249b2b856f2972e6600c46',
   }),
   'container/worker.mjs': Object.freeze({
-    oid: 'bbb4f180905a4cae44141a607739265fe8474f38',
-    sha256: 'sha256:6f0bb08a11f969f648a03aff42ec85d9e7a3614ab708877bbdeed6df77d2aef7',
+    oid: 'd5638734f59b662ecad119838b77f931c29cf696',
+    sha256: 'sha256:778331a12e3720b1373c600f49ef7bd6299946ed10ddfde465b61f2f5c9ec982',
   }),
 } as const);
 const TYPED_ARRAY_PROTOTYPE_V1 = Object.getPrototypeOf(Uint8Array.prototype);

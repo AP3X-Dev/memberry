@@ -59,7 +59,7 @@ export interface CandidateAdmissionFeatureSignalsV1 {
 
 export interface CandidateAdmissionFeatureInputV1 {
   readonly datasetId: typeof DATASET_ID;
-  readonly datasetVersion: typeof VERSION;
+  readonly datasetVersion: typeof DATASET_VERSION;
   readonly scenarioId: string;
   readonly split: Split;
   readonly fixtureCode: string;
