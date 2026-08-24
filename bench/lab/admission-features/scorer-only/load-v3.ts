@@ -19,6 +19,29 @@ function parseJsonLines(content: string, field: string): unknown[] {
 }
 
 /**
+ * Seal-free oracle-byte definition for the custodian seal and the v3 protocol
+ * driver: the raw dev oracle file bytes followed by the raw holdout oracle
+ * file bytes, unmodified. This is the SINGLE definition of the oracle-byte
+ * concatenation — both the seal author's oracleSha256 computation and the
+ * driver's pre-open recompute call this function; no shell-side byte
+ * definition exists. It never parses, prints, or returns per-row content to
+ * callers beyond the opaque bytes.
+ */
+export async function sealedAdmissionFeatureOracleBytesV3(repoRoot = process.cwd()): Promise<Uint8Array> {
+  const buffers = await Promise.all(
+    (['dev', 'holdout'] as const)
+      .map((split) => readFile(resolve(repoRoot, ADMISSION_FEATURE_ORACLE_PATHS_V3[split]))),
+  );
+  const bytes = new Uint8Array(buffers.reduce((total, buffer) => total + buffer.byteLength, 0));
+  let offset = 0;
+  for (const buffer of buffers) {
+    bytes.set(buffer, offset);
+    offset += buffer.byteLength;
+  }
+  return bytes;
+}
+
+/**
  * Scorer-only oracle loader. The holdout oracle is sealed custodian material
  * and only exists inside the one-shot scoring custody, so the dev gate loads
  * ['dev'] alone. Oracles are opened by scorer code only (lab boundary).

@@ -248,6 +248,15 @@ jobs:
           evidence_dir="${RUNNER_TEMP}/memberry-admission-candidate-live"
           npm run bench:lab:admission:candidate:live 2>&1 | tee "$evidence_dir/run.log"
 
+      - name: Admission candidate v3 live Docker evidence
+        shell: bash
+        env:
+          MEMBERRY_ADMISSION_CANDIDATE_V3_LIVE_EVIDENCE_PATH: ${{ runner.temp }}/memberry-admission-candidate-live/evidence-v3.json
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/memberry-admission-candidate-live"
+          npm run bench:lab:admission:candidate-v3:live 2>&1 | tee "$evidence_dir/run-v3.log"
+
       - name: Upload admission candidate live Docker evidence
         if: always()
         uses: actions/upload-artifact@v4
