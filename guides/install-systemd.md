@@ -55,6 +55,7 @@ MEMBERRY_WIKI_OUTPUT_DIR=<INSTALL_DIR>/wiki
 MEMBERRY_ADMISSION_SHADOW_ENABLED=false
 MEMBERRY_ADMISSION_SHADOW_TIMEOUT_MS=50
 MEMBERRY_ADMISSION_ROUTING_V1=disabled
+MEMBERRY_ADMISSION_FEATURE_PRODUCER_V1=disabled
 ```
 
 `MEMBERRY_ADMISSION_SHADOW_ENABLED=true` records content-free baseline-parity
@@ -76,6 +77,14 @@ changes what is stored, and never delays a store beyond the existing shadow
 timeout budget. The value `served` is reserved and rejected until enforcement
 is explicitly approved. Rollback: set `MEMBERRY_ADMISSION_ROUTING_V1=disabled`
 (or unset it) and restart.
+
+`MEMBERRY_ADMISSION_FEATURE_PRODUCER_V1=live` feeds that routing recommendation
+a deterministic, content-free feature envelope derived from safe facts only. It
+requires `MEMBERRY_ADMISSION_ROUTING_V1=shadow` (startup fails loud otherwise)
+and never changes what is stored. Rollback: set
+`MEMBERRY_ADMISSION_FEATURE_PRODUCER_V1=disabled` (or unset it) and restart —
+the routing shadow reverts to its null-envelope recommendations, with
+`MEMBERRY_ADMISSION_ROUTING_V1=disabled` remaining the deeper rollback.
 
 Lock it down — it holds secrets:
 

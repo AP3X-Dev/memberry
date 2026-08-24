@@ -96,6 +96,9 @@ services:
       # MEM-003 routing shadow: disabled | shadow (requires the shadow observer
       # above); "served" is reserved and rejected. Recommendation-only sidecars.
       MEMBERRY_ADMISSION_ROUTING_V1: ${MEMBERRY_ADMISSION_ROUTING_V1:-disabled}
+      # MEM-002 feature producer: disabled | live (requires the routing shadow
+      # above). Deterministic safe-facts envelope for the recommendation only.
+      MEMBERRY_ADMISSION_FEATURE_PRODUCER_V1: ${MEMBERRY_ADMISSION_FEATURE_PRODUCER_V1:-disabled}
       MEMBERRY_EMBEDDING_DIM: ${MEMBERRY_EMBEDDING_DIM:-}
       MEMBERRY_MODEL_EXTRACTION: ${MEMBERRY_MODEL_EXTRACTION:-}
       MEMBERRY_MODEL_SYNTHESIS: ${MEMBERRY_MODEL_SYNTHESIS:-}

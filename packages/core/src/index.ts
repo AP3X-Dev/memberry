@@ -18,6 +18,8 @@ export type {
 export { InternalObservedRetrievalError } from './retrieval-observer.js';
 export * from './admission.js';
 export * from './admission-features.js';
+export * from './admission-features-v2.js';
+export * from './admission-feature-producer.js';
 export { normalizePredicate, getPredicateSynonyms } from './predicates.js';
 export { ConsolidationEngine } from './consolidation.js';
 export type { ConsolidationRedisLayer, ConsolidationNeo4jLayer, RunResult } from './consolidation.js';
