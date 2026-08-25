@@ -79,17 +79,31 @@ export { getConfigStatus } from './config/status.js';
 export type { ConfigStatus } from './config/status.js';
 export {
   DECAY_HALF_LIVES_DAYS,
+  HEBBIAN_HALF_LIFE_FACTORS,
+  HEBBIAN_RECENCY_WINDOW_DAYS,
   LifecycleConfigError,
+  resolveHebbianConfig,
   resolveLifecycleConfig,
 } from './config/lifecycle.js';
-export type { LifecycleConfig, LifecycleConfigErrorCode } from './config/lifecycle.js';
-export { LifecycleEngine, computeDecay } from './lifecycle.js';
+export type { HebbianConfig, LifecycleConfig, LifecycleConfigErrorCode } from './config/lifecycle.js';
+export { LifecycleEngine, computeDecay, usageBand } from './lifecycle.js';
 export type {
   LifecycleStorePort,
   LifecycleProposalsPort,
   LifecycleRunResult,
   LifecycleScopeResult,
+  UsageBand,
+  UsageInput,
 } from './lifecycle.js';
+export { HebbianEngine, HEBBIAN_DRAIN_CAP_RECORDS } from './hebbian.js';
+export type {
+  HebbianEngineDeps,
+  HebbianGraphPort,
+  HebbianRingPort,
+  HebbianRunResult,
+  HebbianTenantResult,
+  HebbianUsageRow,
+} from './hebbian.js';
 export { getAllowedBaseDir } from './config/paths.js';
 export { resolvePort } from './config/port.js';
 export { getHooksStatus } from './cli/install.js';

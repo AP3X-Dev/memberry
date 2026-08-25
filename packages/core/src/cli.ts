@@ -21,7 +21,8 @@ import { runDoctor } from './cli/doctor.js';
 import { createCoreServices, buildDreamEngine } from './services-factory.js';
 import { LifecycleEngine } from './lifecycle.js';
 import { AntiEntropyEngine, type AntiEntropyRunResult } from './anti-entropy.js';
-import { resolveAntiEntropyConfig, resolveLifecycleConfig } from './config/lifecycle.js';
+import { HebbianEngine, type HebbianRunResult } from './hebbian.js';
+import { resolveAntiEntropyConfig, resolveHebbianConfig, resolveLifecycleConfig } from './config/lifecycle.js';
 
 // ─── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -211,10 +212,34 @@ async function runLifecycle(positionals: string[], flags: Record<string, string 
 
   const core = createCoreServices();
   try {
+    const store = new LifecycleStore(core.driver);
+
+    // MEM-006H hebbian pass: drains the feedback ring BEFORE the lifecycle
+    // pass so tonight's usage protects tonight's plan. Behind its own
+    // sub-flag; disabled => the engine is never constructed and the
+    // LifecycleEngine runs the MEM-006 status quo.
+    const hebbianConfig = resolveHebbianConfig();
+    let hebbianResult: HebbianRunResult | undefined;
+    if (hebbianConfig.mode === 'live') {
+      const hebbianEngine = new HebbianEngine({
+        ring: {
+          rpopBatch: async (key, count) => (await core.redis.rpop(key, count)) ?? [],
+          llen: (key) => core.redis.llen(key),
+        },
+        graph: store,
+        config: hebbianConfig,
+        lifecycle: config,
+      });
+      hebbianResult = await hebbianEngine.run({
+        ...(flags['dry-run'] === true ? { dryRun: true } : {}),
+      });
+    }
+
     const engine = new LifecycleEngine({
-      store: new LifecycleStore(core.driver),
+      store,
       proposals: new ProposalStore(core.redis),
       config,
+      ...(hebbianConfig.mode === 'live' ? { hebbian: hebbianConfig } : {}),
     });
     const result = await engine.run({
       ...(typeof flags['scope'] === 'string' ? { scope: flags['scope'] as string } : {}),
@@ -249,10 +274,15 @@ async function runLifecycle(positionals: string[], flags: Record<string, string 
 
     console.log(JSON.stringify({
       ...result,
+      ...(hebbianResult ? { hebbian: hebbianResult } : {}),
       ...(antiEntropyResult ? { anti_entropy: antiEntropyResult } : {}),
     }, null, 2));
-    // A failed scope/drift class must surface to systemd; successes stay applied.
-    if (result.failures.length > 0 || (antiEntropyResult?.failures.length ?? 0) > 0) {
+    // A failed scope/drain/drift class must surface to systemd; successes stay applied.
+    if (
+      result.failures.length > 0
+      || (hebbianResult?.failures.length ?? 0) > 0
+      || (antiEntropyResult?.failures.length ?? 0) > 0
+    ) {
       process.exitCode = 1;
     }
   } finally {
