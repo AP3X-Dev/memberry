@@ -269,13 +269,33 @@ export async function expandMultihopV1(input: ExpandMultihopV1Input): Promise<Ex
     // ~11 are pass-1 duplicates; letting those duplicates occupy the leading pass-2 ranks pushes
     // the one genuinely new item — the missing hop, the entire point of the second pass — below
     // the worst pass-1 item, where it can never enter the fused output.
-    let novelRank = 0;
-    pass2.forEach((result) => {
+    const carriesBridge = (result: RetrievalResult, bridgeSet: ReadonlySet<string>): boolean =>
+      tokenize(`${result.title} ${result.content}`).some((token) => bridgeSet.has(token));
+    const bridgeSet = new Set(bridges.flatMap((bridge) => tokenize(bridge)));
+    // Protect second-hop-shaped evidence ALREADY in pass 1. A second hop shares no token with q —
+    // that is what makes it a second hop — so BM25 against q ranks it near the bottom of pass 1,
+    // which is exactly the band a promoted pass-2 item evicts. Ranking the eviction by q-relevance
+    // therefore throws out the answer whenever pass 1 had already found it. What marks a passage as
+    // second-hop evidence is the bridge, not the query, so a pass-1 item carrying the bridge earns
+    // the same second-pass term a new find does.
+    let carrierRank = 0;
+    for (const result of ranked) {
+      if (!carriesBridge(result, bridgeSet)) continue;
       const key = identityKey(result);
+      scores.set(key, (scores.get(key) ?? 0) + PASS_WEIGHTS[1]! / (MULTIHOP_RRF_K + carrierRank + 1));
+      carrierRank += 1;
+    }
+    // ONE pass-2 term per identity, and only for identities the second pass ADDED. Giving each of
+    // the ~11 duplicates a confirmation boost lifts the whole pass-1 list by about the same amount,
+    // changing no ordering among them while leaving the one new item below all of them.
+    let novelRank = 0;
+    for (const result of pass2) {
+      const key = identityKey(result);
+      if (!pass2OnlyKeys.has(key)) continue;
       if (!byKey.has(key)) byKey.set(key, result);
       scores.set(key, (scores.get(key) ?? 0) + PASS_WEIGHTS[1]! / (MULTIHOP_RRF_K + novelRank + 1));
-      if (pass2OnlyKeys.has(key)) novelRank += 1;
-    });
+      novelRank += 1;
+    }
     const fused = [...byKey.keys()].sort((left, right) => (scores.get(right)! - scores.get(left)!)
       || (Number(pass2OnlyKeys.has(left)) - Number(pass2OnlyKeys.has(right))));
     // Decision 2b(3): replace by FUSED order — the output is the top `budgetSlots` of the fused
