@@ -78,3 +78,8 @@ SETUP_GAPS.md
 
 # Local deployment compose backups (server-specific, not for publication)
 docker-compose.yml.*
+
+# Auto-research loop state (research/aug25-multihop) — untracked by design
+results.tsv
+experiment-state.md
+run.log
