@@ -352,4 +352,4 @@ npm run dev            # MCP server with hot reload
 
 ## License
 
-BUSL-1.1
+MIT — see [LICENSE](LICENSE).
