@@ -264,10 +264,17 @@ export async function expandMultihopV1(input: ExpandMultihopV1Input): Promise<Ex
       if (!byKey.has(key)) byKey.set(key, result);
       scores.set(key, (scores.get(key) ?? 0) + PASS_WEIGHTS[0]! / (MULTIHOP_RRF_K + rank + 1));
     });
-    pass2.forEach((result, rank) => {
+    // Rank among NEW evidence: an identity already in pass 1 still MERGES and still accrues its
+    // pass-2 term, but it does not CONSUME a rank position. The probe returns ~12 items of which
+    // ~11 are pass-1 duplicates; letting those duplicates occupy the leading pass-2 ranks pushes
+    // the one genuinely new item — the missing hop, the entire point of the second pass — below
+    // the worst pass-1 item, where it can never enter the fused output.
+    let novelRank = 0;
+    pass2.forEach((result) => {
       const key = identityKey(result);
       if (!byKey.has(key)) byKey.set(key, result);
-      scores.set(key, (scores.get(key) ?? 0) + PASS_WEIGHTS[1]! / (MULTIHOP_RRF_K + rank + 1));
+      scores.set(key, (scores.get(key) ?? 0) + PASS_WEIGHTS[1]! / (MULTIHOP_RRF_K + novelRank + 1));
+      if (pass2OnlyKeys.has(key)) novelRank += 1;
     });
     const fused = [...byKey.keys()].sort((left, right) => (scores.get(right)! - scores.get(left)!)
       || (Number(pass2OnlyKeys.has(left)) - Number(pass2OnlyKeys.has(right))));
