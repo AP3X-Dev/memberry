@@ -679,10 +679,13 @@ describe('WikiCompiler', () => {
     const path = await import('node:path');
     const outputDir = path.join(os.tmpdir(), `amp-wiki-heartbeat-${Date.now()}`);
     const lockPath = path.join(outputDir, '.compile.lock');
+    // Heartbeat-to-stale margin is 20x: a loaded vitest worker can stall the
+    // event loop for tens of milliseconds, and a tighter margin let a healthy
+    // lease look stale to the contender, which then broke it legitimately.
     const timings = {
-      compileLockStaleMs: 80,
-      compileLockHeartbeatMs: 20,
-      compileLockTimeoutMs: 2_000,
+      compileLockStaleMs: 600,
+      compileLockHeartbeatMs: 30,
+      compileLockTimeoutMs: 5_000,
       compileLockRetryMs: 5,
     };
     let active = 0;
@@ -727,13 +730,22 @@ describe('WikiCompiler', () => {
       slow = new WikiCompiler(slowDriver, timings).compile(outputDir);
       await entered;
       const firstLease = await readLease();
-      await new Promise((resolve) => setTimeout(resolve, 130)); // longer than staleMs
-      const renewedLease = await readLease();
+      // Wait for a renewal rather than a fixed interval: bounded by staleMs
+      // (same 20x heartbeat margin as the contender phase) so a heartbeat that
+      // never fires still fails here.
+      let renewedLease = firstLease;
+      const renewDeadline = Date.now() + timings.compileLockStaleMs;
+      while (Date.parse(renewedLease.at) <= Date.parse(firstLease.at)) {
+        if (Date.now() > renewDeadline) throw new Error('compile lease was not renewed');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        renewedLease = await readLease();
+      }
       expect(renewedLease.token).toBe(firstLease.token);
       expect(Date.parse(renewedLease.at)).toBeGreaterThan(Date.parse(firstLease.at));
 
       contender = new WikiCompiler(contenderDriver, timings).compile(outputDir);
-      await new Promise((resolve) => setTimeout(resolve, 120)); // another stale window
+      // Longer than staleMs: an unrenewed lease would be broken in this window.
+      await new Promise((resolve) => setTimeout(resolve, timings.compileLockStaleMs + 200));
       expect(maxActive).toBe(1);
       releaseSlow();
       await Promise.all([slow, contender]);
