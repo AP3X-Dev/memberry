@@ -93,6 +93,36 @@ These v2 bytes, order, labels, policy, and scorer are immutable after review;
 any change requires additive v3 artifacts. Control headroom remains explicitly
 unqualified until the bound hosted independent production-control receipt exists.
 
+### Multi-hop v3 (RET-007 additive instrument) — control headroom rejected
+
+The additive v3 instrument (`bench/lab/multihop/policy-v3.ts`, `generate-v3.ts`,
+`qualify-control-v3.ts`, `.github/workflows/ret007-v3-control-qualification.yml`,
+datasets under `bench/lab/datasets/multihop/v3/`) interpolates difficulty between
+the saturated v1 exam and the over-hard v2 exam under pre-registered knob bounds
+measured from the v2 dev bytes. Difficulty was tuned only against a disposable
+public `calib` split (15 probes); `dev` and `holdout` (20 probes each) were then
+generated once from the frozen knobs and hash-sealed in `MULTIHOP_V3_FREEZE`. A
+three-split byte-reproduction test binds the committed bytes to the committed
+knobs. Base commit `52aa9d6c880b7a29a99fe5c2537d9e76589af3c6`; merged at
+`cb7309d1714f2050184fc780cebc5d4c7bbe0afa`.
+
+The single authoritative hosted qualification, run `32812460464` at
+`cb7309d1714f2050184fc780cebc5d4c7bbe0afa` (the only run of that workflow),
+returned `control-headroom-rejected` with Node 20 and Node 22 agreeing.
+Authoritative receipt SHA-256
+`ac97e72d0efb6f2307b36804168477e09987d33f4371bf3ac172cebf6e6f709e`. Closed
+aggregates: holdout control 11/20 (0.55) with successes and failures in every
+stratum; dev control 17/20 (0.85), high-density stratum 6/0. The calib split
+(8/15) predicted the holdout well; the dev split drew an easier domain block, and
+at 20 probes per split the cross-split sampling variance exceeds the band's
+tolerance.
+
+The v3 bytes, knobs, policy, and scorer are frozen as a read-only record. No
+recalibration, dev regeneration, v4 instrument, or re-dispatch is authorized
+without an explicit owner decision. RET-007 strike accounting is unchanged: one
+capability hypothesis spent (v1); v2 and v3 are both instrument failures, and no
+candidate has yet run against a qualified non-saturated multi-hop instrument.
+
 ## Admission shadow evidence
 
 `MEM-001D1` is the offline structural packet. It exercises the production core
