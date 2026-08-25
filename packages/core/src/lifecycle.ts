@@ -12,11 +12,22 @@ import { randomUUID } from 'node:crypto';
 import type { ConsolidationProposal } from './types.js';
 import { stableId } from './consolidation.js';
 import { attachAdvisorV1 } from './advisor.js';
-import { DECAY_HALF_LIVES_DAYS, type LifecycleConfig } from './config/lifecycle.js';
+import {
+  DECAY_HALF_LIVES_DAYS,
+  HEBBIAN_HALF_LIFE_FACTORS,
+  HEBBIAN_RECENCY_WINDOW_DAYS,
+  type HebbianConfig,
+  type LifecycleConfig,
+} from './config/lifecycle.js';
 
 const DAY_MS = 86_400_000;
 /** A decay proposal is emitted only when the drop is material. */
 const MATERIAL_DROP = 0.05;
+/** MEM-006H: per-(tenant, scope) cap on emitted reclass proposals per run
+ *  (frozen constant, not config — the decay-cap precedent, one notch lower). */
+const MAX_RECLASS_PROPOSALS_PER_SCOPE = 10;
+/** One-step promotion ladder; permanent is terminal, demotion is not built. */
+const RECLASS_STEP = Object.freeze({ volatile: 'stable', stable: 'permanent' } as const);
 
 // ─── Ports (implemented by @memberry/neo4j LifecycleStore and @memberry/redis ProposalStore) ──
 
@@ -44,12 +55,22 @@ export interface LifecycleStorePort {
     tenantId: string, scope: string,
     cutoffs: { volatile: string; stable: string; episodic: string },
     pendingIds: string[],
-  ): Promise<{ episodic: Array<Record<string, unknown>>; semantic: Array<Record<string, unknown>> }>;
+    // MEM-006H: optional trailing options (existing port fakes compile unedited).
+    options?: { hebbian?: { accessCutoffIso: string } },
+  ): Promise<{
+    episodic: Array<Record<string, unknown>>; semantic: Array<Record<string, unknown>>;
+    /** Rows the hebbian access guard excluded from the plan (options present only). */
+    accessGuarded?: number;
+  }>;
   setArchived(ids: string[], archived: boolean, now: string, batchRows: number): Promise<number>;
   findDecayCandidates(tenantId: string, scope: string, cooldownCutoffIso: string): Promise<Array<{
     id: string; confidence: number; decay_class: 'volatile' | 'stable' | 'permanent'; updated_at: string;
+    // MEM-006H optional usage columns — absent means never accessed.
+    last_accessed?: string | null; access_count?: number | null; reclass_proposed_at?: string | null;
   }>>;
   stampDecayProposedAt(id: string, now: string): Promise<void>;
+  /** MEM-006H reclass-cooldown stamp — optional so existing fakes compile unedited. */
+  stampReclassProposedAt?(id: string, now: string): Promise<void>;
 }
 
 export interface LifecycleProposalsPort {
@@ -66,25 +87,60 @@ export interface DecayInput {
   updated_at: string;
 }
 
+/** MEM-006H usage snapshot for one node. Absent last_accessed = never accessed. */
+export interface UsageInput {
+  last_accessed?: string | null;
+  access_count?: number | null;
+}
+
+export type UsageBand = keyof typeof HEBBIAN_HALF_LIFE_FACTORS;
+
+/**
+ * Closed band selection: no last_accessed → U0 (sinks first); older than the
+ * 90d window → U1 (classic behavior); within the window, access_count picks
+ * U2/U3/U4. An unparseable last_accessed is fail-neutral (U1) — bad data must
+ * never decay a memory FASTER than the classic formula.
+ */
+export function usageBand(usage: UsageInput, nowMs: number): UsageBand {
+  const last = usage.last_accessed;
+  if (last === undefined || last === null) return 'U0_never_accessed';
+  const lastMs = Date.parse(last);
+  if (!Number.isFinite(lastMs)) return 'U1_stale_access';
+  if (lastMs < nowMs - HEBBIAN_RECENCY_WINDOW_DAYS * DAY_MS) return 'U1_stale_access';
+  const count = typeof usage.access_count === 'number' && Number.isFinite(usage.access_count)
+    ? usage.access_count : 0;
+  if (count >= 10) return 'U4_recent_heavy';
+  if (count >= 3) return 'U3_recent_habitual';
+  return 'U2_recent_low';
+}
+
 /**
  * Real half-life decay: proposed = round2(confidence x 0.5^(elapsed/half_life)),
  * floored at the configured confidence floor. Returns null when no material
  * proposal should be emitted (small drop, already at/below the floor, or an
- * unusable timestamp). Pure — node, now, and config only, no I/O — so the
- * MEM-006H usage-recency modifier can land as one added parameter without
- * touching emission, dedupe, or apply.
+ * unusable timestamp). Pure — node, now, and config only, no I/O.
+ *
+ * MEM-006H landed the reserved `usage` parameter: when present, the EFFECTIVE
+ * half-life is DECAY_HALF_LIVES_DAYS[class] x HEBBIAN_HALF_LIFE_FACTORS[band].
+ * With `usage` undefined the factor branch is never taken — the result is
+ * bit-identical to the MEM-006 implementation (§2.6.1, pinned by
+ * hebbian-decay.test.ts).
  */
 export function computeDecay(
   node: DecayInput,
   nowMs: number,
   config: Pick<LifecycleConfig, 'decayConfidenceFloor'>,
+  usage?: UsageInput,
 ): { proposedConfidence: number; drop: number } | null {
   const anchorMs = Date.parse(node.updated_at);
   if (!Number.isFinite(anchorMs)) return null;
   const elapsedDays = (nowMs - anchorMs) / DAY_MS;
   if (!(elapsedDays > 0)) return null;
-  const halfLife = DECAY_HALF_LIVES_DAYS[node.decay_class];
-  if (!halfLife) return null;
+  const baseHalfLife = DECAY_HALF_LIVES_DAYS[node.decay_class];
+  if (!baseHalfLife) return null;
+  const halfLife = usage === undefined
+    ? baseHalfLife
+    : baseHalfLife * HEBBIAN_HALF_LIFE_FACTORS[usageBand(usage, nowMs)];
   const floor = config.decayConfidenceFloor;
   if (!(node.confidence > floor)) return null;
   const raw = node.confidence * Math.pow(0.5, elapsedDays / halfLife);
@@ -108,6 +164,9 @@ export interface LifecycleScopeResult {
   sidecar_deleted: { admission_observation: number; admission_routing_recommendation: number };
   /** Protected-tier sidecar rows are exempt and accumulate — surfaced per run. */
   sidecar_protected: { admission_observation: number; admission_routing_recommendation: number };
+  /** MEM-006H: present only when the hebbian sub-flag is live (results stay
+   *  byte-identical when it is off). */
+  reclass_proposals_emitted?: number;
 }
 
 export interface LifecycleRunResult {
@@ -122,6 +181,12 @@ export interface LifecycleEngineDeps {
   store: LifecycleStorePort;
   proposals: LifecycleProposalsPort;
   config: LifecycleConfig;
+  /**
+   * MEM-006H sub-flag. Absent or disabled ⇒ computeDecay is called without
+   * usage, planArchive without options, and no reclass phase runs — the
+   * MEM-006 behavior byte-for-byte (pinned by hebbian-cli-wiring.test.ts).
+   */
+  hebbian?: HebbianConfig;
   /** Injectable clock for tests. */
   now?: () => Date;
   /**
@@ -156,6 +221,7 @@ export class LifecycleEngine {
   private store: LifecycleStorePort;
   private proposals: LifecycleProposalsPort;
   private config: LifecycleConfig;
+  private hebbian?: HebbianConfig;
   private clock: () => Date;
   private artifactWriter: (filePath: string, json: string) => void;
 
@@ -163,6 +229,7 @@ export class LifecycleEngine {
     this.store = deps.store;
     this.proposals = deps.proposals;
     this.config = deps.config;
+    this.hebbian = deps.hebbian;
     this.clock = deps.now ?? ((): Date => new Date());
     this.artifactWriter = deps.writeArtifact ?? writeArtifactSync;
   }
@@ -209,14 +276,17 @@ export class LifecycleEngine {
     // P6: node ids referenced by any pending proposal are protected; pending
     // decay proposals additionally dedupe by target (not id equality — an open
     // proposal minted from an older updated_at must still suppress re-emission).
+    const hebbianLive = this.hebbian?.mode === 'live';
     const pendingIds = new Set<string>();
     const pendingDecayTargets = new Set<string>();
+    const pendingReclassTargets = new Set<string>();
     for (const proposalId of await this.proposals.listPending()) {
       const proposal = await this.proposals.get(proposalId);
       if (!proposal) continue;
       for (const id of proposal.affected_ids) {
         pendingIds.add(id);
         if (proposal.type === 'decay') pendingDecayTargets.add(id);
+        if (proposal.type === 'reclass') pendingReclassTargets.add(id);
       }
     }
 
@@ -226,7 +296,7 @@ export class LifecycleEngine {
     const decayPlan: Array<{ id: string; updated_at: string; before: number; after: number; drop: number }> = [];
     for (const candidate of candidates) {
       if (pendingDecayTargets.has(candidate.id)) { skippedPending += 1; continue; }
-      const computed = computeDecay(candidate, nowMs, cfg);
+      const computed = computeDecay(candidate, nowMs, cfg, hebbianLive ? candidate : undefined);
       if (!computed) continue;
       decayPlan.push({
         id: candidate.id,
@@ -241,13 +311,41 @@ export class LifecycleEngine {
     decayPlan.sort((a, b) => b.drop - a.drop || (a.id < b.id ? -1 : 1));
     const cappedDecay = decayPlan.slice(0, cfg.maxDecayProposalsPerScope);
 
+    // MEM-006H reclass plan: U4 candidates whose class is one step below the
+    // ladder top, outside the reclass cooldown and with no pending reclass.
+    const bandCounts = {
+      U0_never_accessed: 0, U1_stale_access: 0, U2_recent_low: 0, U3_recent_habitual: 0, U4_recent_heavy: 0,
+    };
+    const reclassPlan: Array<{ id: string; from: 'volatile' | 'stable'; to: 'stable' | 'permanent'; accessCount: number }> = [];
+    if (hebbianLive) {
+      for (const candidate of candidates) {
+        const band = usageBand(candidate, nowMs);
+        bandCounts[band] += 1;
+        if (band !== 'U4_recent_heavy') continue;
+        const to = candidate.decay_class === 'permanent' ? undefined : RECLASS_STEP[candidate.decay_class];
+        if (!to) continue;
+        if (pendingReclassTargets.has(candidate.id)) continue;
+        if (typeof candidate.reclass_proposed_at === 'string' && candidate.reclass_proposed_at >= cooldownCutoff) continue;
+        reclassPlan.push({
+          id: candidate.id,
+          from: candidate.decay_class as 'volatile' | 'stable',
+          to,
+          accessCount: typeof candidate.access_count === 'number' ? candidate.access_count : 0,
+        });
+      }
+      reclassPlan.sort((a, b) => b.accessCount - a.accessCount || (a.id < b.id ? -1 : 1));
+    }
+    const cappedReclass = reclassPlan.slice(0, MAX_RECLASS_PROPOSALS_PER_SCOPE);
+
     const multiplier = cfg.archiveHalfLifeMultiplier;
     const archivePlan = await this.store.planArchive(tenantId, scope, {
       volatile: isoMinusDays(nowMs, DECAY_HALF_LIVES_DAYS.volatile * multiplier),
       stable: isoMinusDays(nowMs, DECAY_HALF_LIVES_DAYS.stable * multiplier),
       // Episodes carry no decay_class: the stable half-life applies.
       episodic: isoMinusDays(nowMs, DECAY_HALF_LIVES_DAYS.stable * multiplier),
-    }, [...pendingIds]);
+    }, [...pendingIds],
+    // Cutoff TIMES are unchanged — the access guard only ever narrows the plan.
+    hebbianLive ? { hebbian: { accessCutoffIso: isoMinusDays(nowMs, HEBBIAN_RECENCY_WINDOW_DAYS) } } : undefined);
 
     const sidecarCutoff = isoMinusDays(nowMs, cfg.sidecarMaxAgeDays);
     const sidecarPlan = await this.store.planSidecarDeletions(tenantId, scope, sidecarCutoff, cfg.sidecarBudget);
@@ -279,6 +377,22 @@ export class LifecycleEngine {
         before_confidence: d.before,
         after_confidence: d.after,
       })),
+      // MEM-006H: additive section only when live — existing keys stay
+      // byte-identical with the sub-flag off (artifact version stays 1).
+      ...(hebbianLive ? {
+        hebbian: {
+          mode: 'live',
+          decay_bands: bandCounts,
+          archive_access_guarded: archivePlan.accessGuarded ?? 0,
+          reclass_proposals: cappedReclass.map((r) => ({
+            id: stableId('reclass', [scope, r.id, r.from, r.to]),
+            target: r.id,
+            from: r.from,
+            to: r.to,
+            access_count: r.accessCount,
+          })),
+        },
+      } : {}),
     };
     // A failed artifact write aborts the scope pass with zero mutations.
     this.artifactWriter(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`);
@@ -297,6 +411,7 @@ export class LifecycleEngine {
         admission_observation: sidecarPlan.AdmissionObservation.protectedCount,
         admission_routing_recommendation: sidecarPlan.AdmissionRoutingRecommendation.protectedCount,
       },
+      ...(hebbianLive ? { reclass_proposals_emitted: 0 } : {}),
     };
     if (dryRun) return scopeResult;
 
@@ -320,6 +435,26 @@ export class LifecycleEngine {
       await this.proposals.save(attachAdvisorV1(proposal));
       await this.store.stampDecayProposedAt(d.id, nowIso);
       scopeResult.decay_proposals_emitted += 1;
+    }
+
+    // ── 3b. MEM-006H reclass proposals (review-gated by construction: the
+    // consolidation auto-apply hatches name only 'reinforce'/'promote') ──
+    for (const r of cappedReclass) {
+      // The literal carries ONLY decay_class on before/after, so the advisor
+      // scores the constant base row for every reclass proposal.
+      const proposal: ConsolidationProposal = {
+        id: stableId('reclass', [scope, r.id, r.from, r.to]),
+        type: 'reclass',
+        scope,
+        affected_ids: [r.id],
+        before: { decay_class: r.from },
+        after: { decay_class: r.to },
+        score: r.accessCount,
+        created_at: nowIso,
+      };
+      await this.proposals.save(attachAdvisorV1(proposal));
+      await this.store.stampReclassProposedAt?.(r.id, nowIso);
+      scopeResult.reclass_proposals_emitted = (scopeResult.reclass_proposals_emitted ?? 0) + 1;
     }
 
     // ── 4. Archive (reversible, idempotent, batched) ─────────────────────

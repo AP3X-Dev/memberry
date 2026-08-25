@@ -147,7 +147,7 @@ export interface EpisodeInput {
 
 // === Consolidation ===
 
-export type ProposalType = 'promote' | 'merge' | 'supersede' | 'decay' | 'reinforce';
+export type ProposalType = 'promote' | 'merge' | 'supersede' | 'decay' | 'reinforce' | 'reclass';
 
 export interface ConsolidationProposal {
   id: string;

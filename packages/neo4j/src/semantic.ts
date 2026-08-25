@@ -213,6 +213,40 @@ export class SemanticStore {
     }
   }
 
+  /**
+   * MEM-006H reclass apply: set ONLY decay_class through the same lock +
+   * applied_consolidation_keys idempotency ledger as updateConfidence.
+   * Deliberately does NOT touch updated_at — a class change already lengthens
+   * the half-life, and resetting the decay anchor would double-relieve.
+   */
+  async updateDecayClass(
+    id: string,
+    decayClass: 'volatile' | 'stable' | 'permanent',
+    applicationKey?: string,
+  ): Promise<void> {
+    const session = this.driver.session();
+    try {
+      await session.executeWrite((tx) => tx.run(
+        `MATCH (s:Semantic {id: $id})
+         // Force a write lock before checking the idempotency ledger so two
+         // concurrent retries on the same Semantic serialize safely.
+         SET s.__confidence_application_lock = true
+         REMOVE s.__confidence_application_lock
+         WITH s, coalesce(s.applied_consolidation_keys, []) AS applied
+         WHERE $application_key IS NULL OR NOT $application_key IN applied
+         SET s.decay_class = $decay_class,
+             s.applied_consolidation_keys = CASE
+               WHEN $application_key IS NULL THEN applied
+               ELSE applied + $application_key
+             END
+         RETURN s.id AS id`,
+        { id, decay_class: decayClass, application_key: applicationKey ?? null },
+      ));
+    } finally {
+      await session.close();
+    }
+  }
+
   async supersede(oldId: string, newNode: SemanticNode & { embedding?: number[] }): Promise<string> {
     const session = this.driver.session();
     try {

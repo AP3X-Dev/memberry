@@ -282,6 +282,15 @@ export interface ConsolidationNeo4jLayer {
      *  entry per FOUND id (missing ids omitted). */
     getByIds?(ids: string[]): Promise<SemanticNode[]>;
     updateConfidence(id: string, confidence: number, applicationKey?: string): Promise<void>;
+    /** MEM-006H reclass apply: sets ONLY decay_class through the shared
+     *  applied_consolidation_keys ledger (never updated_at — the decay
+     *  anchor). Optional for backward compatibility — layers without it
+     *  simply cannot apply reclass proposals. */
+    updateDecayClass?(
+      id: string,
+      decayClass: 'volatile' | 'stable' | 'permanent',
+      applicationKey?: string,
+    ): Promise<void>;
     supersede(oldId: string, newNode: SemanticNode): Promise<string>;
     /**
      * Promote an episodic memory into a new Semantic node.
@@ -900,6 +909,21 @@ export class ConsolidationEngine {
           const after = proposal.after as { confidence?: number };
           if (typeof after.confidence === 'number') {
             await this.neo4j.semantic.updateConfidence(targetId, after.confidence, proposal.id);
+            await this._invalidateCacheBestEffort(targetId);
+          }
+        }
+      } else if (proposal.type === 'reclass') {
+        // MEM-006H: review-gated decay-class change. The proposal id is the
+        // idempotency application key (updateDecayClass ledger), so a replayed
+        // approval is a no-op.
+        const targetId = proposal.affected_ids[0];
+        if (targetId) {
+          const after = proposal.after as { decay_class?: string };
+          if (after.decay_class === 'volatile' || after.decay_class === 'stable' || after.decay_class === 'permanent') {
+            if (!this.neo4j.semantic.updateDecayClass) {
+              throw new Error('reclass apply requires semantic.updateDecayClass');
+            }
+            await this.neo4j.semantic.updateDecayClass(targetId, after.decay_class, proposal.id);
             await this._invalidateCacheBestEffort(targetId);
           }
         }

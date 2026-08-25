@@ -15,7 +15,7 @@ export const ADVISOR_CONTRACT_VERSION = 'advisor/v1' as const;
 
 export type AdvisorBandV1 = 'low' | 'elevated' | 'high';
 export type AdvisorReasonV1 =
-  | 'base_supersede' | 'base_decay' | 'base_merge' | 'base_promote' | 'base_reinforce'
+  | 'base_supersede' | 'base_decay' | 'base_merge' | 'base_promote' | 'base_reinforce' | 'base_reclass'
   | 'multi_target'            // affected_ids.length > 1
   | 'confidence_drop_major'   // before→after confidence drop ≥ 300‰
   | 'confidence_drop_minor'   // drop ≥ 100‰ (and < 300‰)
@@ -44,6 +44,9 @@ const BASE_PERMILLE: Record<ProposalType, { permille: number; reason: AdvisorRea
   supersede: { permille: 600, reason: 'base_supersede' },
   merge: { permille: 500, reason: 'base_merge' },
   decay: { permille: 400, reason: 'base_decay' },
+  // MEM-006H reclass: single-target, metadata-only, reversible one-property
+  // write whose failure mode is over-retention — below decay, above promote.
+  reclass: { permille: 250, reason: 'base_reclass' },
   promote: { permille: 200, reason: 'base_promote' },
   reinforce: { permille: 100, reason: 'base_reinforce' },
 };

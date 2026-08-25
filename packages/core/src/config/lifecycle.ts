@@ -159,3 +159,41 @@ export function resolveAntiEntropyConfig(): AntiEntropyConfig {
     ),
   };
 }
+
+// ─── MEM-006H hebbian (usage-modulated decay) sub-flag ──────────────────────
+//
+// Same separate-object rationale as AntiEntropyConfig: the MEM-006 config
+// shape stays byte-equivalent. No new numeric env vars — the modulation
+// factors, window, and caps are frozen exported constants, not knobs.
+
+/** Accesses older than this window count as stale (U1) for decay modulation
+ *  and make a node archive-eligible again. */
+export const HEBBIAN_RECENCY_WINDOW_DAYS = 90;
+
+/**
+ * Closed usage-band table: the EFFECTIVE decay half-life is
+ * DECAY_HALF_LIVES_DAYS[class] x factor. U1 (factor 1.0) is the classic
+ * MEM-006 behavior; U0 sinks never-accessed memory faster; U4 marks
+ * promotion-eligible heavy use (§2.5 reclass proposals).
+ */
+export const HEBBIAN_HALF_LIFE_FACTORS = Object.freeze({
+  U0_never_accessed: 0.75,
+  U1_stale_access: 1.0,
+  U2_recent_low: 1.5,
+  U3_recent_habitual: 2.0,
+  U4_recent_heavy: 3.0,
+} as const);
+
+export interface HebbianConfig {
+  /** Sub-flag gate: the hebbian pass runs only when BOTH this and the MEM-006 mode are 'live'. */
+  mode: 'disabled' | 'live';
+}
+
+/**
+ * Resolve the hebbian configuration from the environment. Dry-run, batch
+ * rows, the export dir, and the reclass cooldown are reused from
+ * resolveLifecycleConfig — the sub-flag is the only knob.
+ */
+export function resolveHebbianConfig(): HebbianConfig {
+  return { mode: parseMode('MEMBERRY_LIFECYCLE_HEBBIAN') };
+}
