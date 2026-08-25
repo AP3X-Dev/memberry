@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_SHA" == "$RET007V4_SOURCE_SHA" ]]
           [[ "$(git rev-parse HEAD)" == "$RET007V4_SOURCE_SHA" ]]
-          git merge-base --is-ancestor 8bfd235aa4e2f7dde8c433e85ee07bcd3b8b475c "$RET007V4_SOURCE_SHA"
+          git merge-base --is-ancestor 534de13fbaa6b24719a0b6e7390451542987caee "$RET007V4_SOURCE_SHA"
           expected="$(cat <<'PATHS' | LC_ALL=C sort
           .github/workflows/ret007-v4-control-qualification.yml
           bench/lab/__tests__/memberry-retrieval-core-funnel.test.ts
@@ -87,7 +87,7 @@ jobs:
           package.json
           PATHS
           )"
-          actual="$(git diff --name-only 8bfd235aa4e2f7dde8c433e85ee07bcd3b8b475c "$RET007V4_SOURCE_SHA" | LC_ALL=C sort)"
+          actual="$(git diff --name-only 534de13fbaa6b24719a0b6e7390451542987caee "$RET007V4_SOURCE_SHA" | LC_ALL=C sort)"
           [[ "$actual" == "$expected" ]]
           [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/adapters/memberry-retrieval-core-funnel.ts")" == d4cdc0319b8858c81eb9fe635868f82950e6ae5c ]]
           [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/adapters/memberry-retrieval-core.ts")" == e138ed07531949b8fbe40ece620214e6ed604ac6 ]]
@@ -199,7 +199,7 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_SHA" == "$RET007V4_SOURCE_SHA" ]]
           [[ "$(git rev-parse HEAD)" == "$RET007V4_SOURCE_SHA" ]]
-          git merge-base --is-ancestor 8bfd235aa4e2f7dde8c433e85ee07bcd3b8b475c "$RET007V4_SOURCE_SHA"
+          git merge-base --is-ancestor 534de13fbaa6b24719a0b6e7390451542987caee "$RET007V4_SOURCE_SHA"
           expected="$(cat <<'PATHS' | LC_ALL=C sort
           .github/workflows/ret007-v4-control-qualification.yml
           bench/lab/__tests__/memberry-retrieval-core-funnel.test.ts
@@ -232,7 +232,7 @@ jobs:
           package.json
           PATHS
           )"
-          actual="$(git diff --name-only 8bfd235aa4e2f7dde8c433e85ee07bcd3b8b475c "$RET007V4_SOURCE_SHA" | LC_ALL=C sort)"
+          actual="$(git diff --name-only 534de13fbaa6b24719a0b6e7390451542987caee "$RET007V4_SOURCE_SHA" | LC_ALL=C sort)"
           [[ "$actual" == "$expected" ]]
           [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/adapters/memberry-retrieval-core-funnel.ts")" == d4cdc0319b8858c81eb9fe635868f82950e6ae5c ]]
           [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/adapters/memberry-retrieval-core.ts")" == e138ed07531949b8fbe40ece620214e6ed604ac6 ]]

@@ -206,7 +206,7 @@ export const MULTIHOP_V4_FREEZE = Object.freeze({
   version: '4.0.0' as const,
   // D3 base-pinning rule: re-pinned to the D2 merge base by the orchestrator
   // immediately before merge; until then this is origin/master 8bfd235.
-  exactBaseCommit: '8bfd235aa4e2f7dde8c433e85ee07bcd3b8b475c' as const,
+  exactBaseCommit: '534de13fbaa6b24719a0b6e7390451542987caee' as const,
   publicOrderSeed: 'memberry-ret007-v4-order-2026-08-25' as const,
   seedCommitmentSha256: '1129e51ad78067a9fe1b2740517dd8a136de9edadcd0a4bf3864be84e0327bb2' as const,
   orderKeyDerivation: 'sha256-utf8(seed+LF+scenario_id+LF+neutral_slot_id)' as const,
