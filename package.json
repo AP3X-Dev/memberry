@@ -1,6 +1,7 @@
 {
   "name": "memberry",
   "private": true,
+  "license": "MIT",
   "workspaces": [
     "packages/core",
     "packages/neo4j",
