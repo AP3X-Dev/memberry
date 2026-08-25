@@ -70,6 +70,15 @@ const CANONICAL_FACTORIES: Readonly<Record<string, CanonicalFactory>> = Object.f
       return new MemBerryRetrievalCoreAdapter('served');
     },
   },
+  // RET-007 v4 funnel control: constructed with NO argument, so the funnel
+  // top-N is always the constant 12 through this row.
+  'memberry-retrieval-core-funnel-v1': {
+    entry: 'bench/lab/adapters/memberry-retrieval-core-funnel.ts',
+    create: async () => {
+      const { MemBerryRetrievalCoreFunnelAdapter } = await import('./adapters/memberry-retrieval-core-funnel.js');
+      return new MemBerryRetrievalCoreFunnelAdapter();
+    },
+  },
   'scope-aware-bm25-control-v1': {
     entry: 'bench/lab/adapters/baselines.ts',
     create: async () => {

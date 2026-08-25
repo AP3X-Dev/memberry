@@ -301,6 +301,98 @@
       ]
     },
     {
+      "id": "memberry-multihop-v4-calib",
+      "version": "4.0.0",
+      "suite": "multi-hop",
+      "kind": "repository",
+      "split": "calib",
+      "oracleAccess": "scorer-only",
+      "requiredInCi": false,
+      "source": { "url": null, "revision": "lab-ret007-candidate-blind-v4", "path": "bench/lab/datasets/multihop/v4/calib" },
+      "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
+      "dataPolicy": {
+        "reviewStatus": "verified",
+        "containsPersonalData": false,
+        "containsSecrets": false,
+        "containsCustomerData": false,
+        "exclusions": ["real user memory", "credentials", "private customer data", "candidate source", "candidate outputs", "control outputs"]
+      },
+      "acquisition": { "status": "bundled" },
+      "artifacts": [
+        { "role": "input", "access": "adapter", "fileName": "input.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v4/calib/input.jsonl", "hashMode": "text-lf", "sha256": "327534e989dd7a0c725f40be7a8652d4d60348b4de5fc2d423b2f9f703b6392b", "sizeBytes": 185397 },
+        { "role": "oracle", "access": "scorer", "fileName": "oracle.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v4/calib/oracle.jsonl", "hashMode": "text-lf", "sha256": "f64da5b503d38317d8a7678d9c75bd38186ee57cdc92fdd035e451ef07d9aa4a", "sizeBytes": 10935 }
+      ]
+    },
+    {
+      "id": "memberry-multihop-v4-dev",
+      "version": "4.0.0",
+      "suite": "multi-hop",
+      "kind": "repository",
+      "split": "dev",
+      "oracleAccess": "scorer-only",
+      "requiredInCi": false,
+      "source": { "url": null, "revision": "lab-ret007-candidate-blind-v4", "path": "bench/lab/datasets/multihop/v4/dev" },
+      "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
+      "dataPolicy": {
+        "reviewStatus": "verified",
+        "containsPersonalData": false,
+        "containsSecrets": false,
+        "containsCustomerData": false,
+        "exclusions": ["real user memory", "credentials", "private customer data", "candidate source", "candidate outputs", "control outputs"]
+      },
+      "acquisition": { "status": "bundled" },
+      "artifacts": [
+        { "role": "input", "access": "adapter", "fileName": "input.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v4/dev/input.jsonl", "hashMode": "text-lf", "sha256": "85f350fd97d9478a1722fd1d879e49d10cea2a3ea4b68c2d6a5d7862425d7682", "sizeBytes": 246597 },
+        { "role": "oracle", "access": "scorer", "fileName": "oracle.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v4/dev/oracle.jsonl", "hashMode": "text-lf", "sha256": "f76c0fd419aa142bfa01b2ce5f886f0b30a69441f64e17b9bbdda86223b28905", "sizeBytes": 14580 }
+      ]
+    },
+    {
+      "id": "memberry-multihop-v4-holdout",
+      "version": "4.0.0",
+      "suite": "multi-hop",
+      "kind": "repository",
+      "split": "holdout",
+      "oracleAccess": "scorer-only",
+      "requiredInCi": false,
+      "source": { "url": null, "revision": "lab-ret007-candidate-blind-v4", "path": "bench/lab/datasets/multihop/v4/holdout" },
+      "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
+      "dataPolicy": {
+        "reviewStatus": "verified",
+        "containsPersonalData": false,
+        "containsSecrets": false,
+        "containsCustomerData": false,
+        "exclusions": ["real user memory", "credentials", "private customer data", "candidate source", "candidate outputs", "control outputs"]
+      },
+      "acquisition": { "status": "bundled" },
+      "artifacts": [
+        { "role": "input", "access": "adapter", "fileName": "input.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v4/holdout/input.jsonl", "hashMode": "text-lf", "sha256": "c2413af69f29633ef3703808940051aeaa8109f1a61f7a613e9f7abcba91afba", "sizeBytes": 412289 },
+        { "role": "oracle", "access": "scorer", "fileName": "oracle.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v4/holdout/oracle.jsonl", "hashMode": "text-lf", "sha256": "6defc85646d8fa5ed127bc42a8cb7fda3062fc61c13609ef246307270b54e989", "sizeBytes": 24400 }
+      ]
+    },
+    {
+      "id": "memberry-multihop-v4-twin",
+      "version": "4.0.0",
+      "suite": "multi-hop",
+      "kind": "repository",
+      "split": "twin",
+      "oracleAccess": "scorer-only",
+      "requiredInCi": false,
+      "source": { "url": null, "revision": "lab-ret007-candidate-blind-v4", "path": "bench/lab/datasets/multihop/v4/twin" },
+      "license": { "status": "internal", "spdx": null, "url": null, "usage": "repository-tests-only" },
+      "dataPolicy": {
+        "reviewStatus": "verified",
+        "containsPersonalData": false,
+        "containsSecrets": false,
+        "containsCustomerData": false,
+        "exclusions": ["real user memory", "credentials", "private customer data", "candidate source", "candidate outputs", "control outputs"]
+      },
+      "acquisition": { "status": "bundled" },
+      "artifacts": [
+        { "role": "input", "access": "adapter", "fileName": "input.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v4/twin/input.jsonl", "hashMode": "text-lf", "sha256": "de0e168e0ad19fc50e934c3a9a8352e74fbb809ccff9b0c0dcb53cdbd465f31f", "sizeBytes": 124141 },
+        { "role": "oracle", "access": "scorer", "fileName": "oracle.jsonl", "repositoryPath": "bench/lab/datasets/multihop/v4/twin/oracle.jsonl", "hashMode": "text-lf", "sha256": "3646fad33ee0ac091c088b1289f84d5a03fc7ede46d2cd3321c182df9f484731", "sizeBytes": 7290 }
+      ]
+    },
+    {
       "id": "memberry-lab-migrated-retrieval",
       "version": "1.0.0",
       "kind": "repository",
