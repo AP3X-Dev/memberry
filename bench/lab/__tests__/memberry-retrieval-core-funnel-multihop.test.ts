@@ -9,6 +9,7 @@ import { MemBerryRetrievalCoreFunnelAdapter } from '../adapters/memberry-retriev
 import {
   MemBerryRetrievalCoreFunnelMultihopEvidenceBridgeAdapter,
   MemBerryRetrievalCoreFunnelMultihopFactLexicalAdapter,
+  calibGateKey,
 } from '../adapters/memberry-retrieval-core-funnel-multihop.js';
 import { MULTIHOP_V4_BRIDGE_DERIVATION } from '../multihop/policy-v4.js';
 import { auditAdapterDependencies, compareRegisteredAdapters } from '../registered-adapters.js';
@@ -139,7 +140,7 @@ describe('RET-007 v4 candidate lab adapters', () => {
     expect(control.map(({ id }) => id)).not.toContain('mem-b');
     expect(expanded.map(({ id }) => id)).toContain('mem-b');
     expect(expanded.map(({ id }) => id)).toContain('mem-a');
-    expect(candidate.firings.get(`${NAMESPACE.project} ${PLAIN}`)).toBe(true);
+    expect(candidate.firings.get(calibGateKey(NAMESPACE.project, PLAIN))).toBe(true);
   });
 
   it('is byte-identical to the control when the gate does not fire (comparison query)', async () => {
@@ -149,7 +150,7 @@ describe('RET-007 v4 candidate lab adapters', () => {
     const expanded = await queryIds(candidate, comparison);
     expect(control.length).toBeGreaterThan(1);
     expect(JSON.stringify(expanded)).toBe(JSON.stringify(control));
-    expect(candidate.firings.get(`${NAMESPACE.project} ${comparison}`)).toBe(false);
+    expect(candidate.firings.get(calibGateKey(NAMESPACE.project, comparison))).toBe(false);
   });
 
   it('lab determinism: an injected always-timeout clock leaves the output identical (budget is Infinity)', async () => {

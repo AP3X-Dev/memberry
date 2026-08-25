@@ -1,5 +1,6 @@
 // RET-007 v4 D5 — dev-evaluation apparatus: closed aggregates, pins, and the three deliberate differences.
 
+import { calibGateKey } from '../../adapters/memberry-retrieval-core-funnel-multihop.js';
 import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -133,11 +134,16 @@ describe('RET-007 v4 dev-evaluation apparatus', () => {
 
     const calib = scenarios('calib');
     const candidateId = RET007V4_CANDIDATE_ADAPTER_IDS['evidence-bridge'];
-    const firings = new Map(calib.map((scenario, index) => [`${scenario.input.project} ${scenario.input.queries[0]!.query}`, index % 3 === 0]));
-    const gate = computeCalibGatePrecision(calib, report(candidateId, calib, (index) => index % 2 === 0), firings);
+    // Built with the adapter's own key builder, not a re-derived literal: an
+    // independently rewritten separator is exactly what broke run 32843579713.
+    const firings = new Map(calib.map((scenario, index) => [calibGateKey(scenario.input.project, scenario.input.queries[0]!.query), index % 3 === 0]));
+    const gate = computeCalibGatePrecision(calib, report(candidateId, calib, (index) => index % 2 === 0), firings, calibGateKey);
     expect(gate).toMatchObject({ n: 45, fired: 15, firedRate: 15 / 45, firedAndSucceeded: 8, precision: 8 / 15 });
     expect(JSON.stringify({ control, gate })).not.toMatch(CLOSED_LEAK);
-    expect(() => computeCalibGatePrecision(calib, report(candidateId, calib, () => true), new Map())).toThrow(/evaluation-aggregate-invalid/);
+    expect(() => computeCalibGatePrecision(calib, report(candidateId, calib, () => true), new Map(), calibGateKey)).toThrow(/evaluation-aggregate-invalid/);
+    // The defect run 32843579713 hit: adapter and harness keys disagree, so every
+    // lookup misses. A separator drift must fail here, not in a hosted run.
+    expect(() => computeCalibGatePrecision(calib, report(candidateId, calib, () => true), firings, (project, query) => `${project}\u0000${query}`)).toThrow(/evaluation-aggregate-invalid/);
   });
 
   it('applies the interpretive twin wording rule', () => {
