@@ -17,6 +17,7 @@ import {
 } from './scoped-entity-resolver.js';
 import {
   buildRuntimeQueryPlannerReceiptV1,
+  readRuntimeQueryPlannerAuthorityV1,
   resolveRuntimeQueryPlannerAuthorityV1,
   RuntimeQueryPlannerError,
   type RuntimeQueryPlannerResolvedReceiptV1,
@@ -32,7 +33,7 @@ import {
   type RuntimeCandidateExecuteOptions,
 } from './runtime-candidate-channel.js';
 import type { CandidateChannelExecutionResultV1 } from './candidate-channel.js';
-import { askRetrievalTokenBudget } from './assembler.js';
+import { askRetrievalTokenBudget, type ServedMultihopProbeV1 } from './assembler.js';
 import {
   buildRetrievalExplanationViewV1,
   renderRetrievalExplanationTextV1,
@@ -109,6 +110,7 @@ export interface IUnifiedAssembler {
     includeArchitecture: boolean,
     includeMemory: boolean,
     traced?: boolean,
+    multihopProbe?: ServedMultihopProbeV1,
   ): Promise<{ context: UnifiedContext; trace?: RetrievalTraceV1 }>;
 }
 
@@ -151,6 +153,8 @@ export interface RetrievalServiceContainer {
   candidateRuntime: IRuntimeCandidateChannelService | null;
   /** Process-global RET-004B capacity coordinator, shared by all tenant containers. */
   rerankerShadowCoordinator: RerankerShadowCoordinatorPortV1 | null;
+  /** Process-captured exact-default-off RET-007 v4 switch (MEMBERRY_MULTIHOP_EXPANSION_V1). */
+  multihopExpansionEnabled: boolean;
 }
 
 export interface RuntimeScopedEntityResolver {
@@ -173,6 +177,7 @@ export function createRetrievalContainer(partial: Partial<RetrievalServiceContai
     candidateChannelEnabled: partial.candidateChannelEnabled ?? false,
     candidateRuntime: partial.candidateRuntime ?? null,
     rerankerShadowCoordinator: partial.rerankerShadowCoordinator ?? null,
+    multihopExpansionEnabled: partial.multihopExpansionEnabled ?? false,
   };
 }
 
@@ -211,6 +216,7 @@ export function setRetrievalServiceInstances(services: {
   rerankerShadowCoordinator?: RerankerShadowCoordinatorPortV1 | null;
   candidateDriver?: RuntimeCandidateDriver;
   tenantCandidateDrivers?: ReadonlyMap<string, Driver & RuntimeCandidateDriver>;
+  multihopExpansionEnabled?: boolean;
 }): void {
   // Full reset of the default container (a service omitted from `services` is
   // cleared), mirroring packages/mcp/src/tools.ts setServiceInstances().
@@ -222,6 +228,7 @@ export function setRetrievalServiceInstances(services: {
   defaultContainer.candidateRuntime = services.candidateRuntime
     ?? (services.candidateDriver ? new RuntimeCandidateChannelService(services.candidateDriver) : null);
   defaultContainer.rerankerShadowCoordinator = services.rerankerShadowCoordinator ?? null;
+  defaultContainer.multihopExpansionEnabled = services.multihopExpansionEnabled ?? false;
   tenantCandidateRuntimes.clear();
   tenantResolverFactories.clear();
   if (services.tenantCandidateDrivers) {
@@ -435,8 +442,35 @@ export function registerRetrievalTools(
   const {
     assembler, feedbackTracker, tenantId, authenticated, queryPlannerEnabled, resolverFactory,
     candidateChannelEnabled, candidateRuntime,
-    rerankerShadowCoordinator,
+    rerankerShadowCoordinator, multihopExpansionEnabled,
   } = container;
+  // RET-007 v4 served-arm probe, built PER CALL from the call's own sealed
+  // receipt (projectScope / temporal frame) so the bridge resolves against the
+  // same authority as pass 1. `bridge` is a bare name; fact-lexical supplies
+  // none and returns null before touching the resolver. Any planner error
+  // (not found / ambiguous / diagnostics) fails closed to null.
+  const servedMultihopProbe = (
+    receipt: RuntimeQueryPlannerResolvedReceiptV1,
+    options: RuntimeCandidateExecuteOptions,
+  ): ServedMultihopProbeV1 => async ({ bridge }) => {
+    if (!bridge || !candidateRuntime) return null;
+    const sealed = readRuntimeQueryPlannerAuthorityV1(receipt);
+    try {
+      const bridgeReceipt = await resolveRuntimeQueryPlannerAuthorityV1({
+        authenticated,
+        plannerEnabled: queryPlannerEnabled,
+        resolverFactory,
+        tenantId,
+        projectName: sealed.projectScope,
+        entityScope: [bridge],
+        ...(sealed.temporalFrame.mode === 'as-of' ? { asOf: sealed.temporalFrame.asOf } : {}),
+      });
+      return await candidateRuntime.execute(bridgeReceipt, options);
+    } catch (error) {
+      if (error instanceof RuntimeQueryPlannerError) return null;
+      throw error;
+    }
+  };
   const tier1: RegisteredTool[] = [];
   const tier2: RegisteredTool[] = [];
 
@@ -480,13 +514,17 @@ export function registerRetrievalTools(
           || (servedCandidate && !assembler.assembleCandidateExecutionServed)) {
           throw new Error('candidate_runtime:unavailable');
         }
-        const execution = await candidateRuntime.execute(receipt, {
-          includeArchitecture: args.include_arch, includeMemory: args.include_memory,
-        });
+        const executeOptions = { includeArchitecture: args.include_arch, includeMemory: args.include_memory };
+        const execution = await candidateRuntime.execute(receipt, executeOptions);
         const shadowObserver = servedCandidate || args.strategy === 'deterministic'
           ? undefined
           : candidateShadowObserver(rerankerShadowCoordinator, receipt, execution, args.task);
-        const assembled = servedCandidate
+        const assembled = servedCandidate && multihopExpansionEnabled
+          ? await assembler.assembleCandidateExecutionServed!(
+            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
+            servedMultihopProbe(receipt, executeOptions),
+          )
+          : servedCandidate
           ? await assembler.assembleCandidateExecutionServed!(
             args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
           )
@@ -600,13 +638,17 @@ export function registerRetrievalTools(
           || (servedCandidate && !assembler.assembleCandidateExecutionServed)) {
           throw new Error('candidate_runtime:unavailable');
         }
-        const execution = await candidateRuntime.execute(receipt, {
-          includeArchitecture: true, includeMemory: true,
-        });
+        const executeOptions = { includeArchitecture: true, includeMemory: true };
+        const execution = await candidateRuntime.execute(receipt, executeOptions);
         const shadowObserver = servedCandidate
           ? undefined
           : candidateShadowObserver(rerankerShadowCoordinator, receipt, execution, args.question);
-        const assembled = servedCandidate
+        const assembled = servedCandidate && multihopExpansionEnabled
+          ? await assembler.assembleCandidateExecutionServed!(
+            args.question, execution, askRetrievalTokenBudget(args.reasoning_level), true, true, false,
+            servedMultihopProbe(receipt, executeOptions),
+          )
+          : servedCandidate
           ? await assembler.assembleCandidateExecutionServed!(
             args.question, execution, askRetrievalTokenBudget(args.reasoning_level), true, true, false,
           )
