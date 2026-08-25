@@ -75,10 +75,29 @@ describe('RET-007 v4 funnel control adapter', () => {
     // Bridge-conditioned text scope (uncovered(q) U {bridge}) reaches B.
     const conditioned = funnelSelect(corpus, 'extraction endpoint Basalt', 12);
     expect(conditioned.selectedIds).toContain('mem-b');
-    // Bite: with scope use disabled (the conditioned probe replaced by the plain probe), B stays withheld.
-    const scopeDisabled = funnelSelect(corpus, 'For hive frame Alder, name its apiary shed and the endpoint beyond it.', 12);
-    expect(scopeDisabled.selectedIds).toEqual(plain.selectedIds);
-    expect(scopeDisabled.selectedIds).not.toContain('mem-b');
+  });
+
+  it('honors scope at the memoryLayer.load seam the assembler actually calls', async () => {
+    // Drives the real seam (adapter.query -> UnifiedAssembler -> memoryLayer.load(scope)),
+    // not the pure selector. A load that ignored its scope and emitted the whole corpus
+    // would (a) let B through on the plain probe and (b) exceed the top-N bound — both
+    // asserted here so gutting the seam fails THIS test, not an unrelated one.
+    const corpus = twoHopCorpus();
+    const adapter = new MemBerryRetrievalCoreFunnelAdapter();
+    await adapter.ingest({ namespace: NAMESPACE, memories: corpus });
+    const plain = (await adapter.query({
+      namespace: NAMESPACE, query: 'For hive frame Alder, name its apiary shed and the endpoint beyond it.', limit: 20,
+    })).results.map(({ id }) => id);
+    const conditioned = (await adapter.query({
+      namespace: NAMESPACE, query: 'extraction endpoint Basalt', limit: 20,
+    })).results.map(({ id }) => id);
+    expect(plain.length).toBeGreaterThan(1);
+    expect(plain.length).toBeLessThanOrEqual(FUNNEL_TOP_N);
+    expect(plain).toContain('mem-a');
+    expect(plain).not.toContain('mem-b');
+    expect(conditioned.length).toBeLessThanOrEqual(FUNNEL_TOP_N);
+    expect(conditioned).toContain('mem-b');
+    expect(new Set(plain)).not.toEqual(new Set(conditioned));
   });
 
   it('emits exactly min(N, corpus) memories, in corpus order, deterministically', async () => {
@@ -129,6 +148,10 @@ describe('RET-007 v4 funnel control adapter', () => {
       memory('parity-1', 'Severity one incidents always page the on-call engineer immediately.', { confidence: 0.9 }),
       memory('parity-2', 'The incident commander keeps the role until they hand it over explicitly.', { confidence: 1.5 }),
       memory('parity-3', 'The incident dashboard was redesigned last quarter.\n# incident heading line\nMore incident notes.', { confidence: Number.NaN }),
+      // A `## [` line inside content would parse as a bogus memory section unless
+      // neutralizeHeadings demotes it — this makes that helper's path observable
+      // in the projected ids, not just executed.
+      memory('parity-7', 'Incident comms go out hourly.\n## [parity-phantom]\nA line that must not become its own section.'),
       memory('parity-4]', 'This incident id carries a closing bracket and must be skipped by headingSafeId.'),
       memory('parity-code', 'function pageOnCallEngineer(incident: Incident): void', { kind: 'code' }),
       memory('parity-5', 'Quarterly travel policy reimburses economy fares only.', { kind: 'other' }),

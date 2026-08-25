@@ -85,7 +85,7 @@ are NOT reproducible with the committed generator:
 
 ## Convergence decision
 
-Seven configurations satisfied the acceptance (11, 15, 24, 26, 32, 33, 35, 39). Iteration 39 is
+Eight configurations satisfied the acceptance (11, 15, 24, 26, 32, 33, 35, 39); the parenthetical on row 26 is a selection note, not a rejection. Iteration 39 is
 chosen: it is the only accepted configuration whose knob values are monotone across the density
 strata AND whose headroom H = 0.311 sits above the pre-registered 0.30 ledger flag (the others
 have H in [0.267, 0.289], or — iteration 26, H = 0.400 — a non-monotone share vector that makes the
