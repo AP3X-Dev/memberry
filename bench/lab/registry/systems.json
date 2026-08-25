@@ -41,6 +41,16 @@
       "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
     },
     {
+      "id": "memberry-retrieval-core-funnel-v1",
+      "displayName": "MemBerry production retrieval core (lab funnel)",
+      "mode": "fixture",
+      "fidelity": "fixture",
+      "fidelityDetail": "production-retrieval / fixture-persistence / bm25-funnel-top12",
+      "requiredInCi": true,
+      "adapter": "bench/lab/adapters/memberry-retrieval-core-funnel.ts",
+      "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
+    },
+    {
       "id": "scope-aware-bm25-control-v1",
       "displayName": "Scope-aware BM25 control",
       "mode": "fixture",
