@@ -214,6 +214,8 @@ interface EvaluationRuntime {
   loadCalib(repoRoot: string): Promise<readonly LabScenario[]>;
   compare(options: { runId: string; controlId: string; candidateId: string; scenarios: readonly LabScenario[]; split: string; repoRoot: string }): Promise<ComparisonReport>;
   createCandidate(policy: MultiHopV4BridgeDerivation): LabAdapter & { firings: ReadonlyMap<string, boolean> };
+  /** The adapter's own key builder: reconstructing it here is what broke run 32843579713. */
+  calibGateKey(project: string, query: string): string;
   run(options: { runId: string; adapter: LabAdapter; scenarios: readonly LabScenario[]; split: string }): Promise<AdapterRunReport>;
 }
 
@@ -226,6 +228,7 @@ async function loadEvaluationRuntime(): Promise<EvaluationRuntime> {
     import('../adapters/memberry-retrieval-core-funnel-multihop.js'),
   ]);
   return {
+    calibGateKey: adapterModule.calibGateKey,
     loadDev: (repoRoot) => loaderModule.loadMultiHopV4ScenariosForScoring('dev', repoRoot),
     loadTwin: (repoRoot) => loaderModule.loadMultiHopV4TwinScenariosForEvidence(repoRoot),
     loadCalib: (repoRoot) => loaderModule.loadMultiHopV4CalibScenariosForCalibration(repoRoot),
@@ -381,13 +384,14 @@ export function computeCalibGatePrecision(
   scenarios: readonly LabScenario[],
   report: AdapterRunReport,
   firings: ReadonlyMap<string, boolean>,
+  keyOf: (project: string, query: string) => string,
 ): MultiHopV4DevEvaluation['calibGate'] {
   if (scenarios.length !== MULTIHOP_V4_PROBES.calib) throw new ClosedEvaluationError('evaluation-aggregate-invalid');
   let fired = 0;
   let firedAndSucceeded = 0;
   for (const [index, scenario] of scenarios.entries()) {
     const success = strictSuccess(scenario, report, index);
-    const key = `${scenario.input.project} ${scenario.input.queries[0]!.query}`;
+    const key = keyOf(scenario.input.project, scenario.input.queries[0]!.query);
     const didFire = firings.get(key);
     if (didFire === undefined) throw new ClosedEvaluationError('evaluation-aggregate-invalid');
     if (!didFire) continue;
@@ -450,7 +454,8 @@ export function buildDevEvaluation(input: {
   controlReceiptSha256: string;
   dev: { scenarios: readonly LabScenario[]; comparison: ComparisonReport };
   twin: { scenarios: readonly LabScenario[]; comparison: ComparisonReport };
-  calib: { scenarios: readonly LabScenario[]; report: AdapterRunReport; firings: ReadonlyMap<string, boolean> };
+  calib: { scenarios: readonly LabScenario[]; report: AdapterRunReport; firings: ReadonlyMap<string, boolean>;
+    keyOf: (project: string, query: string) => string };
 }): Readonly<MultiHopV4DevEvaluation> {
   const candidateAdapterId = RET007V4_CANDIDATE_ADAPTER_IDS[input.policy];
   if (input.dev.comparison.candidate.adapterId !== candidateAdapterId
@@ -494,7 +499,7 @@ export function buildDevEvaluation(input: {
       itemDelta,
       interpretation: twinInterpretation(twinDelta, itemDelta),
     }),
-    calibGate: computeCalibGatePrecision(input.calib.scenarios, input.calib.report, input.calib.firings),
+    calibGate: computeCalibGatePrecision(input.calib.scenarios, input.calib.report, input.calib.firings, input.calib.keyOf),
   });
 }
 
@@ -526,7 +531,7 @@ async function executeDevNodeEvidence(repoRoot: string, environment: NodeJS.Proc
       policy, controlReceipt: control.receipt, controlReceiptSha256: control.sha256,
       dev: { scenarios: devScenarios, comparison: dev },
       twin: { scenarios: twinScenarios, comparison: twin },
-      calib: { scenarios: calibScenarios, report: calibReport, firings: calibAdapter.firings },
+      calib: { scenarios: calibScenarios, report: calibReport, firings: calibAdapter.firings, keyOf: runtime.calibGateKey },
     });
   } catch (error) {
     if (error instanceof ClosedEvaluationError) throw error;
