@@ -1,0 +1,33 @@
+RET-007 v3 knob measurement over bench/lab/datasets/multihop/v2/dev/input.jsonl (oracle-free)
+
+mh2-d-01 family=routing density=low chain=Bramble->Meridian->Quartz bridgeTokenCollisions=1 factTokenEcho=1
+mh2-d-02 family=routing density=medium chain=Saffron->Loom->Amber bridgeTokenCollisions=2 factTokenEcho=2
+mh2-d-03 family=routing density=high chain=Lyra->Orion->Dawn bridgeTokenCollisions=2 factTokenEcho=4
+mh2-d-04 family=routing density=low chain=Alder->Cedar->Moss bridgeTokenCollisions=1 factTokenEcho=1
+mh2-d-05 family=assignment density=medium chain=Niko->Juniper->09:10 bridgeTokenCollisions=2 factTokenEcho=2
+mh2-d-06 family=assignment density=high chain=Mira->Signal->05:40 bridgeTokenCollisions=2 factTokenEcho=4
+mh2-d-07 family=assignment density=low chain=Tova->Delta->13:20 bridgeTokenCollisions=1 factTokenEcho=1
+mh2-d-08 family=assignment density=medium chain=Inez->Copper->18:30 bridgeTokenCollisions=2 factTokenEcho=2
+mh2-d-09 family=component density=high chain=Atlas->Quartz->ceramic shield bridgeTokenCollisions=2 factTokenEcho=2
+mh2-d-10 family=component density=low chain=Echo->Linden->brass spring bridgeTokenCollisions=1 factTokenEcho=1
+mh2-d-11 family=component density=medium chain=Kestrel->Fern->graphite lubricant bridgeTokenCollisions=2 factTokenEcho=2
+mh2-d-12 family=component density=high chain=Opal->Harbor->silica gasket bridgeTokenCollisions=2 factTokenEcho=2
+mh2-d-13 family=custody density=low chain=Iris->Sela->cotton gloves bridgeTokenCollisions=1 factTokenEcho=1
+mh2-d-14 family=custody density=medium chain=Lark->Oren->blue transport sleeve bridgeTokenCollisions=2 factTokenEcho=2
+mh2-d-15 family=custody density=high chain=Clover->Pia->amber veil bridgeTokenCollisions=2 factTokenEcho=2
+mh2-d-16 family=custody density=low chain=Umber->Noor->neutral backing board bridgeTokenCollisions=1 factTokenEcho=2
+mh2-d-17 family=maintenance density=medium chain=Kestrel->Harbor->Coral bridgeTokenCollisions=2 factTokenEcho=2
+mh2-d-18 family=maintenance density=high chain=Juniper->Maple->East bridgeTokenCollisions=2 factTokenEcho=4
+mh2-d-19 family=maintenance density=low chain=Vela->Ivo->Rain bridgeTokenCollisions=1 factTokenEcho=1
+mh2-d-20 family=maintenance density=medium chain=Nimbus->Blue->Tide bridgeTokenCollisions=2 factTokenEcho=2
+
+Per-density summary (v2 dev; knob upper bounds take the per-density MAXIMUM):
+density=low n=7
+  bridgeTokenCollisions min=1 max=1 values=[1,1,1,1,1,1,1]
+  factTokenEcho min=1 max=2 values=[1,1,1,1,1,2,1]
+density=medium n=7
+  bridgeTokenCollisions min=2 max=2 values=[2,2,2,2,2,2,2]
+  factTokenEcho min=2 max=2 values=[2,2,2,2,2,2,2]
+density=high n=6
+  bridgeTokenCollisions min=2 max=2 values=[2,2,2,2,2,2]
+  factTokenEcho min=2 max=4 values=[4,4,2,2,2,4]
