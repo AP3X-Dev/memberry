@@ -15,7 +15,10 @@ import { createRedisClient } from '../client.js';
 import { SignalStream, EpisodicBuffer } from '../streams.js';
 import type { StreamSignal } from '@memberry/core';
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+// Isolated logical DB: streams.test.ts exercises the same hardcoded
+// 'amp:signals' key on DB 0 in a concurrent vitest worker, and its DEL
+// destroys this suite's consumer group mid-test on a shared Redis.
+const REDIS_URL = `${(process.env.REDIS_URL || 'redis://localhost:6379').replace(/\/\d+$/, '')}/9`;
 
 async function isRedisReachable(url: string): Promise<boolean> {
   const probe = createRedisClient(url, {
