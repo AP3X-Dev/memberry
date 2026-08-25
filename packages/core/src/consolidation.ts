@@ -14,6 +14,7 @@ import { extractFacts } from './extract.js';
 import { readEnv } from './config/settings.js';
 import type { LlmClient } from './llm.js';
 import { clusterHasIndependentCorroborationV1 } from './evidence-diversity.js';
+import { attachAdvisorV1 } from './advisor.js';
 import {
   advancePromotionCursorV1,
   parsePromotionCursorV1,
@@ -459,7 +460,7 @@ export class ConsolidationEngine {
             }
           }
         } else {
-          await this.redis.proposals.save(proposal);
+          await this.redis.proposals.save(attachAdvisorV1(proposal));
           if (signalProposalIds.has(proposal.id)) {
             durableSignalProposalIds.add(proposal.id);
             for (const id of proposal.affected_ids) durableSignalTargets.add(id);

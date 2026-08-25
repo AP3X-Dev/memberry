@@ -1,3 +1,6 @@
+// Type-only import (erased at runtime) — no import cycle with advisor.ts.
+import type { AdvisorRecommendationV1 } from './advisor.js';
+
 // === Node Types ===
 
 /**
@@ -155,6 +158,8 @@ export interface ConsolidationProposal {
   after: Record<string, unknown>;
   score: number;
   created_at: string;
+  /** MEM-008 review-queue risk recommendation (metadata only; never read by apply). */
+  advisor?: AdvisorRecommendationV1;
 }
 
 // === Session ===

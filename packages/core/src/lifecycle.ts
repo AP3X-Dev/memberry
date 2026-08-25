@@ -11,6 +11,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ConsolidationProposal } from './types.js';
 import { stableId } from './consolidation.js';
+import { attachAdvisorV1 } from './advisor.js';
 import { DECAY_HALF_LIVES_DAYS, type LifecycleConfig } from './config/lifecycle.js';
 
 const DAY_MS = 86_400_000;
@@ -316,7 +317,7 @@ export class LifecycleEngine {
       };
       // Order per node: pending-scan (above) → save → stamp; a crash between
       // save and stamp is covered by the pending-scan on the next run.
-      await this.proposals.save(proposal);
+      await this.proposals.save(attachAdvisorV1(proposal));
       await this.store.stampDecayProposedAt(d.id, nowIso);
       scopeResult.decay_proposals_emitted += 1;
     }
