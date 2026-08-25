@@ -6,7 +6,7 @@
 import { execFileSync } from 'child_process';
 import { createNeo4jDriver, TenantAdmin, LifecycleStore } from '@memberry/neo4j';
 import { writeFileSync } from 'fs';
-import { createRedisClient, ProposalStore } from '@memberry/redis';
+import { createRedisClient, ProposalStore, EpisodicBuffer } from '@memberry/redis';
 import { exportAll, exportFiltered } from './export.js';
 import { defaultExportPath } from './config/settings.js';
 import { importFromPath, type ImportStrategy } from './import.js';
@@ -20,7 +20,8 @@ import { runProject } from './cli/project.js';
 import { runDoctor } from './cli/doctor.js';
 import { createCoreServices, buildDreamEngine } from './services-factory.js';
 import { LifecycleEngine } from './lifecycle.js';
-import { resolveLifecycleConfig } from './config/lifecycle.js';
+import { AntiEntropyEngine, type AntiEntropyRunResult } from './anti-entropy.js';
+import { resolveAntiEntropyConfig, resolveLifecycleConfig } from './config/lifecycle.js';
 
 // ─── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -219,9 +220,41 @@ async function runLifecycle(positionals: string[], flags: Record<string, string 
       ...(typeof flags['scope'] === 'string' ? { scope: flags['scope'] as string } : {}),
       ...(flags['dry-run'] === true ? { dryRun: true } : {}),
     });
-    console.log(JSON.stringify(result, null, 2));
-    // A failed scope must surface to systemd; successful scopes stay applied.
-    if (result.failures.length > 0) process.exitCode = 1;
+
+    // MEM-007 anti-entropy pass: rides the same job AFTER the lifecycle pass,
+    // behind its own sub-flag so the first automated graph writes outside
+    // bootstrap are killable without disabling retention/archive. Disabled
+    // sub-flag => the engine is never constructed (MEM-006 behavior untouched).
+    let antiEntropyResult: AntiEntropyRunResult | undefined;
+    const antiEntropyConfig = resolveAntiEntropyConfig();
+    if (antiEntropyConfig.mode === 'live') {
+      const episodicBuffer = new EpisodicBuffer(core.redis);
+      const antiEntropyEngine = new AntiEntropyEngine({
+        graph: new LifecycleStore(core.driver),
+        streams: {
+          groupHealth: (group) => core.signals.groupHealth(group),
+          removeIdleConsumers: (group, minIdleMs) => core.signals.removeIdleConsumers(group, minIdleMs),
+          bufferLength: () => episodicBuffer.length(),
+        },
+        queue: { size: () => core.queue.size(), peek: (count) => core.queue.peek(count) },
+        extraction: { stats: () => core.extractionQueue.stats() },
+        kv: { mget: (...keys) => core.redis.mget(...keys) },
+        config: antiEntropyConfig,
+        lifecycle: config,
+      });
+      antiEntropyResult = await antiEntropyEngine.run({
+        ...(flags['dry-run'] === true ? { dryRun: true } : {}),
+      });
+    }
+
+    console.log(JSON.stringify({
+      ...result,
+      ...(antiEntropyResult ? { anti_entropy: antiEntropyResult } : {}),
+    }, null, 2));
+    // A failed scope/drift class must surface to systemd; successes stay applied.
+    if (result.failures.length > 0 || (antiEntropyResult?.failures.length ?? 0) > 0) {
+      process.exitCode = 1;
+    }
   } finally {
     await core.close();
   }
@@ -375,7 +408,7 @@ async function main(): Promise<void> {
       console.error('');
       console.error('Background memory commands:');
       console.error('  dream      [--scope project:x] [--max-entities N] [--no-cards]');
-      console.error('  lifecycle  [--scope project:x] [--dry-run] | unarchive --id <id>   (MEMBERRY_LIFECYCLE_V1=live gates the pass)');
+      console.error('  lifecycle  [--scope project:x] [--dry-run] | unarchive --id <id>   (MEMBERRY_LIFECYCLE_V1=live gates the pass; MEMBERRY_LIFECYCLE_ANTIENTROPY=live adds the anti-entropy pass)');
       console.error('  extraction status|replay   (durable fact-extraction queue: counts / replay dead-letters)');
       console.error('  tenant stats|export|delete --tenant <name> [--out file] [--yes]   (per-tenant admin)');
       console.error('');

@@ -139,7 +139,8 @@ function isoMinusDays(nowMs: number, days: number): string {
   return new Date(nowMs - days * DAY_MS).toISOString();
 }
 
-function writeArtifactSync(filePath: string, json: string): void {
+/** Exported for the MEM-007 anti-entropy artifact (same fsync-before-return writer, not duplicated). */
+export function writeArtifactSync(filePath: string, json: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const fd = fs.openSync(filePath, 'w');
   try {

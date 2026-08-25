@@ -318,6 +318,110 @@ export class LifecycleStore {
     }
   }
 
+  // ─── MEM-007 anti-entropy: episodic → project REFERENCES re-link ──────────
+  //
+  // Bootstrap heals orphans once at bootstrap time (bootstrap-graph.ts step 5)
+  // and never again; this is the recurring, bounded, idempotent version of the
+  // SAME healed predicate. It never creates Entity roots and never touches
+  // memory content — the only write is a REFERENCES relationship MERGE.
+
+  /**
+   * Existing bootstrapped project roots. The repair MATCHes these — it never
+   * MERGEs one (bootstrap owns Entity creation).
+   */
+  async listProjectRoots(): Promise<string[]> {
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `MATCH (proj:Entity {type: 'project'})
+         RETURN proj.name AS name
+         ORDER BY name`,
+      );
+      return result.records.map((r) => r.get('name') as string);
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Derive a project's canonical scope tag defensively — the project Entity
+   * stores name/type/description but NOT its tag (project_tag is bootstrap
+   * input only). Primary, self-grounding: the dominant non-null ep.scope among
+   * episodes ALREADY linked to the root (bootstrap's own step-5 linking seeded
+   * these). Fallback: `project:` + lowercased name, accepted only if at least
+   * one Episodic carries that scope or tag (never invents a tag for a project
+   * whose tag differs from its name). Neither => null; the engine skips the
+   * project and reports it rather than guessing (mis-linking is worse than
+   * waiting for an operator).
+   */
+  async deriveProjectTag(projectName: string): Promise<string | null> {
+    const session = this.driver.session();
+    try {
+      const linked = await session.run(
+        `MATCH (ep:Episodic)-[:REFERENCES]->(:Entity {name: $projectName, type: 'project'})
+         WHERE ep.scope IS NOT NULL
+         RETURN ep.scope AS scope, count(*) AS c
+         ORDER BY c DESC, scope ASC
+         LIMIT 1`,
+        { projectName },
+      );
+      const dominant = linked.records[0]?.get('scope') as string | undefined;
+      if (dominant) return dominant;
+
+      const candidate = `project:${projectName.toLowerCase()}`;
+      const grounded = await session.run(
+        `MATCH (ep:Episodic)
+         WHERE ep.scope = $candidate OR $candidate IN ep.tags
+         RETURN count(ep) AS c`,
+        { candidate },
+      );
+      return toInt(grounded.records[0]?.get('c') ?? 0) > 0 ? candidate : null;
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Re-link orphaned episodics to an EXISTING project root. The ownership
+   * predicate reuses bootstrap-graph.ts step 5 byte-for-byte in structure:
+   * structured scope/tags equality first, then the BRACKETED legacy task token
+   * `[project:<name>]` — the brackets are what killed the gap-13/T7 substring
+   * aliasing ('foo' bootstrap linked 'project:foobar' episodes on a bare
+   * CONTAINS). Two deliberate changes from bootstrap: MERGE instead of CREATE
+   * (idempotent under a concurrent bootstrap re-run) and a batch LIMIT so one
+   * run is bounded and repeated runs converge. The NOT guard and the project
+   * MATCH both name type:'project' so a same-named non-project Entity neither
+   * satisfies the guard (permanently excluding an episode) nor receives edges.
+   */
+  async linkOrphanEpisodics(
+    projectName: string,
+    canonTag: string,
+    batchRows: number,
+  ): Promise<{ linked: number; ids: string[] }> {
+    const batch = assertBatchRows(batchRows);
+    const taskTag = `[project:${projectName}]`;
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `MATCH (ep:Episodic)
+         WHERE (ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag)
+           AND NOT (ep)-[:REFERENCES]->(:Entity {name: $projectName, type: 'project'})
+         WITH ep LIMIT toInteger($batch)
+         MATCH (proj:Entity {name: $projectName, type: 'project'})
+         MERGE (ep)-[:REFERENCES]->(proj)
+         RETURN count(ep) AS linked, collect(ep.id) AS ids`,
+        { canonTag, taskTag, projectName, batch },
+      );
+      const rec = result.records[0];
+      return {
+        linked: toInt(rec?.get('linked') ?? 0),
+        ids: (rec?.get('ids') as string[] | undefined) ?? [],
+      };
+    } finally {
+      await session.close();
+    }
+  }
+
   /**
    * Emission-time cooldown stamp. A single-property SET that never touches
    * updated_at (updated_at is the decay anchor; stamping must not reset it).
