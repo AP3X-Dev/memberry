@@ -70,7 +70,9 @@ function makeLegacy(options: { preambleTask?: (scope: Scope) => string } = {}) {
   return { assembler, memoryLayer, scopes };
 }
 
-const RANKED = { strategy: 'ranked' as const, include_code: false, include_arch: false, include_memory: true, max_tokens: 8_000 };
+// project_name is set so memoryScope.tags carries a real project scope: the pass-2
+// scope assertion below is only meaningful if there is a scope to preserve.
+const RANKED = { strategy: 'ranked' as const, include_code: false, include_arch: false, include_memory: true, max_tokens: 8_000, project_name: 'project:multihop-fixture' };
 
 describe('legacy arm (assembleRankedInternal)', () => {
   it('flag-off: single load, no pass 2, and flag-on-but-not-fired is byte-identical to flag-off', async () => {
@@ -100,6 +102,9 @@ describe('legacy arm (assembleRankedInternal)', () => {
       expect('queryVector' in scope).toBe(false);
       expect(scope.task).not.toBe(QUERY);
       expect(scope.tenantId).toBe(scopes[0]!.tenantId);
+      // The project scope travels with the tenant: dropping `tags` would widen pass 2
+      // beyond the project the caller asked for.
+      expect(scope.tags).toEqual(scopes[0]!.tags);
     }
     expect(scopes[1]!.task.split(' ')).toContain('Basalt');
     expect(ids(context)).toContain('mem-b');
