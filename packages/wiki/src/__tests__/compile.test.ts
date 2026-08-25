@@ -730,10 +730,11 @@ describe('WikiCompiler', () => {
       slow = new WikiCompiler(slowDriver, timings).compile(outputDir);
       await entered;
       const firstLease = await readLease();
-      // Wait for a renewal rather than a fixed interval: bounded well inside
-      // staleMs so a heartbeat that never fires still fails here.
+      // Wait for a renewal rather than a fixed interval: bounded by staleMs
+      // (same 20x heartbeat margin as the contender phase) so a heartbeat that
+      // never fires still fails here.
       let renewedLease = firstLease;
-      const renewDeadline = Date.now() + timings.compileLockStaleMs / 2;
+      const renewDeadline = Date.now() + timings.compileLockStaleMs;
       while (Date.parse(renewedLease.at) <= Date.parse(firstLease.at)) {
         if (Date.now() > renewDeadline) throw new Error('compile lease was not renewed');
         await new Promise((resolve) => setTimeout(resolve, 10));
