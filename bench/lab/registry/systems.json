@@ -51,6 +51,26 @@
       "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
     },
     {
+      "id": "memberry-retrieval-core-funnel-multihop-evidence-bridge-v1",
+      "displayName": "MemBerry production retrieval core (lab funnel + multihop evidence-bridge)",
+      "mode": "fixture",
+      "fidelity": "fixture",
+      "fidelityDetail": "production-retrieval / fixture-persistence / bm25-funnel-top12 / multihop-expansion evidence-bridge (bridge = name-shaped token of pass-1 top-3, one text-conditioned funnel probe per bridge, n<=3)",
+      "requiredInCi": true,
+      "adapter": "bench/lab/adapters/memberry-retrieval-core-funnel-multihop.ts",
+      "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
+    },
+    {
+      "id": "memberry-retrieval-core-funnel-multihop-fact-lexical-v1",
+      "displayName": "MemBerry production retrieval core (lab funnel + multihop fact-lexical)",
+      "mode": "fixture",
+      "fidelity": "fixture",
+      "fidelityDetail": "production-retrieval / fixture-persistence / bm25-funnel-top12 / multihop-expansion fact-lexical (dev-only attribution control: one probe of top-IDF terms of pass-1 top-3, m<=6, no bridge)",
+      "requiredInCi": true,
+      "adapter": "bench/lab/adapters/memberry-retrieval-core-funnel-multihop.ts",
+      "capabilities": ["namespaces", "feedback", "stats", "cleanup", "project-scope", "tenant-scope", "temporal-filtering"]
+    },
+    {
       "id": "scope-aware-bm25-control-v1",
       "displayName": "Scope-aware BM25 control",
       "mode": "fixture",

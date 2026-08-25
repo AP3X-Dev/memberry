@@ -79,6 +79,23 @@ const CANONICAL_FACTORIES: Readonly<Record<string, CanonicalFactory>> = Object.f
       return new MemBerryRetrievalCoreFunnelAdapter();
     },
   },
+  // RET-007 v4 CANDIDATE arms: mechanism on by construction, policy fixed per
+  // class, no argument (the lab budget is Infinity and no clock is injected).
+  'memberry-retrieval-core-funnel-multihop-evidence-bridge-v1': {
+    entry: 'bench/lab/adapters/memberry-retrieval-core-funnel-multihop.ts',
+    create: async () => {
+      const { MemBerryRetrievalCoreFunnelMultihopEvidenceBridgeAdapter } = await import('./adapters/memberry-retrieval-core-funnel-multihop.js');
+      return new MemBerryRetrievalCoreFunnelMultihopEvidenceBridgeAdapter();
+    },
+  },
+  // P4' dev-only mechanism-attribution control; deleted at D6 before any holdout dispatch.
+  'memberry-retrieval-core-funnel-multihop-fact-lexical-v1': {
+    entry: 'bench/lab/adapters/memberry-retrieval-core-funnel-multihop.ts',
+    create: async () => {
+      const { MemBerryRetrievalCoreFunnelMultihopFactLexicalAdapter } = await import('./adapters/memberry-retrieval-core-funnel-multihop.js');
+      return new MemBerryRetrievalCoreFunnelMultihopFactLexicalAdapter();
+    },
+  },
   'scope-aware-bm25-control-v1': {
     entry: 'bench/lab/adapters/baselines.ts',
     create: async () => {

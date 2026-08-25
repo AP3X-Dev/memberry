@@ -40,6 +40,13 @@ import {
 import type { RetrievalTraceV1 } from './trace.js';
 import type { CandidateChannelExecutionResultV1 } from './candidate-channel.js';
 import {
+  expandMultihopV1,
+  MULTIHOP_PASS1_BUDGET_MS,
+  type MultihopBridgeDerivation,
+  type MultihopProbe,
+  type MultihopProbeInput,
+} from './multihop-expansion.js';
+import {
   applyServedRerankerV1,
   type ServedRerankerApplicationResultV1,
   type ServedRerankerConstructionV1,
@@ -121,6 +128,22 @@ export interface TracedUnifiedContext {
 
 /** @internal RET-004B candidate-only post-fusion/dedup observation seam. */
 export type RerankerShadowPostDedupObserverV1 = (candidates: readonly RetrievalResult[]) => void;
+
+/** @internal RET-007 v4: default-off multihop expansion configuration (flag read at bootstrap). */
+export interface MultihopExpansionOptionsV1 {
+  policy: MultihopBridgeDerivation;
+  /** Injected clock (ms); absent => no timing (the lab passes none). */
+  clock?: () => number;
+  /** Pass-1 skip threshold and pass-2 deadline; defaults to MULTIHOP_PASS1_BUDGET_MS. */
+  budgetMs?: number;
+}
+
+/**
+ * @internal RET-007 v4 served-arm probe, built PER CALL by tools.ts: resolves
+ * `input.bridge` through a second sealed receipt and returns that execution,
+ * or null when the bridge does not resolve to exactly one entity (fail closed).
+ */
+export type ServedMultihopProbeV1 = (input: MultihopProbeInput) => Promise<CandidateChannelExecutionResultV1 | null>;
 
 // ─── Dialectic (berry_ask) ─────────────────────────────────────────────────────
 
@@ -275,6 +298,7 @@ export class UnifiedAssembler {
   private collectionSizeCachedAt = 0;
   private static readonly COLLECTION_SIZE_TTL_MS = 60_000; // 60s cache
   readonly servedRerankerEnabled: boolean;
+  private multihop: MultihopExpansionOptionsV1 | undefined;
 
   constructor(
     private driver: Driver,
@@ -288,6 +312,11 @@ export class UnifiedAssembler {
     this.deterministic = new DeterministicAssembler(driver);
     this.feedback = new FeedbackTracker(redis);
     this.servedRerankerEnabled = servedReranker !== null;
+  }
+
+  /** @internal RET-007 v4: turn the legacy-arm expansion on (MEMBERRY_MULTIHOP_EXPANSION_V1) or fix the lab policy. */
+  enableMultihopExpansionV1(options: MultihopExpansionOptionsV1): void {
+    this.multihop = { ...options };
   }
 
   /**
@@ -470,6 +499,7 @@ export class UnifiedAssembler {
     includeArchitecture: boolean,
     includeMemory: boolean,
     traced = false,
+    multihopProbe?: ServedMultihopProbeV1,
   ): Promise<TracedUnifiedContext | { context: UnifiedContext }> {
     assertBoundedQueryInput(task);
     if (this.servedReranker === null || this.servedReranker === undefined) {
@@ -516,6 +546,67 @@ export class UnifiedAssembler {
           estimatedTokens: Math.ceil(candidate.content.length / 4),
         });
         observation.finalIds.push(privateId);
+      }
+    }
+    // RET-007 v4: entity-conditioned second pass over memory.scope. The probe
+    // is present only when the flag is on; identity is the evidenceId, and
+    // pass-2 candidates are registered at a disjoint privateId offset BEFORE
+    // the module sees them so its exclusion can resolve them. The replacement
+    // is written back to listsByChannel before `lists` is derived.
+    const memoryPass1 = multihopProbe ? listsByChannel.get('memory.scope') : undefined;
+    if (multihopProbe && memoryPass1 && memoryPass1.length > 0) {
+      const memoryObservation = observations.find((entry) => entry.channels[0]?.channel === 'memory.scope');
+      const pass2Candidates = new Map<string, RuntimeStructuralCandidateObservation>();
+      // Trace ranks are unique per channel: pass-2 ranks continue after pass-1's last rank.
+      let nextRank = (memoryObservation?.candidates ?? [])
+        .reduce((max, candidate) => Math.max(max, ...candidate.channels.map((channel) => channel.rank)), 0);
+      const probe: MultihopProbe = async (input) => {
+        const second = await multihopProbe(input);
+        if (!second) return [];
+        const mapped: RetrievalResult[] = [];
+        for (const candidate of second.candidates) {
+          if (candidate.channel !== 'memory.scope') continue;
+          const privateId = `${candidate.channel}\u0000${candidate.rank + 10_000}\u0000${candidate.evidenceId}`;
+          if (evidenceByPrivateId.has(privateId)) continue;
+          evidenceByPrivateId.set(privateId, candidate.evidenceId);
+          pass2Candidates.set(privateId, {
+            privateId,
+            sourceType: candidate.sourceType,
+            channels: [{ channel: candidate.channel, rank: ++nextRank, score: candidate.score }],
+            evidence: { confidence: candidate.score },
+            estimatedTokens: Math.ceil(candidate.content.length / 4),
+          });
+          mapped.push({
+            id: privateId,
+            source_type: candidate.sourceType as RetrievalResult['source_type'],
+            title: candidate.title,
+            content: candidate.content,
+            score: candidate.score,
+            metadata: { title: candidate.title, confidence: candidate.score, evidenceId: candidate.evidenceId },
+          });
+        }
+        return mapped;
+      };
+      const out = await expandMultihopV1({
+        policy: this.multihop?.policy ?? 'evidence-bridge',
+        query: task,
+        pass1: memoryPass1,
+        budgetSlots: memoryPass1.length,
+        probe,
+        ...(this.multihop?.clock ? { clock: this.multihop.clock } : {}),
+        budgetMs: this.multihop?.budgetMs ?? MULTIHOP_PASS1_BUDGET_MS,
+        identityKey: (result) => evidenceByPrivateId.get(result.id) ?? result.id,
+      });
+      if (out.fired) {
+        listsByChannel.set('memory.scope', [...out.results]);
+        if (memoryObservation) {
+          for (const privateId of out.pass2Ids) {
+            const candidate = pass2Candidates.get(privateId);
+            if (!candidate) continue;
+            memoryObservation.candidates.push(candidate);
+            memoryObservation.finalIds.push(privateId);
+          }
+        }
       }
     }
     const lists = execution.request.plannedChannels
@@ -874,6 +965,11 @@ export class UnifiedAssembler {
 
     // Gather results from each layer in parallel (individual failures don't crash assembly)
     const promises: Promise<void>[] = [];
+    // RET-007 v4 legacy-arm probe: built inside the memory block (it closes
+    // over memoryScope) and consumed after settlement; undefined => no pass 2.
+    let multihopProbe: MultihopProbe | undefined;
+    const multihopPass2Observations: RuntimeStructuralObservation[] = [];
+    const multihopStartedAt = this.multihop?.clock?.();
 
     if (opts.include_arch) {
       const archQuery = expansion.expanded.slice(0, 3).join(' OR ');
@@ -996,6 +1092,36 @@ export class UnifiedAssembler {
         ...(queryVector ? { queryVector } : {}),
         ...(opts.as_of ? { temporal: { as_of: opts.as_of } } : {}),
       };
+      if (this.multihop && !stableIdLane) {
+        const memoryLayer = this.memoryLayer;
+        multihopProbe = async ({ conditionedTask }) => {
+          // C6: the pass-2 scope OMITS queryVector so AMPService embeds the
+          // conditioned task; C5: its wrapper is normalized with that task.
+          const pass2Scope = { ...memoryScope, task: conditionedTask };
+          delete (pass2Scope as { queryVector?: number[] }).queryVector;
+          const observed = traced && memoryLayer.loadFreshObserved !== undefined;
+          const result = observed
+            ? await memoryLayer.loadFreshObserved!(pass2Scope)
+            : await memoryLayer.load(pass2Scope);
+          const wrapper = observed ? parseRuntimeObservedWrapper(result) : undefined;
+          if (observed && !wrapper) throw new Error('multihop:invalid-observation');
+          const rawContext = wrapper
+            ? wrapper.value as Awaited<ReturnType<AssemblerMemoryLayer['load']>>
+            : result as Awaited<ReturnType<AssemblerMemoryLayer['load']>>;
+          const ctx = snapshotAssemblerMemoryResult(rawContext, pass2Scope.max_tokens);
+          const parsed = parseMemoryMarkdown(normalizeMemoryMarkdown(ctx.markdown, conditionedTask), ctx.sources);
+          if (observed) {
+            const observation = parseRuntimeStructuralObservation(wrapper!.observation);
+            if (!observation || !exactFinalIds(ctx.sources, observation.finalIds) || !parsed.attributionComplete) {
+              throw new Error('multihop:invalid-observation');
+            }
+            const mapped = mapMemoryObservationToOuter(parsed.results, observation);
+            if (!mapped.complete) throw new Error('multihop:invalid-observation');
+            multihopPass2Observations.push(mapped.observation);
+          }
+          return parsed.results;
+        };
+      }
       promises.push(
         (traced && this.memoryLayer.loadFreshObserved
           ? this.memoryLayer.loadFreshObserved(memoryScope)
@@ -1050,6 +1176,42 @@ export class UnifiedAssembler {
     }
 
     await Promise.all(promises);
+    // RET-007 v4: text-conditioned second pass; replaces settledLists.memory in
+    // place of the list (never a new list) and EXTENDS the memory observation.
+    if (multihopProbe && this.multihop && settledLists.memory && settledLists.memory.length > 0) {
+      const out = await expandMultihopV1({
+        policy: this.multihop.policy,
+        query: task,
+        pass1: settledLists.memory,
+        budgetSlots: settledLists.memory.length,
+        probe: multihopProbe,
+        ...(this.multihop.clock ? { clock: this.multihop.clock } : {}),
+        ...(multihopStartedAt !== undefined ? { pass1ElapsedMs: this.multihop.clock!() - multihopStartedAt } : {}),
+        budgetMs: this.multihop.budgetMs ?? MULTIHOP_PASS1_BUDGET_MS,
+      });
+      if (out.fired) {
+        settledLists.memory = [...out.results];
+        const base = settledObservations?.memory;
+        if (traced && base) {
+          const pass2Ids = new Set(out.pass2Ids);
+          const known = new Set(base.candidates.map((candidate) => candidate.privateId));
+          // Trace ranks are unique per channel: pass-2 ranks continue after pass-1's last rank.
+          let nextRank = base.candidates.reduce((max, candidate) => Math.max(max, ...candidate.channels.map((channel) => channel.rank)), 0);
+          const extra = multihopPass2Observations
+            .flatMap((observation) => observation.candidates)
+            .filter((candidate) => pass2Ids.has(candidate.privateId) && !known.has(candidate.privateId) && known.add(candidate.privateId))
+            .map((candidate) => ({
+              ...candidate,
+              channels: candidate.channels.map((channel) => ({ ...channel, rank: ++nextRank })),
+            }));
+          settledObservations!.memory = {
+            channels: base.channels,
+            candidates: [...base.candidates, ...extra],
+            finalIds: [...base.finalIds, ...extra.map((candidate) => candidate.privateId)],
+          };
+        }
+      }
+    }
     const observations: RuntimeStructuralObservation[] | undefined = traced ? [] : undefined;
     // Use one frozen channel order in both modes so score ties and duplicate
     // representatives never depend on async source settlement order.

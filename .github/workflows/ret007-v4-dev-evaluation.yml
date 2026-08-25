@@ -1,0 +1,274 @@
+name: RET-007 v4 candidate dev evaluation
+
+# Clone of ret007-v4-control-qualification.yml with THREE deliberate differences
+# (D4 spec §9, P1-5): (a) the candidate-absence assert is DROPPED — candidates are
+# the point; (b) registered-adapters.ts / systems.json / experiments.json are
+# re-pinned at the D5 candidate PR (funnel / core / runner pins unchanged);
+# (c) the freeze base and exact path list are the D5 PR's merge base + envelope.
+# DEV ONLY: the holdout split is never loaded by this apparatus.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed RET-007 v4 D5 source and workflow commit SHA
+        required: true
+        type: string
+      policy:
+        description: Candidate bridge-derivation policy under evaluation
+        required: true
+        type: choice
+        options: [evidence-bridge, fact-lexical]
+      control_receipt_run_id:
+        description: Workflow run id that produced the qualified control receipt (ret007-v4-control-qualification)
+        required: true
+        type: string
+      control_receipt_run_attempt:
+        description: Run attempt of that qualification run
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  evaluate-dev:
+    name: Evidence on Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - name: Bind workflow definition to requested source and initialize evidence tombstone
+        shell: bash
+        env:
+          RET007V4_SOURCE_SHA: ${{ inputs.source_sha }}
+          RET007V4_RECEIPT_PATH: ${{ runner.temp }}/ret007v4-dev/receipt-node${{ matrix.node-version }}.json
+        run: |
+          mkdir -p "$(dirname "$RET007V4_RECEIPT_PATH")"
+          source_json=null
+          workflow_json=null
+          [[ "$RET007V4_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] && source_json="\"$RET007V4_SOURCE_SHA\""
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] && workflow_json="\"$GITHUB_SHA\""
+          printf '{\n  "schemaVersion": "1.0.0",\n  "kind": "ret007v4-dev-evaluation-node-evidence-failure",\n  "outcome": "rejected",\n  "failureCode": "source-preflight-failed",\n  "executedSourceSha": %s,\n  "workflowRefSha": %s,\n  "workflowRun": { "id": "%s", "url": "https://github.com/%s/actions/runs/%s", "attempt": %s },\n  "runtime": { "execution": "hosted", "platform": "linux", "nodeMajor": %s },\n  "disclosure": "closed-aggregate-only"\n}\n' \
+            "$source_json" "$workflow_json" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT" "${{ matrix.node-version }}" >"$RET007V4_RECEIPT_PATH"
+          [[ "$source_json" != null ]]
+          [[ "$GITHUB_SHA" == "$RET007V4_SOURCE_SHA" ]]
+
+      - name: Check out exact bound source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: No-dependency source and instrument-pin preflight (D5 base + envelope; no candidate-absence assert)
+        shell: bash
+        env:
+          RET007V4_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" == "$RET007V4_SOURCE_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$RET007V4_SOURCE_SHA" ]]
+          git merge-base --is-ancestor 36e4c0050c8651b81bf9119fd68083adc12c7b31 "$RET007V4_SOURCE_SHA"
+          expected="$(cat <<'PATHS' | LC_ALL=C sort
+          .env.example
+          .github/workflows/ret007-v4-dev-evaluation.yml
+          bench/lab/__tests__/memberry-retrieval-core-funnel-multihop.test.ts
+          bench/lab/adapters/memberry-retrieval-core-funnel-multihop.ts
+          bench/lab/multihop/__tests__/evaluate-dev-v4.test.ts
+          bench/lab/multihop/evaluate-dev-v4.ts
+          bench/lab/registered-adapters.ts
+          bench/lab/registry/systems.json
+          package.json
+          packages/mcp/src/bootstrap.ts
+          packages/retrieval/src/__tests__/assembler.multihop.test.ts
+          packages/retrieval/src/__tests__/multihop-expansion.test.ts
+          packages/retrieval/src/__tests__/tools.multihop.test.ts
+          packages/retrieval/src/assembler.ts
+          packages/retrieval/src/multihop-expansion.ts
+          packages/retrieval/src/tools.ts
+          PATHS
+          )"
+          actual="$(git diff --name-only 36e4c0050c8651b81bf9119fd68083adc12c7b31 "$RET007V4_SOURCE_SHA" | LC_ALL=C sort)"
+          [[ "$actual" == "$expected" ]]
+          [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/adapters/memberry-retrieval-core-funnel.ts")" == d4cdc0319b8858c81eb9fe635868f82950e6ae5c ]]
+          [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/adapters/memberry-retrieval-core.ts")" == e138ed07531949b8fbe40ece620214e6ed604ac6 ]]
+          [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/runner.ts")" == c0b885845d117f1d6e7a25bbfc87832e97ddee77 ]]
+          [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/registry/experiments.json")" == 7a07dd7fd4709a98ab400fff535aa38a45ead174 ]]
+          [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/registered-adapters.ts")" == 223a20e3c6d31e648d3bbb381bae2e7b70194eb7 ]]
+          [[ "$(git rev-parse "$RET007V4_SOURCE_SHA:bench/lab/registry/systems.json")" == 1c8d2811c02c46063850a884c961d4e81e24f08b ]]
+          python3 - <<'PY'
+          import json
+          def load(path):
+              with open(path, encoding="utf-8") as handle:
+                  return json.load(handle)
+          datasets = [value for value in load("bench/lab/registry/datasets.json")["datasets"]
+                      if str(value.get("id", "")).startswith("memberry-multihop-v4-")]
+          assert {value["id"] for value in datasets} == {
+              "memberry-multihop-v4-calib", "memberry-multihop-v4-dev", "memberry-multihop-v4-holdout", "memberry-multihop-v4-twin"
+          }
+          for value in datasets:
+              split = value["split"]
+              assert split in {"calib", "dev", "holdout", "twin"}
+              assert value["requiredInCi"] is False
+              identities = {
+                  f'{item.get("role")}|{item.get("access")}|{item.get("repositoryPath")}'
+                  for item in value.get("artifacts", [])
+              }
+              assert identities == {
+                  f"input|adapter|bench/lab/datasets/multihop/v4/{split}/input.jsonl",
+                  f"oracle|scorer|bench/lab/datasets/multihop/v4/{split}/oracle.jsonl",
+              }
+          systems = {value["id"] for value in load("bench/lab/registry/systems.json")["systems"]}
+          assert "memberry-retrieval-core-funnel-v1" in systems
+          assert "memberry-retrieval-core-funnel-multihop-evidence-bridge-v1" in systems
+          assert "memberry-retrieval-core-funnel-multihop-fact-lexical-v1" in systems
+          PY
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install frozen dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Prove installation did not mutate or add source
+        shell: bash
+        env:
+          RET007V4_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" == "$RET007V4_SOURCE_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$RET007V4_SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+
+      - name: Fetch the qualified control receipt (hash-bound in the runner)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RET007V4_CONTROL_RUN_ID: ${{ inputs.control_receipt_run_id }}
+          RET007V4_CONTROL_RUN_ATTEMPT: ${{ inputs.control_receipt_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$RET007V4_CONTROL_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RET007V4_CONTROL_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          mkdir -p "$RUNNER_TEMP/ret007v4-dev/control"
+          gh run download "$RET007V4_CONTROL_RUN_ID" \
+            --name "ret007v4-control-authority-$RET007V4_CONTROL_RUN_ID-$RET007V4_CONTROL_RUN_ATTEMPT" \
+            --dir "$RUNNER_TEMP/ret007v4-dev/control"
+          [[ -f "$RUNNER_TEMP/ret007v4-dev/control/receipt-authoritative.json" ]]
+
+      - name: Run control and candidate over DEV (+ twin evidence, + calib gate precision)
+        env:
+          RET007V4_SOURCE_SHA: ${{ inputs.source_sha }}
+          RET007V4_POLICY: ${{ inputs.policy }}
+          RET007V4_RECEIPT_PATH: ${{ runner.temp }}/ret007v4-dev/receipt-node${{ matrix.node-version }}.json
+          RET007V4_CONTROL_RECEIPT_PATH: ${{ runner.temp }}/ret007v4-dev/control/receipt-authoritative.json
+          RET007V4_TWIN_EVIDENCE_ROLE: recorded-evidence-only
+        run: npm run bench:lab:multihop-v4:evaluate-dev
+
+      - name: Upload closed node evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ret007v4-dev-node-evidence-node${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ret007v4-dev/receipt-node${{ matrix.node-version }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  finalize-evaluation:
+    name: Join Node 20 and Node 22 evidence
+    needs: [evaluate-dev]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Bind workflow definition and initialize authoritative tombstone
+        shell: bash
+        env:
+          RET007V4_SOURCE_SHA: ${{ inputs.source_sha }}
+          RET007V4_RECEIPT_PATH: ${{ runner.temp }}/ret007v4-dev/receipt-authoritative.json
+        run: |
+          mkdir -p "$(dirname "$RET007V4_RECEIPT_PATH")"
+          source_json=null
+          workflow_json=null
+          [[ "$RET007V4_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] && source_json="\"$RET007V4_SOURCE_SHA\""
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] && workflow_json="\"$GITHUB_SHA\""
+          printf '{\n  "schemaVersion": "1.0.0",\n  "kind": "ret007v4-dev-evaluation-failure",\n  "outcome": "rejected",\n  "failureCode": "source-preflight-failed",\n  "executedSourceSha": %s,\n  "workflowRefSha": %s,\n  "workflowRun": { "id": "%s", "url": "https://github.com/%s/actions/runs/%s", "attempt": %s },\n  "runtime": { "execution": "hosted", "platform": "linux", "nodeMajor": 22 },\n  "disclosure": "closed-aggregate-only"\n}\n' \
+            "$source_json" "$workflow_json" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT" >"$RET007V4_RECEIPT_PATH"
+          [[ "$source_json" != null ]]
+          [[ "$GITHUB_SHA" == "$RET007V4_SOURCE_SHA" ]]
+
+      - name: Check out exact bound source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frozen dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Prove join checkout remains exact and clean
+        shell: bash
+        env:
+          RET007V4_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" == "$RET007V4_SOURCE_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$RET007V4_SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+
+      - name: Download exactly Node 20 evidence
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ret007v4-dev-node-evidence-node20-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ret007v4-dev/evidence/node20
+
+      - name: Download exactly Node 22 evidence
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ret007v4-dev-node-evidence-node22-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ret007v4-dev/evidence/node22
+
+      - name: Emit sole authoritative joined dev record (hashed) or rejection tombstone
+        if: always()
+        env:
+          RET007V4_SOURCE_SHA: ${{ inputs.source_sha }}
+          RET007V4_POLICY: ${{ inputs.policy }}
+          RET007V4_RECEIPT_PATH: ${{ runner.temp }}/ret007v4-dev/receipt-authoritative.json
+          RET007V4_NODE20_EVIDENCE_PATH: ${{ runner.temp }}/ret007v4-dev/evidence/node20/receipt-node20.json
+          RET007V4_NODE22_EVIDENCE_PATH: ${{ runner.temp }}/ret007v4-dev/evidence/node22/receipt-node22.json
+          RET007V4_MATRIX_RESULT: ${{ needs.evaluate-dev.result }}
+          RET007V4_TWIN_EVIDENCE_ROLE: recorded-evidence-only
+        run: npm run bench:lab:multihop-v4:join-dev
+
+      - name: Upload sole authoritative closed record or tombstone
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ret007v4-dev-authority-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ret007v4-dev/receipt-authoritative.json
+            ${{ runner.temp }}/ret007v4-dev/receipt-authoritative.sha256
+          if-no-files-found: error
+          retention-days: 90

@@ -189,6 +189,8 @@ export function parseTenantDatastores(
 export async function bootstrap(): Promise<BootstrapHandles> {
   const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1';
   const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1';
+  // RET-007 v4: default-off second retrieval pass over the memory channel.
+  const multihopExpansionEnabled = process.env['MEMBERRY_MULTIHOP_EXPANSION_V1'] === '1';
   const rerankerMode = resolveBootstrapRerankerModeV1(process.env['MEMBERRY_RERANKER_V1']);
   if (rerankerMode === 'shadow' && (!queryPlannerEnabled || !candidateChannelEnabled)) {
     throw new Error('reranker_shadow:prerequisite_unavailable');
@@ -562,6 +564,9 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     llm,
     servedReranker,
   );
+  if (multihopExpansionEnabled) {
+    unifiedAssembler.enableMultihopExpansionV1({ policy: 'evidence-bridge', clock: () => Date.now() });
+  }
   const feedbackTrackerService = new FeedbackTracker(feedbackRedis);
   const dedicatedTenantCandidateDrivers = new Map<string, typeof driver>();
 
@@ -693,6 +698,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     queryPlannerEnabled,
     candidateChannelEnabled,
     rerankerShadowCoordinator,
+    multihopExpansionEnabled,
     candidateDriver: driver,
     tenantCandidateDrivers: dedicatedTenantCandidateDrivers,
     resolverFactory: (authority) => {
