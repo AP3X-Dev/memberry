@@ -198,3 +198,111 @@ For each dataset, complete all of the following in one reviewable change:
 Until then, these datasets remain registered and fail closed. Product work may
 continue, but no release or comparison claim may imply that LongMemEval or LoCoMo
 has been executed.
+
+## Golden v2 — headroom-qualified retrieval RANKING instrument (RET-GOLDEN-V2)
+
+**Instrument:** `memberry-golden-v2`, version `2.0.0`. Measures RANKING quality
+(Recall@k / Precision@k / MRR / nDCG) of the production retrieval assembly path.
+It does NOT measure answer quality, task completion, latency, or safety.
+
+**Why it exists.** Measured at `6d2c6f7`: the golden set's Precision@5 is `0.4000`
+against a STRUCTURAL ceiling of `0.4667`, with 8 of its 12 queries already maxed on
+both Precision@5 and Recall@10 — an effective sample size of about 4. Every quality
+metric is bit-identical to the 2026-08-14 `memberry-7a31231` baseline across 25
+merged Retrieval 2.0 PRs. The instrument cannot distinguish "no improvement" from
+"improvement it cannot see", so it cannot decide the G2 criterion "Precision@5
+materially improved". Operating Rule 1 (headroom first: qualify the control before
+candidate code is authorized) has never been applied to the golden set; it fails
+that rule from the TOO-EASY side, the mirror of the LAB-013 rejection.
+
+Golden v1 is NOT replaced. It remains the regression guard it became in RET-006,
+with its `precisionAt5: 0.39` floor explicitly annotated as not a headroom metric.
+
+### PRE-REGISTERED QUALIFICATION BAND
+
+Fixed BEFORE any candidate arm exists. It may not be changed after any candidate
+result is observed, and it is committed here before any dataset byte exists.
+
+- **Structural ceiling MUST be 1.0:** every query carries >=5 relevant docs, so
+  Precision@5 is not capped by construction. Exact equality, not `>=`.
+- **Control Precision@5 in `[0.42, 0.58]`** on dev AND on the sealed holdout.
+- **Control Recall@10 in `[0.45, 0.80]`.**
+- **At most 1 query in ~40 maxed on both metrics** — the saturation counter, the
+  direct analogue of RET-007 v4's headroom diagnostic H with the sign flipped.
+  Non-negotiable.
+- **>=3 clear successes AND >=3 clear failures in every distractor-density
+  stratum** (`low`, `medium`, `high`).
+
+```
+GOLDEN_V2_CONTROL_BAND = {
+  requiredStructuralCeilingPrecisionAt5: 1.0,          // exact equality, not >=
+  minimumRelevantPerQueryInclusive: 5,
+  minimumPrecisionAt5Inclusive: 0.42,
+  maximumPrecisionAt5Inclusive: 0.58,
+  minimumRecallAt10Inclusive: 0.45,
+  maximumRecallAt10Inclusive: 0.80,
+  maximumSaturatedQueriesPerSplitInclusive: 1,
+  minimumSuccessesPerStratumInclusive: 3,
+  minimumFailuresPerStratumInclusive: 3,
+}
+```
+
+Split sizes are `calib 24 / dev 42 / holdout 42`, so each stratum is exactly 14 and
+the one-saturated-query cap applies at its literal value. "Clear success" is
+pre-registered as `precisionAt5 >= 0.6 AND recallAt10 >= 0.8`; "clear failure" is
+its exact complement, so the two partition the split and no query is uncounted.
+Both were settled before any control number was observed on any split.
+
+### On rejection
+
+1. Mark the version unqualified here with the closed aggregates and failure codes.
+2. Leave the committed bytes exactly as they are. Frozen bytes are never mutated,
+   regenerated in place, or deleted.
+3. Upload the authoritative rejection tombstone artifact.
+4. The ONLY permitted response is an additive `2.1.0` under new paths, tuning
+   DATASET KNOBS ONLY, and only while no candidate arm, candidate adapter,
+   candidate registration, or candidate result exists anywhere in the tree.
+5. **Hard cap: two versions this campaign.** If `2.1.0` also rejects, stop and
+   escalate with both tombstones and the measured knob-response table.
+6. Never lower the band, never widen an interval, never drop a stratum, never
+   shrink a split to make a rate land in range.
+
+### GOLDEN V2 ANTI-GAMING RULE
+
+```
+GOLDEN V2 ANTI-GAMING RULE
+Transcribed verbatim from PRP section 6.6, bullet 8 (2026-08-14):
+"Record failures and exclusions; never remove a hard case merely to raise a score."
+```
+
+`GOLDEN_V2_ANTIGAMING_RULE` in `bench/lab/golden-v2/policy-v2.ts` holds that string
+as a frozen literal, and a test asserts it matches this block character for
+character. That pin proves the two tracked copies never drift after commit. It
+cannot prove fidelity to the upstream PRP, because `docs/` is gitignored and git
+has never seen that document — but the quoted sentence is one line, so anyone
+holding the PRP can check it by eye.
+
+A second, independently tracked analogue already exists above under CMP-006A
+("Record every rejected or excluded case with a reason; no silent exclusions").
+It predates this section and was written for a different work package, so it is
+corroboration rather than the same evidence twice.
+
+### Order-seed commitment (recorded before any scenario byte exists)
+
+```
+publicOrderSeed        memberry-goldenv2-order-2026-08-25
+seedCommitmentSha256   0f6a8af36990d78b6224182638bfab9a6d17ba86c8e3c4ed0f5d800cc3711eb3
+orderKeyDerivation     sha256-utf8(seed + LF + scenario_id + LF + neutral_slot_id)
+```
+
+Reproduced bit-identically under node:20 and node:22. Corpus order is therefore
+independent of label, content, role, control output, and candidate output. This
+follows the LAB-013 chronology precedent: the commitment is recorded before the
+first scenario byte exists.
+
+### Status
+
+**NOT YET BUILT.** No dataset bytes, no adapter, no candidate, no registry entry
+exists. The build is blocked behind a feasibility pilot that must first
+demonstrate the five band terms above are JOINTLY satisfiable; if it cannot, the
+design is tombstoned before any instrument version slot is opened.
