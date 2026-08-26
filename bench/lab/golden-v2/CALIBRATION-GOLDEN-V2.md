@@ -173,6 +173,25 @@ goldenv2-pilot-rework-record
   candidateState:     absent   (re-asserted at run time by the same preflight)
 ```
 
+### Correction, appended 2026-08-26 (prior text left intact per the append-only rule)
+
+The `changedFrom` field above says the rework "deliberately retires generator
+invariant R5 (no single memory carries two facet names) for the primary document
+only". **That is imprecise, and the implementation does not do it.** As built, the
+primary document carries **no facet name at all** — only the subject, the relation
+phrasing at full lexical weight, and the facet TYPE. So:
+
+- **R5 is NOT retired.** No memory carries two facet names; the primary carries zero.
+- **R4 still holds.** The probe never names a facet name, and neither does the primary,
+  so the primary cannot be matched on a token the probe does not contain.
+- What actually changes is the §3.2 CONSTRUCTION rule that every relevant memory
+  "supplies a facet name drawn without replacement" — that now holds for the
+  supporting documents only, not for the primary.
+
+The rest of the `changedFrom` and the whole `changeRationale` stand as written. This
+correction is appended rather than edited in, because the record was already committed
+(`3c127ad`) and the log forbids overwriting a prior entry.
+
 **Invariants that do NOT move.** `relevantPerQuery >= 5` still holds for every
 query, so the structural Precision@5 ceiling stays exactly `1.0` — that floor is
 the reason this instrument exists and is not negotiable. The band is untouched.
