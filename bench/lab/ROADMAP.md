@@ -312,8 +312,8 @@ committed here before any number was observed, which is the point of recording i
 
 The finding is about the CONTROL, not the corpus. Under plural relevance (>=5
 relevant documents per query) with same-subject distractors,
- tops out near **0.32** Precision@5 - below the
- band, which was pre-registered on the assumption the control could
+`memberry-retrieval-core-v1` tops out near **0.32** Precision@5 — below the
+`[0.42, 0.58]` band, which was pre-registered on the assumption the control could
 reach it. Both structural terms PASSED on all 144 vectors across both attempts:
 the ceiling held at exactly 1.0 and saturation stayed at 0, so the golden v1
 defect this instrument existed to fix was genuinely solved. It failed on
@@ -325,7 +325,7 @@ pre-registered against what the control measurably does, not what it was assumed
 to do.
 
 Full evidence, including the knob-response tables and both rework records:
-.
+`bench/lab/golden-v2/CALIBRATION-GOLDEN-V2.md`.
 
 **Do not author a 2.1.0 or a third corpus shape from this design.** The two-shape
 cap is exhausted. A future instrument is a NEW campaign with its own
