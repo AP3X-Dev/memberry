@@ -302,7 +302,31 @@ first scenario byte exists.
 
 ### Status
 
-**NOT YET BUILT.** No dataset bytes, no adapter, no candidate, no registry entry
-exists. The build is blocked behind a feasibility pilot that must first
-demonstrate the five band terms above are JOINTLY satisfiable; if it cannot, the
-design is tombstoned before any instrument version slot is opened.
+**TOMBSTONED 2026-08-26. NEVER BUILT.** No dataset byte, adapter, candidate,
+registry entry, freeze, or receipt was ever created, and **neither of the two
+instrument version slots was opened** - both remain available to a future campaign.
+
+The feasibility pilot ran before the build and both permitted corpus shapes
+measured infeasible. The band above was **never adjusted**; it stands exactly as
+committed here before any number was observed, which is the point of recording it.
+
+The finding is about the CONTROL, not the corpus. Under plural relevance (>=5
+relevant documents per query) with same-subject distractors,
+ tops out near **0.32** Precision@5 - below the
+ band, which was pre-registered on the assumption the control could
+reach it. Both structural terms PASSED on all 144 vectors across both attempts:
+the ceiling held at exactly 1.0 and saturation stayed at 0, so the golden v1
+defect this instrument existed to fix was genuinely solved. It failed on
+difficulty calibration instead, from the too-hard side.
+
+Consequence worth carrying: golden v1 reports 0.4000 against a 0.4667 structural
+cap, so its number is flattered by its own ceiling. Any future band must be
+pre-registered against what the control measurably does, not what it was assumed
+to do.
+
+Full evidence, including the knob-response tables and both rework records:
+.
+
+**Do not author a 2.1.0 or a third corpus shape from this design.** The two-shape
+cap is exhausted. A future instrument is a NEW campaign with its own
+pre-registration, not a continuation of this one.
