@@ -1,6 +1,11 @@
 # RET-010 Served Reranker Design Freeze
 
-Status: proposed design freeze
+Status: PARTIALLY PROMOTED — supporting design reference, not the plan of record.
+RET-010A through RET-010D are promoted and the RET-010E verification design merged
+(PR #68). RET-010E implementation, RET-010F, and the RET-010 parent remain OPEN,
+and the holdout evaluation this design's promotion depends on has never been
+authorized or run. Live completion state lives in `10X_EXECUTION_ROADMAP.md`, the
+canonical plan; resume from its `NEXT ACTION`, not from this file.
 
 Design base: `f55f61e2dca958627ed01766332d23f9d565c689`
 
