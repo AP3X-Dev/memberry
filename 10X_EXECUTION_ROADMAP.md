@@ -74,28 +74,79 @@ else is either design detail or a historical record.
 
 ## NEXT ACTION
 
-The holdout-harness repair that this section previously demanded is DONE. Stage
-receipts for pre-flight rejections merged (`9eae555`, `c7af25e`, `d43b646`,
-`9f4b210`), and two authenticated development records landed (`3665d6d` from run
-`32644686048`, `d39712a` from run `32647104086`). Three lanes are now open and
-the sequencing decision is the owner's:
+**Direction changed 2026-08-26 (owner).** The program spent 25+ merged PRs with a
+bit-identical retrieval metric vector, then tombstoned a purpose-built instrument.
+Both facts point the same way: **we cannot measure retrieval quality, and we have
+been trying to fix it blind.** The new sequence puts measurement first, and it
+deliberately abandons the synthetic-instrument approach that has now failed twice.
 
-1. **G2 (Phase 2 close).** Obtain explicit owner authorization for one actual
-   RET-010 holdout evaluation. Decide G2 from its permitted aggregate receipt
-   and stop. This is the only thing standing between the program and a closed
-   Phase 2; note that G2 would close on the reranker alone, with RET-004,
-   RET-006, and RET-007 still open beneath it.
-2. **IDX-001 (the structural bet).** Index-time structure — Phase A first. This
-   is the measured prerequisite for RET-007 and, per Findings 3 and 4, the lane
-   most likely to move retrieval quality off zero. Entry below at the Phase 3
-   tail.
-3. ~~**COD-010b.**~~ **CLOSED 2026-08-26** — PR #113 merged as master `3eba9a9`,
-   deployed to cerebro and live-verified. Mixed code+memory requests under the
-   live flags now render `**Code:** served (16 of 20)` with 16 real symbols
-   alongside 29 semantic memories. Verify with:
-   `ssh cerebro@192.168.0.25 "docker exec memberry-mcp grep -c codeEligible /app/packages/retrieval/dist/assembler.js"`
-   (expect ≥1). Raw rendered lines quoted in
-   `docs/agent-runs/run-state-cmp006-headroom-instrument.md`.
+### Why the synthetic approach is retired
+
+Golden v2 built synthetic corpora with invented topics and mechanically-derived
+relevance labels, then pre-registered a difficulty band. It could not be
+calibrated and was tombstoned before any build. Published industry practice names
+exactly these failure modes: unrealistic corpora of isolated snippets, synthetic
+queries that miss how nuanced real questions are, and proxy relevance metrics that
+"often do not align closely with what a real user would genuinely find helpful."
+Systems tuned on such benchmarks "consistently stumble in real-world scenarios."
+
+We reproduced that result at a cost of one day. Do not build a third one.
+
+### The measured problem, from the live index
+
+`project:memberry`, 8,928 indexed symbols:
+
+| kind | count | share |
+|---|---|---|
+| `variable` | 6,597 | **74%** |
+| function | 1,192 | 13% |
+| method | 646 | 7% |
+| interface | 340 | 4% |
+| class | 75 | 0.8% |
+| from test files | 3,084 | **34%** |
+
+Ranking sorts on raw fulltext score (`ORDER BY score DESC`) with exactly one
+adjustment anywhere (`* 0.8` discounting semantics). `SymbolKind` exists in the
+schema and is **never used for ranking**; test paths get no treatment at all. A
+live query for assembler internals returned `class UnifiedAssembler` alongside six
+copies of `session: () => session` from test files.
+
+### The lanes, in order
+
+1. **EVAL-001 — real-query evaluation (DO THIS FIRST).** Replace synthetic
+   instruments with ~15-25 questions actually asked of this system, each with
+   ground-truth KEYWORDS a correct answer must contain. Keyword presence is scored
+   automatically, so no synthetic corpus and no hand-labelled relevance set is
+   needed, and no difficulty band has to be calibrated — the queries are as hard as
+   they really are. Grow it from real failure cases. This is the industry-validated
+   shape and it is cheap. **Everything below is unmeasurable until this exists.**
+2. **IDX-002 — chunk granularity.** Controlled study evidence: function-level
+   chunking "consistently underperforms all other strategies by 3.57-5.64 pp EM
+   and is never Pareto-optimal". MemBerry indexes INDIVIDUAL SYMBOLS, which is
+   finer than function-level, so it sits on the losing side of that result. What
+   wins is AST-aligned structural chunks sized to budget (32-64 lines under ~4k
+   tokens, 64-128 as budgets grow) and MIXED granularity. Returning 20 disconnected
+   one-line symbols is the wrong SHAPE of answer even when every line is relevant.
+3. **IDX-001 Phase A — index-time structure.** Relationships, call graphs, module
+   hierarchy. Still the structural bet, but it lands on a far cleaner index once
+   lane 2 fixes the unit of retrieval. Prerequisite for RET-007.
+4. **G2 (Phase 2 close).** Needs explicit owner authorization for one RET-010
+   holdout evaluation. **Read the G2 checkbox before spending the one shot** —
+   golden v1 reports 0.4000 against a 0.4667 structural cap, and a fair instrument
+   scores the same control at ~0.32, so the pre-registered "+0.05" asks for 75% of
+   reachable headroom on an instrument that flatters the starting point.
+
+Cheap cleanup available in lane 2 or ahead of it: rank `class`/`interface`/
+`function`/`method` above `variable`, and deprioritize (never exclude) `__tests__`
+and `.test.` paths. It needs no calibration — "a local variable is not a better
+answer than the class it lives in" is true before any measurement, so it is a
+mechanism fix, not tuning to a score.
+
+**The discipline that survives the direction change.** Never tune weights because
+a number moved on the same queries used to choose them; that is measuring on
+train, and it is how golden v2 died. Fix mechanisms with a priori justification,
+then use EVAL-001 as a REGRESSION check. Golden v1 remains the regression guard it
+became in RET-006 and its `precisionAt5: 0.39` floor is not raised or lowered.
 
 Standing scope exclusions, unchanged: keep RET-007 v2 and v3 permanently frozen;
 keep deployment, activation, threshold changes, sealed holdout inspection, new
