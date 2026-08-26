@@ -13,7 +13,32 @@ describe('retrieval quality gate (golden set)', () => {
     expect(report.recall10).toBeGreaterThanOrEqual(QUALITY_THRESHOLDS.recallAt10);
     expect(report.ndcg10).toBeGreaterThanOrEqual(QUALITY_THRESHOLDS.ndcgAt10);
     expect(report.mrr).toBeGreaterThanOrEqual(QUALITY_THRESHOLDS.mrr);
+    expect(report.precision5).toBeGreaterThanOrEqual(QUALITY_THRESHOLDS.precisionAt5);
     expect(report.intentAccuracy).toBeGreaterThanOrEqual(QUALITY_THRESHOLDS.intentAccuracy);
+  });
+
+  it('keeps precision@5 measured against its structural ceiling (RET-006)', async () => {
+    // Precision@5 is capped per query at min(relevant, 5) / 5, so the aggregate can
+    // never reach 1.0 on this set and a raw gain reads larger than it is. This pins
+    // the ceiling itself: if the golden set gains relevant docs per query the ceiling
+    // moves, and THAT is the moment precisionAt5 becomes a headroom metric worth
+    // ratcheting. Fails loudly rather than letting a saturated gate look meaningful.
+    const report = await runQualityEval();
+
+    const ceilings = report.perQuery.map((p) => {
+      // recall5 = hits@5 / relevant and precision5 = hits@5 / 5, so relevant is
+      // recoverable from the pair without re-reading the fixture labels.
+      const hitsAt5 = p.precision5 * 5;
+      const relevant = p.recall5 > 0 ? Math.round(hitsAt5 / p.recall5) : 0;
+      return Math.min(relevant, 5) / 5;
+    });
+    const meanCeiling = ceilings.reduce((sum, c) => sum + c, 0) / ceilings.length;
+
+    expect(meanCeiling).toBeCloseTo(0.4667, 3);
+    expect(report.precision5).toBeLessThanOrEqual(meanCeiling);
+    // 8 of 12 queries are at their own ceiling — the saturation this note is about.
+    const atCeiling = report.perQuery.filter((p, i) => p.precision5 >= ceilings[i]! - 1e-9);
+    expect(atCeiling.length).toBe(8);
   });
 
   it('ranks an exact identifier lookup as the #1 result', async () => {

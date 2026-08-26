@@ -465,10 +465,24 @@ const LEX_INDEX = buildLexicalIndex();
 // before distractors + a hard symbol-seeking query were added to de-saturate Recall@10;
 // the de-saturated set is more discriminating, so nDCG/recall sit lower while staying a
 // faithful gate.) Raising these as the pipeline improves locks in gains.
+// RET-006 note — precisionAt5 is a REGRESSION GUARD, not a headroom metric.
+// Precision@5 is structurally capped by how many relevant docs a query has: a
+// query with one relevant doc cannot score above 0.20 however perfectly it ranks.
+// Measured on this set, the mean per-query ceiling is 0.4667 against an actual
+// 0.4000, and 8 of the 12 queries already sit exactly at their own ceiling. Total
+// reachable improvement is +0.067 absolute, all of it in four queries ("how does
+// authentication work", "explain the consolidation strategy", "how are payment
+// failures retried", "error handling in the payment flow"). Read a precision@5
+// gain on this set against that ceiling before calling it material; a "materially
+// improved Precision@5" claim needs a set with more relevant docs per query, not
+// a better ranker. Set just below the measured value like its neighbours: the
+// eval is deterministic, but the aggregate is a mean of fifths and 0.4000 is not
+// exactly representable, so an equality-tight gate fails on float noise alone.
 export const QUALITY_THRESHOLDS = {
   recallAt10: 0.90,
   ndcgAt10: 0.84,
   mrr: 0.88,
+  precisionAt5: 0.39,         // measured 0.4000; ceiling 0.4667 (see RET-006 note above)
   intentAccuracy: 1.0,
   currentAboveStaleRate: 1.0, // current truth must always outrank the superseded fact
   maxStaleLeakRate: 0.0,      // no stale/invalidated doc in the top 3 of a conflict query
