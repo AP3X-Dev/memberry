@@ -27,9 +27,9 @@ function emptyCtx(): UnifiedContext {
   return { task: 'q', strategy: 'ranked', sections: [], token_count: 0, assembled_at: '2026-06-07T00:00:00.000Z' };
 }
 
-function makeAssembler(context: UnifiedContext): IUnifiedAssembler {
+function makeAssembler(context: UnifiedContext, servedRerankerEnabled = false): IUnifiedAssembler {
   return {
-    servedRerankerEnabled: false,
+    servedRerankerEnabled,
     assemble: vi.fn().mockResolvedValue(context),
     assembleTraced: vi.fn().mockResolvedValue({ context, trace: approvedTrace }),
     renderMarkdown: vi.fn().mockReturnValue('# md'),
@@ -52,8 +52,8 @@ function makeServerStub() {
   return { server, handlers };
 }
 
-function candidateContainer(tenantId: string, context: UnifiedContext) {
-  const assembler = makeAssembler(context);
+function candidateContainer(tenantId: string, context: UnifiedContext, servedRerankerEnabled = false) {
+  const assembler = makeAssembler(context, servedRerankerEnabled);
   const resolution = Object.freeze({
     resolution: Object.freeze({ state: 'resolved', canonicalEntityIds: Object.freeze(['entity-stable']) }),
     diagnostics: Object.freeze([]),
@@ -98,7 +98,10 @@ function candidateContainer(tenantId: string, context: UnifiedContext) {
 const CANDIDATE_ARGS = { task: 'safe', project_name: 'project:memberry', entity_scope: ['Resolver'] };
 
 describe('COD-010 candidate-path code-plane disclosure', () => {
-  it('passes unsupported candidate-channel into renderMarkdown for the default tenant', async () => {
+  // COD-010b split of the original single pin (spec §Tests, "Existing-test contract edit"):
+  // the UNSERVED/shadow arm keeps the synthetic candidate-channel status, while the SERVED
+  // arm must hand the assembler's REAL status through untouched. No assertion is loosened.
+  it('unserved arm: passes unsupported candidate-channel into renderMarkdown for the default tenant', async () => {
     const context = emptyCtx();
     const { assembler, container } = candidateContainer('default', context);
     const { server, handlers } = makeServerStub();
@@ -106,11 +109,32 @@ describe('COD-010 candidate-path code-plane disclosure', () => {
 
     const result = await handlers.get('berry_context')!({ ...CANDIDATE_ARGS, include_code: true });
 
+    expect(assembler.assembleCandidateExecutionServed).not.toHaveBeenCalled();
     expect(assembler.renderMarkdown).toHaveBeenCalledTimes(1);
     expect(assembler.renderMarkdown).toHaveBeenCalledWith({
       ...context,
       code_plane: { outcome: 'unsupported', reason: 'candidate-channel' },
     });
+    expect(result).toEqual({ content: [{ type: 'text', text: '# md' }] });
+  });
+
+  it('served arm: renderMarkdown receives the assembler\'s real code_plane unmodified', async () => {
+    // The exact object the served assembler returns — the tool layer owns none of it.
+    const context: UnifiedContext = {
+      ...emptyCtx(),
+      code_plane: { outcome: 'served', results: 2, candidates: 20 },
+    };
+    const { assembler, container } = candidateContainer('default', context, true);
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+
+    const result = await handlers.get('berry_context')!({ ...CANDIDATE_ARGS, include_code: true });
+
+    expect(assembler.assembleCandidateExecutionServed).toHaveBeenCalledTimes(1);
+    expect(assembler.renderMarkdown).toHaveBeenCalledTimes(1);
+    const rendered = vi.mocked(assembler.renderMarkdown).mock.calls[0]![0];
+    expect(rendered).toBe(context);
+    expect(rendered.code_plane).toEqual({ outcome: 'served', results: 2, candidates: 20 });
     expect(result).toEqual({ content: [{ type: 'text', text: '# md' }] });
   });
 

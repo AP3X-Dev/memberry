@@ -29,6 +29,7 @@ import type {
 } from '@memberry/core';
 import { readEnv } from '@memberry/core';
 import { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from '@memberry/neo4j';
+import { canonicalProjectTag } from '@memberry/code';
 import {
   RankedRuntimeTraceAdapter,
   type RuntimeObserved,
@@ -102,11 +103,11 @@ function snapshotRetrievalOptions<T extends object | undefined>(options: T): T {
 // ─── Dependency interfaces ───────────────────────────────────────────────────
 
 export interface AssemblerCodeLayer {
-  search(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; queryVector?: number[] }): Promise<
+  search(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; project_tag?: string; queryVector?: number[] }): Promise<
     Array<{ id: string; source_type: string; name: string; kind: string; file_path: string; start_line: number; signature: string; doc_comment: string; score: number; language?: string; content?: string }>
   >;
   /** @internal RET-001B1 structural observation; ordinary callers use search(). */
-  searchObserved?(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; queryVector?: number[] }): Promise<RuntimeObserved<
+  searchObserved?(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; project_tag?: string; queryVector?: number[] }): Promise<RuntimeObserved<
     Array<{ id: string; source_type: string; name: string; kind: string; file_path: string; start_line: number; signature: string; doc_comment: string; score: number; language?: string; content?: string }>
   >>;
 }
@@ -500,6 +501,7 @@ export class UnifiedAssembler {
     includeMemory: boolean,
     traced = false,
     multihopProbe?: ServedMultihopProbeV1,
+    options?: { includeCode?: boolean },
   ): Promise<TracedUnifiedContext | { context: UnifiedContext }> {
     assertBoundedQueryInput(task);
     if (this.servedReranker === null || this.servedReranker === undefined) {
@@ -609,11 +611,72 @@ export class UnifiedAssembler {
         }
       }
     }
+    // COD-010b: the candidate runtime composes memory/arch only, so the served
+    // arm fetches code itself and SEEDS it as the `code.fulltext` list before
+    // `lists` is derived — the trace adapter below snapshots its candidates from
+    // `lists`. `.set` (never a second appended list) so an executor that ever
+    // does return real code.fulltext rows cannot double their RRF mass.
+    // Default tenant only: Symbol nodes are not tenant-stamped.
+    const includeCode = options?.includeCode === true;
+    const codeEligible = includeCode && this.codeLayer != null && isDefaultTenant(execution.request.tenantId);
+    let codeCandidates = 0;
+    let codeFailure: 'query-failed' | undefined;
+    if (codeEligible) {
+      const projectTag = canonicalProjectTag(execution.request.projectScope);
+      try {
+        const rows = await this.codeLayer!.search(task, {
+          limit: 20,
+          include_semantics: false,
+          ...(projectTag !== undefined ? { project_tag: projectTag } : {}),
+        });
+        codeCandidates = rows.length;
+        // The executor settles code.fulltext as safe-failure/unavailable, so an
+        // observation for it usually exists and must be REPLACED WHOLESALE (a
+        // patched `outcome` would leave a stray failure `code` on a success). It
+        // may also be absent entirely when the channel settled budget-exceeded
+        // (that settlement is skipped above) — then create it.
+        const observation: RuntimeStructuralObservation = {
+          channels: [{ channel: 'code.fulltext', outcome: 'success' }],
+          candidates: [],
+          finalIds: [],
+        };
+        const existing = observations.findIndex((entry) => entry.channels[0]?.channel === 'code.fulltext');
+        if (existing >= 0) observations[existing] = observation;
+        else observations.push(observation);
+        const codeRows = rows.map((row, index): RetrievalResult => {
+          const privateId = `code.fulltext\u0000${index + 1}\u0000${row.id}`;
+          // The trace validator rejects a raw score whose float form is not its
+          // own rounded form, and that failure latches the whole adapter.
+          const score = Number(row.score.toFixed(6));
+          const content = `**${row.name}** (${row.kind}) — \`${row.file_path}:${row.start_line}\`\n\`${row.signature}\`${row.doc_comment ? '\n> ' + row.doc_comment.split('\n')[0] : ''}`;
+          evidenceByPrivateId.set(privateId, row.id);
+          observation.candidates.push({
+            privateId,
+            sourceType: 'symbol',
+            channels: [{ channel: 'code.fulltext', rank: index + 1, score }],
+            evidence: { confidence: score },
+            estimatedTokens: Math.ceil(content.length / 4),
+          });
+          observation.finalIds.push(privateId);
+          return {
+            id: privateId,
+            source_type: 'symbol',
+            title: `${row.name} (${row.kind})`,
+            content,
+            score,
+            metadata: { kind: row.kind, file_path: row.file_path, confidence: score },
+          };
+        });
+        listsByChannel.set('code.fulltext', codeRows);
+      } catch {
+        codeFailure = 'query-failed';
+      }
+    }
     const lists = execution.request.plannedChannels
       .map((channel) => listsByChannel.get(channel))
       .filter((list): list is RetrievalResult[] => list !== undefined);
     const traceAdapter = traced ? new RankedRuntimeTraceAdapter(observations, lists, {
-      includeCode: false,
+      includeCode: codeEligible,
       includeArchitecture,
       includeMemory,
       projectScopeApplied: true,
@@ -646,8 +709,36 @@ export class UnifiedAssembler {
       (sum, section) => sum + section.items.reduce((itemSum, item) => itemSum + Math.ceil(item.content.length / 4), 0),
       0,
     );
+    // COD-010b: same fail-loud status the legacy arm renders. K counts DELIVERED
+    // symbol items in the FINAL sections, so **Code:** can never contradict the
+    // **Sources:** provenance on the same line.
+    let codePlane: CodePlaneStatusV1 | undefined;
+    if (includeCode) {
+      if (!codeEligible) {
+        codePlane = {
+          outcome: 'unsupported',
+          reason: !isDefaultTenant(execution.request.tenantId) ? 'tenant-scope' : 'code-layer-missing',
+        };
+      } else if (codeFailure !== undefined) {
+        codePlane = { outcome: 'failed', reason: codeFailure };
+      } else {
+        const results = sections.reduce(
+          (sum, section) => section.source_type === 'symbol' ? sum + section.items.length : sum, 0,
+        );
+        codePlane = codeCandidates === 0
+          ? { outcome: 'no-results' }
+          : results === 0
+          ? { outcome: 'no-results', reason: 'budget-evicted', candidates: codeCandidates }
+          : { outcome: 'served', results, candidates: codeCandidates };
+      }
+    }
     const context: UnifiedContext = {
-      task, strategy: 'ranked', sections, token_count: tokenCount, assembled_at: new Date().toISOString(),
+      task,
+      strategy: 'ranked',
+      sections,
+      token_count: tokenCount,
+      assembled_at: new Date().toISOString(),
+      ...(codePlane !== undefined ? { code_plane: codePlane } : {}),
     };
     return { context, ...(traceAdapter ? { trace: traceAdapter.finalize() } : {}) };
   }

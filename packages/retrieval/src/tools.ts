@@ -111,6 +111,7 @@ export interface IUnifiedAssembler {
     includeMemory: boolean,
     traced?: boolean,
     multihopProbe?: ServedMultihopProbeV1,
+    options?: { includeCode?: boolean },
   ): Promise<{ context: UnifiedContext; trace?: RetrievalTraceV1 }>;
 }
 
@@ -523,10 +524,12 @@ export function registerRetrievalTools(
           ? await assembler.assembleCandidateExecutionServed!(
             args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
             servedMultihopProbe(receipt, executeOptions),
+            { includeCode: args.include_code === true },
           )
           : servedCandidate
           ? await assembler.assembleCandidateExecutionServed!(
             args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
+            undefined, { includeCode: args.include_code === true },
           )
           : shadowObserver
           ? assembler.assembleCandidateExecution(
@@ -536,12 +539,14 @@ export function registerRetrievalTools(
           : assembler.assembleCandidateExecution(
             args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
           );
-        // COD-010: the candidate runtime composes memory/arch only — when code
-        // was requested, disclose the drop instead of returning a successful-
+        // COD-010: the UNSERVED candidate runtime composes memory/arch only — when
+        // code was requested, disclose the drop instead of returning a successful-
         // looking context without code. tenant-scope outranks candidate-channel
         // so the stated reason matches the legacy path for the same request.
+        // COD-010b: the SERVED arm fetches code itself and owns the real status,
+        // so its context passes through untouched.
         const md = assembler.renderMarkdown(
-          args.include_code === true
+          args.include_code === true && !servedCandidate
             ? {
               ...assembled.context,
               code_plane: {
@@ -647,10 +652,13 @@ export function registerRetrievalTools(
           ? await assembler.assembleCandidateExecutionServed!(
             args.question, execution, askRetrievalTokenBudget(args.reasoning_level), true, true, false,
             servedMultihopProbe(receipt, executeOptions),
+            // berry_ask has no include_code input, so code is never requested here.
+            { includeCode: false },
           )
           : servedCandidate
           ? await assembler.assembleCandidateExecutionServed!(
             args.question, execution, askRetrievalTokenBudget(args.reasoning_level), true, true, false,
+            undefined, { includeCode: false },
           )
           : shadowObserver
           ? assembler.assembleCandidateExecution(

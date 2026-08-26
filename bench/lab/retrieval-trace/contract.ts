@@ -136,6 +136,10 @@ function inspectMarkdown(
   if (lines[0] !== '# Unified Context' || lines[1] !== `**Task:** ${expectation.expectedTask}`) {
     fail('RET001D_MARKDOWN_REQUEST_MISMATCH');
   }
+  // COD-010b: this pattern is END-ANCHORED, so it assumes the summary line carries
+  // NO trailing ` | **Code:** …` segment. renderMarkdown appends that segment only
+  // when the context has a code_plane, i.e. when the request set include_code —
+  // every live-conformance request literal keeps `include_code: false`.
   const summary = lines[2]?.match(/^\*\*Strategy:\*\* (deterministic|ranked) \| \*\*Tokens:\*\* ~(\d+) \| \*\*Sources:\*\* (.+) \| \*\*IDs:\*\* (\d+)$/);
   if (!summary || summary[1] !== expectation.expectedStrategy) fail('RET001D_MARKDOWN_REQUEST_MISMATCH');
   const tokenCount = Number(summary[2]);
