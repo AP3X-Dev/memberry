@@ -165,11 +165,17 @@ goldenv2-pilot-rework-record
                       ranker something findable at rank 1 and makes top-5
                       composition a property the knobs can move, which is the
                       degree of freedom the flat shape structurally lacks.
-  gridVectors:        <pending>
-  gridSummary:        <pending>
-  interior:           <pending>
-  outcome:            <pending>
-  rejectReason:       <pending>
+  gridVectors:        72
+  gridSummary:        GOLDENV2PILOT preflight ok: no golden-v2 registration, no
+                      candidate env flag, no golden-v2 dataset path
+                      GOLDENV2PILOT vectors=72 interior=0
+                      GOLDENV2PILOT verdict=infeasible
+  interior:           0
+  outcome:            infeasible
+  rejectReason:       control-precision-band-rejected (below band) and
+                      control-stratum-not-mixed (2 of 72 vectors reached even one
+                      clear success in any stratum; the band needs >=3 successes
+                      AND >=3 failures in EVERY stratum)
   candidateState:     absent   (re-asserted at run time by the same preflight)
 ```
 
@@ -211,3 +217,64 @@ so any movement there is the signal that the correction has gone too far.
 including on a pass, before step 1 of the build. A shape that only became feasible
 on the second try is exactly the case a human should see before eight days and two
 version slots are committed to it.
+
+### Attempt 2 result — the mechanism worked, and it was not nearly enough
+
+| | attempt 1 (flat facets) | attempt 2 (primary + supporting) | change |
+|---|---|---|---|
+| max Precision@5 | `0.3111` | `0.3222` | **+0.0111** |
+| max Recall@10 | `0.4444` | `0.4444` | **0.0000** |
+| max saturated queries | `0` | `0` | 0 |
+| structural ceiling | `1.0000` on all 72 | `1.0000` on all 72 | held |
+| vectors with ANY stratum success | `0` of 72 | `2` of 72 | +2 |
+
+The predicted direction was correct — the primary document did lift Precision@5 and
+did produce the first clear successes the design has ever generated. The magnitude
+is the finding: **`+0.011` against a `~0.10` gap to the band floor**, roughly a
+tenth of what was needed, and Recall@10 did not move at all.
+
+The arithmetic explains why, and it is not a tuning problem. Precision@5 is
+`hits@5 / 5`, so one engineered document can contribute at most `+0.2` on a single
+query. A mean gain of `0.011` across the grid means the primary is reaching the top
+5 only occasionally. **A document carrying the subject AND the complete relation
+phrasing at full lexical weight still does not reliably outrank subject-matched
+near-misses in this control.**
+
+That is a statement about the control as much as about the corpus. Under plural
+relevance (`>= 5` relevant documents per query) with `sameSubjectOffRelation`
+distractors, `memberry-retrieval-core-v1` tops out near `0.32` Precision@5 — below
+the `[0.42, 0.58]` band that was pre-registered on the assumption the control could
+reach it.
+
+### Disposition — TOMBSTONE
+
+**The two-shape cap is now exhausted.** Attempt 1 (`facet-decomposition-v1`) and
+attempt 2 (`primary-plus-supporting-v1`) both record `outcome: infeasible`. Spec
+§2.5.6 Rule 2 permits no third shape, and §2.5.6's kill rule leaves exactly one
+remaining path: **tombstone the design and escalate to the owner with the grid.**
+
+What was NOT done, and will not be:
+
+- The band was **never adjusted**, on either attempt. `[0.42, 0.58]` and
+  `[0.45, 0.80]` stand exactly as pre-registered in `bench/lab/ROADMAP.md` at commit
+  `d69a709`, which predates every number in this file.
+- **No instrument version slot was opened.** No dataset byte was generated, no
+  registry entry written, no freeze computed, no receipt produced, no workflow run.
+  Both version slots remain available to a future campaign.
+- No third corpus shape was authored.
+- Nothing from either pilot worktree was committed. `pilot.ts` exists only in the
+  disposable scratch clone and is untracked there.
+
+### What this campaign actually bought
+
+Roughly one day of work, zero hosted CI budget, and zero version slots, in exchange
+for a measured answer to a question that would otherwise have been discovered eight
+days and two irreplaceable version slots later: **the five band terms are not
+jointly satisfiable by this corpus design, and the binding constraint is the
+control's Precision@5 under plural relevance, not the corpus knobs.**
+
+Both structural terms the redesign existed to fix — the `1.0` ceiling and the
+saturation counter — passed on all 144 vectors across both attempts. The golden v1
+defect was genuinely solved. The instrument failed on difficulty calibration
+instead, from the too-hard side, which is the LAB-013 failure mode rather than the
+golden v1 one.
