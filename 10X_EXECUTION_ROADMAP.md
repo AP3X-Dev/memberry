@@ -44,8 +44,9 @@ else is either design detail or a historical record.
 ## Current program position
 
 - **Last updated:** 2026-08-26
-- **Exact remote master:** `2ad56a4fd4da15ee16e5729f4d0bb56f39faf488` (PR #111 —
-  the RET-006 precision gate and its structural-ceiling pin)
+- **Exact remote master:** `3eba9a99` — see `git rev-parse master`; PR #113
+  (COD-010b served code plane). Prior: #111 RET-006 precision gate, #112 roadmap
+  reconciliation.
 - **Active critical-path phase:** Phase 2 — Retrieval 2.0. G2 is the only gate
   still open below the current work front: RET-010's holdout evaluation was
   never authorized or run, and RET-007 is parked blocked on indexing.
@@ -59,9 +60,17 @@ else is either design detail or a historical record.
   lifecycle work that closed G3 improved noise load and calibration, not
   retrieval quality.
 - **Deployment state:** Phase 3 packets are merged, deployed to Cerebro, and
-  live-verified. The COD-010 slice is deployed with the Neuri code index at
-  12,339 symbols. No Retrieval 2.0 capability-policy activation has been
-  authorized.
+  live-verified. **COD-010b deployed 2026-08-26** (master `3eba9a9`); the served
+  code plane is live and verified at `**Code:** served (16 of 20)` on a mixed
+  request. Code index live counts: `project:memberry` 8,928, `project:neuri`
+  12,339, `project:hermes-agent` 15,055, `project:ag3ntic` 5,385, NULL 5,136.
+  No Retrieval 2.0 capability-policy activation has been authorized.
+- **Golden v2 instrument: TOMBSTONED 2026-08-26.** Both permitted corpus shapes
+  measured infeasible before any build; band never adjusted, **zero version slots
+  opened**. The binding constraint is the CONTROL: under plural relevance
+  (>=5 relevant/query) `memberry-retrieval-core-v1` tops out near 0.32 P@5,
+  below the pre-registered `[0.42,0.58]`. Evidence:
+  `bench/lab/golden-v2/CALIBRATION-GOLDEN-V2.md` on branch `feat/ret-golden-v2`.
 
 ## NEXT ACTION
 
@@ -80,12 +89,13 @@ the sequencing decision is the owner's:
    is the measured prerequisite for RET-007 and, per Findings 3 and 4, the lane
    most likely to move retrieval quality off zero. Entry below at the Phase 3
    tail.
-3. **COD-010b.** Spec APPROVED and previously parked behind the RET-007 v4
-   campaign; that campaign has ended, so the lane is released. Restores the code
-   service under the live candidate-channel composition — `runtime-candidate-channel.ts`
-   drops `include_code`, so mixed requests still render `Code: unavailable
-   (candidate-channel)` under the live flags. Re-ground the base against current
-   master before implementing; line numbers have drifted.
+3. ~~**COD-010b.**~~ **CLOSED 2026-08-26** — PR #113 merged as master `3eba9a9`,
+   deployed to cerebro and live-verified. Mixed code+memory requests under the
+   live flags now render `**Code:** served (16 of 20)` with 16 real symbols
+   alongside 29 semantic memories. Verify with:
+   `ssh cerebro@192.168.0.25 "docker exec memberry-mcp grep -c codeEligible /app/packages/retrieval/dist/assembler.js"`
+   (expect ≥1). Raw rendered lines quoted in
+   `docs/agent-runs/run-state-cmp006-headroom-instrument.md`.
 
 Standing scope exclusions, unchanged: keep RET-007 v2 and v3 permanently frozen;
 keep deployment, activation, threshold changes, sealed holdout inspection, new
@@ -123,15 +133,21 @@ relevant tests); the 10,428 stale audit-day clone rows were deleted. Silent empt
 code traces are gone — `berry_context` now states code-plane status per response
 as `served (K of N)` or `unavailable (reason)`.
 
-**Still open.** Mixed code+memory requests under the live flags
+**CLOSED 2026-08-26 by COD-010b** (PR #113, master `3eba9a9`, deployed and
+live-verified). Mixed code+memory requests under the live flags
 (`MEMBERRY_QUERY_PLANNER_V1=1`, `MEMBERRY_CANDIDATE_CHANNEL_V1=1`,
-`MEMBERRY_RERANKER_V1=served`) render `Code: unavailable (candidate-channel)`,
-because `runtime-candidate-channel.ts` has no code option and drops
-`include_code`. COD-010b closes this. Until it does, a Neuri answer may cite
-`berry_code_search` results directly, but must treat a mixed `berry_context`
-request as carrying **no** code evidence, use repository inspection as authority,
-and label retrieved semantic nodes as historical context only. A semantic-only
-answer must never count as code-context success.
+`MEMBERRY_RERANKER_V1=served`) now render `**Code:** served (16 of 20)` and carry
+real `file:line` symbols alongside semantic memory. The guidance below applied
+only while the gap was open and no longer governs.
+
+~~Until it does, a Neuri answer may cite `berry_code_search` results directly, but
+must treat a mixed `berry_context` request as carrying no code evidence…~~
+
+Two constraints that DO survive: a semantic-only answer still never counts as
+code-context success, and a project with no indexed symbols still yields
+`served (0 of 0)` rather than evidence. Check index coverage before trusting a
+code answer — live counts as of 2026-08-26: `project:memberry` 8,928,
+`project:neuri` 12,339, `project:hermes-agent` 15,055, `project:ag3ntic` 5,385.
 
 The exact held-out regression is the integration-Library discovery incident. Given
 the original diagnosis request, MemBerry must retrieve and cite the current Build
@@ -371,8 +387,11 @@ freeze G3, G6, or G8 indefinitely.
   PR #94 c4cd671, deployed, post-master CI 32724618129 green — berry_context now
   states code-plane status per response as "served (K of N)" or "unavailable
   (reason)", and Neuri is indexed at 12,339 symbols. KNOWN GAP closing in
-  COD-010b: mixed requests under the live flags still render "Code: unavailable
-  (candidate-channel)". CORRECTED 2026-08-25 after re-grounding against master —
+  COD-010b — CLOSED 2026-08-26, PR #113 merged as master 3eba9a9, deployed and
+  live-verified at "Code: served (16 of 20)" on a mixed request. The historical
+  diagnosis is retained below because it cost real time to establish and the
+  corrected file anchors are still the right ones for anyone reading this code.
+  CORRECTED 2026-08-25 after re-grounding against master —
   an earlier version of this line blamed runtime-candidate-channel.ts and would
   have sent an implementer to the wrong file. That file does lack a code option,
   but its per-channel "unavailable" is a candidate-channel FAILURE CODE that
@@ -383,9 +402,9 @@ freeze G3, G6, or G8 indefinitely.
   the assembler's assembleCandidateExecutionServed, which is what the approved
   spec says. Note also that berry_context now has TWO served call sites
   (tools.ts:523-526 multihop, :528-531 non-multihop) — patching one leaves the
-  bug alive under the other flag combination. COD-010b spec APPROVED at
-  docs/agent-runs/specs/2026-08-25-cod010b-code-service.md, implementation
-  unstarted — the lane it was parked behind has ended.)`
+  bug alive under the other flag combination. COD-010b spec at
+  docs/agent-runs/specs/2026-08-25-cod010b-code-service.md; implementation plan at
+  docs/agent-runs/plans/2026-08-26-cod010b-implementation.md. SHIPPED.)`
 - [ ] COD-011 — Current worktree and dirty-overlay context. Responses distinguish
   canonical, branch, worktree, dirty, deployed, and unrepresented bytes and attach
   resolvable path/symbol/line/commit anchors.
