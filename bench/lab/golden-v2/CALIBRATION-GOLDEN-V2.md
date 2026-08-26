@@ -123,3 +123,72 @@ Per spec §2.5.6 the permitted responses are exactly two: rework the corpus shap
 once as attempt 2 under the two-shape cap, or tombstone the design and escalate to
 the owner with the grid attached. **The band was not adjusted and will not be.**
 Escalated to the owner with the grid.
+
+**Owner decision (2026-08-26): proceed with the rework as attempt 2**, on the
+explicit condition that the new shape answers the structural question "what lets a
+relevant document rank strongly?" — a reworked shape without that answer would
+spend the last slot to land in the same place.
+
+---
+
+## Feasibility pilot (spec §2.5) — attempt 2
+
+Recorded BEFORE the attempt begins, per §2.5.6 Rule 1.
+
+```
+goldenv2-pilot-rework-record
+  attempt:            2                       (of the 2-shape cap — THE LAST ONE)
+  recordedAt:         2026-08-26
+  shapeId:            primary-plus-supporting-v1
+  parentShapeId:      facet-decomposition-v1
+  changedFrom:        The relevant set stops being a flat set of interchangeable
+                      peers. It becomes ONE primary relevant document that names
+                      the subject, asserts the queried relation, and carries the
+                      relation phrasing at full lexical weight while enumerating
+                      the facet TYPE, plus (relevantPerQuery - 1) supporting
+                      documents that each carry exactly one facet as before. This
+                      deliberately retires generator invariant R5 (no single
+                      memory carries two facet names) for the primary document
+                      only; R5 continues to hold across the supporting set.
+  changeRationale:    Facet decomposition cannot vary top-5 composition
+                      independently of recall, because every relevant document is
+                      lexically interchangeable. Each names the subject exactly
+                      once and asserts exactly one facet, so no relevant document
+                      can rank strongly on its own merits, while every
+                      sameSubjectOffRelation near-miss also names the subject
+                      exactly. The ranker is asked to separate uniformly weak
+                      relevant documents from subject-matched near-misses on
+                      relation phrasing alone, and the shape provides no mechanism
+                      by which any relevant document can concentrate probability
+                      mass in the top 5. Introducing one document that carries
+                      both the subject and the full relation phrasing gives the
+                      ranker something findable at rank 1 and makes top-5
+                      composition a property the knobs can move, which is the
+                      degree of freedom the flat shape structurally lacks.
+  gridVectors:        <pending>
+  gridSummary:        <pending>
+  interior:           <pending>
+  outcome:            <pending>
+  rejectReason:       <pending>
+  candidateState:     absent   (re-asserted at run time by the same preflight)
+```
+
+**Invariants that do NOT move.** `relevantPerQuery >= 5` still holds for every
+query, so the structural Precision@5 ceiling stays exactly `1.0` — that floor is
+the reason this instrument exists and is not negotiable. The band is untouched.
+The strata definitions, split sizes, `k`, the Precision@5 cutoff, `tokenBudget`,
+and the control adapter are untouched. Only the composition of the relevant set
+changes.
+
+**The risk this rework carries, stated before the numbers are seen.** Attempt 1
+failed from the too-hard side. A primary document engineered to rank strongly is a
+correction toward easier, and an over-correction lands on the too-easy side — the
+golden v1 failure this whole instrument was built to escape. The saturation counter
+(`saturatedQueries == 0` in the pilot's interior test) is the term that will catch
+that, and it is the term to watch: attempt 1 scored `0` on it with room to spare,
+so any movement there is the signal that the correction has gone too far.
+
+**After attempt 2, escalation to the owner is MANDATORY regardless of outcome**,
+including on a pass, before step 1 of the build. A shape that only became feasible
+on the second try is exactly the case a human should see before eight days and two
+version slots are committed to it.
