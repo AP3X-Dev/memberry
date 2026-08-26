@@ -1,6 +1,13 @@
 # SEC-001B authenticated runtime binding design
 
-Status: design freeze candidate; no runtime behavior, deployment, or live service is changed by this document.
+Status: IMPLEMENTED — retained as supporting design reference, not as open work.
+The binding described here shipped (`packages/mcp/src/capability-runtime.ts` and
+`packages/core/src/capability-policy.ts`, both present on master `6d2c6f7`; design
+merge `a43a3da`, runtime merge `3c623e8`). Completion state is tracked in
+`10X_EXECUTION_ROADMAP.md`, which is the canonical plan; this file is the design
+detail behind it. The original header read "design freeze candidate; no runtime
+behavior, deployment, or live service is changed by this document" — true when
+written, misleading now. No capability-policy activation has been authorized.
 
 Source custody: exact master `b69caf03c99d2ddb7c69a4429b622d966fd1d81d` (roadmap merge PR #51).
 
