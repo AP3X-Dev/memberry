@@ -580,8 +580,10 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     });
 
     expect(candidateRuntime.execute).toHaveBeenCalledTimes(1);
+    // COD-010b: `options` at position 8 (probe at 7 stays undefined when the
+    // multihop flag is off). Every pre-existing argument claim is unchanged.
     expect(assembler.assembleCandidateExecutionServed).toHaveBeenCalledWith(
-      'served', expect.anything(), 8_000, true, true, false,
+      'served', expect.anything(), 8_000, true, true, false, undefined, { includeCode: false },
     );
     expect(assembler.assembleCandidateExecution).not.toHaveBeenCalled();
     expect(rerankerShadowCoordinator!.trySchedule).not.toHaveBeenCalled();

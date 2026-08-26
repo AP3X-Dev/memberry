@@ -144,10 +144,14 @@ describe('RET-007 v4 served multihop probe factory (flag on)', () => {
     expect(noBridge.probeOutputs).toEqual([null]);
   });
 
-  it('flag off: the served method is called with exactly six arguments and no probe', async () => {
+  it('flag off: the served method is called with no probe (COD-010b: + the code options arg)', async () => {
     const { handlers, assembleCandidateExecutionServed, candidateRuntime } = harness({ flag: false });
     await handlers.get('berry_context')!({ task: 'served', strategy: 'ranked', project_name: 'project:memberry', entity_scope: ['Resolver'], max_tokens: 8_000, include_arch: true, include_memory: true });
-    expect(assembleCandidateExecutionServed.mock.calls[0]).toHaveLength(6);
+    // COD-010b added `options` at position 8, so the flag-off call is 8 args with an
+    // UNDEFINED probe at position 7 — the original "no probe" claim, unweakened.
+    expect(assembleCandidateExecutionServed.mock.calls[0]).toHaveLength(8);
+    expect(assembleCandidateExecutionServed.mock.calls[0]![6]).toBeUndefined();
+    expect(assembleCandidateExecutionServed.mock.calls[0]![7]).toEqual({ includeCode: false });
     expect(candidateRuntime.execute).toHaveBeenCalledTimes(1);
     expect(createRetrievalContainer().multihopExpansionEnabled).toBe(false);
   });
