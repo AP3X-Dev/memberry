@@ -203,11 +203,38 @@ Measured live on the ten-question outcome probe, baseline → after both:
 
 No case regressed; oc-01 2→1, oc-02 5→2, oc-08 MISS→2.
 
-**What this did NOT fix, and lane 2 still must.** Five of ten probe answers are
-absent from the top 10 **entirely** — the right file is never returned, at any
-rank. That is coverage, and no ranking or scoping change reaches it. It is
-exactly the granularity problem described above, and it is now the larger half
-of the remaining gap. The instruments are `bench/eval/run-outcome-probe.mjs`
+**What IDX-002 did not fix turned out not to be granularity at all.**
+
+- **IDX-003** (PR #121, `51fcd99`). `CodeIndexer` was constructed with only a
+  driver — **no embedding provider** — so `symbol.embedding` was never assigned
+  and the branch deriving `mini_vector` never executed. Every symbol ever
+  indexed had both null: **0 embeddings across all 54,314 symbols in all five
+  projects**. `symbol_embedding` was an empty vector index, `code.dense-vector`
+  returned zero rows on every query *while reporting success*, and code search
+  has always been lexical-only. Backfilled 16,399 memberry symbols.
+
+| | before 002A | after 002B | after 003 |
+|---|---|---|---|
+| answerAt1 | 0.1000 | 0.3000 | **0.5000** |
+| answerAt5 | 0.2000 | 0.5000 | **0.6000** |
+| MRR | 0.1619 | 0.4000 | **0.5333** |
+| own code in top 5 | 42% | 100% | 100% |
+
+**The granularity hypothesis was tested and failed.** Excluding variables from
+the pool — the crude form of a coarser chunk — left the same five misses and
+made MRR *worse* (0.3250 vs 0.4000). The misses were never about chunk size;
+they were about there being no semantic retrieval at all. Lane 2 as written
+would have re-chunked a lexical-only index.
+
+**What is now the bottleneck.** With embeddings live, the 11,847 embedded
+variables compete inside the dense channel and crowd real answers out of its
+top-k before fusion sees them: excluding variables recovers **8 of 10** answers
+versus 6. That is a per-channel cap or a kind-aware dense filter — a
+ranking-layer knob, reversible — not an indexer change.
+
+**Still open, same class:** the boot guard added in IDX-003 found **29,269
+`Fact` nodes with zero embeddings** on its first run. Semantic was fixed once,
+Symbol is fixed now, Fact is not. The instruments are `bench/eval/run-outcome-probe.mjs`
 (is the answer there, and how far down) and `bench/eval/scope-probe.mjs` (what
 is occupying the slots).
 
