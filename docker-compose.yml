@@ -99,6 +99,17 @@ services:
       # MEM-002 feature producer: disabled | live (requires the routing shadow
       # above). Deterministic safe-facts envelope for the recommendation only.
       MEMBERRY_ADMISSION_FEATURE_PRODUCER_V1: ${MEMBERRY_ADMISSION_FEATURE_PRODUCER_V1:-disabled}
+      # IDX-002A: rank `variable` and test-path symbols last within the window
+      # code search already returned. Unset = the fused order, unchanged.
+      MEMBERRY_KIND_RANK_V1: ${MEMBERRY_KIND_RANK_V1:-}
+      # IDX-002B: project scope actually scopes — an un-stamped symbol needs path
+      # evidence, and the semantic channel takes the project tag. Unset = the
+      # prior behaviour, in which neither held.
+      MEMBERRY_CODE_SCOPE_V2: ${MEMBERRY_CODE_SCOPE_V2:-}
+      # Phase 3 lifecycle engines: disabled | live.
+      MEMBERRY_LIFECYCLE_V1: ${MEMBERRY_LIFECYCLE_V1:-disabled}
+      MEMBERRY_LIFECYCLE_ANTIENTROPY: ${MEMBERRY_LIFECYCLE_ANTIENTROPY:-disabled}
+      MEMBERRY_LIFECYCLE_HEBBIAN: ${MEMBERRY_LIFECYCLE_HEBBIAN:-disabled}
       MEMBERRY_EMBEDDING_DIM: ${MEMBERRY_EMBEDDING_DIM:-}
       MEMBERRY_MODEL_EXTRACTION: ${MEMBERRY_MODEL_EXTRACTION:-}
       MEMBERRY_MODEL_SYNTHESIS: ${MEMBERRY_MODEL_SYNTHESIS:-}
