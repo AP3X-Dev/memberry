@@ -19,22 +19,10 @@
 // isError, discarding the exact branch this runner exists to separate.
 
 import { readFileSync, writeFileSync } from 'node:fs'
+import { createClient, NON_RETRIEVAL_ERRORS } from './mcp-client.mjs'
 
 const DEFAULT_BASE = 'http://192.168.0.25:3101'
 
-/**
- * Verified live 2026-08-27. Planner rejections arrive as HTTP 200 with isError:true and a bare
- * message; there is no JSON-RPC error member and nothing throws. A runner that inspects
- * response.error sees nothing, feeds this literal string into keyword matching, and scores 0 --
- * reporting a catastrophic regression that is really a config error. This list is why the
- * runner branches on isError BEFORE it scores anything.
- */
-const NON_RETRIEVAL_ERRORS = [
-  'runtime_query_planner:invalid_request',
-  'runtime_query_planner:resolution_failed',
-  'reranker_shadow:prerequisite_unavailable',
-  'reranker_served:prerequisite_unavailable',
-]
 
 /**
  * EVAL-001 spec §2.2.1, pinned. The separator is U+2014 EM DASH (bytes e2 80 94), confirmed at
@@ -63,75 +51,6 @@ function parseArgs(argv) {
     if (argv[i] === '--base') args.base = argv[i + 1]
   }
   return args
-}
-
-// ---- MCP client, ~40 lines, no dependency -------------------------------------------------
-
-function createClient(base, token) {
-  let sessionId = null
-  async function rpc(method, params) {
-    const headers = {
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-      authorization: `Bearer ${token}`,
-    }
-    if (sessionId) headers['mcp-session-id'] = sessionId
-    const res = await fetch(new URL('/mcp', base), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    })
-    const sid = res.headers.get('mcp-session-id')
-    if (sid) sessionId = sid
-    const text = await res.text()
-    if (!text.trim()) return { _status: res.status, _empty: true }
-    // Responses are SSE-framed; the payload is the line beginning "data: ".
-    const dataLine = text.split('\n').find((l) => l.startsWith('data: '))
-    try {
-      return JSON.parse(dataLine ? dataLine.slice(6) : text)
-    } catch {
-      return { _status: res.status, _unparseable: text.slice(0, 400) }
-    }
-  }
-  async function callTool(name, args) {
-    const res = await rpc('tools/call', { name, arguments: args })
-    const result = res?.result
-    const text = (result?.content ?? []).map((c) => c?.text ?? '').join('\n')
-    return { isError: result?.isError === true, text, raw: res }
-  }
-  return {
-    async connect() {
-      await rpc('initialize', {
-        protocolVersion: '2024-11-05',
-        capabilities: {},
-        clientInfo: { name: 'eval001-runner', version: '1' },
-      })
-      await rpc('notifications/initialized', {})
-      if (!sessionId) throw new Error('EVAL001 fatal: no mcp-session-id returned by initialize')
-
-      // Progressive disclosure: the code tools are DISABLED by default. Without this, every
-      // berry_code_search question returns `MCP error -32602: Tool berry_code_search disabled`
-      // as isError -- and the whole code plane, the one the primary defect lives in, silently
-      // becomes unmeasurable. Enabling here is what a real agent does, not a test fixture.
-      //
-      // Two traps, both verified live 2026-08-27:
-      //   - the parameter is `domain`, NOT `tier`
-      //   - passing the wrong parameter returns isError:FALSE with the failure buried in a JSON
-      //     body ({"error":"domain parameter required for enable action"}), so the isError
-      //     branch alone does not catch it. Parse the body.
-      const enable = await callTool('berry_tools', { action: 'enable', domain: 'code' })
-      let enabled = false
-      try {
-        enabled = JSON.parse(enable.text)?.ok === true
-      } catch {
-        enabled = false
-      }
-      const listed = await rpc('tools/list', {})
-      const codeTools = (listed?.result?.tools ?? []).map((t) => t.name).filter((n) => n.includes('code'))
-      return { codeDomainEnabled: enabled, codeToolsVisible: codeTools.length }
-    },
-    callTool,
-  }
 }
 
 // ---- Response parsing ---------------------------------------------------------------------
