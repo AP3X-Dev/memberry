@@ -110,13 +110,22 @@ describe('IDX-002A kind-aware ranking (spec §5.1)', () => {
       'function', 'class', 'method', 'interface', 'type', 'enum', 'module',
       'constant', 'table', 'view', 'resource', 'config',
     ];
+    // AMENDED by IDX-002B. A8 was written to catch exactly one thing: the kind
+    // predicate being widened to sweep up whatever the current complaint is. It
+    // did its job — the semantic-rows finding was left UNFIXED in IDX-002A
+    // rather than smuggled in by widening `kind`. IDX-002B fixes it deliberately
+    // and on a DIFFERENT axis: `source_type`, the closed channel discriminator.
+    // The kind axis stays frozen, which is what A8 exists to guarantee.
     for (const kind of [...liveVocabulary, 'semantic', 'gizmo', '']) {
       expect(noisePenalty(row({ name: 'x', kind, file_path: 'src/x.ts' }))).toBe(0);
     }
     expect(noisePenalty(row({ name: 'x', kind: 'variable', file_path: 'src/x.ts' }))).toBe(1);
 
-    // A semantic row as `semanticVectorSearch` emits it (search.ts:529-531).
-    expect(noisePenalty(row({ name: '[Semantic] abc', kind: 'semantic', file_path: '' }))).toBe(0);
+    // A semantic row as `semanticVectorSearch` emits it (search.ts:545-557):
+    // penalised for its source_type, never for its kind string.
+    const memory = row({ name: '[Semantic] abc', kind: 'semantic', file_path: '' });
+    expect(noisePenalty({ ...memory, source_type: 'semantic' })).toBe(3);
+    expect(noisePenalty({ ...memory, source_type: 'symbol' })).toBe(0);
   });
 
   it("A9 — frozen path list, case-insensitive, and an absent file_path is not a test path", () => {

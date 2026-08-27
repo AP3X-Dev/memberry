@@ -63,10 +63,40 @@ interface SymbolScopeOptions {
 export const KIND_RANK_FLAG = 'MEMBERRY_KIND_RANK_V1';
 const KIND_RANK_V1 = process.env[KIND_RANK_FLAG] === '1';
 
-/** 0 = keep, 1 = one strike, 2 = both. No weights: this is a comparator, not a score. */
+/**
+ * IDX-002B: a non-code row outranks nothing in a CODE search. `semanticVectorSearch`
+ * emits `file_path: ''` and `start_line: 0`, so a memory row can never answer "where
+ * is this in the code" — yet it scored 0 here and therefore sorted ABOVE every
+ * `variable`. Measured on the live box 2026-08-27: 28 of 50 top-5 slots.
+ *
+ * Keyed on `source_type` (the channel-assigned discriminator, closed at
+ * 'symbol' | 'semantic'), NOT on `kind` — `kind` is open vocabulary from the
+ * parser, and a symbol whose kind happens to read 'semantic' is still code.
+ *
+ * 3 dominates the 0..2 code band, so the bands never interleave.
+ */
+const NON_CODE_PENALTY = 3;
+
+/** 0 = keep, 1 = one strike, 2 = both, 3 = not code at all. A comparator, not a score. */
 export function noisePenalty(r: CodeSearchResult): number {
+  if (r.source_type === 'semantic') return NON_CODE_PENALTY;
   return (r.kind === 'variable' ? 1 : 0) + (isTestPath(r.file_path) ? 1 : 0);
 }
+
+// ─── IDX-002B: project scope actually scopes (flagged, default OFF) ──────────
+
+/**
+ * Process flag, read ONCE at module load. '1' = on; anything else = shipped behaviour.
+ *
+ * Two leaks, one switch, because they are the same defect on two channels:
+ *   - the un-stamped-symbol fallback admits EVERY un-stamped symbol in the graph
+ *     when no path hint narrows it (5,136 on the live box, none of them the
+ *     scoped project's);
+ *   - the semantic channel is not scoped at all.
+ * Separate from KIND_RANK_V1 so either mechanism can be reverted alone.
+ */
+export const CODE_SCOPE_FLAG = 'MEMBERRY_CODE_SCOPE_V2';
+const CODE_SCOPE_V2 = process.env[CODE_SCOPE_FLAG] === '1';
 
 /** Stable sort in place. Permutation of the input window; length and ids are invariant. */
 export function rankByNoise(rows: CodeSearchResult[]): CodeSearchResult[] {
@@ -186,8 +216,8 @@ export class CodeSearch {
         : this.lexicalVectorSearch(query, limit, options),
       includeSemantics
         ? observed
-          ? this.semanticVectorSearch(query, limit, options?.as_of, queryVectorPromise, settle)
-          : this.semanticVectorSearch(query, limit, options?.as_of, queryVectorPromise)
+          ? this.semanticVectorSearch(query, limit, options?.as_of, options?.project_tag, queryVectorPromise, settle)
+          : this.semanticVectorSearch(query, limit, options?.as_of, options?.project_tag, queryVectorPromise)
         : Promise.resolve([]),
     ] as const;
     let fulltextResults: CodeSearchResult[];
@@ -516,6 +546,7 @@ export class CodeSearch {
     query: string,
     limit: number,
     asOf?: string,
+    projectTag?: string,
     queryVectorPromise?: Promise<number[] | null>,
     observe?: (entry: InternalRetrievalChannelObservation) => void,
   ): Promise<CodeSearchResult[]> {
@@ -529,17 +560,34 @@ export class CodeSearch {
       const queryEmbedding = queryVectorPromise ? await queryVectorPromise : await this.embedding.embed(query);
       if (!queryEmbedding) return [];
       const semanticLimit = Math.min(limit, 10);
-      const candidateLimit = candidateLimitForTemporalFilter(semanticLimit, Boolean(asOf));
+      // IDX-002B: the memory channel was the ONLY channel with no project scope —
+      // a search scoped to one project drew memories from every project in the
+      // graph (on the live box, 101 of 192 project-tagged memories were the
+      // scoped project's; the rest were other people's). Filtering happens after
+      // the vector index returns, so overfetch for it exactly as as_of does.
+      const scopeTag = CODE_SCOPE_V2 ? projectTag?.trim() : undefined;
+      const candidateLimit = candidateLimitForTemporalFilter(
+        semanticLimit,
+        Boolean(asOf) || Boolean(scopeTag),
+      );
       const session = this.driver.session();
       try {
         // When as_of is provided, post-filter semantic nodes to those created before the cutoff
-        const temporalFilter = asOf ? 'WHERE s.created_at <= $asOf' : '';
+        const conditions: string[] = [];
+        if (asOf) conditions.push('s.created_at <= $asOf');
+        if (scopeTag) conditions.push('$project_tag IN s.tags');
+        const temporalFilter = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
         const result = await session.run(
           `CALL db.index.vector.queryNodes('semantic_embedding', $limit, $embedding)
            YIELD node AS s, score
            ${temporalFilter}
            RETURN s, score`,
-          { limit: neo4j.int(candidateLimit), embedding: queryEmbedding, ...(asOf ? { asOf } : {}) },
+          {
+            limit: neo4j.int(candidateLimit),
+            embedding: queryEmbedding,
+            ...(asOf ? { asOf } : {}),
+            ...(scopeTag ? { project_tag: scopeTag } : {}),
+          },
         );
 
         const value = result.records.map((r) => {
@@ -651,8 +699,13 @@ function buildSymbolScopeCypher(
         params,
       };
     }
+    // IDX-002B: with no path hint an un-stamped symbol carries NO evidence of
+    // belonging to this project, so the legacy fallback admits the whole graph.
+    // Under V2 the tag must match; the path-hinted fallback above is untouched.
     return {
-      clause: `(${alias}.project_tag = $project_tag OR ${alias}.project_tag IS NULL)`,
+      clause: CODE_SCOPE_V2
+        ? `${alias}.project_tag = $project_tag`
+        : `(${alias}.project_tag = $project_tag OR ${alias}.project_tag IS NULL)`,
       params,
     };
   }
@@ -692,13 +745,24 @@ function applyScopePostFilter<T extends ScopeScratch>(
       if (r.project_tag === tag) return true; // PRIMARY: stored canonical tag
       if (r.project_tag) return false;         // stamped for a different project
       // FALLBACK: legacy un-stamped symbol — admit, narrowed by path hint if given.
-      return fp ? includesCaseInsensitive(r.file_path, fp) : true;
+      // IDX-002B mirrors buildSymbolScopeCypher exactly: an un-stamped row with no
+      // path evidence is rejected under V2. The two must agree or the vector path
+      // re-admits what the fulltext WHERE just excluded.
+      if (fp) return includesCaseInsensitive(r.file_path, fp);
+      return !CODE_SCOPE_V2;
     });
   }
 
   if (fp) return results.filter((r) => includesCaseInsensitive(r.file_path, fp));
   return results;
 }
+
+/**
+ * @internal IDX-002B B12/B13 assert the post-filter and the Cypher agree under
+ * both flag states. Exported (not re-implemented in the test) so the assertion
+ * binds to the shipped predicate rather than a copy of it.
+ */
+export const applyScopePostFilterForTest = applyScopePostFilter;
 
 /** Drop the scratch `project_tag` field so the public CodeSearchResult shape is unchanged. */
 function stripScratch<T extends { project_tag?: string }>(r: T): Omit<T, 'project_tag'> {

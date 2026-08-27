@@ -96,19 +96,36 @@ describe('IDX-002A frozen live-window replay (spec §5.2)', () => {
     expect(rankOf(before, idFor('UnifiedAssembler'))).toBe(fixture.beforeRanks.UnifiedAssembler);
     expect(rankOf(after, idFor('UnifiedAssembler'))).toBe(1);
     expect(rankOf(before, idFor('assembleCandidateExecution'))).toBe(fixture.beforeRanks.assembleCandidateExecution);
-    expect(rankOf(after, idFor('assembleCandidateExecution'))).toBe(5);
+    // IDX-002B: 5 -> 2. The three memory rows that held ranks 2-4 are no longer
+    // ahead of it, so the second real answer moves up three places.
+    expect(rankOf(after, idFor('assembleCandidateExecution'))).toBe(2);
     expect(testPathsInTop5(before)).toBe(2);
-    expect(testPathsInTop5(after)).toBe(0);
+    // IDX-002B COST, recorded not buried: 0 -> 1. With the memory rows exiled to
+    // the tail, ranks 3-5 are filled by the next-best rows this window HAS, and
+    // the best remaining are penalty-1 code — two plain variables and one
+    // function that happens to live in a test file. Exiling non-code does not
+    // conjure good code; it stops promoting rows that answer nothing. A window
+    // with only noisy code left will show noisy code.
+    expect(testPathsInTop5(after)).toBe(1);
   });
 
-  // Spec §8 addendum (found during the dry run): the predicate's deliberate narrowness
-  // means `semantic` rows score 0 and therefore rise with the code rows. On this window
-  // they occupy ranks 2-4 of a CODE search. Pinned so it is a visible, deliberate fact
-  // rather than a surprise — widening the predicate to fix it is a separate packet.
-  it('records that non-code rows float up with the promoted code rows', () => {
+  // Spec §8 addendum, CLOSED by IDX-002B. IDX-002A's narrow predicate scored
+  // `semantic` rows 0, so they rose WITH the promoted code rows and took ranks
+  // 2-4 of a code search. That was pinned here as a deliberate visible fact and
+  // named as a separate packet; this is that packet. The memory rows now sort
+  // behind every code row, and the top 5 is code end to end.
+  it('ranks code ahead of non-code across the whole window', () => {
     const kinds = after.slice(0, 5).map((r) => r.kind);
     console.log(`[§8] kinds in top 5 after: ${kinds.join(', ')}`);
-    expect(kinds).toEqual(['class', 'semantic', 'semantic', 'semantic', 'method']);
+    expect(kinds).toEqual(['class', 'method', 'variable', 'variable', 'function']);
+    expect(after.slice(0, 5).every((r) => r.source_type !== 'semantic')).toBe(true);
+
+    // Never excluded — every memory row is still here, at the tail where a code
+    // search should put it. Six in, six out.
+    const semanticRanks = after
+      .map((r, i) => (r.source_type === 'semantic' ? i + 1 : null))
+      .filter((n): n is number => n !== null);
+    expect(semanticRanks).toEqual([15, 16, 17, 18, 19, 20]);
   });
 });
 
