@@ -179,6 +179,38 @@ and `.test.` paths. It needs no calibration — "a local variable is not a bette
 answer than the class it lives in" is true before any measurement, so it is a
 mechanism fix, not tuning to a score.
 
+**DONE, and it was worth more than "cheap cleanup" suggested.**
+
+- **IDX-002A** (PR #118, `3874f7a`) shipped that ranking behind
+  `MEMBERRY_KIND_RANK_V1`, live since 2026-08-27.
+- **IDX-002B** (PR #119, `afcf3b2`) fixed what measuring 002A exposed. A
+  `berry_code_search` scoped to one project was returning **42% of that
+  project's code** in its top 5. The rest was memory prose with no file or line
+  (28 of 50 slots — the kind predicate scored them 0, so 002A's sort actively
+  promoted them above code) and another project's source, admitted because the
+  un-stamped-symbol scope fallback had no path constraint. The semantic channel
+  had no project scope at all. Behind `MEMBERRY_CODE_SCOPE_V2`, live.
+
+Measured live on the ten-question outcome probe, baseline → after both:
+
+| | before 002A | after 002B |
+|---|---|---|
+| the project's own code in top 5 | 42% | **100%** |
+| answerAt5 | 0.4000 | **0.5000** |
+| MRR | 0.2700 | **0.4000** |
+| memory rows in top 5 | 28 of 50 | **0** |
+| foreign / stale rows in top 5 | 1 | **0** |
+
+No case regressed; oc-01 2→1, oc-02 5→2, oc-08 MISS→2.
+
+**What this did NOT fix, and lane 2 still must.** Five of ten probe answers are
+absent from the top 10 **entirely** — the right file is never returned, at any
+rank. That is coverage, and no ranking or scoping change reaches it. It is
+exactly the granularity problem described above, and it is now the larger half
+of the remaining gap. The instruments are `bench/eval/run-outcome-probe.mjs`
+(is the answer there, and how far down) and `bench/eval/scope-probe.mjs` (what
+is occupying the slots).
+
 **The discipline that survives the direction change.** Never tune weights because
 a number moved on the same queries used to choose them; that is measuring on
 train, and it is how golden v2 died. Fix mechanisms with a priori justification,
