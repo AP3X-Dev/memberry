@@ -1,0 +1,11 @@
+# Raw mined population. Contains verbatim agent task strings from ALL projects on this
+# workstation, including third-party client names and business context. memberry is a
+# PUBLIC repo -- this file must never be committed. Reproduce it with:
+#   node bench/eval/mine-queries.mjs
+mined-queries.jsonl
+
+# Run artifact. Regenerable, and may carry per-question detail.
+last-run.json
+
+# Third-party term denylist for exclusion ground E6. Never commit.
+.foreign-terms

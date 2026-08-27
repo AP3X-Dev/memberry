@@ -43,10 +43,19 @@ else is either design detail or a historical record.
 
 ## Current program position
 
-- **Last updated:** 2026-08-26
-- **Exact remote master:** `3eba9a99` — see `git rev-parse master`; PR #113
-  (COD-010b served code plane). Prior: #111 RET-006 precision gate, #112 roadmap
-  reconciliation.
+- **Last updated:** 2026-08-27
+- **Exact remote master:** `a1439fb` — see `git rev-parse master`; PR #116
+  (docs/new-direction-eval-first). Prior: #113 COD-010b served code plane,
+  #115 RET golden v2 tombstone, #111 RET-006 precision gate.
+  **The deployed box runs `3eba9a9`, 12 commits behind — but
+  `git diff --stat 3eba9a9..a1439fb -- packages/ src/` is EMPTY, so deployed code
+  is identical to master code and the delta is docs-only.**
+- **Test ratchet:** 3,631 passed / <=72 skipped per Node major (3579 → 3621 PR #109
+  → 3631 PR #113). The 3579 in `run-state-cod010b.md` and 3621 in
+  `run-state-ret007-v4.md` are both superseded. There is **no mechanical
+  enforcement** anywhere — no count check in `package.json`, `ci.yml`, or
+  `scripts/`; it is a verifier obligation to sum the "N passed" lines on both
+  Node majors.
 - **Active critical-path phase:** Phase 2 — Retrieval 2.0. G2 is the only gate
   still open below the current work front: RET-010's holdout evaluation was
   never authorized or run, and RET-007 is parked blocked on indexing.
@@ -94,22 +103,50 @@ We reproduced that result at a cost of one day. Do not build a third one.
 
 ### The measured problem, from the live index
 
-`project:memberry`, 8,928 indexed symbols:
+**RE-MEASURED 2026-08-27 against the live graph. The numbers below replace the
+2026-08-26 figures, which are superseded — the index grew 83.7% since.**
+
+`project:memberry`, **16,399** indexed symbols (was 8,928):
 
 | kind | count | share |
 |---|---|---|
-| `variable` | 6,597 | **74%** |
-| function | 1,192 | 13% |
-| method | 646 | 7% |
-| interface | 340 | 4% |
-| class | 75 | 0.8% |
-| from test files | 3,084 | **34%** |
+| `variable` | 11,847 | **72.2%** |
+| function | 2,589 | 15.8% |
+| method | 880 | 5.4% |
+| interface | 654 | 4.0% |
+| type | 254 | 1.5% |
+| class | 155 | 0.9% |
+| module | 20 | 0.1% |
+| from test files | 8,344 | **50.9%** |
+| bare variable (empty `doc_comment`) | 10,996 | **67.1%** |
 
-Ranking sorts on raw fulltext score (`ORDER BY score DESC`) with exactly one
-adjustment anywhere (`* 0.8` discounting semantics). `SymbolKind` exists in the
-schema and is **never used for ranking**; test paths get no treatment at all. A
-live query for assembler internals returned `class UnifiedAssembler` alongside six
-copies of `session: () => session` from test files.
+**Test-file contamination is now HALF the index, not a third.** Other project tags
+are unchanged: hermes-agent 15,055, neuri 12,339, ag3ntic 5,385, NULL 5,136.
+
+**CORRECTION — the ranking description below was wrong and cost a wrong mental
+model.** Ranking is NOT `ORDER BY score DESC` with one `* 0.8` adjustment. That
+`ORDER BY` (`packages/code/src/search.ts:348`) sorts one of four channels. The final
+rank is `rrfFusion` (k=60), which **discards raw scores** for `1/(k+rank+1)` sums,
+followed by feedback boosts, a `{symbol: 0.25}` source-type boost
+(`scoring.ts:233-240`), a multiplicative lexical text boost (`assembler.ts:1338-1341`),
+MMR diversity, dedup, and the served reranker. The `* 0.8` semantics discount
+(`search.ts:535`) **never fires** on this path — the assembler passes
+`include_semantics: false` (`assembler.ts:1119`, `:629`).
+
+What DOES hold: `SymbolKind` is **never used for ranking** — it is only an equality
+filter and is explicitly stripped from the title before scoring by `stripKindSuffix`
+(`scoring.ts:103-105`). Note `inferSourceTypeBoost` boosts source_type `symbol`, not
+SymbolKind, so a query containing "class" boosts variables just as much as classes.
+
+Test-path handling is **not uniformly absent**, and the split is worse than either
+half: the bulk indexer applies none (`indexer.ts:450-478`), but `CodeWatcher`
+excludes `.test.`, `.spec.`, `__tests__`, `__mocks__` by default
+(`watcher.ts:47-49`). So a full re-index admits test symbols and the incremental
+watch then never refreshes or deletes them.
+
+A live query for assembler internals returned `class UnifiedAssembler` at rank 4,
+behind `results` (variable, test file), `ranked` (variable), and `compose` (function,
+test file). Re-confirmed live 2026-08-27.
 
 ### The lanes, in order
 
