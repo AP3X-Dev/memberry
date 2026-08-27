@@ -70,6 +70,11 @@ async function embedBatch(texts) {
 const scope = PROJECT ? 'AND s.project_tag = $project' : '';
 const session = driver.session();
 let done = 0, skipped = 0;
+// The batch query re-selects `WHERE s.embedding IS NULL` each pass, so it only
+// advances because the previous pass WROTE. If a write silently fails — or in a
+// dry run, where none happen — the identical rows come back forever. Track ids
+// and stop the moment a pass yields nothing new.
+const seen = new Set();
 try {
   const countRes = await session.run(
     `MATCH (s:Symbol) WHERE s.embedding IS NULL ${scope} RETURN count(s) AS n`,
@@ -90,9 +95,16 @@ try {
     if (res.records.length === 0) break;
 
     const rows = res.records.map((r) => ({ id: r.get('id'), text: vectorText(r) }));
-    const usable = rows.filter((r) => r.text.trim().length > 0);
-    skipped += rows.length - usable.length;
-    if (usable.length === 0) break;
+    const fresh = rows.filter((r) => !seen.has(r.id));
+    if (fresh.length === 0) {
+      console.error(`  STOPPING: a batch returned ${rows.length} rows and none were new. ` +
+        'The cursor is not advancing — writes are not landing. Nothing further attempted.');
+      break;
+    }
+    for (const r of fresh) seen.add(r.id);
+    const usable = fresh.filter((r) => r.text.trim().length > 0);
+    skipped += fresh.length - usable.length;
+    if (usable.length === 0) continue;
 
     if (DRY_RUN) {
       done += usable.length;
