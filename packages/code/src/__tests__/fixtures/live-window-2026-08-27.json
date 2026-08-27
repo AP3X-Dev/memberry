@@ -1,0 +1,187 @@
+{
+  "capturedAt": "2026-08-27",
+  "capturedBeforeAnyImplementationEdit": true,
+  "query": "How does the unified assembler compose the code plane and fuse ranked results?",
+  "projectScope": "project:memberry",
+  "tool": "berry_code_search",
+  "limit": 20,
+  "idNote": "ids are synthesised as file_path:start_line:name — berry_code_search returns no node id (tools.ts:200 emits a plain object map).",
+  "answerIds": [
+    "/workspace/memberry/packages/retrieval/src/assembler.ts:295:UnifiedAssembler",
+    "/workspace/memberry/packages/retrieval/src/assembler.ts:397:assembleCandidateExecution"
+  ],
+  "rows": [
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/__tests__/tools.multihop.test.ts:71:assembler",
+      "name": "assembler",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/__tests__/tools.multihop.test.ts",
+      "start_line": 71,
+      "score": 0.0299
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/assembler.ts:2418:ranked",
+      "name": "ranked",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/assembler.ts",
+      "start_line": 2418,
+      "score": 0.0258
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/assembler.ts:295:UnifiedAssembler",
+      "name": "UnifiedAssembler",
+      "kind": "class",
+      "file_path": "/workspace/memberry/packages/retrieval/src/assembler.ts",
+      "start_line": 295,
+      "score": 0.0164
+    },
+    {
+      "id": ":null:[Semantic] semantic-dec",
+      "name": "[Semantic] semantic-dec",
+      "kind": "semantic",
+      "file_path": "",
+      "start_line": null,
+      "score": 0.0164
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/__tests__/scoring.test.ts:168:stats",
+      "name": "stats",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/__tests__/scoring.test.ts",
+      "start_line": 168,
+      "score": 0.0161
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/__tests__/code-plane-candidate.test.ts:191:results",
+      "name": "results",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/__tests__/code-plane-candidate.test.ts",
+      "start_line": 191,
+      "score": 0.0161
+    },
+    {
+      "id": ":null:[Semantic] semantic-dec",
+      "name": "[Semantic] semantic-dec",
+      "kind": "semantic",
+      "file_path": "",
+      "start_line": null,
+      "score": 0.0161
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/multihop-expansion.ts:209:ranked",
+      "name": "ranked",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/multihop-expansion.ts",
+      "start_line": 209,
+      "score": 0.0159
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/__tests__/assembler.resolved-ids.test.ts:83:assembler",
+      "name": "assembler",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/__tests__/assembler.resolved-ids.test.ts",
+      "start_line": 83,
+      "score": 0.0159
+    },
+    {
+      "id": ":null:[Semantic] semantic-dec",
+      "name": "[Semantic] semantic-dec",
+      "kind": "semantic",
+      "file_path": "",
+      "start_line": null,
+      "score": 0.0159
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/assembler.ts:397:assembleCandidateExecution",
+      "name": "assembleCandidateExecution",
+      "kind": "method",
+      "file_path": "/workspace/memberry/packages/retrieval/src/assembler.ts",
+      "start_line": 397,
+      "score": 0.0156
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/__tests__/query-input-boundary.test.ts:68:assembler",
+      "name": "assembler",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/__tests__/query-input-boundary.test.ts",
+      "start_line": 68,
+      "score": 0.0156
+    },
+    {
+      "id": ":null:[Semantic] semantic-dec",
+      "name": "[Semantic] semantic-dec",
+      "kind": "semantic",
+      "file_path": "",
+      "start_line": null,
+      "score": 0.0156
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/__tests__/reranker-shadow.test.ts:65:assembler",
+      "name": "assembler",
+      "kind": "function",
+      "file_path": "/workspace/memberry/packages/retrieval/src/__tests__/reranker-shadow.test.ts",
+      "start_line": 65,
+      "score": 0.0154
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/__tests__/assembler-provider-boundary.test.ts:94:assembler",
+      "name": "assembler",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/__tests__/assembler-provider-boundary.test.ts",
+      "start_line": 94,
+      "score": 0.0154
+    },
+    {
+      "id": ":null:[Semantic] sem-JjtbRjx6",
+      "name": "[Semantic] sem-JjtbRjx6",
+      "kind": "semantic",
+      "file_path": "",
+      "start_line": null,
+      "score": 0.0154
+    },
+    {
+      "id": "/workspace/memberry/packages/core/src/__tests__/ranking.inference.test.ts:30:ranked",
+      "name": "ranked",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/core/src/__tests__/ranking.inference.test.ts",
+      "start_line": 30,
+      "score": 0.0152
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/__tests__/retrieval-fault-policy.test.ts:178:assembler",
+      "name": "assembler",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/__tests__/retrieval-fault-policy.test.ts",
+      "start_line": 178,
+      "score": 0.0152
+    },
+    {
+      "id": ":null:[Semantic] Z9FiBkobgq-C",
+      "name": "[Semantic] Z9FiBkobgq-C",
+      "kind": "semantic",
+      "file_path": "",
+      "start_line": null,
+      "score": 0.0152
+    },
+    {
+      "id": "/workspace/memberry/packages/retrieval/src/__tests__/trace.test.ts:994:ranked",
+      "name": "ranked",
+      "kind": "variable",
+      "file_path": "/workspace/memberry/packages/retrieval/src/__tests__/trace.test.ts",
+      "start_line": 994,
+      "score": 0.0149
+    }
+  ],
+  "answerKeyJustification": {
+    "authoredBeforeTheSortExisted": true,
+    "rule": "Each id is justified by a file:line citation into the implementation. A row kind must NOT appear in any justification.",
+    "/workspace/memberry/packages/retrieval/src/assembler.ts:295:UnifiedAssembler": "assembler.ts:296 declares the type that owns the compose-and-fuse pipeline the question asks about: it performs the code-plane fetch at assembler.ts:627-631 (codeLayer.search with include_semantics:false) and the ranked fusion at assembler.ts:693 (rrfFusion(lists,50,60,...)).",
+    "/workspace/memberry/packages/retrieval/src/assembler.ts:397:assembleCandidateExecution": "assembler.ts:395-396 carries the verbatim docstring \"compose authority-bound channel candidates through the established ranked fusion, MMR, dedup, and token-budget pipeline\" — a direct restatement of the question.",
+    "excluded:/workspace/memberry/packages/retrieval/src/assembler.ts:2418:ranked": "EXCLUDED on pipeline stage, not on kind. assembler.ts:2419 shows it is const ranked = firstFit(results) inside groupAndBudget (declared :2378), the token-budget packer — downstream of the fusion the question asks about. Had this been the fusion call it would be in the key regardless of what kind it carries."
+  },
+  "beforeRanks": {
+    "UnifiedAssembler": 3,
+    "assembleCandidateExecution": 11,
+    "minAnswerRankBefore": 3
+  }
+}
