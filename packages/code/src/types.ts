@@ -41,6 +41,23 @@ export function isMcpConfigBasename(name: string): boolean {
   return MCP_CONFIG_BASENAMES.has(name.toLowerCase());
 }
 
+/** The repo's single definition of a test path. Shared with CodeWatcher's skipTests. */
+export const TEST_FILE_PATTERNS = ['.test.', '.spec.', '__tests__', '__mocks__'];
+
+/**
+ * True when `filePath` looks like a test or mock file.
+ *
+ * Accepts an absent path on purpose: `semanticVectorSearch` emits `file_path: ''`
+ * (search.ts:530) and `CodeSearchResult.file_path` is not guaranteed non-null for
+ * every channel at runtime. This runs inside the live search path, so an absent
+ * path must mean "not a test path", never a throw.
+ */
+export function isTestPath(filePath: string | null | undefined): boolean {
+  if (!filePath) return false;
+  const lower = filePath.toLowerCase();
+  return TEST_FILE_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
 /**
  * Resolve a file's language by BASENAME first (for config files whose extname is
  * unhelpful, e.g. `.mcp.json`), then by extension. Returns undefined for files

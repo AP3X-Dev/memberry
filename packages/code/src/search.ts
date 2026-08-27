@@ -4,6 +4,7 @@
 
 import neo4j, { type Driver } from 'neo4j-driver';
 import type { CodeSearchResult, CodeContext } from './types.js';
+import { isTestPath } from './types.js';
 import type {
   EmbeddingProvider,
 } from '@memberry/core';
@@ -54,6 +55,22 @@ interface SymbolScopeOptions {
   file_path?: string;
   kind?: string;
   project_tag?: string;
+}
+
+// ─── IDX-002A: kind / test-path rank prior (flagged, default OFF) ────────────
+
+/** Process flag, read ONCE at module load. '1' = on; anything else = baseline order. */
+export const KIND_RANK_FLAG = 'MEMBERRY_KIND_RANK_V1';
+const KIND_RANK_V1 = process.env[KIND_RANK_FLAG] === '1';
+
+/** 0 = keep, 1 = one strike, 2 = both. No weights: this is a comparator, not a score. */
+export function noisePenalty(r: CodeSearchResult): number {
+  return (r.kind === 'variable' ? 1 : 0) + (isTestPath(r.file_path) ? 1 : 0);
+}
+
+/** Stable sort in place. Permutation of the input window; length and ids are invariant. */
+export function rankByNoise(rows: CodeSearchResult[]): CodeSearchResult[] {
+  return rows.sort((a, b) => noisePenalty(a) - noisePenalty(b));
 }
 
 export class CodeSearch {
@@ -195,6 +212,10 @@ export class CodeSearch {
     // RRF fusion across all result lists (source_type already set per list)
     const allLists: CodeSearchResult[][] = [fulltextResults, lexicalResults, vectorResults, semanticResults];
     const fused = rrfFusion(allLists, limit);
+    // IDX-002A: rank prior, behind KIND_RANK_FLAG (default OFF = baseline order).
+    // Within the window rrfFusion already returned, `variable` symbols and test-path
+    // symbols sort last. Stable sort => a permutation of that window, never a filter.
+    if (KIND_RANK_V1) rankByNoise(fused);
 
     if (!observed) return fused;
 

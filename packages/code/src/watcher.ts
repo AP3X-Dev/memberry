@@ -7,7 +7,7 @@ import { createHash } from 'crypto';
 import { extname, resolve, sep } from 'path';
 import type { FSWatcher } from 'fs';
 import { isRealpathWithinBase, getAllowedBaseDir } from '@memberry/core';
-import { LANGUAGE_EXTENSIONS } from './types.js';
+import { LANGUAGE_EXTENSIONS, isTestPath } from './types.js';
 
 // ─── Injected interfaces ───────────────────────────────────────────────────
 
@@ -42,10 +42,6 @@ const DEFAULT_EXCLUDE_PATTERNS = [
   'node_modules', 'dist', '.git', 'vendor', '__pycache__', 'build',
   'coverage', '.next', '.venv', 'venv', 'env', '.env', 'target',
   '.amp', '.lab', '.yggdrasil', '.codebase', '.nyc_output',
-];
-
-const TEST_FILE_PATTERNS = [
-  '.test.', '.spec.', '__tests__', '__mocks__',
 ];
 
 // ─── File path extraction ───────────────────────────────────────────────────
@@ -265,10 +261,7 @@ export class CodeWatcher {
       if (this.excludePatterns.has(part)) return false;
     }
 
-    if (this.skipTests) {
-      const lowerPath = filePath.toLowerCase();
-      if (TEST_FILE_PATTERNS.some((pattern) => lowerPath.includes(pattern))) return false;
-    }
+    if (this.skipTests && isTestPath(filePath)) return false;
 
     return true;
   }
