@@ -22,11 +22,12 @@ import { generateMiniVector } from '../packages/code/dist/vectors.js';
 
 const env = {};
 try {
-  for (const line of readFileSync('.env', 'utf8').split('\n')) {
+  for (const line of readFileSync('.env', 'utf8').split(/\r?\n/)) {
+    // Split on /\r?\n/, not '\n': this .env has MIXED line endings, and JS
+    // treats CR as a line terminator so `.` will not match it. `(.*)$` then
+    // fails to match a CRLF line AT ALL and that variable silently goes
+    // missing -- which reads as "key not set" rather than "key has a stray byte".
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
-    // .trim() is load-bearing: a CRLF .env leaves a trailing CR on every value,
-    // and a key with CR on the end fails as "not a legal HTTP header value"
-    // rather than as an auth error, which sends you looking in the wrong place.
     if (m) env[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
   }
 } catch { /* no .env — rely on process.env */ }
