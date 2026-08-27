@@ -6,6 +6,7 @@ export type { SchemaVerification } from './schema.js';
 export {
   runMigrations,
   checkVectorIndexDimensions,
+  checkEmptyVectorIndexes,
   MIGRATIONS,
   SCHEMA_VERSION_ID,
 } from './migrations.js';
