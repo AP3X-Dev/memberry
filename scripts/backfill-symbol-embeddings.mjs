@@ -23,8 +23,11 @@ import { generateMiniVector } from '../packages/code/dist/vectors.js';
 const env = {};
 try {
   for (const line of readFileSync('.env', 'utf8').split('\n')) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-    if (m) env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
+    // .trim() is load-bearing: a CRLF .env leaves a trailing CR on every value,
+    // and a key with CR on the end fails as "not a legal HTTP header value"
+    // rather than as an auth error, which sends you looking in the wrong place.
+    if (m) env[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
   }
 } catch { /* no .env — rely on process.env */ }
 
