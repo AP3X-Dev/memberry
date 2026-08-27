@@ -8,6 +8,7 @@ import { parseFile } from './parser.js';
 import { ImportResolver } from './resolver.js';
 import { SymbolStore } from './symbol-store.js';
 import { generateLexicalVector, generateMiniVector, generateSparseVector } from './vectors.js';
+import type { EmbeddingProvider } from '@memberry/core';
 import type { SupportedLanguage, SymbolKind, SymbolNode, IndexResult } from './types.js';
 import { detectLanguage, isMcpConfigBasename } from './types.js';
 
@@ -42,13 +43,55 @@ const EXCLUDE_FILES = new Set([
   'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
 ]);
 
+/**
+ * The text a symbol is indexed BY. Single source of truth: the lexical, sparse,
+ * and dense vectors must all describe the same text, or the channels disagree
+ * about what a symbol is.
+ */
+export function symbolVectorText(symbol: Pick<SymbolNode, 'name' | 'signature' | 'doc_comment'>): string {
+  return [symbol.name, symbol.signature, symbol.doc_comment].filter(Boolean).join(' ');
+}
+
 export class CodeIndexer {
   private symbolStore: SymbolStore;
   private resolver: ImportResolver;
 
-  constructor(private driver: Driver) {
+  /**
+   * `embedding` is OPTIONAL and its absence is the defect IDX-003 fixes: without
+   * it every indexed Symbol had `embedding: null`, so the `symbol_embedding`
+   * vector index was empty and the `code.dense-vector` channel returned nothing
+   * on every query while reporting success. Code search was lexical-only.
+   * Same shape as BootstrapGraph, which had this exact bug on the memory side.
+   */
+  constructor(private driver: Driver, private embedding?: EmbeddingProvider) {
     this.symbolStore = new SymbolStore(driver);
     this.resolver = new ImportResolver(driver);
+  }
+
+  /**
+   * Dense-embed a batch of symbols in place. Best-effort: an embedding outage
+   * must degrade retrieval to the lexical channels, never fail the index write,
+   * so a throw here is logged and swallowed and the symbols still get stored.
+   */
+  private async embedSymbols(symbols: SymbolNode[]): Promise<void> {
+    if (symbols.length === 0) return;
+    if (!this.embedding || this.embedding.available === false) return;
+    try {
+      const vectors = await this.embedding.embedBatch(symbols.map(symbolVectorText));
+      symbols.forEach((symbol, i) => {
+        const vector = vectors[i];
+        // A short/empty vector is a provider contract violation, not a symbol we
+        // should store a broken embedding for — leave it lexical-only.
+        if (!Array.isArray(vector) || vector.length === 0) return;
+        symbol.embedding = vector;
+        symbol.mini_vector = generateMiniVector(vector);
+      });
+    } catch (err: unknown) {
+      console.error(
+        '[memberry-code] symbol embedding failed; indexing lexical-only for this batch:',
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   /**
@@ -176,18 +219,21 @@ export class CodeIndexer {
       }
 
       // Generate multi-vectors from symbol text
-      const vectorText = [symbol.name, symbol.signature, symbol.doc_comment].filter(Boolean).join(' ');
+      const vectorText = symbolVectorText(symbol);
       symbol.lexical_vector = generateLexicalVector(vectorText);
       const sparse = generateSparseVector(vectorText);
       symbol.sparse_indices = sparse.indices;
       symbol.sparse_values = sparse.values;
-      // Mini vector requires dense embedding --- generated if embedding exists
-      if (symbol.embedding) {
-        symbol.mini_vector = generateMiniVector(symbol.embedding);
-      }
 
       changed.push(symbol);
     }
+
+    // Dense vectors in ONE batched provider call per file, AFTER the changed set
+    // is known — embedding is the expensive step and unchanged symbols are
+    // skipped by content_hash, so a no-op reindex costs nothing.
+    // `mini_vector` is derived here too; it was previously unreachable because
+    // nothing ever assigned `symbol.embedding`.
+    await this.embedSymbols(changed);
 
     // Single batched UNWIND MERGE: identical composite-key identity, property set,
     // and create-vs-update outcome as the prior per-symbol loop.

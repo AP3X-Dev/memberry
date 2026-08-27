@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import { DistributedLock, ProposalStore } from '@memberry/redis';
-import { runMigrations, checkVectorIndexDimensions, ProvenanceTraversal } from '@memberry/neo4j';
+import { runMigrations, checkVectorIndexDimensions, checkEmptyVectorIndexes, ProvenanceTraversal } from '@memberry/neo4j';
 import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT } from '@memberry/core';
 import type { CoreServices } from '@memberry/core';
 import { setServiceInstances, setTenantContainer } from './tools.js';
@@ -271,6 +271,23 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     }
     status.degraded.push(`schema: ${dimDrift.length} vector index dimension mismatch`);
   }
+  // IDX-003: an index with the right shape and nothing in it is just as broken,
+  // and unlike a dimension mismatch it produces no error anywhere — the channel
+  // returns zero rows and reports success. Say so at boot.
+  const emptyVectorIndexes = await checkEmptyVectorIndexes(driver);
+  for (const idx of emptyVectorIndexes) {
+    console.error(
+      `[memberry-mcp] WARNING: ${idx.nodes} :${idx.label} nodes and NOT ONE has an embedding. ` +
+      `Vector search over ${idx.label} returns nothing on every query while reporting success. ` +
+      `Backfill with: node scripts/backfill-symbol-embeddings.mjs (Symbol) ` +
+      `or node scripts/backfill-embeddings.mjs (Semantic).`,
+    );
+  }
+  if (emptyVectorIndexes.length > 0) {
+    status.degraded.push(
+      `vectors: ${emptyVectorIndexes.map((i) => `${i.label} 0/${i.nodes} embedded`).join(', ')}`,
+    );
+  }
 
   // Services the MCP server needs beyond the core load/store kit.
   // Pass the shared embedding provider so consolidation-promoted and superseded
@@ -471,7 +488,10 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   await initCodeSchema(driver);
   console.error('[memberry-mcp] Code schema verified');
 
-  const codeIndexerService = new CodeIndexer(driver);
+  // IDX-003: pass the shared embedding provider so indexed Symbols get a dense
+  // vector and land in the symbol_embedding index. Without it they were
+  // write-only and the code.dense-vector channel was inert on every query.
+  const codeIndexerService = new CodeIndexer(driver, embedding);
   const symbolStoreService = new SymbolStore(driver);
   const codeSearchService = new CodeSearch(driver, embedding);
   const codeWatcherService = new CodeWatcher(codeIndexerService, symbolStoreService);

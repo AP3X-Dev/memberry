@@ -362,6 +362,51 @@ export interface VectorIndexDimension {
  * them against EMBEDDING_DIM reported two permanent "mismatches" that pinned the
  * server in DEGRADED MODE — masking the real degradation the mode exists to show.
  */
+/** A vector index that exists, has the right dimensions, and holds nothing. */
+export interface EmptyVectorIndex {
+  label: string;
+  nodes: number;
+  embedded: number;
+}
+
+/**
+ * IDX-003 fail-loud guard. The dimension check above catches an index whose
+ * shape drifted. It does NOT catch the failure that actually happened: an index
+ * created correctly and never written to, because the writer was constructed
+ * without an embedding provider. Every query against it returns zero rows and
+ * the channel reports SUCCESS, so retrieval silently degrades to lexical-only
+ * with nothing in any log. That shipped on the memory side once and on the code
+ * side for the entire life of the code index.
+ *
+ * Reports labels that have nodes but no embeddings at all. A partially embedded
+ * label is backfill-in-progress, not a wiring defect, so it is not reported.
+ */
+export async function checkEmptyVectorIndexes(driver: Driver): Promise<EmptyVectorIndex[]> {
+  const session = driver.session();
+  try {
+    const empty: EmptyVectorIndex[] = [];
+    for (const label of ['Symbol', 'Semantic', 'Episodic', 'Fact']) {
+      const res = await session.run(
+        `MATCH (n:${label})
+         RETURN count(n) AS nodes,
+                sum(CASE WHEN n.${EMBEDDING_PROPERTY} IS NOT NULL THEN 1 ELSE 0 END) AS embedded`,
+      );
+      const record = res.records[0];
+      if (!record) continue;
+      const nodes = Number(record.get('nodes'));
+      const embedded = Number(record.get('embedded'));
+      if (nodes > 0 && embedded === 0) empty.push({ label, nodes, embedded });
+    }
+    return empty;
+  } catch {
+    // Restricted permissions or an unavailable server: skip the guard rather
+    // than fail boot, exactly as the dimension check does.
+    return [];
+  } finally {
+    await session.close();
+  }
+}
+
 export async function checkVectorIndexDimensions(driver: Driver): Promise<VectorIndexDimension[]> {
   const session = driver.session();
   try {
