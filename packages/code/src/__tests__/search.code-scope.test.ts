@@ -208,8 +208,11 @@ describe('IDX-002B project scope', () => {
       expect(fulltextOf(calls).query).toContain('s.project_tag IS NULL');
       expect(semanticOf(calls).query).not.toContain('IN s.tags');
     }
-    expect(zero.map((c) => c.query)).toEqual(off.map((c) => c.query));
-    expect(truthy.map((c) => c.query)).toEqual(off.map((c) => c.query));
+    // Sorted: the four channels fan out in parallel, so capture order is not
+    // guaranteed. The SET of emitted queries is the contract, not their sequence.
+    const sorted = (calls: Captured[]): string[] => calls.map((c) => c.query).sort();
+    expect(sorted(zero)).toEqual(sorted(off));
+    expect(sorted(truthy)).toEqual(sorted(off));
   });
 });
 

@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
-import { KIND_RANK_FLAG, noisePenalty, rankByNoise } from '../search.js';
+import { CODE_SCOPE_FLAG, KIND_RANK_FLAG, noisePenalty, rankByNoise } from '../search.js';
 import { TEST_FILE_PATTERNS, isTestPath } from '../types.js';
 import type { CodeSearchResult } from '../types.js';
 
@@ -183,11 +183,23 @@ describe('IDX-002A kind-aware ranking (spec §5.1)', () => {
     expect((await orderFor('1'))[0]).toBe('UnifiedAssembler');
   });
 
-  it('A11 — the flag is read exactly once, in exactly one file', () => {
+  it('A11 — every flag is read exactly once, at module load, in exactly one file', () => {
     expect(KIND_RANK_FLAG).toBe('MEMBERRY_KIND_RANK_V1');
     const source = readFileSync(resolve(import.meta.dirname, '../search.ts'), 'utf8');
-    expect(source.split(FLAG).length - 1).toBe(1);
-    expect(source.split('process.env').length - 1).toBe(1);
+
+    // Each flag NAME appears exactly once — in its own `export const …_FLAG =` line.
+    for (const flag of [FLAG, CODE_SCOPE_FLAG]) {
+      expect(source.split(flag).length - 1).toBe(1);
+    }
+
+    // AMENDED by IDX-002B, which added a second flag. The tripwire was never
+    // "one env read" — it is "no env read anywhere except the module-load
+    // constants", so that a flag cannot be re-read per call and drift mid-process.
+    // Pinning the exact list is STRICTER than the old count: a stray read now
+    // fails on identity, not just on arithmetic.
+    const reads = source.match(/process\.env\[[A-Za-z_]+\]/g) ?? [];
+    expect(reads).toEqual(['process.env[KIND_RANK_FLAG]', 'process.env[CODE_SCOPE_FLAG]']);
+    expect(source.split('process.env').length - 1).toBe(reads.length);
   });
 });
 
