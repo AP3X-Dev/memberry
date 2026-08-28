@@ -51,8 +51,8 @@ answer, so a surprising result here cannot be confused with the corpus having mo
 
 | source type | share of delivered slots | median confidence |
 |---|---|---|
-| semantic | **63.7%** | 0.9 |
-| episodic | **36.3%** | **1.0** |
+| semantic | **63.7%** (58) | 0.9 |
+| episodic | **36.3%** (33) | **1.0** |
 | fact | **0.0%** (0 candidates) | n/a |
 
 > **Corrected before publication.** A first run reported 92 slots at 65.2/34.8 with an earlier
@@ -65,10 +65,10 @@ Confidence histogram over every slot:
 
 | source · confidence | slots |
 |---|---|
-| episodic · 1.0 | **32** |
-| semantic · 0.9 | 41 |
+| episodic · 1.0 | **33** |
+| semantic · 0.9 | 40 |
 | semantic · 0.3 | 10 |
-| semantic · 0.5 | 5 |
+| semantic · 0.5 | 4 |
 | semantic · 1.0 | 4 |
 
 Head-to-head, the four queries where both kinds were delivered:
@@ -77,7 +77,7 @@ Head-to-head, the four queries where both kinds were delivered:
 |---|---|---|---|
 | `eval001-d-11` | 1 | 2 | episode |
 | `eval001-d-13` | 1 | 3 | episode |
-| `eval001-d-19` | 13 | 1 | semantic |
+| `eval001-d-19` | 11 | 1 | semantic |
 | `eval001-d-25` | 13 | 1 | semantic |
 
 **MemoryBlocks are UNMEASURABLE here, not zero.** Block ids never enter `finalIds` even though
@@ -86,7 +86,7 @@ blocks are rendered into the markdown, so this probe structurally cannot see the
 
 ## 4. What the numbers say
 
-**RL-010 is confirmed live.** Every one of the 32 delivered episodic slots carries confidence
+**RL-010 is confirmed live.** Every one of the 33 delivered episodic slots carries confidence
 exactly **1.0** — the hard-coded literal — against a median of 0.9 for semantics. The mechanism is
 real and it is running in production.
 
@@ -113,7 +113,7 @@ The rule below was pre-registered in the sprint plan **before** this run:
 > FIRES if episodic share of delivered slots ≥ 40% **AND** median delivered episodic confidence
 > exceeds median delivered semantic confidence.
 
-**It does NOT fire.** Episodic share is 34.8%, below the 40% threshold. The second conjunct is
+**It does NOT fire.** Episodic share is 36.3%, below the 40% threshold. The second conjunct is
 satisfied (1.0 > 0.9) and was already flagged as near-vacuous — episodes are injected at a literal
 1.0, so it can only fail when zero episodes are delivered.
 
