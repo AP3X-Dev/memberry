@@ -269,7 +269,12 @@ export interface ConsolidationRedisLayer {
 
 export interface ConsolidationFactLayer {
   create(fact: import('./types.js').FactNode): Promise<string>;
-  findBySubjectPredicate(subject: string, predicate: string): Promise<import('./types.js').FactNode[]>;
+  findBySubjectPredicate(
+    subject: string,
+    predicate: string,
+    tenantId?: string,
+    opts?: { includeTentative?: boolean },
+  ): Promise<import('./types.js').FactNode[]>;
   invalidate(id: string, invalidAt: string, supersededById?: string): Promise<void>;
   dispute(id: string): Promise<void>;
 }
@@ -1080,18 +1085,39 @@ export class ConsolidationEngine {
           ? sourceEpisodeIds
           : input.source_episode_ids;
 
-        // Check for existing active fact with same subject+predicate
+        // Reconcile against existing facts for this subject + predicate, INCLUDING
+        // tentative ones. Without the opt-in this lookup is active-only
+        // (`neo4j/fact.ts` — "Default = active-only ... e.g. consolidation"), so a
+        // tentative deductive fact minted by extraction was invisible here and this
+        // method created an inductive twin of a claim already in the graph. Measured
+        // 2026-08-28: 999 groups of byte-identical duplicates, 985 of them exactly one
+        // deductive + one inductive twin, all written since the engine started running.
         const existing = await factLayer.findBySubjectPredicate(
           input.subject,
           input.predicate,
+          undefined,
+          { includeTentative: true },
         );
 
-        if (existing.length > 0) {
-          const current = existing[0]!;
-          if (current.object === input.object) {
-            // Same fact — skip (reinforce by doing nothing; confidence is maintained)
-            continue;
-          }
+        // Split the result the way the extraction path already does. Taking
+        // `existing[0]` was unsafe once tentative rows are visible: the query orders by
+        // `valid_at DESC`, so the head could be a tentative contender, and the OPT-31
+        // gate below would then compare a contender against the WRONG fact. Because
+        // tentative facts sit at 0.5 and the protect threshold is 0.75, that gate would
+        // evaluate `autoInvalidate` true almost every time — inverting the protection it
+        // exists to enforce and auto-promoting an uncorroborated claim.
+        //
+        // `reinforcing` decides dedup and matches ANY status. `current` decides the
+        // contradiction and is ACTIVE by construction, which makes all of that
+        // structurally unreachable rather than merely unlikely.
+        const reinforcing = existing.find((f) => f.object === input.object);
+        if (reinforcing) {
+          // The claim is already in the graph. Skip — no write of any kind.
+          continue;
+        }
+        const current = existing.find((f) => f.object !== input.object && f.status === 'active');
+
+        if (current) {
           // Different object — a contradiction. Auto-invalidating an ESTABLISHED
           // fact from extraction-derived (potentially untrusted) content would
           // let injected input silently overwrite an authoritative fact (OPT-31).

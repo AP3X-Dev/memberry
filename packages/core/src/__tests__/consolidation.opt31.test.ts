@@ -210,3 +210,77 @@ describe('OPT-31: consolidation fact-invalidation confidence gate', () => {
     expect(created.status).toBe('active');
   });
 });
+
+describe('twin creation: consolidation reconciles against TENTATIVE facts', () => {
+  const tentative = (object: string, confidence = 0.5): FactNode => ({
+    ...makeExistingFact(confidence),
+    id: 'fact-tentative',
+    object,
+    status: 'tentative',
+    inference_type: 'deductive',
+  });
+
+  async function applyWithExisting(existing: FactNode[], contenderObject = 'plaintext') {
+    const node = makeSemanticNode('sem-old', 0.8);
+    const factLayer = makeFactLayer(existing);
+    mockExtractFacts.mockResolvedValue([
+      { ...contradictingInput(0.5), object: contenderObject },
+    ] as never);
+    const engine = new ConsolidationEngine(makeRedis(supersedeProposal(node)), makeNeo4j(factLayer, node), makeConfig());
+    await engine.apply('prop-1', 'approve');
+    return factLayer;
+  }
+
+  it('opts into seeing tentative contenders', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const factLayer = await applyWithExisting([]);
+    // A silent revert of the opt-in is the whole regression; pin the call shape.
+    expect(factLayer.findBySubjectPredicate).toHaveBeenCalledWith(
+      'auth-module', 'uses', undefined, { includeTentative: true },
+    );
+  });
+
+  it('does NOT mint an inductive twin of a claim already held as TENTATIVE', async () => {
+    // The regression this whole change exists for. Extraction mints a tentative
+    // deductive fact; consolidation could not see it and minted an inductive twin of
+    // the same claim. Measured on the live graph: 999 duplicate groups, 985 of them
+    // exactly this shape, all written since the engine started running.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const factLayer = await applyWithExisting([tentative('plaintext')], 'plaintext');
+
+    expect(factLayer.create).not.toHaveBeenCalled();
+    expect(factLayer.invalidate).not.toHaveBeenCalled();
+  });
+
+  it('never invalidates a TENTATIVE fact, and never auto-promotes the contender', async () => {
+    // The guard against the naive fix. Tentative facts sit at 0.5 and the protect
+    // threshold is 0.75, so had `current` been allowed to be tentative, the OPT-31 gate
+    // would evaluate autoInvalidate true almost every time — invalidating the very
+    // corroboration pool extraction depends on AND writing the contender ACTIVE.
+    // This fails loudly if anyone collapses the two finds back into existing[0].
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const factLayer = await applyWithExisting([tentative('bcrypt')], 'plaintext');
+
+    expect(factLayer.invalidate).not.toHaveBeenCalled();
+    expect(factLayer.create).toHaveBeenCalledOnce();
+    const created = factLayer.create.mock.calls[0][0] as FactNode;
+    expect(created.status).toBe('tentative');        // not auto-promoted
+    expect(created.supersedes_fact_id).toBeNull();   // took the new-fact branch
+  });
+
+  it('is not sensitive to result ordering', async () => {
+    // The lookup orders by valid_at DESC, so the head is not status-deterministic.
+    // Both orderings must dedup identically.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const active = makeExistingFact(0.9);                 // object 'bcrypt', active
+    const twin = tentative('plaintext');                  // same object as the contender
+
+    const a = await applyWithExisting([active, twin], 'plaintext');
+    const b = await applyWithExisting([twin, active], 'plaintext');
+
+    expect(a.create).not.toHaveBeenCalled();
+    expect(b.create).not.toHaveBeenCalled();
+    expect(a.invalidate).not.toHaveBeenCalled();
+    expect(b.invalidate).not.toHaveBeenCalled();
+  });
+});
