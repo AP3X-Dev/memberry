@@ -370,6 +370,41 @@ provenance — the code comment says so — so instead of separating the two, in
 from promoting at all. Splitting them (inference type is now an argument, defaulting to
 `'deductive'`) lets a generalization be confirmed as a generalization.
 
+**TWIN ROOT CAUSE FOUND AND FIXED 2026-08-28.** Consolidation called
+`findBySubjectPredicate(subject, predicate)` with two arguments. That lookup is **active-only by
+default** (`packages/neo4j/src/fact.ts:564`), and its own comment named the caller it was
+protecting: *"Default = active-only — byte-identical for every existing caller (e.g.
+consolidation)."* So a TENTATIVE deductive fact minted by extraction was invisible to
+consolidation, which fell through and minted an inductive twin of a claim already in the graph.
+Backward compatibility that was safe until the engine began running at volume.
+
+**The naive fix would have been worse than the bug.** Simply passing `includeTentative` feeds
+tentative rows into the same `existing[0]` head-grab that drives the OPT-31 contradiction gate.
+Tentative facts sit at 0.5 against a 0.75 protect threshold, so `autoInvalidate` evaluates true
+almost every time — it would invalidate the very corroboration pool extraction depends on and
+write the contender ACTIVE. Verified on the real code: the pre-fix path does invalidate a tentative
+fact, and a test now pins that it must not.
+
+**Shipped shape:** opt in, then split the result the way the extraction path already does —
+`reinforcing` matches ANY status and decides dedup; `current` requires `status === 'active'` and
+decides the contradiction. `current` is active by construction, so invalidating a tentative row,
+mis-gating OPT-31 and superseding a tentative fact are all structurally unreachable rather than
+merely unlikely. The `valid_at DESC` ordering hazard disappears because nothing reads the head any
+more.
+
+`dream.ts` carried the same two-arg blindness in its dedup guard and is fixed with it. That guard
+only ever SKIPS a create, so seeing more facts can only mean writing less.
+
+**Two further misses in the same family, deliberately NOT in that diff, each with its own blast
+radius:** consolidation passes no tenant, so on a non-default tenant it cannot see extraction's
+facts at all and would keep minting twins forever; and it stores the RAW predicate while extraction
+stores `normalizePredicate(...)`, so predicates where normalization is not the identity (for example
+`depends_on` to `uses`) miss on the predicate too. The measured 999 byte-identical groups are
+necessarily predicates where normalization is the identity.
+
+**Forward-looking only.** This stops NEW twins; the 2,008 existing duplicate rows are untouched and
+merging them is a separate pass.
+
 **Also explains the August duplicate spike.** 985 of the 999 duplicate groups are one `deductive`
 + one `inductive` twin of the same claim. The inductive twin absorbs the corroboration and cannot
 use it; the deductive twin stays at one episode. All 2,008 duplicate rows are August-only — 26% of

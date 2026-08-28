@@ -24,7 +24,12 @@ import { isSaneFact } from './extract.js';
 
 export interface DreamFactLayer {
   getActive(entityName: string): Promise<FactNode[]>;
-  findBySubjectPredicate(subject: string, predicate: string): Promise<FactNode[]>;
+  findBySubjectPredicate(
+    subject: string,
+    predicate: string,
+    tenantId?: string,
+    opts?: { includeTentative?: boolean },
+  ): Promise<FactNode[]>;
   create(fact: FactNode): Promise<string>;
 }
 
@@ -220,7 +225,14 @@ export class DreamEngine {
             // object) already exists — read inside the critical section.
             let existing: FactNode[] = [];
             try {
-              existing = await this.deps.fact.findBySubjectPredicate(h.subject, h.predicate);
+              // Include tentative contenders. Active-only is this lookup's default, so
+              // an unconfirmed fact was invisible and a hypothesis could be minted for a
+              // claim already present — the same blindness that produced deductive /
+              // inductive twins in consolidation. This guard only ever SKIPS a create, so
+              // seeing more facts can only mean writing less.
+              existing = await this.deps.fact.findBySubjectPredicate(
+                h.subject, h.predicate, undefined, { includeTentative: true },
+              );
             } catch { /* treat as no match */ }
             if (existing.some((f) => f.object.toLowerCase() === h.object.toLowerCase())) {
               return false; // dedup hit — nothing minted
