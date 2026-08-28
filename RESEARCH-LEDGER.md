@@ -63,15 +63,31 @@ a switch on it.
 
 ---
 
-### RL-002 — Split IDX-004's two mechanisms onto separate flags
+### RL-002 — Split IDX-004's four coupled behaviours off their single flag
 **Evidence:** measured · **Status:** ready · **Opened:** 2026-08-27
 
 Direct consequence of RL-001. Today `MEMBERRY_CODE_RERANK_V1` turns on both the widening (proven)
-and the reranker (unproven), so you cannot take the safe half. The reranker also carries a real
+and the reranker (unproven), so you cannot take the safe half.
+
+**Correction, 2026-08-28: it is four behaviours, not two, and their ORDER is load-bearing.** One
+boolean, `rerankThisCall` (`packages/code/src/search.ts:245`), switches all of:
+widen the retrieval window to at least 50 (`:248`; `widenLimit` is `Math.max(limit, 50)` at
+`:128-130`, so a caller asking 100 still gets 100), run the reranker (`:332`), force the IDX-002A
+kind prior on even when `MEMBERRY_KIND_RANK_V1` is off (`:346` — note the `||`), and truncate
+back to the caller's limit (`:347`). The comment at `:242-244` records why they are computed once
+— so the four "cannot drift apart into a configuration nobody measured" — and `:319-330` records
+why their ORDER is load-bearing: fuse-wide → rerank → truncate with NO prior is **worse than
+baseline**, because the reranker's coverage and phrase terms favour memory prose over a short
+code signature on an English question.
+
+So this is a flag-surface redesign with an order constraint, not a two-line split — and a naive
+two-way split can reach exactly the configuration the comment forbids. `MEMBERRY_CODE_SCOPE_V2`
+has the same shape and says so itself (`search.ts:91`, "Two leaks, one switch";
+full docblock `:88-97`), gating three sites off one boolean. The reranker also carries a real
 latency risk: `scoreBatch` recomputes document frequency *inside* the per-candidate loop, so cost
-scales with candidates² — and the window just went from 10 to 50, against a 250ms timeout. On
-timeout it silently returns the unranked order (a latched warning was added, but it degrades
-quietly by design).
+scales with candidates² — and the window just went from the caller's limit (20 by default) to
+50, against a 250ms timeout. On timeout it silently returns the unranked order (a latched
+warning was added, but it degrades quietly by design).
 
 **Trigger fired 2026-08-28, and the decision was to ship both.** The flag is now on in
 production. Recording what that means rather than quietly retiring the entry:
@@ -152,14 +168,47 @@ day for the code plane.
 
 ---
 
-### RL-007 — `FactStore` is constructed without an embedding provider
-**Evidence:** audit (file read, not re-verified) · **Status:** open · **Opened:** 2026-08-27
+### RL-007 — `FactStore` cannot embed a Fact, and a constructor param would not change that
+**Evidence:** verified · **Status:** open · **Opened:** 2026-08-27
 
-`constructor(private driver: Driver)` — the identical defect IDX-003 fixed in `CodeIndexer`,
-sitting ~18 lines above a correct `new SemanticStore(driver, embedding)`. Same class, same fix.
+`constructor(private driver: Driver)` (`packages/neo4j/src/fact.ts:13`) does take no embedding
+provider, and `new SemanticStore(driver, embedding)` at `packages/core/src/services-factory.ts:194`
+really is the correct sibling to the `new FactStore(driver)` at `:175`. (The original entry put
+the two ~18 lines apart, which is right; it just read as though both lived in `fact.ts`.)
 
-**Revisit when:** RL-008 is decided — if the Fact plane gets a reader, this is the prerequisite;
-if the index is dropped, this becomes moot.
+**Correction, 2026-08-28 — the diagnosis holds, the SIZE was wrong.** The original framing
+invited a one-line constructor change, and that change would be **completely inert**: there is no
+`resolveEmbedding` on `FactStore`, `create()` persists `fact.embedding` only when a caller hands
+one in (`fact.ts:88-94`) and none of the five production call sites does —
+`packages/core/src/service.ts:1162`, `packages/core/src/dream.ts:228`, and
+`packages/core/src/consolidation.ts:1129`, `:1135`, `:1163`. That spread is itself the argument
+for putting the embed call inside `create()` rather than at the callers. `setEmbedding`
+(`fact.ts:581`) has exactly one caller in the tree, a test.
+
+**IDX-003 is the template, not the counterexample.** It is tempting to say `CodeIndexer` already
+owned its write-time embed call and `FactStore` does not — that is false, and git says so.
+`a1345d9` added all three parts in ONE commit: the text synthesizer `symbolVectorText`, the
+`embedSymbols` write-path call and its call site, and the optional constructor param
+(`packages/code/src/indexer.ts:66`). `SymbolNode` had no `content` field either
+(`packages/code/src/types.ts:101-127`). The shape transfers — with one caveat that cuts AGAINST
+us: IDX-003's step 1 merely extracted an expression that already ran inline for the lexical
+vectors, whereas the Fact plane has no such string anywhere, so step 1 is genuinely new work
+here. The three parts are:
+
+1. A text synthesizer. `FactNode` (`packages/core/src/types.ts:361-383`) has no `content` field,
+   so there is nothing to embed yet; subject + predicate + object is the Fact's text.
+2. A write-path embed call in `create()`, mirroring `embedSymbols`.
+3. The constructor parameter, which is what makes 1 and 2 reachable.
+
+Plus one thing IDX-003 also needed and this entry must not forget: a backfill for the 29,314
+existing nodes, since `setEmbedding` has no production caller to drive it.
+
+**Revisit when:** RL-008 is decided. Note the asymmetry: if the Fact plane gets a reader this is
+the prerequisite, but if the indexes are DROPPED this is not neutrally moot — dropping
+`fact_embedding` (`packages/neo4j/src/schema.ts:69`) removes the vector index this fix exists to
+fill, so the drop forecloses it rather than deferring it. Dropping `fact_content` (`:63`) does
+not: it indexes the subject/predicate/object properties, and those properties — the synthesizer's
+input — survive it untouched.
 
 ---
 
@@ -233,18 +282,46 @@ one most obviously unmeasurable without an instrument.
 
 ---
 
-### RL-011 — 99.3% of Facts are stuck at `tentative`
-**Evidence:** measured (2026-08-27) · **Status:** hypothesis · **Opened:** 2026-08-27
+### RL-011 — 99.3% of Facts are `tentative`, and the pipeline that would promote them IS running
+**Evidence:** verified · **Status:** open · **Opened:** 2026-08-27
 
-29,109 of 29,314. Only 152 `active`, unchanged when the graph was re-counted on 2026-08-28. Either
-promotion is working correctly and these genuinely never earned promotion, or **the promotion
-pipeline does not run**. Nobody has looked.
+29,109 of 29,314. Only 152 `active`, unchanged when the graph was re-counted on 2026-08-28.
 
-If it is the second, it is a bigger finding than RL-009 — it would mean the whole tentative→active
-lifecycle is inert.
+**Someone looked, 2026-08-28. The alarming half is refuted.** The promotion path is fully wired,
+with no flag gating it: `buildExtractionConsumer(core)` (`packages/mcp/src/bootstrap.ts:744`) →
+`packages/core/src/services-factory.ts:345` → `processExtraction` (`service.ts:1003-1008`) →
+`_extractFactsOnce` → `findBySubjectPredicate` with tentative contenders surfaced
+(`service.ts:1073`) → the promotable guard (`:1104`) → `await factLayer.corroborate(...)`
+(`:1106`) → `SET f.status = 'active'` (`packages/neo4j/src/fact.ts:658`). That is the only
+writer that TRANSITIONS a Fact to active — consolidation separately MINTS facts already active
+on its auto-invalidate branch (`packages/core/src/consolidation.ts:1118`), so the 152 `active`
+rows are not all corroborations. The tentative→active lifecycle is not inert, so **do not cite
+this entry as evidence that it is.** One precondition, not a flag: extraction only runs when
+`config.embedding.apiKey` is set (`service.ts:913`, `:1005-1006`).
 
-**Revisit when:** one investigation, cheap, any time. This is a question, not a conclusion — do not
-cite it as a defect until someone checks.
+What remains are four narrower defects, each of which would suppress promotion without stopping
+the pipeline:
+
+- **Raw byte equality on the object.** `existing.find(f => f.object === fi.object)`
+  (`service.ts:1077`) matches the object exactly, while the predicate immediately above it is
+  normalized first (`:1065`). "Cerebro" and "cerebro" never reinforce each other.
+- **Corroboration needs a DISTINCT episode.** `independent` requires non-empty provenance that
+  does not already contain this episode (`service.ts:1097-1099`), and deductive facts are
+  promotable only when it holds (`:1100-1103`). This is OPT-70b anti-poisoning and is
+  deliberate — but it means a fact restated in one episode can never promote.
+- **Minting is unconditionally `tentative`** (`service.ts:1146`) and nothing revisits old facts
+  proactively. There is no expiry — a later distinct episode can still promote one at any time —
+  but nothing goes looking, so a fact whose corroborating episode never arrives stays tentative.
+- **Subject-phrasing drift hides contenders.** `findBySubjectPredicate` resolves the subject with
+  `resolveExisting` and returns `[]` when there is no match (`packages/neo4j/src/fact.ts:553-554`),
+  while `create()` resolves-or-CREATES (`:23`). So a subject never strands its own prior facts —
+  but a later episode phrasing the subject differently mints a fresh Entity, and the existing
+  contenders become invisible to it. Weakest of the four; listed for completeness.
+
+**Revisit when:** RL-006 lands and can size which of the four actually accounts for the 29,109 —
+or sooner for the object-normalization one, which is a one-line change with an a-priori
+justification and needs no measurement. Loosening it touches an anti-poisoning gate, so it
+wants a security read.
 
 ---
 
@@ -364,15 +441,20 @@ its only automated reminder. See RL-008 — this ledger is now the only thing ho
 
 ---
 
-### RL-017 — 14 "pre-existing lab failures" were a broken gate harness
+### RL-017 — 13 of 14 "pre-existing lab failures" were a broken gate harness; the 14th is unexplained
 **Evidence:** measured · **Status:** RESOLVED 2026-08-28 (13 of 14) · **Opened:** 2026-08-27
 
-`bench/lab/ret010/__tests__/dev-gate.test.ts` failed 14 tests in both Node majors, byte-identical
-across three consecutive gates. Stable and pre-existing — and read, for three packets, as a
+The lab sweep failed 14 tests in both Node majors, byte-identical across three consecutive gates
+(recorded at the time against `bench/lab/ret010/__tests__/dev-gate.test.ts`, though the
+dubious-ownership class reaches other lab suites that also shell out to git, so that single-file
+attribution is not corroborated). Stable and pre-existing — and read, for three packets, as a
 product defect nobody had time for.
 
-**It was not a product defect. It was our own gate script.** CI runs `npm run bench:lab:test` and
-CI was green the whole time, which should have been the tell.
+**Thirteen of them were not a product defect. They were our own gate script.** CI runs the same
+command (`npm run bench:lab:test`, `ci.yml:50`) and is expected green, which should have been the
+tell. No CI run id was recorded at the time, so treat that green as expected rather than
+attested. **The fourteenth is still unexplained** — see the bullet below; nothing here says it is
+not a product defect.
 
 - **13 of 14:** `fatal: detected dubious ownership in repository at '/w'`. The gate container ran
   as root against a uid-1000 worktree. `git config --global --add safe.directory` does not help,
@@ -380,9 +462,28 @@ CI was green the whole time, which should have been the tell.
   config is never read. Fixed by matching the container uid to the worktree owner **and** running
   `npm ci` under the same uid; doing only one trades dubious-ownership for EACCES on
   `node_modules/.cache`.
-- **1 of 14:** the finalizer-drain test shells out to the `docker` CLI, which the `node:NN` image
-  does not contain. Mounting the docker socket would hand the suite control of the host daemon —
-  not a trade worth making for one assertion. CI has a docker CLI and covers it.
+- **1 of 14: CAUSE NOT ESTABLISHED.** This entry originally said the finalizer-drain test shells
+  out to the `docker` CLI, which the `node:NN` image does not contain. **That attribution is
+  withdrawn, 2026-08-28.** `grep -i docker` over `bench/lab/ret010/__tests__/dev-gate.test.ts`
+  and `bench/lab/ret010/dev-gate.cjs` returns zero on both; the named test compiles the gate
+  in-process and calls `__testFinalize` with injected hooks — no docker, no container. It is NOT
+  subprocess-free, though: `developmentFailureFixture` runs
+  `execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' })`
+  (`dev-gate.test.ts:307`) — the same git-against-a-host-owned-worktree operation blamed for the
+  other 13. **A lead, not a cause, and a weak one:** this failure SURVIVED the uid fix that
+  cleared those 13, which is evidence the class is different, not the same. It has not been
+  checked either way.
+  **And docker is not reachable from this run at all:** the lab's docker spawns sit behind
+  `candidate/live.ts` and `candidate-v3/live.ts`, which run from the `bench:lab:admission:*:live`
+  scripts as their own CI steps, not from `vitest run bench/lab`. "Docker is missing" cannot
+  explain a failure in this sweep, whichever test it is. The suite HAS been run — that is how we know one case
+  still fails after the uid fix — but nobody has read that case's output, which is what would
+  establish the cause. CI runs the same command (`npm run bench:lab:test`, `ci.yml:50`) and is
+  expected green; that is an expectation, not an attestation, and **it does not license ignoring
+  the red here** — with the cause unknown there is no established reason CI's environment differs
+  from the container's. **Do not substitute a new cause without a run** — that is how this entry got its first
+  one — and note the failing test's IDENTITY was recorded alongside the withdrawn cause and has
+  not itself been re-confirmed.
 
 The fix lives in a tracked script, `scripts/gate.sh`, so the reasoning cannot evaporate with a
 box-local file again. **Expected steady state is `LAB_EXIT=1` with exactly ONE failure; two or
@@ -392,7 +493,7 @@ more is a real regression.**
 *stable*, and I treated that as evidence they were *legitimate*. It was only evidence they were
 consistent. A red gate nobody has diagnosed is not a baseline, it is an unread message.
 
-**Revisit when:** the finalizer test's environment gap becomes worth closing, or if lab failures
+**Revisit when:** the one remaining lab failure becomes worth diagnosing, or if lab failures
 ever exceed one.
 
 ---

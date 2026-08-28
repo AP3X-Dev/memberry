@@ -10,10 +10,12 @@
 # ---------------------------------------------------------------------------
 # WHY --user, AND WHY npm ci RUNS UNDER IT TOO
 #
-# Running this as the container's default root against a host-owned worktree produced FOURTEEN lab
-# failures that looked like product defects for three consecutive gates. They were not. Thirteen
-# were `fatal: detected dubious ownership in repository at '/w'` — git refuses a repo owned by a
-# different uid. `git config --global --add safe.directory` does NOT fix it here: the lab's sandbox
+# Running this as the container's default root against a host-owned worktree produced THIRTEEN of
+# the fourteen lab failures that looked like product defects for three consecutive gates. Those
+# thirteen were not defects: they were `fatal: detected dubious ownership in repository at '/w'`
+# — git refuses a repo owned by a different uid. (The FOURTEENTH is a different matter and is NOT
+# explained by anything in this section — see ONE KNOWN-RED TEST below. Nothing here says it is
+# not a product defect.) `git config --global --add safe.directory` does NOT fix it here: the lab's sandbox
 # spawns git with a sanitised environment, so HOME is unset and the global config is never read.
 #
 # Matching the container uid to the worktree owner removes the mismatch at the source. But npm ci
@@ -22,14 +24,38 @@
 # mode for the other.
 #
 # ---------------------------------------------------------------------------
-# ONE KNOWN-RED TEST, AND IT IS AN ENVIRONMENT GAP, NOT A DEFECT
+# ONE KNOWN-RED TEST. CAUSE NOT ESTABLISHED.
 #
-#   RET-010E > "drains every retained finalizer owner once after an injected close failure"
+#   RET-010E > "drains every retained finalizer owner once after an injected close failure and
+#   emits no output"   <- IDENTITY NOT RE-CONFIRMED; recorded alongside the withdrawn cause.
 #
-# Its sandbox shells out to the `docker` CLI, which the node:NN image does not contain. CI runs on
-# a runner that has one, and CI is green — so CI is the authority for that test, not this script.
-# Mounting the docker socket in here would hand the test suite control of the host daemon, which is
-# not a trade worth making for one assertion.
+# This block used to assert that the test shells out to the `docker` CLI, which the node:NN image
+# does not contain. THAT ATTRIBUTION IS UNSUPPORTED and has been withdrawn: `grep -i docker` over
+# bench/lab/ret010/__tests__/dev-gate.test.ts and bench/lab/ret010/dev-gate.cjs both return zero,
+# and the test compiles the gate in-process and calls __testFinalize with injected hooks — no
+# docker, no container. It is NOT subprocess-free: developmentFailureFixture runs
+# `execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' })` at
+# dev-gate.test.ts:307 — the same git-against-a-host-owned-worktree operation blamed for the other
+# 13. A lead, not a cause, and a weak one: this failure SURVIVED the uid fix that cleared those
+# 13, which is evidence the class is different. Not checked either way.
+#
+# Nor is docker reachable from this run at all: the lab's docker spawns live behind
+# candidate/live.ts and candidate-v3/live.ts, which run from the bench:lab:admission:*:live
+# scripts as their own CI steps, NOT from `vitest run bench/lab`. So "docker is missing" cannot
+# explain a failure in this sweep, whichever test it is.
+#
+# The real cause is NOT ESTABLISHED. The suite HAS been run — that is how we know one case still
+# fails after the uid fix — but nobody has read that case's output. Establishing the cause means
+# reading the failure in lab.log, not producing another one. Do not restate the docker story as fact and
+# do not install a replacement — including the failing test's identity above, which was recorded
+# alongside the withdrawn cause and has not itself been re-confirmed.
+#
+# NOTE ON CI. CI runs the same command (`npm run bench:lab:test`, ci.yml:50) and is expected green
+# — no run id was ever recorded, so that is an expectation, not an attestation. The old header
+# reasoned from this that CI "is the authority for that test, not this script". That inference is
+# ALSO withdrawn: its premise was the docker story (CI's runner has a docker CLI, the container
+# does not). With the cause unknown, there is no established reason CI's environment differs from
+# this container's, so a green CI does not license ignoring the red here.
 #
 # So: LAB_EXIT=1 with exactly ONE failure is the expected steady state. TWO or more is a real
 # regression and must be read. Do not "fix" this by filtering the test out — a gate you have taught
