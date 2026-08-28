@@ -82,8 +82,14 @@ const embedding = {
   },
 }
 
+// --no-reranker isolates the two mechanisms IDX-004 actually ships. Widening the window and
+// running the prior over 50 rows instead of 10 is one mechanism; BM25F reranking is another, and
+// they arrive together. Without this arm a gain from the first would be credited to the second.
+const NO_RERANKER = argv.includes('--no-reranker')
 const driver = neo4j.driver(NEO4J_URI, neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD))
-const search = new CodeSearch(driver, embedding, createCodeRerankerV1())
+const search = NO_RERANKER
+  ? new CodeSearch(driver, embedding)
+  : new CodeSearch(driver, embedding, createCodeRerankerV1())
 const cases = readFileSync(CASES, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
 
 const results = []
@@ -120,7 +126,7 @@ for (const c of cases) {
 }
 await driver.close()
 
-const run = { flagOn: FLAG_ON, limit: LIMIT, project: PROJECT, results, metrics: metrics(results) }
+const run = { flagOn: FLAG_ON, reranker: !NO_RERANKER, limit: LIMIT, project: PROJECT, results, metrics: metrics(results) }
 if (OUT) { writeFileSync(OUT, JSON.stringify(run, null, 2)); console.error(`wrote ${OUT}`) }
 console.log(JSON.stringify(run.metrics, null, 2))
 
