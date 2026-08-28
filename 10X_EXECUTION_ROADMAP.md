@@ -12,6 +12,12 @@ authority for sequencing and completion state. Evaluation-dataset activation
 details remain in
 [`bench/lab/ROADMAP.md`](bench/lab/ROADMAP.md).
 
+Findings we deliberately deferred — with the condition that should bring each one
+back — live in [`RESEARCH-LEDGER.md`](RESEARCH-LEDGER.md). This roadmap says what
+to build next; the ledger says what we learned and chose not to act on yet. Read
+the ledger before planning a lane: three times running, live measurement
+overturned what this file predicted the next real defect would be.
+
 ## Checkbox rules
 
 - `[x]` means the parent work package or gate met its acceptance criteria and
