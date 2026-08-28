@@ -138,9 +138,14 @@ reports file/symbol/entity counts and the wiki URL on success.
 npx tsx packages/core/src/cli.ts doctor
 ```
 
-`doctor` diagnoses the install — Docker, stack health, reachable Neo4j/Redis,
-env config, and wired agent hooks — and reports what is wrong and how to fix it.
-You can also hit the health endpoints directly:
+`doctor` is a read-only status report against a running server — MCP
+`/healthz`, authenticated `/readyz`, embedding mode (inferred from the CLI's
+own `OPENAI_API_KEY`, which the server does not expose), graph node counts,
+indexed projects, the wiki viewer, and optionally a graph-lint summary — plus
+a `suggested_next` list of fixes. It does not inspect Docker, connect to Neo4j
+or Redis directly, or check installed agent hooks; for hooks run
+`npx tsx packages/core/src/cli.ts hooks status`. You can also hit the health
+endpoints directly:
 
 ```bash
 curl http://HOST:3101/healthz                                   # unauthenticated liveness

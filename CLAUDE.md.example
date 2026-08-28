@@ -36,7 +36,6 @@ You have access to a persistent memory system called MemBerry via MCP tools. It 
 **How to enable a domain:**
 ```
 berry_tools(action: "enable", domain: "temporal")     // enable one domain
-berry_tools(action: "enable", domain: "all")           // enable everything
 berry_tools(action: "list")                             // see what's available and enabled
 berry_tools(action: "disable", domain: "research")     // disable when done
 ```
@@ -62,7 +61,7 @@ Enable domains as needed for your task. The Tier 1 tools handle most session wor
 | Tool | Purpose |
 |------|---------|
 | `berry_load` | Load token-budgeted context for a task. Params: `task`, `entities?`, `tags?`, `max_tokens?`, `temporal?` |
-| `berry_store` | Store an episodic memory. **Auto-extracts entities** if you don't provide them. Params: `session_id`, `task`, `content`, `outcome?`, `signals?`, `entities?` |
+| `berry_store` | Store an episodic memory. **Auto-extracts entities** if you don't provide them. Params: `session_id`, `task`, `content`, `scope?`, `tags?`, `memory_type?`, `outcome?`, `signals?`, `entities?` |
 | `berry_query` | Read-only Cypher query. Params: `query`, `limit?` |
 | `berry_consolidate` | Run/review/status consolidation, or `action:"dream"` — the background generative pass that fills knowledge gaps and mints low-confidence **abductive** hypotheses for a scope (also runnable via the `memberry dream` CLI / nightly timer). Params: `action`, `scope?`, `proposal_id?`, `decision?` |
 | `berry_resolve` | Resolve `memberry://` URIs to context. Params: `uri`, `max_tokens?`, `stage_context?` |
@@ -77,6 +76,8 @@ Enable domains as needed for your task. The Tier 1 tools handle most session wor
 | `berry_memory_rewrite` | Overwrite entire memory block. Params: `block`, `content`, `scope?`, `session_id?` |
 | `berry_memory_promote` | Change block tier. Params: `block`, `from_tier`, `to_tier`, `scope?`, `session_id?` |
 | `berry_memory_archive` | Archive block to episodic memory. Params: `block`, `scope?`, `session_id?` |
+
+A finalized decision requires `memory_type: "decision"` with `outcome: "approved"` — that pair promotes a single episode without waiting for recurrence. Patterns and conventions still require recurring independent evidence.
 
 **Key concepts:**
 - **Episodic** = what happened (session snapshots). Created by `berry_store`.
@@ -104,12 +105,12 @@ Enable domains as needed for your task. The Tier 1 tools handle most session wor
 | Tool | Purpose |
 |------|---------|
 | `berry_code_index` | Parse project with tree-sitter, create Symbol nodes + call/import/inherit edges. Languages: TypeScript, JavaScript, Python, Go, Rust, plus structural extraction for SQL (tables/views/functions), Terraform/HCL (resources/modules/variables), and MCP config files (servers; env-safe) |
-| `berry_code_search` | Hybrid search: fulltext + vector + RRF fusion across symbols and semantics |
+| `berry_code_search` | Hybrid search over four channels (fulltext, dense symbol vectors, lexical vectors, semantic memories) fused with RRF. With `MEMBERRY_CODE_RERANK_V1=1` it retrieves a wide window (at least 50), fuses, reranks with the served BM25F reranker, sorts `variable` and test-path rows last, then truncates to `limit`. The returned `score` is the RRF fusion score, not the final ordering key |
 | `berry_code_ast_grep` | Structural AST search with ast-grep patterns and meta-variable captures |
 | `berry_code_symbols` | Query symbols by file path or name |
 | `berry_code_deps` | Symbol-level dependency queries (callers, callees, importers, inheritance) |
 | `berry_code_context` | Build code-aware context for a task (symbols + semantic memories) |
-| `berry_code_watch` | Start/stop/status the background watcher that auto-reindexes changed files |
+| `berry_code_watch` | Start/stop/status the background watcher that auto-reindexes changed files. Test and mock files (`*.test.*`, `*.spec.*`, `__tests__/`, `__mocks__/`) are skipped by the watcher and never refreshed, even though `berry_code_index` indexes them |
 
 ### Research (6 tools) — experiment tracking
 
@@ -126,17 +127,17 @@ Enable domains as needed for your task. The Tier 1 tools handle most session wor
 
 | Tool | Purpose |
 |------|---------|
-| `berry_context` | Unified context assembly. Strategies: `auto` (classify intent -> route), `ranked` (hybrid search + RRF + learned weights), `deterministic` (same graph -> same output) |
+| `berry_context` | Unified context assembly. On the default build: `auto` (classify intent -> route), `ranked` (hybrid search + RRF + feedback boosts), `deterministic` (same graph -> same output). On a server running the candidate channel (`MEMBERRY_QUERY_PLANNER_V1=1` + `MEMBERRY_CANDIDATE_CHANNEL_V1=1` + `MEMBERRY_RERANKER_V1=served`) every request goes planned channels -> RRF without boosts -> served BM25F reranker; `strategy` only selects whether the reranker is applied, and the assembled context reports `strategy: ranked` whatever you asked for |
 | `berry_ask` | **Dialectic retrieval (Tier 1).** Ask a natural-language question; retrieves ranked evidence then LLM-synthesizes a **cited** answer with explicit inference. `reasoning_level` (minimal/low/medium/high/max) trades latency for depth. Returns the answer + supporting node IDs. Use when the answer needs reasoning over multiple memories; use `berry_context` for raw assembled context. |
-| `berry_feedback` | Record whether a retrieval result was useful. Improves future rankings via learned weights. |
+| `berry_feedback` | Record whether a retrieval result was useful. Feeds the entity and source-type boosts the ranked assembler applies on the default build; on a server running the candidate channel the signal is recorded but does not currently affect `berry_context` or `berry_ask` ranking. |
 
-**Learned retrieval:** The system tracks which strategies, entities, and source types produce useful results. Over time, it auto-routes queries to the strategy that works best for each intent type, and boosts/penalizes entities based on their historical usefulness.
+**Learned retrieval:** `berry_feedback` records usefulness per entity and per source type (`entity_boosts`, `source_type_boosts`), and the ranked assembler applies those boosts when it fuses. The candidate-channel path fuses without them and relies on the served reranker instead. Strategy selection is a rule/embedding intent classifier — there is no learned strategy routing.
 
 ### Wiki (5 tools) — knowledge externalization & human curation
 
 | Tool | Purpose |
 |------|---------|
-| `berry_compile` | Compile the graph into a navigable wiki. Each entity becomes a markdown article with `[[wikilinks]]`, backlinks, hierarchy, see-also, source citations. Params: `project_tag`, `output_dir`, `format?`, `emit_graph?`, `entities?` |
+| `berry_compile` | Compile the graph into a navigable wiki. Each entity becomes a markdown article with `[[wikilinks]]`, backlinks, hierarchy, see-also, source citations. Params: `project_tag`, `output_dir?`, `format?`, `emit_graph?`, `entities?` |
 | `berry_ingest` | Ingest raw source documents (articles, papers, notes, repos). Handles text/markdown directly and converts PDF / Word / Excel / HTML / RTF to text first when the needed system tools are installed (no new dependencies). **Auto-extracts entities and claims** if you don't provide them. Params: `source_path`, `source_type`, `project_tag`, `title?`, `entities?`, `claims?`, `tags?` |
 | `berry_lint` | 10 graph health checks: orphan_pages, broken_links, missing_links, redirect_candidates, link_density, hub_detection, contradictions, low_confidence, stale_sources, coverage_gaps. Params: `project_tag`, `checks?`, `thresholds?` |
 | `berry_braindump` | Capture a human brain dump as durable, human-authored memory under a custom scope (e.g. `project:user-personal`). Extracts entities/claims while keeping the verbatim text as a Source. Use when the user says "remember this about me". |
@@ -187,7 +188,7 @@ Recalling the **right** memory at the **right** moment — without flooding the 
 - **Recall precisely.** Scope every load with `entities` + `tags` (`project:<tag>`) and set `max_tokens` to the smallest that fits — the goal is the *right* context, not *all* of it. Start specific; widen only if the scoped recall is empty.
 - **Pick the smallest tool that fits:** `berry_grep(pattern, scope)` for a specific fact/name/preference · `berry_memory_read(block)` for a known block · `berry_load(task, entities, tags, max_tokens, temporal?)` for token-budgeted task memory · `berry_context` for genuinely cross-cutting tasks · `berry_timeline`/`berry_fact_diff` (temporal domain) for how knowledge changed · `berry_code_search`/`berry_code_context` (code domain) for symbols/usages.
 - **Prefer current facts.** `berry_load` returns current facts by default; pass `temporal` only when you need historical or changed state.
-- **Close the loop.** Enable `retrieval` and use `berry_feedback` when recalled memory helped (or didn't) — MemBerry learns to rank better.
+- **Close the loop.** Enable `retrieval` and use `berry_feedback` when recalled memory helped (or didn't) — the signal is recorded against the entities and source types it came from.
 - **Apply silently.** Surface recalled memory only when it changes your recommendation.
 
 ### During Work
@@ -248,22 +249,21 @@ Store to MemBerry whenever these happen — don't ask:
 
 ### Wiki Auto-Compile
 
-The wiki recompiles automatically every 6 hours via systemd timer (`memberry-wiki-compile.timer`).
-The viewer runs persistently on **port 3200** (`memberry-wiki.service`).
-
-In addition, agents should trigger a recompile when significant knowledge changes occur:
-
-| Trigger | Action |
-|---------|--------|
-| Session stored 3+ times | Call `berry_compile` at session end |
-| Source ingested via `berry_ingest` | Call `berry_compile` after ingestion |
-| Consolidation ran with promotions | Call `berry_compile` after consolidation |
+Publication is automatic. Successful stores schedule scoped consolidation and full wiki
+publication; the coordinator retries transient failures and reconciles missed graph changes
+during startup and periodic catch-up. Don't call `berry_compile` as routine post-store work —
+manual compilation, consolidation, and cache refresh are diagnosis, verification, or recovery.
+The viewer runs persistently on **port 3200** (`memberry-wiki.service`), with
+`memberry-wiki-compile.timer` as a periodic backstop on systemd installs.
 
 To recompile manually:
 
 ```
-berry_compile(project_tag: "project:<tag>", output_dir: "/home/cerebro/projects/amp/wiki", emit_graph: true)
+berry_compile(project_tag: "project:<tag>", emit_graph: true)
 ```
+
+`output_dir` is optional and defaults to the server's configured wiki directory — a client
+need not know the server's filesystem layout.
 
 The wiki viewer is always available at: **http://192.168.0.25:3200**
 
@@ -297,7 +297,7 @@ Returns: origin episodic, all signals with attribution, supersession chain, sour
 
 Enable wiki domain (`berry_tools(action: "enable", domain: "wiki")`), then:
 ```
-berry_compile(project_tag: "project:my-project", output_dir: "./wiki", emit_graph: true)
+berry_compile(project_tag: "project:my-project", emit_graph: true)
 ```
 Then either serve via the built-in viewer or read the markdown files directly.
 

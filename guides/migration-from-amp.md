@@ -73,13 +73,16 @@ If you have an old client config pointing at `…:3101/sse`, switch the URL to
 re-run `npx tsx packages/core/src/cli.ts configure <claude|codex>`, which always
 emits the `/mcp` form.
 
-### Legacy stdio Codex key: `[mcp_servers.amp]`
+### Stdio Codex key: `[mcp_servers.amp]`
 
-The older stdio-based hook installer wrote a `[mcp_servers.amp]` block into
-`~/.codex/config.toml` (`packages/core/src/cli/install.ts`). The current
-`configure codex` command writes the canonical `[mcp_servers.memberry]` block
-for the streamable-HTTP transport instead. If you have an old `[mcp_servers.amp]`
-entry, you can remove it after adding the `memberry` one.
+`hooks install --agent codex --with-mcp` writes a stdio `[mcp_servers.amp]`
+block into the **project-local** `./.codex/config.toml` (`addCodexMcp()` in
+`packages/core/src/cli/install.ts`), and still does so today — so look there,
+not in `~/.codex/config.toml`. The separate `configure codex` command is the
+streamable-HTTP path and writes the canonical `[mcp_servers.memberry]` block
+into the user-level `~/.codex/config.toml` (`codexConfigPath()` in
+`configure.ts`). If a project has a `[mcp_servers.amp]` entry, remove it after
+adding the `memberry` one, and drop `--with-mcp` from future hook installs.
 
 ## User-facing renames
 
@@ -132,5 +135,7 @@ code-level aliases, to avoid implying behavior that does not exist:
    let the dual-read fallback keep using the old one).
 3. Repoint any client config from `/sse` → `/mcp`, adding `"type": "http"` for
    Claude Code — easiest via `configure <claude|codex> --write`.
-4. Replace an `amp` / `[mcp_servers.amp]` MCP server key with `memberry`.
+4. Replace an `amp` / `[mcp_servers.amp]` MCP server key with `memberry` — the
+   `amp` one is written into the project-local `./.codex/config.toml`, not
+   `~/.codex/config.toml`.
 5. Update log-scraping rules from `[amp-*]` → `[memberry-*]`.

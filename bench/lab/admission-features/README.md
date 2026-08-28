@@ -95,9 +95,21 @@ v3 instrument map (new files only; every v1/v2 instrument stays frozen):
   contract, and the extended burn-authority absence check.
 - `candidate-v3/worker.ts` — container adapter executing the PRODUCTION
   producer (no lab copy of the mapping).
+- `candidate-v3/build.ts` + `candidate-v3/container/Dockerfile` (`da154e0`) —
+  canonical networkless image builder over a content-addressed tar context;
+  content-hash and Git-blob identity pins only.
+- `candidate-v3/live.ts` (`da154e0`) — hosted live proof: one run of the
+  canonical image under the frozen `candidate/sandbox.ts` policy, writing
+  content-free evidence for the receipt binding.
+- `scorer-only/v3/seal.json` (`76fd52f`) — custodian seal, parsed by
+  `scorer-only/blinded-holdout-artifact-v3.ts`.
+- `.github/workflows/mem002prod-holdout.yml` (`76fd52f`) — the v3 one-shot
+  dispatch workflow, asserted by
+  `scorer-only/__tests__/mem002prod-holdout-workflow.test.ts`.
 - `contracts/c2-runtime-policy-receipt-v4.ts` — receipt-chain extension for the
-  fresh attempt (canonical `.v4.json` instance is produced by the owner-gated
-  hosted attestation run).
+  fresh attempt (canonical `.v4.json` instance committed in `76fd52f`, bound to
+  the seal and to hosted run `32773103347` attempt 1 by
+  `contracts/__tests__/c2-runtime-policy-receipt-v4-instance.test.ts`).
 - `__tests__/producer-v3-dev-agreement.test.ts` — the pre-holdout dev gate
   (42/42 cells at 1000 permille).
 

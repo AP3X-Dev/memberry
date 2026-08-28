@@ -8,8 +8,8 @@ over a committed, human-labeled golden set, and reports the standard IR metrics:
 outrank superseded facts).
 
 It requires **no OpenAI key and no live Neo4j/Redis** — the ranking uses the lexical +
-RRF + MMR path only (no vector embeddings), so it is fully reproducible and runs in the CI
-`unit` job (which sets `NEO4J_URI="" REDIS_URL=""`).
+RRF + MMR path only (no vector embeddings), so it is fully reproducible offline (run it
+with `NEO4J_URI="" REDIS_URL=""`).
 
 ## How it reuses existing work (no parallel system)
 
@@ -21,7 +21,8 @@ pipeline, and the metric implementations already live in
 duplicate the corpus, the labels, or the ranking. What it adds:
 
 - a single **root-runnable** entry point (`npm run bench:quality`) that exits non-zero on
-  any threshold failure, so CI can gate on it directly in the unit job;
+  any threshold failure (the wrapper is no longer a CI step of its own; the thresholds it
+  checks are enforced elsewhere — see below);
 - an explicit, consolidated **metrics report** (table + machine-readable
   `bench/quality/last-run.json`, gitignored);
 - an explicit **Recall@5 floor** (`RECALL_AT_5_MIN`), which the package-level gate did not
@@ -79,8 +80,12 @@ npx tsx bench/quality/eval.ts
 npx tsx bench/quality/eval.ts --json
 ```
 
-CI runs `npm run bench:quality` as a step in the `unit` job (`.github/workflows/ci.yml`)
-with `NEO4J_URI=""` and `REDIS_URL=""`.
+The `npm run bench:quality` step itself was removed from the `unit` job in `a40755c` when the
+evaluation-lab gate landed, but these thresholds still gate CI: `npm run bench:lab:ci` runs
+the quality control, and `packages/retrieval/src/__tests__/quality.regression.test.ts`
+asserts each `QUALITY_THRESHOLDS` entry on every `npm test`. What is not wired is this
+wrapper's own extra floor, `RECALL_AT_5_MIN`. Run the wrapper locally with `NEO4J_URI=""`
+and `REDIS_URL=""` for the full report.
 
 ## Raising the bar
 

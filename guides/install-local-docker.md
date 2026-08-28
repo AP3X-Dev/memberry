@@ -73,7 +73,10 @@ for a local install:
 In local mode, `MEMBERRY_PUBLISH_HOST=127.0.0.1` means Docker only publishes the
 port on the loopback interface, so nothing on the LAN can reach it. Neo4j
 (`7474`/`7687`) and Redis (`6379`) are always bound to `127.0.0.1` regardless of
-mode. See [`.env.example`](../.env.example) for the full annotated key list.
+mode. See [`.env.example`](../.env.example) for the commonly-tuned keys, and
+the `mcp` service block in [`docker-compose.yml`](../docker-compose.yml) for
+the full set of flags the container reads, including the retrieval and
+lifecycle rollout flags.
 
 ## Connect a client
 
@@ -149,5 +152,5 @@ host (needs Node.js 20+):
 ```bash
 ./scripts/setup.sh --db-only
 npm install
-npm run dev           # tsx, hot reload  (or: npm start)
+npm run dev           # tsx (identical to npm start; restart it after edits)
 ```

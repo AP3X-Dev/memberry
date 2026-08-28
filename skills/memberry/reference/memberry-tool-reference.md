@@ -44,7 +44,7 @@ Exact `berry_feedback` schema:
 
 Required: `result_id`, `was_useful`, `session_id`. Optional: `query` (default `""`) and `source_type` (default `semantic`; one of `semantic`, `episodic`, `symbol`, `arch_entity`, `aspect`). There is no `useful` or `reason` field.
 
-`berry_ingest_codebase` requires `path`; optional fields are `project_name`, `project_tag`, `description`, `domain`, `languages`, and `exclude_patterns`. Allowed languages: TypeScript, JavaScript, Python, Go, Rust. The path must be under `MEMBERRY_INGEST_ALLOW_DIR`.
+`berry_ingest_codebase` requires `path`; optional fields are `project_name`, `project_tag`, `description`, `domain`, `languages`, and `exclude_patterns`. Allowed `languages` values are case-sensitive lower-case literals: `typescript`, `javascript`, `python`, `go`, `rust`. The path must be under `MEMBERRY_INGEST_ALLOW_DIR`.
 
 Wiki tools:
 

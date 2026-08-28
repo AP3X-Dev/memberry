@@ -93,7 +93,7 @@ Store to MemBerry when:
 - A convention is established
 - An architecture pattern is chosen
 
-Format: `berry_store(session_id, task: "[project:<tag>] ...", content: "[project:<tag>] ...", entities: [...])`.
+Format: `berry_store(session_id, task: "[project:<tag>] ...", content: "[project:<tag>] ...", scope: "project:<tag>", entities: [...])`. Classify durable stores with `memory_type`; a finalized decision uses `memory_type: "decision"` with `outcome: "approved"`, which promotes it without waiting for recurrence.
 
 **Entity auto-extraction:** If you omit `entities`, the system auto-extracts them from your content via LLM. Explicit entities are preferred but auto-extraction is a safety net.
 
@@ -154,7 +154,7 @@ Each project needs an `## MemBerry Memory` section in its agent config with: pro
 | `berry_code_symbols` | code | Query symbols by file/name |
 | `berry_code_deps` | code | Callers, callees, importers |
 | `berry_code_context` | code | Code context for a task |
-| `berry_code_watch` | code | Start/stop/status the background watcher that auto-reindexes changed files |
+| `berry_code_watch` | code | Start/stop/status the background watcher that auto-reindexes changed files (test and mock files are skipped, unlike `berry_code_index`) |
 | `berry_arch_register` | arch | Enrich entity with architecture |
 | `berry_arch_relate` | arch | Create entity relationships |
 | `berry_arch_aspect` | arch | Cross-cutting concerns |

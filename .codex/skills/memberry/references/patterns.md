@@ -11,6 +11,7 @@ berry_store(
   session_id: "session-20260329-100000",
   task: "[project:my-api] decision: chose JWT over sessions",
   content: "[project:my-api] Chose JWT for stateless auth. Sessions require sticky routing.",
+  memory_type: "decision",
   outcome: "approved",
   entities: ["my-api", "auth-module"]
 )
@@ -24,7 +25,7 @@ berry_impact(entity_name: "auth-module")
 ## Find Past Bugs in a Module
 ```
 berry_query(
-  query: "MATCH (ep:Episodic)-[:ABOUT]->(e:Entity {name: 'auth-module'}) WHERE ep.content CONTAINS 'bug' OR ep.content CONTAINS 'fix' RETURN ep.content, ep.timestamp ORDER BY ep.timestamp DESC",
+  query: "MATCH (ep:Episodic)-[:REFERENCES]->(e:Entity {name: 'auth-module'}) WHERE ep.content CONTAINS 'bug' OR ep.content CONTAINS 'fix' RETURN ep.content, ep.created_at ORDER BY ep.created_at DESC",
   limit: 5
 )
 ```
@@ -45,7 +46,7 @@ berry_store(
   session_id: "session-20260329-100000",
   task: "[project:my-api] bug fix: OOM in cache module",
   content: "[project:my-api] OOM caused by unbounded LRU cache. Cache grew without eviction under concurrent writes. Fixed with max-size + TTL.",
-  outcome: "approved",
+  memory_type: "general",
   entities: ["my-api", "cache-module"]
 )
 ```

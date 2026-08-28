@@ -164,16 +164,18 @@ if the index is dropped, this becomes moot.
 ---
 
 ### RL-008 — The Fact plane: 0 of 29,314 embedded, and nothing reads the index
-**Evidence:** measured (counts, 2026-08-27) + audit (reader absence) · **Status:** decision needed
+**Evidence:** measured (counts, 2026-08-27) + verified (no reader) · **Status:** decision needed
 
-`fact_embedding` and `fact_content` are created and maintained, and the audit found **no query
-reads them**. Live counts: 29,314 Fact nodes, **0 embedded**. Status distribution: 29,109
-`tentative`, 152 `active`, 53 `invalidated`.
+`fact_embedding` and `fact_content` are created and maintained and **no query reads them** — each
+appears only in its own CREATE statement in `packages/neo4j/src/schema.ts` (`:69` and `:63`). Live
+counts: 29,314 Fact nodes, **0 embedded**. Status distribution: 29,109 `tentative`, 152 `active`,
+53 `invalidated`. **Re-measured on the live graph 2026-08-28: identical, to the row.**
 
-Two live consequences:
+Two consequences:
 - Backfilling the embeddings would cost money for an index with no reader.
-- The new coverage guard (HK-1) reports Fact as under-covered on every boot, so `status.degraded`
-  is permanently non-empty — which blunts HK-1's own signal (see RL-016).
+- The new coverage guard (HK-1) reported Fact as under-covered on every boot, pinning
+  `status.degraded` non-empty and blunting HK-1's own signal. RL-016 fixed that on 2026-08-28, at
+  the cost recorded below.
 
 **Either build a reader or drop the index.** Doing neither is the current state and is the worst
 of the three.
@@ -189,15 +191,32 @@ permanent.
 
 ---
 
-### RL-009 — `berry_context` / `berry_ask` discard every Fact and MemoryBlock
-**Evidence:** audit · **Status:** open · **Opened:** 2026-08-27
+### RL-009 — `berry_context` / `berry_ask` discard every MemoryBlock, not every Fact
+**Evidence:** verified · **Status:** open · **Opened:** 2026-08-27
 
-Aggregation headings in the assembler skip them, so `berry_ask` structurally **cannot cite a
-fact**. Note the scope correction: this sounds like 29,314 lost rows, but 99.3% of Facts are
-`tentative` (see RL-008), so the real gap is the **152 `active`** ones. That is a much smaller
-finding than it first appeared, and it is recorded that way on purpose.
+`memory.block` sits in `RETRIEVAL_TRACE_CHANNEL_ORDER` (`retrieval/trace.ts:97-101`) but has no
+`SOURCES` spec — the spec union admits only `memory.scope` and `arch.entity`
+(`retrieval/runtime-candidate-channel.ts:74`, `:132-135`) — so it falls to the `(!spec && !isFact)`
+branch at `:338` and resolves to `unavailable` on every request. The 16 MemoryBlocks in the graph
+are unreachable through either tool.
 
-**Revisit when:** RL-006 lands and can size the impact, or if a user reports a fact that should
+**Scope correction, 2026-08-28: the Fact half of this entry was wrong the day it was opened.** The
+original claim was read off `parseMemoryMarkdown` (`retrieval/assembler.ts:1984-1986`, `:2016-2021`),
+which skips the `Core Memory` / `Working Memory` / `Current Facts` / `Fact Timeline` aggregate
+headings and emits only `source_type: 'semantic'` (`:2042`). That is the legacy path. With
+`MEMBERRY_CANDIDATE_CHANNEL_V1=1` — live — both tools run through
+`assembleCandidateExecution(Served)` (`retrieval/tools.ts:514-539`, `:642-668`), where `memory.fact`
+is a real channel: `FactStore.getActiveByEntityIdsBatch` → `sourceType: 'fact'`
+(`runtime-candidate-channel.ts:336`, `:356-358`, `:262`) → a `Facts` heading in `groupAndBudget`
+(`assembler.ts:2387`). That channel returns exactly `f.status = 'active'` rows (`neo4j/fact.ts:302`),
+so the **152 `active`** Facts this entry named as the real gap are precisely the ones already
+reachable. The heading map has carried `fact: 'Facts'` since `46ff991` (2026-08-16), eleven days
+before this entry was opened — stale is not the excuse.
+
+This does not weaken RL-008. The fact channel reads Fact node properties by entity MATCH;
+`fact_embedding` and `fact_content` still have no reader.
+
+**Revisit when:** RL-006 lands and can size the impact, or if a user reports a block that should
 have been cited and was not.
 
 ---
@@ -217,8 +236,9 @@ one most obviously unmeasurable without an instrument.
 ### RL-011 — 99.3% of Facts are stuck at `tentative`
 **Evidence:** measured (2026-08-27) · **Status:** hypothesis · **Opened:** 2026-08-27
 
-29,109 of 29,314. Only 152 `active`. Either promotion is working correctly and these genuinely
-never earned promotion, or **the promotion pipeline does not run**. Nobody has looked.
+29,109 of 29,314. Only 152 `active`, unchanged when the graph was re-counted on 2026-08-28. Either
+promotion is working correctly and these genuinely never earned promotion, or **the promotion
+pipeline does not run**. Nobody has looked.
 
 If it is the second, it is a bigger finding than RL-009 — it would mean the whole tentative→active
 lifecycle is inert.
@@ -240,17 +260,39 @@ was about half a cent, and it left this decision open rather than making it sile
 
 **They remain a deletion candidate.** Deleting them would also let the HK-1 coverage floor tighten.
 
+**Confirmed 2026-08-28:** all 5,136 are still present and still embedded. The graph now holds
+54,314 symbols at 100% coverage across all five tag buckets, so no coverage number will surface
+them again. The deletion call has not been made.
+
 **Revisit when:** someone is willing to make a destructive call on the graph, or before the next
 index-wide operation.
 
 ---
 
-### RL-013 — Seven indexes are maintained on every write and queried by nothing
-**Evidence:** audit · **Status:** open · **Opened:** 2026-08-27
+### RL-013 — Two Symbol indexes are maintained on every write and queried by nothing
+**Evidence:** verified · **Status:** open · **Opened:** 2026-08-27
 
-Every symbol write computes and stores vectors that no query reads (the 4096-slot sparse lexical
-vector is the most expensive). This is a write-amplification and storage cost, not a correctness
+`symbol_mini` (`code/schema.ts:30`) has no reader: `mini_vector` is written on every symbol at
+`code/indexer.ts:87` and queried nowhere. `symbol_content_hash` (`code/schema.ts:16`) has no reader
+either — nothing in the repo puts a predicate on `s.content_hash`. The one query that returns it
+(`symbol-store.ts:370`) seeks on `symbol_file_path` and projects the hash out; the comparison then
+happens in JS at `indexer.ts:216`. A property index serves predicates, and there is no predicate.
+Two properties cost the same way with no index at all — `sparse_indices` / `sparse_values`
+(`code/indexer.ts:225-226`). This is a write-amplification and storage cost, not a correctness
 problem — which is why it keeps losing to capability work.
+
+**Correction, 2026-08-28.** This entry opened claiming seven unread indexes and named the
+4096-slot lexical vector as the most expensive of them. Both halves were wrong when it was written,
+not stale, and the second is the dangerous one: acting on it would have deleted a live retrieval
+channel. `packages/code/src/schema.ts` declares thirteen Symbol indexes — nine property (`:11-21`),
+one fulltext (`:23-25`), three vector (`:27-31`) — and eleven are reachable: `symbol_search`,
+`symbol_embedding` and `symbol_lexical` by the search channels (`code/search.ts:496`, `:547`,
+`:604`), `symbol_name_file_kind` by `findByCompositeKey` (`code/symbol-store.ts:192-204`), the rest
+by the language, kind and scope filters (`search.ts:476`, `:489`, `:786-812`). The lexical vector
+is also **dense**, not sparse — `Float64Array(4096)` at `code/vectors.ts:68-70` — and
+`symbol_lexical` is queried by `lexicalVectorSearch` (`search.ts:604`) as an ungated arm of the
+4-way fan-out in `searchStandard` (`search.ts:270`, `:278-291`); only the semantic arm is flagged.
+It has been read since the package landed in `195c5f0`.
 
 **Revisit when:** write latency or graph size becomes a complaint, or during any index cleanup.
 Pair it with RL-012, which is the same kind of housekeeping.
@@ -258,11 +300,22 @@ Pair it with RL-012, which is the same kind of housekeeping.
 ---
 
 ### RL-014 — `Semantic.status` is NULL on all 194 nodes
-**Evidence:** measured (2026-08-27) · **Status:** open · **Opened:** 2026-08-27
+**Evidence:** measured (2026-08-27) + verified (lifecycle) · **Status:** open · **Opened:** 2026-08-27
 
-The field exists and nothing sets it. Facts carry a real status distribution; Semantics carry
-none. So there is currently no way to mark a semantic memory deferred, superseded, or retired —
-which is part of why this ledger is a markdown file instead of living in MemBerry itself.
+The field exists and nothing sets it — there is no `status` on `SemanticNode`
+(`core/types.ts:39-58`) and zero matches for it in `packages/neo4j/src/semantic.ts`. Facts carry a
+real status distribution; Semantics carry none. Re-measured 2026-08-28: still 194 nodes, still NULL
+on all 194.
+
+**Scope correction, 2026-08-28.** This entry concluded there was no way to mark a semantic memory
+deferred, superseded or retired. Two of the three ship today. **Superseded:** the `SUPERSEDES` edge,
+written at `neo4j/semantic.ts:272` and read back by the provenance chain (`neo4j/provenance.ts:18`,
+`:45`). **Retired:** the reversible `archived` flag (`core/types.ts:57`), set by the lifecycle
+service (`core/lifecycle.ts:467` → `neo4j/lifecycle.ts:351`) and enforced across the read paths by
+`archivedWhere` (`neo4j/query.ts:60-62`), with `MEMBERRY_LIFECYCLE_V1` live. Only **deferred** has
+no mechanism at all. What is missing is a status vocabulary on Semantic, not a lifecycle — a
+narrower prerequisite for RL-015 than this entry was written as, and still part of why this ledger
+is a markdown file instead of living in MemBerry itself.
 
 **Revisit when:** before attempting to migrate this ledger into MemBerry (RL-015), or when
 lifecycle work next touches Semantic nodes.
@@ -276,8 +329,10 @@ MemBerry is a memory system for durable project context, and its own project con
 a flat file. That is worth fixing once it can actually hold the shape: an entry needs a status, a
 revisit trigger, and citable retrieval.
 
-**Blocked on:** RL-014 (no status field in use) and RL-009 (`berry_ask` cannot cite the entries
-back). Both are prerequisites, not excuses.
+**Blocked on:** RL-014, narrowly — the missing status vocabulary on Semantic, since `SUPERSEDES`
+and `archived` already cover superseded and retired. RL-009 blocks this only if entries land as
+MemoryBlocks: as of 2026-08-28 `berry_ask` cites semantics and facts, and blocks not at all.
+Neither is an excuse.
 
 **Revisit when:** both are closed. Until then this file is the source of truth.
 
@@ -295,6 +350,14 @@ failure: a vector index that queries hit and silently get nothing from. Nothing 
 cannot produce that failure. The guard now iterates `EMBEDDING_READ_LABELS`
 (`Symbol`, `Semantic`, `Episodic`), with the rule written down: add a label when something starts
 reading its embeddings, not before. Pinned by S18.
+
+**Not confirmable from outside the process, and worth knowing why.** `status.degraded` is a
+bootstrap-local array (`packages/mcp/src/bootstrap.ts:254`, pushed at `:273`, `:292`, `:311`) that
+is only ever printed to stderr at `:762-765`. It appears in no HTTP payload. `/readyz` does return
+a `consolidation_automation` block with its own `degraded` / `limitations` fields, but those come
+from consolidation worker health (`consolidation-coordinator.ts:111-117`) and would read the same
+whether or not this fix landed — checking them proves nothing about the coverage guard. Verifying
+this one means reading the server's boot log, or the S18 pin.
 
 **What this cost, recorded because it is easy to lose:** the Fact plane's open decision just lost
 its only automated reminder. See RL-008 — this ledger is now the only thing holding it.

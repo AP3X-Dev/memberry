@@ -81,9 +81,12 @@ to add a *new* question from a real failure case per spec §3.3 — not to inspe
 
 ## 4. The current holdout
 
-**13 questions SELECTED. The SURVIVING count is TBD** until blind keyword authoring closes —
-blind authoring plus a strict second reviewer removes questions whose ground truth cannot be
-established outside MemBerry, and that attrition is real (16 of the first 20).
+**13 questions SELECTED, 5 SURVIVING** (2 code-plane, 3 memory-plane — `eval001-h-05`,
+`-h-06`, `-h-16`, `-h-31`, `-h-32`). Blind keyword authoring plus a strict second reviewer
+removes questions whose ground truth cannot be established outside MemBerry, and that
+attrition was severe: 25 of the 34 selected questions were removed, and the 9 survivors
+split 4 dev / 5 holdout. See the entry-1 notes in section 5 for what n = 5 does and does
+not buy.
 
 Assigned mechanically by [`SELECTION-RULE.md`](SELECTION-RULE.md) §6 as amended by A2 —
 stratify by plane, walk `code → mixed → memory`, one 3-dev / 2-holdout cycle with a cursor

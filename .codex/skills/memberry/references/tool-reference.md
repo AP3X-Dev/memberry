@@ -56,7 +56,7 @@
 | `berry_code_symbols` | Query symbols by file/name/kind |
 | `berry_code_deps` | Symbol deps: callers, callees, importers, inheritance |
 | `berry_code_context` | Code-aware context assembly for a task |
-| `berry_code_watch` | Background watcher that auto-reindexes changed files |
+| `berry_code_watch` | Background watcher that auto-reindexes changed files (test and mock files are skipped) |
 
 ### arch (6 tools)
 
