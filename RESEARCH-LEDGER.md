@@ -433,6 +433,30 @@ wants a security read.
 
 ---
 
+### RL-018 — `berry_context` rejects a real call that names no entities
+**Evidence:** measured (2026-08-28) · **Status:** open · **Opened:** 2026-08-28
+
+`eval001-d-08` is a real mined `berry_context` call — `task`, `project_name`, `include_code`,
+`include_memory`, `strategy`, `max_tokens`, and no `entity_scope`. The runtime query planner
+rejects it with `runtime_query_planner:invalid_request`
+(`packages/retrieval/src/runtime-query-planner.ts`: the input must carry an `entityScope` key, and
+the hint snapshot requires a non-empty array). `packages/retrieval/src/tools.ts` swallows the
+throw to `null` on one path, so it degrades quietly.
+
+**It is not an edge case.** It is 1 of the 2 surviving `berry_context` questions in EVAL-001, so
+half that tool's coverage scores as `nonRetrieval` rather than as a number — the same failure at
+the origin on 2026-08-27 and again on the post-deploy run on 2026-08-28. Of the mined real
+`berry_context` calls, 5 of 13 carried no `entity_scope`.
+
+An agent asking a scoped question without naming entities is ordinary usage, not malformed input.
+Every such call is currently unanswerable.
+
+**Revisit when:** immediately — this is cheap to confirm and it silently caps what EVAL-001 can
+measure. Either the planner should accept an empty entity scope and fall back to task-text
+retrieval, or the tool should reject loudly at its boundary instead of degrading to null.
+
+---
+
 ### RL-012 — 5,136 symbols are unreachable by any scoped search
 **Evidence:** measured (2026-08-27) · **Status:** decision needed · **Opened:** 2026-08-27
 

@@ -416,6 +416,42 @@ None. The origin in section 2 is the first, and it stands unsuperseded.
 
 ## 7. Run log — APPEND ONLY
 
+### 2026-08-28 — dev split, post-deploy. NOT a re-pin, and NOT comparable to the origin.
+
+| metric | value |
+|---|---|
+| `keywordRecall@5` | 0.0833 |
+| `keywordRecall@10` | 0.0833 |
+| `testFileRate@5` | 0.2000 |
+| `testFileRate@10` | 0.2333 |
+| `nonRetrieval` | 1 of 4 (`eval001-d-08`) |
+| `grammarMisses` | 0 |
+
+Run against the deployed server at master `e7308ef`, flags
+`QUERY_PLANNER_V1,CANDIDATE_CHANNEL_V1,RERANKER_V1`. Artifact:
+`bench/eval/eval001-dev-fresh.json` (on the box).
+
+**No delta is reported, because none is permitted.** §3.2 item 2 voided comparison against the
+origin when `MEMBERRY_KIND_RANK_V1`, `MEMBERRY_CODE_SCOPE_V2` and `MEMBERRY_CODE_RERANK_V1`
+shipped. The origin's `keywordRecall@5` also reads 0.0833; that the two numbers coincide is
+recorded as an observation and is explicitly **not** a claim that nothing changed.
+
+**This run does not re-pin the origin.** §5 permits re-pinning only on a deliberate re-index, and
+no re-index happened. See the blocked decision below.
+
+### BLOCKED: §3.2 and §5 contradict each other
+
+§3.2 lists four conditions that void comparison and each "requires a **fresh baseline**, not a
+delta". §5 permits re-pinning the origin for exactly **one** of those four — a deliberate
+re-index — and says "nothing else re-pins it". A flag change (§3.2 item 2) therefore demands a
+fresh baseline and forbids the only documented procedure for producing one.
+
+That is a governance decision, not an engineering one, and amending a pre-registered instrument so
+that it permits the thing you want to do is how golden v2 died. Recorded here rather than resolved.
+Until it is resolved EVAL-001 can still be RUN — the dev split above is evidence of that — but its
+numbers cannot be compared to anything, which is most of what a regression guard is for.
+
+
 Later runs append rows here. **They do not touch section 2.** Rows are never edited,
 reordered, or deleted; a mistaken row is corrected by appending a correction row that
 references it.
