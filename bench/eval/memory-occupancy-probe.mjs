@@ -29,12 +29,16 @@
 //   node bench/eval/memory-occupancy-probe.mjs --dry-run
 //   node bench/eval/memory-occupancy-probe.mjs --out /w/occupancy.json
 //
-// NODE ARM. The workspace packages publish `exports.import` -> ./src/index.ts, so importing
-// @memberry/core requires a node that can load TypeScript natively (>= 22.18, or >= 22.6 with
-// --experimental-strip-types). On node:20 this exits 3 rather than crashing obscurely. That is a
-// property of the repo's package exports, not of this script.
+// MODULE RESOLUTION. `@memberry/core` is unresolvable by plain node on every version — its
+// exports map points at ./src/index.ts, which imports ./types.js, a file that exists only as
+// types.ts. `_memberry-core-hooks.mjs` aliases that one specifier to the built dist equivalents;
+// see that file for why a shim rather than dist/index.js. If it ever stops working this exits 3
+// with a named message rather than crashing obscurely.
 
 import { readFileSync, writeFileSync } from 'node:fs'
+import { register } from 'node:module'
+
+register(new URL('./_memberry-core-hooks.mjs', import.meta.url))
 
 const EXIT_BAD_ENV = 2
 const EXIT_UNRESOLVABLE = 3
@@ -90,10 +94,18 @@ try {
   }
 } catch { /* the container runs on process.env */ }
 
-const NEO4J_URI = process.env.NEO4J_URI || env.NEO4J_URI || 'bolt://localhost:7687'
-const NEO4J_USER = process.env.NEO4J_USER || env.NEO4J_USER || 'neo4j'
-const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || env.NEO4J_PASSWORD
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || env.OPENAI_API_KEY
+// Trim every value. A CRLF .env sourced through a shell leaves a trailing carriage return on
+// each variable. `fetch` tolerates it in a header but the OpenAI SDK throws APIConnectionError ("Connection
+// error."), which reads as a network outage and is not one. The repo already learned this once —
+// see e0ccbb3, "Trim env values in the backfill scripts".
+const pick = (...vals) => {
+  for (const v of vals) if (typeof v === 'string' && v.trim()) return v.trim().replace(/^["']|["']$/g, '')
+  return undefined
+}
+const NEO4J_URI = pick(process.env.NEO4J_URI, env.NEO4J_URI) || 'bolt://localhost:7687'
+const NEO4J_USER = pick(process.env.NEO4J_USER, env.NEO4J_USER) || 'neo4j'
+const NEO4J_PASSWORD = pick(process.env.NEO4J_PASSWORD, env.NEO4J_PASSWORD)
+const OPENAI_API_KEY = pick(process.env.OPENAI_API_KEY, env.OPENAI_API_KEY)
 
 if (!NEO4J_PASSWORD) {
   console.error('OCCUPANCY fatal: NEO4J_PASSWORD unset')
@@ -108,31 +120,40 @@ if (!OPENAI_API_KEY) {
 }
 
 // ── module resolution ───────────────────────────────────────────────────────
-let AMPService, ScopedQuery, FactStore, neo4jDriver, OpenAI
+let AMPService, ScopedQuery, FactStore, neo4jDriver
 try {
   ;({ AMPService } = await import('../../packages/core/dist/service.js'))
-  ;({ ScopedQuery, FactStore } = await import('../../packages/neo4j/dist/index.js'))
+  // Submodules, not the barrel: dist/index.js re-exports schema.js and friends, which pull in
+  // more of @memberry/core than the shim covers. query.js needs only readEnv + DEFAULT_TENANT;
+  // fact.js needs nothing from core at all.
+  ;({ ScopedQuery } = await import('../../packages/neo4j/dist/query.js'))
+  ;({ FactStore } = await import('../../packages/neo4j/dist/fact.js'))
   neo4jDriver = (await import('neo4j-driver')).default
-  OpenAI = (await import('openai')).default
 } catch (err) {
   console.error('OCCUPANCY fatal: workspace packages did not resolve.')
   console.error(`  ${err?.code ?? ''} ${err?.message ?? err}`)
-  console.error('  The @memberry/* exports map resolves `import` to ./src/index.ts, so this needs')
-  console.error('  node >= 22.18 (native type stripping) and a completed `npm ci && npm run build`.')
+  console.error('  Needs a completed `npm ci && npm run build`, and _memberry-core-hooks.mjs must')
+  console.error('  be alongside this file — @memberry/core is not resolvable without it.')
   process.exit(EXIT_UNRESOLVABLE)
 }
 
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY })
+// Raw fetch, not the openai SDK. On node 22.23 with openai 4.104 every embeddings call fails
+// with "Premature close" while the identical request over fetch succeeds — verified three for
+// three. The SDK buys nothing here, so this drops the dependency rather than pinning around it.
+async function embedFetch(input) {
+  const r = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'text-embedding-3-small', input }),
+  })
+  if (!r.ok) throw new Error(`embeddings HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`)
+  const j = await r.json()
+  return j.data.map((d) => d.embedding)
+}
 const embedding = {
   available: true,
-  async embed(text) {
-    const r = await openai.embeddings.create({ model: 'text-embedding-3-small', input: text })
-    return r.data[0].embedding
-  },
-  async embedBatch(texts) {
-    const r = await openai.embeddings.create({ model: 'text-embedding-3-small', input: texts })
-    return r.data.map((d) => d.embedding)
-  },
+  async embed(text) { return (await embedFetch(text))[0] },
+  async embedBatch(texts) { return embedFetch(texts) },
 }
 if (embedding.available !== true) {
   console.error('OCCUPANCY fatal: embedding unavailable')
