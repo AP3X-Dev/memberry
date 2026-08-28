@@ -126,7 +126,42 @@ Any confidence change that ships from here does so on the **owner's separate dir
 a-priori argument**, not on this gate. Those are different justifications and the distinction is
 the point.
 
-## 6. Reproducing
+## 6. Two-arm measurement of the RL-010 fix
+
+Both arms run back to back in one session against the same live graph and the same ten queries,
+because lifecycle flags are live and the corpus mutates — a comparison against the section-3
+origin would not be sound. The only difference between arms is the injected episode confidence in
+the built `packages/core/dist/service.js`; the arm was verified by reading that line before each
+run, not assumed.
+
+| | arm A — `confidence: 1.0` | arm B — `confidence: 0.5` |
+|---|---|---|
+| delivered slots | 91 | 91 |
+| semantic | 58 (63.7%) | **68 (74.7%)** |
+| episodic | 33 (36.3%) | **23 (25.3%)** |
+| median episodic confidence | 1.0 | 0.5 |
+| queries where an episode outranked a semantic | 2 | **1** |
+| `episodicChannel` | success:10 | success:10 |
+
+**Ten delivered slots moved from raw captures to consolidated knowledge**, and the **top-ranked
+answer changed on 2 of the 10 queries** — `eval001-d-11` and `eval001-d-29`, both from episodic to
+semantic at rank 1. On `eval001-d-13` the best semantic moved from rank 3 to rank 2.
+
+### What this does and does not establish
+
+It establishes that the change is **real and load-bearing**: it moves about 11% of delivered slots
+and rewrites the first answer on a fifth of the sample. It is not a no-op.
+
+It does **not** establish that answers got better. This probe counts what KIND of thing occupied
+each slot; it has no notion of whether any of it was correct. "More consolidated knowledge, fewer
+raw captures" is only an improvement if corroborated knowledge is the better answer — which is the
+a-priori argument for the fix, not a result of it.
+
+**Nothing here should be reported as a retrieval-quality gain.** Measuring that needs ground truth
+on the memory plane, which does not exist yet. The pre-registered rule in section 5 still did not
+fire, and this measurement does not retroactively fire it.
+
+## 7. Reproducing
 
 ```
 cd <worktree> && set -a && . <env-file> && set +a
