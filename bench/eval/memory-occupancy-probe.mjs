@@ -230,10 +230,19 @@ for (const c of cases) {
   // Replay as TASK TEXT. Passing resolvedEntityIds instead would make the episodic channel
   // return [] by design (service.ts:1284-1291) and every slot would come back semantic or fact —
   // a 0% episodic reading that means nothing.
+  // Forward EVERY scope field the original call carried. An earlier version passed only task,
+  // tags and max_tokens, which silently dropped `entities` on the two cases that had it — and
+  // `entities` is what gates the fact fetch (service.ts:408-416), so those runs reported zero
+  // facts for a channel the probe itself had disabled. Replay fidelity is the whole point.
+  // `resolvedEntityIds` is deliberately NOT forwarded: it is an internal lane that disables the
+  // episodic channel by design (service.ts:1284-1291). No mined row carries it.
   const scope = {
     task: c.input.task,
+    ...(c.input.entities ? { entities: c.input.entities } : {}),
     ...(c.input.tags ? { tags: c.input.tags } : {}),
     ...(c.input.max_tokens ? { max_tokens: c.input.max_tokens } : {}),
+    ...(c.input.temporal ? { temporal: c.input.temporal } : {}),
+    ...(c.input.session_id ? { session_id: c.input.session_id } : {}),
     ...(TENANT ? { tenantId: TENANT } : {}),
   }
 

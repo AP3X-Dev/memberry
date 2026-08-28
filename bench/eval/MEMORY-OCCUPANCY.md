@@ -47,13 +47,19 @@ answer, so a surprising result here cannot be confused with the corpus having mo
 
 ## 3. The numbers
 
-**92 delivered slots across 10 queries.** Denominator is `finalIds`, which is facts + memories.
+**91 delivered slots across 10 queries.** Denominator is `finalIds`, which is facts + memories.
 
 | source type | share of delivered slots | median confidence |
 |---|---|---|
-| semantic | **65.2%** (60) | 0.9 |
-| episodic | **34.8%** (32) | **1.0** |
-| fact | **0.0%** (0) | n/a |
+| semantic | **63.7%** | 0.9 |
+| episodic | **36.3%** | **1.0** |
+| fact | **0.0%** (0 candidates) | n/a |
+
+> **Corrected before publication.** A first run reported 92 slots at 65.2/34.8 with an earlier
+> build of the probe that forwarded only `task`, `tags` and `max_tokens` — silently dropping
+> `entities` on the two cases that carried it. Since `entities` is what gates the fact fetch
+> (`service.ts:408-416`), that run had disabled the fact channel itself. The numbers above are
+> from the faithful replay. The fact result did not change, and section 4 explains why.
 
 Confidence histogram over every slot:
 
@@ -88,10 +94,17 @@ real and it is running in production.
 splits two-all. Four semantic rows also reached 1.0, so the episode does not sit above the entire
 reachable semantic ceiling as previously written — it ties at the top rather than clearing it.
 
-**The fact plane delivered nothing.** Zero fact candidates and zero fact slots across all ten
-queries, against 29,353 Fact nodes in the graph. This probe cannot say why — `berry_load`'s fact
-path is an entity-id lookup and these queries are task text — but "the fact channel contributes
-nothing to a berry_load answer" is now measured rather than assumed.
+**The fact plane delivered nothing, and the reason is not ranking.** Zero fact candidates across
+all ten queries — including the two that supplied `entities` and therefore did reach the fact
+fetch. The cause is upstream of every reader: **every fact query in the system filters
+`f.status = 'active'`** (`packages/neo4j/src/fact.ts:302` for the served path,
+`packages/mcp/src/tools.ts:810` for `berry_grep`), and the live graph holds **152 active facts
+against 29,148 tentative** and 53 invalidated.
+
+So 99.5% of the fact corpus is structurally unreachable by anything, and the fact plane's
+bottleneck is promotion (RL-011), not indexing. This is the number that should govern any decision
+to build fact readers: both `fact_content` and `fact_embedding` would serve a 152-row corpus until
+promotion is fixed.
 
 ## 5. The pre-registered rule, and its verdict
 
