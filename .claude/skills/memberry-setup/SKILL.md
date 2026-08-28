@@ -1,7 +1,7 @@
 ---
 name: memberry-setup
-description: "Bootstrap MemBerry persistent memory for the current project. Analyzes the repo, discovers entities and domain tags, writes MemBerry Memory config to CLAUDE.md, and calls berry_bootstrap to scaffold the knowledge graph. Run once per project. Trigger: user says 'set up memberry', 'bootstrap memberry', 'init memberry', 'configure memberry memory'."
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, AskUserQuestion, mcp__memberry__berry_load, mcp__memberry__berry_store, mcp__memberry__berry_query, mcp__memberry__berry_bootstrap
+description: "Bootstrap MemBerry persistent memory for the current project. Analyzes the repo, discovers entities and domain tags, writes MemBerry Memory config to CLAUDE.md, and ingests the codebase (or calls berry_bootstrap) to scaffold the knowledge graph. Run once per project. Trigger: user says 'set up memberry', 'bootstrap memberry', 'init memberry', 'configure memberry memory'."
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, AskUserQuestion, mcp__memberry__berry_load, mcp__memberry__berry_store, mcp__memberry__berry_query, mcp__memberry__berry_tools, mcp__memberry__berry_bootstrap, mcp__memberry__berry_ingest_codebase, mcp__memberry__berry_memory_insert
 argument-hint: "[project name] or auto"
 ---
 
@@ -17,7 +17,7 @@ Bootstrap MemBerry persistent memory for the current project.
 4. Forms seed priors from code/architecture observations
 5. Presents findings to the user for confirmation
 6. Writes `## MemBerry Memory` config section to the project's CLAUDE.md
-7. Calls `berry_bootstrap` to scaffold the knowledge graph
+7. Ingests the codebase to scaffold the knowledge graph, falling back to `berry_bootstrap`
 
 ## Execution Flow
 
@@ -67,24 +67,67 @@ Project: <name>
 Description: <one-line description>
 Domain: <domain>
 Project Tag: project:<kebab-case-name>
+Workload Profile: <coding|research|operations|mixed>
 
 Entities:
-- <entity-1>
-- <entity-2>
+- <human-readable entity>
 
-Tags:
-- <tag-1>
-- <tag-2>
+Canonical Entity IDs:
+- <project-name>: <resolved-id>
+
+Stable Tags:
+- <reusable non-project tag>
+
+Recall Priorities:
+- <approved decisions or active architecture>
 
 Store Policy:
-- default
+- Classify durable knowledge and verify every returned episode.
+
+Data Exclusions:
+- Secrets, credentials, raw customer data, routine diffs.
+
+Agent Coordination:
+- Share one session ID; use distinct runtime `agent_id` identities per agent.
+- Subagents return durable findings; the parent stores one integrated summary.
 
 Priors:
-- <prior-1>
-- <prior-2>
+- <low-confidence observation>
 ```
 
-### Step 9 — Bootstrap Graph
+Twelve of the thirteen fields are required — `Priors:` is the one the validator does
+not enforce, and it is worth writing anyway. `Workload Profile` must be one of the four listed
+values, `Canonical Entity IDs` needs at least one `- name: id` mapping, and
+`Stable Tags` needs at least one non-project kebab-case tag.
+
+### Step 8b — Validate the Config
+
+Run `node skills/memberry/scripts/validate-project-config.mjs <written-file>` when the
+validator is available, and fix any field it reports missing before bootstrapping.
+
+### Step 9 — Ingest and Bootstrap
+
+`berry_bootstrap` and `berry_ingest_codebase` are both Tier-2, so enable `admin` first:
+
+```
+berry_tools(action: "enable", domain: "admin")
+```
+
+Prefer one-shot ingestion when the repo root is server-visible (under
+`MEMBERRY_INGEST_ALLOW_DIR`) — it scans, bootstraps, indexes, and seeds in one call:
+
+```
+berry_ingest_codebase(
+  path: "<repo root>",
+  project_name: "<name>",
+  project_tag: "project:<kebab-case-name>",
+  description: "<description>",
+  domain: "<domain>"
+)
+```
+
+Use `berry_bootstrap` plus explicit code indexing only when one-shot ingestion is
+unavailable:
 
 ```
 berry_bootstrap(
@@ -92,8 +135,8 @@ berry_bootstrap(
   project_tag: "project:<kebab-case-name>",
   description: "<description>",
   domain: "<domain>",
-  entities: [...],
-  semantic_seeds: [...],
+  entities: [{ name: "<entity>", type: "module", parent: "<name>" }],
+  semantic_seeds: [{ claim: "<prior>", domain: "architecture", confidence: 0.3 }],
   agents: [{ id: "mcp", name: "Claude Code", type: "assistant" }]
 )
 ```

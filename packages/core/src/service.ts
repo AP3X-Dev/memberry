@@ -36,6 +36,18 @@ import { InternalObservedRetrievalError } from './retrieval-observer.js';
 import type { AdmissionObservationV1 } from './admission.js';
 import type { AdmissionShadowAttempt, AdmissionShadowHook } from './admission-shadow.js';
 
+/**
+ * Confidence for a raw episode injected into the ranked memory pool (RL-010).
+ *
+ * The codebase's existing neutral prior — the value it already uses wherever a claim carries no
+ * evidence either way (`consolidation.ts:968`, `service.ts` fact create, `assembler.ts:2045`),
+ * the boundary below which `advisor.ts:103` flags `low_confidence_result`, and the exact point
+ * at which the provenance multiplier in `scoring.ts:162` — `(confidence - 0.5) * 0.2` — is
+ * neutral. An uncorroborated capture should assert nothing in either direction.
+ */
+const EPISODE_NEUTRAL_CONFIDENCE = 0.5;
+
+
 // ─── Dependency interfaces (injected, not concrete imports) ──────────────────
 
 export interface RedisLayer {
@@ -92,8 +104,13 @@ export interface FactLayer {
   /** OPT-42: batch confidence updates in one round-trip (optional — staleness
    *  decay falls back to per-fact updateConfidence when absent). */
   updateConfidenceBatch?(updates: Array<{ id: string; confidence: number }>): Promise<void>;
-  /** Promote a corroborated tentative/abductive fact to active+deductive (optional) */
-  corroborate?(id: string, confidence: number): Promise<void>;
+  /** Promote a corroborated tentative fact to active (optional). `inferenceType`
+   *  defaults to 'deductive'; pass the fact's own type to preserve it. */
+  corroborate?(
+    id: string,
+    confidence: number,
+    inferenceType?: 'deductive' | 'inductive' | 'abductive',
+  ): Promise<void>;
 }
 
 export interface Neo4jLayer {
@@ -543,16 +560,36 @@ export class AMPService {
       }
     }
     // Episodic vector hits join the same ranked candidate pool as pseudo-semantic
-    // nodes: a raw capture is ground truth (confidence 1.0), its recency is its
-    // creation time, and its relevance is the cosine score. rankMemories then
-    // orders episodes and semantics together; the token budget trims the tail.
+    // nodes. Recency is the episode's creation time and relevance is the cosine
+    // score — both earned. Confidence is the NEUTRAL PRIOR (0.5), not 1.0.
+    //
+    // RL-010. `confidence` is the only term in rankMemories (ranking.ts:16) that
+    // expresses corroboration, and a raw capture has none — the same literal below
+    // says signal_count 0, which advisor.ts:98-101 itself treats as a risk signal.
+    // Asserting 1.0 ranked every raw episode strictly above every corroborated
+    // Semantic in the store: the highest confidence this system ever ASSIGNS is 0.9,
+    // for a human-approved decision (consolidation.ts:39, :1392). 1.0 appears
+    // elsewhere only as a clamp ceiling on untrusted model output (consolidation.ts:861),
+    // never as a value anything earns.
+    //
+    // 0.5 is not a tuned constant. It is this codebase's existing "no evidence either
+    // way" value (consolidation.ts:968, service.ts:1138/:1154, assembler.ts:2045), it
+    // is the documented low/not-low boundary (advisor.ts:103), and it is the exact
+    // point at which the downstream provenance multiplier is neutral —
+    // scoring.ts:162 computes (confidence - 0.5) * 0.2, so 1.0 was silently buying
+    // the episode a +0.1 boost in fusion on top of the ranking advantage.
+    //
+    // NOT derived from signal_count: no helper does that, and wiki/reconcile.ts:275
+    // mints a human-authored claim at 0.8 with signal_count 0, so the repo does not
+    // hold that invariant. rankMemories then orders episodes and semantics together;
+    // the token budget trims the tail.
     for (const ep of byVectorEpisodic) {
       if (!seen.has(ep.id) && inProjectScope(ep, projectScope)) {
         seen.add(ep.id);
         merged.push({
           id: ep.id,
           content: ep.task ? `${ep.task}\n\n${ep.content}` : ep.content,
-          confidence: 1.0,
+          confidence: EPISODE_NEUTRAL_CONFIDENCE,
           signal_count: 0,
           created_at: ep.created_at,
           updated_at: ep.created_at,
@@ -1097,13 +1134,35 @@ export class AMPService {
             const independent =
               reinforcing.source_episode_ids.length > 0 &&
               !reinforcing.source_episode_ids.includes(episodeId);
+            // Inductive facts are promotable too, under the SAME distinct-episode bar
+            // as deductive ones. They were excluded only because `corroborate` used to
+            // relabel everything it promoted to deductive, which would have destroyed a
+            // generalization's provenance — the comment above says as much. That is now
+            // an argument to `corroborate`, so the exclusion is no longer needed.
+            //
+            // This was not a theoretical gap. Measured on the live graph 2026-08-28:
+            // all 340 tentative facts carrying two or more distinct source episodes were
+            // inductive, against 152 active facts in total. Consolidation mints inductive
+            // (`consolidation.ts:1119`, `:1156`), so the pile grew with every run of the
+            // engine and nothing could ever drain it.
+            //
+            // OPT-70b is UNCHANGED: `independent` still requires a DISTINCT episode with
+            // non-empty provenance, so this widens WHICH facts can promote, never the
+            // evidence bar they must clear.
             const promotable =
               reinforcing.status === 'tentative' &&
               (reinforcing.inference_type === 'abductive' ||
-                (reinforcing.inference_type === 'deductive' && independent));
+                ((reinforcing.inference_type === 'deductive'
+                  || reinforcing.inference_type === 'inductive') && independent));
             if (promotable && factLayer.corroborate) {
               const boosted = Math.min(1, Math.max(reinforcing.confidence, 0.5) + 0.1);
-              await factLayer.corroborate(reinforcing.id, boosted);
+              // Preserve a generalization as a generalization. An abductive hypothesis
+              // confirmed by explicit evidence still becomes deductive, as before.
+              await factLayer.corroborate(
+                reinforcing.id,
+                boosted,
+                reinforcing.inference_type === 'inductive' ? 'inductive' : 'deductive',
+              );
               // OPT-70b: the contender is now CONFIRMED (active). Only NOW may it
               // supersede an ESTABLISHED active fact it conflicts with — supersession
               // is deferred from first-sight to corroboration-time so unconfirmed

@@ -10,10 +10,12 @@
 # ---------------------------------------------------------------------------
 # WHY --user, AND WHY npm ci RUNS UNDER IT TOO
 #
-# Running this as the container's default root against a host-owned worktree produced FOURTEEN lab
-# failures that looked like product defects for three consecutive gates. They were not. Thirteen
-# were `fatal: detected dubious ownership in repository at '/w'` — git refuses a repo owned by a
-# different uid. `git config --global --add safe.directory` does NOT fix it here: the lab's sandbox
+# Running this as the container's default root against a host-owned worktree produced THIRTEEN of
+# the fourteen lab failures that looked like product defects for three consecutive gates. Those
+# thirteen were not defects: they were `fatal: detected dubious ownership in repository at '/w'`
+# — git refuses a repo owned by a different uid. (The FOURTEENTH is a different matter and is NOT
+# explained by anything in this section — see ONE KNOWN-RED TEST below. Nothing here says it is
+# not a product defect.) `git config --global --add safe.directory` does NOT fix it here: the lab's sandbox
 # spawns git with a sanitised environment, so HOME is unset and the global config is never read.
 #
 # Matching the container uid to the worktree owner removes the mismatch at the source. But npm ci
@@ -22,17 +24,32 @@
 # mode for the other.
 #
 # ---------------------------------------------------------------------------
-# ONE KNOWN-RED TEST, AND IT IS AN ENVIRONMENT GAP, NOT A DEFECT
+# ONE KNOWN-RED TEST. CAUSE ESTABLISHED 2026-08-28: A SPAWN TIMEOUT UNDER LOAD.
 #
-#   RET-010E > "drains every retained finalizer owner once after an injected close failure"
+# This block used to blame a missing `docker` CLI. That was withdrawn (grep finds no docker in the
+# test or in the gate it loads, and the lab's docker spawns sit behind candidate/live.ts and
+# candidate-v3/live.ts, which are their own CI steps and unreachable from `vitest run bench/lab`).
+# Then somebody read the logs, which is all it ever needed.
 #
-# Its sandbox shells out to the `docker` CLI, which the node:NN image does not contain. CI runs on
-# a runner that has one, and CI is green — so CI is the authority for that test, not this script.
-# Mounting the docker socket in here would hand the test suite control of the host daemon, which is
-# not a trade worth making for one assertion.
+# THE TWO ARMS FAIL ON DIFFERENT TESTS:
+#   node:20  bench/lab/admission-features/scorer-only/__tests__/blinded-holdout-v2.test.ts
+#            "loads the assembled v2 policy through the real preflight CLI" -> timed out in 5000ms
+#   node:22  bench/lab/ret010/__tests__/dev-gate.test.ts:2199
+#            "runs the exact production finalize CLI..." -> spawnSync node ETIMEDOUT (errno -110)
 #
-# So: LAB_EXIT=1 with exactly ONE failure is the expected steady state. TWO or more is a real
-# regression and must be read. Do not "fix" this by filtering the test out — a gate you have taught
+# Same class both times: a short hard timeout around spawning a Node subprocess. The node:22 case
+# allows timeout: 3_000 (dev-gate.test.ts:2196); the node:20 case is vitest's default 5s. That one
+# file carries seven such 2-3s spawn budgets, so WHICH test trips depends on machine load, not on
+# any defect. Both arms reported "Tests 1 failed | 2116 passed", at 160-220s of test time on a
+# 4-core box measured at load 2.83.
+#
+# That is why this looked like one stable known-red test for three packets: stable in COUNT,
+# unstable in IDENTITY. Nothing is missing from this container — the budgets are simply too tight
+# for it under parallel load. The real fix is to raise those budgets or serialise the lab run, not
+# to filter anything out.
+#
+# So: LAB_EXIT=1 with exactly ONE failure is the expected steady state, but DO NOT assume it is
+# the same test as last time — read the log. TWO or more is a real regression and must be read. Do not "fix" this by filtering the test out — a gate you have taught
 # to ignore its own output is the thing this whole comment exists to prevent.
 set -eu
 

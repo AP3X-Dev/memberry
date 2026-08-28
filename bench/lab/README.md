@@ -227,12 +227,18 @@ packets and approvals are complete.
 ```text
 bench/lab/
   admission/    production-core structural runner and registered fixture systems
+  admission-features/ MEM-002 feature-label evaluation boundary and blinded-holdout
+                packets (own README)
   adapters/     frozen controls, proxy candidate, opt-in live MCP adapter
   baselines/    immutable pre-lab manifest, lock, comparison policy
   contracts/    versioned retrieval and sibling structural evidence contracts
   datasets/     synthetic input/oracle splits and registry-driven acquisition
+  eval001/      pinned render-grammar test for the EVAL-001 runner
   fixtures/     committed protected and migrated behavioral scenarios
+  golden-v2/    tombstoned RET-GOLDEN-V2 calibration record (never built)
+  multihop/     RET-007 multi-hop instruments v1-v4: policy, generators, calibration
   registry/     datasets, systems, metrics, and default-off experiments
+  ret010/       served-reranker development gate — invoked by name in CI (ci.yml:65)
   retrieval-trace/ opt-in MCP trace conformance and disposable live evidence
   ROADMAP.md    deferred dataset activation packets and acceptance gates
   __tests__/    golden metrics, hostile regressions, contract boundaries

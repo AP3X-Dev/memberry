@@ -1,15 +1,27 @@
 # RET-010 Served Reranker Design Freeze
 
-Status: PARTIALLY PROMOTED — supporting design reference, not the plan of record.
-RET-010A through RET-010D are promoted and the RET-010E verification design merged
-(PR #68). RET-010E implementation, RET-010F, and the RET-010 parent remain OPEN,
-and the holdout evaluation this design's promotion depends on has never been
-authorized or run. Live completion state lives in `10X_EXECUTION_ROADMAP.md`, the
-canonical plan; resume from its `NEXT ACTION`, not from this file.
+Status: PROMOTED — supporting design reference, not the plan of record.
+RET-010A through RET-010F and the RET-010 parent are all closed: RET-010E was
+qualified by CI `32627897999` and RET-010F committed as approval record
+`f8627b8`. See the checked items "Implement and qualify RET-010E in the frozen
+thirteen paths", "Close RET-010F by independently authenticating the hosted
+development evidence", and "Close RET-010" under **Immediate Retrieval 2.0 exit
+checklist** in `10X_EXECUTION_ROADMAP.md`. The served reranker runs in production
+as `MEMBERRY_RERANKER_V1=served`. The RET-010 holdout evaluation has still never
+been authorized or run — that authorization and the G2 pass criterion are the two
+unchecked items left on that checklist, and per the roadmap's 2026-08-25
+reconciliation under `- [x] RET-010` both are G2 gate items, not RET-010
+promotion dependencies. Live completion state lives in
+`10X_EXECUTION_ROADMAP.md`, the canonical plan; resume from its `NEXT ACTION`, not
+from this file. Cite that file by heading, never by line — it is rewritten often.
 
 Design base: `f55f61e2dca958627ed01766332d23f9d565c689`
 
-Roadmap route: `RET-010 -> RET-006 material utility -> G2 Retrieval 2.0`
+Roadmap route at design time (historical): `RET-010 -> RET-006 material
+utility -> G2 Retrieval 2.0`. RET-010 has since closed. The live route is the
+NOW lane `G2: one authorized RET-010 holdout -> decide Retrieval 2.0 and stop`
+under **Topological route to the final gate**; RET-006 is still unchecked in the
+Phase 2 list, but no longer sits between RET-010 and G2.
 
 ## 1. Decision
 

@@ -1,12 +1,20 @@
 # load() latency — sequential vs concurrent phasing
 
+Measured 2026-05-30 at `12a6559`.
+
 Controlled A/B (`load_latency.ts`). Both arms drive **identical mock layers** with
 identical injected per-op latencies, so the only variable is round-trip *phasing*:
 
 - **sequential** — faithful replica of the pre-optimization ordering
   (`await blocks → await semantics+vector → await facts → await expand`)
-- **concurrent** — the current `AMPService.load()`
+- **concurrent** — `AMPService.load()`'s phasing as measured
   (`await Promise.all([blocks, semantics+vector, facts]) → await expand`)
+
+`load()` has since gained a fourth concurrent branch — the episodic vector channel
+(`d2c1022`, `packages/core/src/service.ts:397`) — and takes a five-promise
+`Promise.allSettled` path when a retrieval observation is active (`service.ts:442`).
+The phasing conclusion is unchanged; the concurrent arm is no longer a byte-faithful
+replica of current `load()`.
 
 Injected: redis=1ms, neo4j=8ms, embedApi=120ms. 5 entities, blocks+facts present, 50 iters.
 

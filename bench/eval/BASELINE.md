@@ -1,11 +1,13 @@
 # EVAL-001 — origin baseline
 
-**Status: TEMPLATE. No run has happened. Every number below is the literal token `TBD`.**
+**Status: ORIGIN PINNED 2026-08-27 at `a1439fb` (deployed `3eba9a9`). Section 2.6 holds the
+real measurements and is never overwritten.**
 
-A `TBD` in this file is a placeholder for a measurement that does not exist yet. It is not
-zero, it is not "roughly zero", and it must never be quoted, averaged, compared against, or
-carried into a report. Filling one in is the act of taking the origin baseline, and that
-happens exactly once.
+A surviving `TBD` in sections 2.1 to 2.5 is a run-time confirmation cell that was not
+captured at the run. It is a placeholder for evidence that does not exist: it is not zero,
+it is not "roughly zero", and it must never be quoted, averaged, compared against, or
+carried into a report. The origin was taken once and does not get retaken; the `TBD`s in
+section 3 are worked examples of the delta format, not cells.
 
 Governed by spec
 [`docs/agent-runs/specs/2026-08-26-eval001-real-query-evaluation.md`](../../docs/agent-runs/specs/2026-08-26-eval001-real-query-evaluation.md)
@@ -68,7 +70,7 @@ Confirm at run time and record the confirmation:
 | repo SHA actually used, if it moved | TBD |
 | deployed SHA actually used, if it moved | TBD |
 
-### 2.2 Flag state — the complete set, including what is not in the repo
+### 2.2 Flag state at origin — the complete set, including what is not in the repo
 
 A change to any of these voids cross-run comparison (SELECTION-RULE §9 item 2) and requires
 a fresh baseline.
@@ -174,6 +176,11 @@ node bench/eval/run-eval001.mjs --split dev     --out bench/eval/last-run.json
 node bench/eval/run-eval001.mjs --split holdout --out bench/eval/last-run-holdout.json
 ```
 
+**As actually run, both splits wrote to `bench/eval/last-run.json`.** The holdout run
+overwrote the dev artifact and `last-run-holdout.json` was never produced, so the surviving
+artifact holds the holdout aggregate with per-question detail withheld. Future runs must use
+distinct `--out` paths.
+
 | field | value |
 |---|---|
 | exact command lines used | TBD |
@@ -185,6 +192,9 @@ node bench/eval/run-eval001.mjs --split holdout --out bench/eval/last-run-holdou
 Opening the `holdout` split at origin is an open, and **must be recorded in
 [`HOLDOUT-OPENS.md`](HOLDOUT-OPENS.md)** like any other, with `change tested = origin
 baseline`.
+
+`run-eval001.mjs` is the only EVAL-001 instrument. A sibling probe harness is committed
+alongside it in this directory and is **not** governed by this file; see section 8.
 
 ### 2.6 THE ORIGIN NUMBERS
 
@@ -220,7 +230,7 @@ footnotes. A run with a nonzero `nonRetrieval` is a partially-measured run:
 | `testFileRate@10` | **0.2000** |
 | `nonRetrieval` (count, of 4 dev questions) | **1** — `eval001-d-08`, `runtime_query_planner:invalid_request` (no `entity_scope` in the original call). Excluded from scoring, never counted as zero. **n scored = 3.** |
 | `grammarMisses` (count) | **0** |
-| kind histogram over top-10 (descriptive) | see `bench/eval/last-run.json` |
+| kind histogram over top-10 (descriptive) | not retained — the holdout invocation overwrote `last-run.json`. Re-run the dev split to regenerate; unscored, so nothing depends on it. |
 
 **`holdout` split (n = 5) — AGGREGATE ONLY. No per-question row is ever recorded here.**
 
@@ -255,6 +265,32 @@ EVAL001 split=holdout grammarMisses=0 nonRetrieval=0 flags=QUERY_PLANNER_V1,CAND
 **Per-question `dev` detail is permitted and belongs in the run artifact
 (`bench/eval/last-run.json`), not in this file** — this file records split-level aggregates.
 Per-question `holdout` detail is not permitted anywhere, per spec §3.2.1 and §5.
+
+### 2.7 Post-origin flag drift
+
+Section 2.2 records the origin environment and is not rewritten. Three retrieval flags went
+live after the origin was pinned:
+
+| flag | shipped in | live value |
+|---|---|---|
+| `MEMBERRY_KIND_RANK_V1` | #118 — IDX-002A, kind-aware ranking | `1` |
+| `MEMBERRY_CODE_SCOPE_V2` | #119 — IDX-002B, project-scoped code search | `1` |
+| `MEMBERRY_CODE_RERANK_V1` | #123 — IDX-004, wide-window code rerank | `1` |
+
+All three are declared in `packages/code/src/search.ts` (lines 63, 98, and 113), and all
+three read `1` on the deployed box as of 2026-08-28.
+
+**They are in scope for §3.2 item 2.** "Any flag in §2.2" means any flag governing the
+measured path; the §2.2 table is the origin's snapshot of that set, not a closed list a later
+flag escapes by being younger. Cross-run comparison against the origin numbers is therefore
+void, and **a fresh baseline is owed** before section 7 carries its first post-origin row.
+The §2.6 numbers stand as the record of what the `a1439fb` environment measured.
+
+IDX-004 was confirmed live on 2026-08-28 against the deployed server — top-5 70.0%, MRR
+58.3%, variable share 8.0%, test-file share 0.0%, 0 errors. That measurement was taken with
+the sibling probe harness (section 8), not with `run-eval001.mjs`, and is logged in the root
+`RESEARCH-LEDGER.md`. It is not an EVAL-001 result and does not substitute for the fresh
+baseline.
 
 ---
 
@@ -374,7 +410,7 @@ When a deliberate re-index happens:
 
 ## 6. Superseded origins — retained forever
 
-None. The origin in section 2 is the first, and it has not been taken yet.
+None. The origin in section 2 is the first, and it stands unsuperseded.
 
 ---
 
@@ -391,4 +427,40 @@ counts, the flag state if it differs from §2.2, and the accept/reject verdict.
 | date | SHA | split | change tested | kwRecall@5 (Δprior / Δorigin) | kwRecall@10 (Δprior / Δorigin) | testFileRate@5 (Δprior / Δorigin) | testFileRate@10 (Δprior / Δorigin) | nonRetrieval | grammarMisses | verdict |
 |---|---|---|---|---|---|---|---|---|---|---|
 
-*No runs yet. The first row is the origin baseline itself, added when section 2.6 is filled.*
+*The origin baseline is recorded in section 2.6 and as entry 1 of
+[`HOLDOUT-OPENS.md`](HOLDOUT-OPENS.md) section 5. No post-origin run has been appended here
+yet.*
+
+---
+
+## 8. Sibling probes in this directory — NOT the EVAL-001 instrument
+
+`bench/eval/` also carries a probe harness that this file does not govern. It has no blind
+keyword authoring, no splits, and no holdout: it is diagnostic, and its results are logged in
+the root [`RESEARCH-LEDGER.md`](../../RESEARCH-LEDGER.md), never in section 7.
+
+| script | the question it answers |
+|---|---|
+| `run-outcome-probe.mjs` | did the right FILE come back, and how far down? |
+| `scope-probe.mjs` | what is OCCUPYING the top-`k`, and how much of it is this project's code? |
+| `idx004-measure.mjs` | does retrieve-wide + rerank + prior-last actually find more? |
+
+All three read the same ground-truth file, `outcome-cases.jsonl` — 10 cases, `oc-01` through
+`oc-10`. Each names a question, the file that answers it, and a `sourceOfTruth` file:line,
+and carries `authoredBeforeFirstRun: true`. File-level ground truth is unarguable, which is
+why this probe needs no blind-authoring ceremony to be honest. The trade is that at n = 10
+with no sealed split it is a weaker instrument than EVAL-001, not a stronger one.
+
+`run-outcome-probe.mjs` and `scope-probe.mjs` are MCP clients (`mcp-client.mjs`) and read the
+deployed server. `idx004-measure.mjs` is different: it constructs `CodeSearch` against the
+live graph in-process and runs the shipped code path, one process per flag state because the
+flag is read at module load. It measures shipped code against live data; it is **not** a
+reading from the deployed server, and must be reported that way. Its `--no-reranker` arm
+isolates the two mechanisms IDX-004 ships together — the widened window with the prior run
+over 50 rows instead of 10, and BM25F reranking — so that a gain from the first is not
+credited to the second. Its `--compare off.json on.json` mode is pure arithmetic over two
+saved runs and needs no database.
+
+**These probes never write to section 7 and never move the origin in section 2.** The recent
+retrieval decisions (IDX-002A, IDX-002B, IDX-003, IDX-004) rested on them. That records what
+the evidence actually was, and at what n; it does not promote the probe to a gate.

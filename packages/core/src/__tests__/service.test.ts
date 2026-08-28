@@ -1250,7 +1250,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     await service.store({ session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT' });
     await flushAsync();
 
-    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-dream', expect.any(Number));
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-dream', expect.any(Number), 'deductive');
     expect(factLayer.create).not.toHaveBeenCalled(); // reinforcing → no new fact
   });
 
@@ -1297,8 +1297,24 @@ describe('AMPService.store — real-time fact extraction', () => {
     expect(factLayer.updateConfidence).toHaveBeenCalledWith('stale', 0.45);
   });
 
-  it('does NOT promote an INDUCTIVE (consolidation) fact on reinforcement — provenance stays inductive', async () => {
-    const existing = makeFactNode({ id: 'fact-ind', object: 'JWT', status: 'tentative', inference_type: 'inductive', confidence: 0.5 });
+  it('promotes an INDUCTIVE (consolidation) fact on independent reinforcement — and it STAYS inductive', async () => {
+    // Behaviour change, 2026-08-28. This previously asserted that an inductive fact is
+    // never promoted. That was not the real invariant — the invariant the old comment
+    // named is "provenance stays inductive", and refusing to promote was only how it was
+    // achieved, because `corroborate` relabelled everything it promoted to deductive.
+    //
+    // The cost was measured on the live graph: every one of the 340 tentative facts
+    // carrying two or more distinct source episodes was inductive, against 152 active
+    // facts in total. Consolidation mints inductive, so the engine's own output could
+    // gather corroboration forever and never become servable.
+    //
+    // The generalization is now preserved by PASSING its type through, so it can be
+    // confirmed as a generalization. The evidence bar is untouched — see the
+    // same-episode test below, which still refuses.
+    const existing = makeFactNode({
+      id: 'fact-ind', object: 'JWT', status: 'tentative',
+      inference_type: 'inductive', confidence: 0.5, source_episode_ids: ['ep-old'],
+    });
     const factLayer = makeFactLayer();
     (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([existing]);
     mockExtractFacts.mockResolvedValue([
@@ -1306,11 +1322,30 @@ describe('AMPService.store — real-time fact extraction', () => {
     ]);
 
     const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
-    await service.store({ session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT' });
-    await flushAsync();
+    await service.processExtraction('auth uses JWT', 'ep-new', 'default'); // distinct from 'ep-old'
 
-    expect(factLayer.corroborate).not.toHaveBeenCalled(); // inductive must not be promoted
+    // Promoted, and explicitly NOT relabelled to deductive.
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-ind', expect.any(Number), 'inductive');
     expect(factLayer.create).not.toHaveBeenCalled();
+  });
+
+  it('does NOT promote an INDUCTIVE fact on a retry of the SAME episode', async () => {
+    // The OPT-70b independence bar is unchanged by the above: widening WHICH types may
+    // promote must not widen the evidence they have to clear.
+    const existing = makeFactNode({
+      id: 'fact-ind-same', object: 'JWT', status: 'tentative',
+      inference_type: 'inductive', confidence: 0.5, source_episode_ids: ['ep-same'],
+    });
+    const factLayer = makeFactLayer();
+    (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([existing]);
+    mockExtractFacts.mockResolvedValue([
+      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+    ]);
+
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    await service.processExtraction('auth uses JWT', 'ep-same', 'default'); // NOT distinct
+
+    expect(factLayer.corroborate).not.toHaveBeenCalled();
   });
 
   it('OPT-70: an INDEPENDENT episode corroborates a tentative DEDUCTIVE fact → promoted to active', async () => {
@@ -1331,7 +1366,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
     await service.processExtraction('auth uses JWT', 'ep-new', 'default'); // distinct from 'ep-old'
 
-    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-dt', expect.any(Number));
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-dt', expect.any(Number), 'deductive');
     expect(factLayer.create).not.toHaveBeenCalled(); // reinforcing → no new fact
     // OPT-70: reconciliation must opt into seeing tentative contenders.
     expect(factLayer.findBySubjectPredicate).toHaveBeenCalledWith(
@@ -1434,7 +1469,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     await service.processExtraction('auth uses JWT', 'ep-new', 'default'); // independent of 'ep-old'
 
     // Contender promoted...
-    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-jwt', expect.any(Number));
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-jwt', expect.any(Number), 'deductive');
     // ...and the established conflicting fact superseded BY it.
     expect(factLayer.invalidate).toHaveBeenCalledOnce();
     const invalidateArgs = (factLayer.invalidate as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -1478,7 +1513,7 @@ describe('AMPService.store — real-time fact extraction', () => {
 
     // The contender was corroborated (promoted, already persisted) BEFORE the
     // invalidate that failed — so the new truth survives.
-    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-jwt', expect.any(Number));
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-jwt', expect.any(Number), 'deductive');
     expect(factLayer.create).not.toHaveBeenCalled(); // reinforcing → no new fact
     expect(factLayer.invalidate).toHaveBeenCalledOnce();
     expect((factLayer.invalidate as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('fact-old');
@@ -1519,7 +1554,7 @@ describe('AMPService.store — real-time fact extraction', () => {
 
     // Contender promoted (not a new create), old fact invalidated + superseded by it.
     expect(factLayer.create).not.toHaveBeenCalled();
-    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-jwt', expect.any(Number));
+    expect(factLayer.corroborate).toHaveBeenCalledWith('fact-jwt', expect.any(Number), 'deductive');
     expect(factLayer.invalidate).toHaveBeenCalledOnce();
     const invalidateArgs = (factLayer.invalidate as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(invalidateArgs[0]).toBe('fact-old');

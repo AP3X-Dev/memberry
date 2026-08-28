@@ -117,11 +117,50 @@ stratum; dev control 17/20 (0.85), high-density stratum 6/0. The calib split
 at 20 probes per split the cross-split sampling variance exceeds the band's
 tolerance.
 
-The v3 bytes, knobs, policy, and scorer are frozen as a read-only record. No
-recalibration, dev regeneration, v4 instrument, or re-dispatch is authorized
-without an explicit owner decision. RET-007 strike accounting is unchanged: one
-capability hypothesis spent (v1); v2 and v3 are both instrument failures, and no
-candidate has yet run against a qualified non-saturated multi-hop instrument.
+The v3 bytes, knobs, policy, and scorer are frozen as a read-only record. A v4
+instrument was subsequently authorized by explicit owner decision and built (see
+below); beyond it, no recalibration, dev regeneration, or re-dispatch is authorized
+without a further explicit owner decision. RET-007 strike accounting is unchanged:
+one capability hypothesis spent (v1); v2 and v3 are both instrument failures, and
+no candidate has yet run against a qualified non-saturated multi-hop instrument —
+v4 is built but not yet qualified.
+
+### Multi-hop v4 (RET-007 additive instrument) — built, qualification pending
+
+v4 was authorized by explicit owner decision on 2026-08-25 and built at `b90272e`,
+base-pinned in `MULTIHOP_V4_FREEZE.exactBaseCommit` to
+`534de13fbaa6b24719a0b6e7390451542987caee`, which is that commit's parent. It adds
+a lab retrieval funnel (`bench/lab/adapters/memberry-retrieval-core-funnel.ts`,
+pinned by Git blob alongside five v3 control-identity paths) and reuses the v3
+evidence discipline: `bench/lab/multihop/policy-v4.ts`, `generate-v4.ts`,
+`calibrate-v4.ts`, `qualify-control-v4.ts`, `evaluate-dev-v4.ts`,
+`scorer-only-v4.ts`, `exchangeability-v4.ts`, loaded through
+`bench/lab/datasets/load-multihop-v4.ts`.
+
+Frozen knobs (`MULTIHOP_V4_KNOBS`, tuned only against the disposable public `calib`
+split within `MULTIHOP_V4_KNOB_BOUNDS`), each triple low/medium/high: corpus size
+22 per scenario; bridge-token collisions 0/1/1; domain lexical overlap share
+0.8/0.85/0.85; fact-token echo 0/0/0. The confirmation run at those values
+(`calibrate-v4.ts` with no arguments) closed at overall 22/45 = 0.489; strata low
+8/7, medium 5/10, high 9/6; headroom H = 14/45 = 0.311; score-driven 14/14;
+accepted. H sits above the pre-registered 0.30 ledger flag, so no near-threshold
+flag is owed. See `bench/lab/multihop/CALIBRATION-V4.md`.
+
+After the freeze, `calib`, `dev`, `holdout`, and `twin` were generated exactly once
+from the frozen knobs, hashed into `MULTIHOP_V4_FREEZE.artifacts`, and registered
+as `memberry-multihop-v4-{calib,dev,holdout,twin}` 4.0.0 in
+`registry/datasets.json`. Any later knob, generator, or dataset byte change
+invalidates the packet. Exchangeability is reported calib-only in
+`EXCHANGEABILITY-V4.md`; the dev, holdout, and twin marginals there are structural,
+with no oracle opened.
+
+Two hosted workflows are wired,
+`.github/workflows/ret007-v4-control-qualification.yml` and
+`ret007-v4-dev-evaluation.yml`, driven by the
+`bench:lab:multihop-v4:{qualify-control,join-control,evaluate-dev,join-dev}`
+scripts. No hosted qualification run is recorded here. Control headroom stays
+explicitly unqualified until an authoritative hosted receipt exists, exactly as
+for v2 and v3.
 
 ## Admission shadow evidence
 
@@ -275,12 +314,14 @@ Transcribed verbatim from PRP section 6.6, bullet 8 (2026-08-14):
 "Record failures and exclusions; never remove a hard case merely to raise a score."
 ```
 
-`GOLDEN_V2_ANTIGAMING_RULE` in `bench/lab/golden-v2/policy-v2.ts` holds that string
-as a frozen literal, and a test asserts it matches this block character for
-character. That pin proves the two tracked copies never drift after commit. It
-cannot prove fidelity to the upstream PRP, because `docs/` is gitignored and git
-has never seen that document — but the quoted sentence is one line, so anyone
-holding the PRP can check it by eye.
+No code pin for this rule exists. The instrument was tombstoned before
+`bench/lab/golden-v2/policy-v2.ts` was authored, so the block above is the only
+tracked copy of the rule. A future campaign that reopens this design must
+re-establish the pin — a frozen literal plus a character-for-character assertion
+against this block — before relying on it as an audit control. Such a pin would
+bind the two tracked copies to each other; it could never prove fidelity to the
+upstream PRP, because `docs/` is gitignored and git has never seen that document.
+The quoted sentence is one line, so anyone holding the PRP can check it by eye.
 
 A second, independently tracked analogue already exists above under CMP-006A
 ("Record every rejected or excluded case with a reason; no silent exclusions").

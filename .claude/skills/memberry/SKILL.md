@@ -11,25 +11,27 @@ For the rare times the user explicitly asks to interact with MemBerry. Normal co
 
 ## Subcommands
 
+Only the Tier-1 tools are visible at connect; everything else starts disabled. Call `berry_tools(action: "enable", domain: "<name>")` first: `admin` for `query`, `consolidate`, `provenance`; `temporal` for `timeline`, `fact-diff`; `wiki` for `compile`, `ingest`, `lint`; `graph` for `graph`, `pr-impact`, `pr-conflicts`; `memory` for the block replace, rewrite, promote, and archive operations. `ask`, `recall`, `remember`, `grep`, block read, and block insert need no enable.
+
 | Subcommand | What it does |
 |------------|-------------|
-| `status` | Health check + graph stats. See [reference/admin.md](reference/admin.md) |
+| `status` | Health check + graph stats. |
 | `ask <question>` | Dialectic retrieval — ask a question, get a synthesized cited answer (not raw chunks) via `berry_ask`. See [reference/memory-ops.md](reference/memory-ops.md) |
 | `query <q>` | Natural language or Cypher query. See [reference/memory-ops.md](reference/memory-ops.md) |
-| `consolidate [run\|review\|dream]` | Manage consolidation, or `dream` — the background gap-filling / abductive-hypothesis pass. See [reference/admin.md](reference/admin.md) |
+| `consolidate [run\|review\|dream]` | Manage consolidation, or `dream` — the background gap-filling / abductive-hypothesis pass. |
 | `recall [topic]` | Explicit memory load. See [reference/memory-ops.md](reference/memory-ops.md) |
 | `remember <what>` | Explicit memory store. See [reference/memory-ops.md](reference/memory-ops.md) |
-| `provenance <id>` | Trace the full lifecycle of a semantic node. See [reference/provenance.md](reference/provenance.md) |
-| `compile` | Compile the knowledge graph into an interlinked wiki. See [reference/wiki.md](reference/wiki.md) |
-| `ingest <path>` | Ingest a source document into the graph. See [reference/wiki.md](reference/wiki.md) |
-| `lint` | Run health checks on the knowledge graph. See [reference/wiki.md](reference/wiki.md) |
+| `provenance <id>` | Trace the full lifecycle of a semantic node. |
+| `compile` | Compile the knowledge graph into an interlinked wiki. See the `memberry-wiki` skill. |
+| `ingest <path>` | Ingest a source document into the graph. See the `memberry-wiki` skill. |
+| `lint` | Run health checks on the knowledge graph. See the `memberry-wiki` skill. |
 | `timeline <entity>` | Chronological fact history for an entity. See [reference/memory-ops.md](reference/memory-ops.md) |
 | `fact-diff <entity>` | What changed about an entity between two timestamps. See [reference/memory-ops.md](reference/memory-ops.md) |
 | `memory [read\|write\|promote] <block>` | Read, edit, or manage memory tier blocks. See [reference/memory-ops.md](reference/memory-ops.md) |
-| `graph [report\|export]` | Deterministic graph audit (`berry_graph_report`: corpus summary, node/relation counts, core abstractions, knowledge areas, cycles, low-confidence/gaps) or portable JSON / offline interactive HTML map (`berry_graph_export`). Read-only, project-scoped, secret-safe. Works for any memory graph, not just code. See [reference/admin.md](reference/admin.md) |
-| `pr-impact <num>` | Blast radius of a GitHub PR over the code graph (`berry_pr_impact`: changed files → symbols → dependents, plus knowledge areas + high-centrality nodes touched). Requires the `gh` CLI. See [reference/provenance.md](reference/provenance.md) |
-| `pr-conflicts` | PR pairs whose impact overlaps — likely merge/review conflicts (`berry_pr_conflicts`). Requires the `gh` CLI. See [reference/provenance.md](reference/provenance.md) |
+| `graph [report\|export]` | Deterministic graph audit (`berry_graph_report`: corpus summary, node/relation counts, core abstractions, knowledge areas, cycles, low-confidence/gaps) or portable JSON / offline interactive HTML map (`berry_graph_export`). Read-only, project-scoped, secret-safe. Works for any memory graph, not just code. |
+| `pr-impact <num>` | Blast radius of a GitHub PR over the code graph (`berry_pr_impact`: changed files → symbols → dependents, plus knowledge areas + high-centrality nodes touched). Requires the `gh` CLI. |
+| `pr-conflicts` | PR pairs whose impact overlaps — likely merge/review conflicts (`berry_pr_conflicts`). Requires the `gh` CLI. |
 
 **No subcommand?** Default to `status`.
 
-Read the reference file for your subcommand before executing.
+Read [reference/memory-ops.md](reference/memory-ops.md) before running the subcommands it documents.

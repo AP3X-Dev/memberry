@@ -93,6 +93,12 @@ npx tsx packages/core/src/cli.ts configure claude --write   # Claude Code
 npx tsx packages/core/src/cli.ts configure codex --write    # Codex
 ```
 
+> **Docker-only?** These CLI helpers run on the host, so they need Node 20+ and
+> an `npm install` in the clone. Without them, paste the MCP config `setup.sh`
+> already printed, or re-run `./scripts/setup.sh --configure-claude`
+> (`--configure-codex`), which runs the same command and prints it verbatim if
+> it fails.
+
 > **No OpenAI key?** MemBerry still runs — retrieval falls back to deterministic
 > lexical + fulltext ranking (no random results). Add `OPENAI_API_KEY` to `.env`
 > and `npm run stack:up` to enable embeddings.
@@ -184,7 +190,7 @@ Prefer a UI? The wiki has a **Settings** page (`/settings`, port 3200) to enable
 
 ### Bootstrap Your Project
 
-Copy `CLAUDE.md.example` (or `GEMINI.md.example`, `.cursorrules`) to your project and ask your agent to set up MemBerry. The agent analyzes your codebase, discovers entities, and scaffolds the knowledge graph. From that point on, every session loads and stores automatically.
+Copy `CLAUDE.md.example` (or `GEMINI.md.example`, `.cursorrules`) to your project and ask your agent to set up MemBerry. The agent analyzes your codebase, discovers entities, and scaffolds the knowledge graph — `berry_ingest_codebase` does the whole pass in one call, `berry_bootstrap` seeds the graph alone. From that point on, every session loads and stores automatically.
 
 ---
 
@@ -199,6 +205,8 @@ Copy `CLAUDE.md.example` (or `GEMINI.md.example`, `.cursorrules`) to your projec
 | `berry_ask` | Ask memory a question, get a synthesized cited answer (not raw chunks) — tunable reasoning depth |
 | `berry_memory_read/insert` | Structured memory blocks: persona, user preferences, project state |
 | `berry_grep` | Search across all memory by pattern |
+| `berry_tools` | Switch on an on-demand domain when you need it — the other 41 tools, listed by domain |
+| `berry_memory_replace/rewrite` | Edit a memory block in place — swap a passage, or overwrite the whole block |
 | `berry_memory_promote/archive` | Graduate working notes to permanent knowledge, or archive completed work |
 
 ### Temporal Intelligence (2 tools)
@@ -207,11 +215,27 @@ Copy `CLAUDE.md.example` (or `GEMINI.md.example`, `.cursorrules`) to your projec
 | `berry_timeline` | See how knowledge about any entity evolved over time |
 | `berry_fact_diff` | "What changed about auth-module between January and March?" |
 
+### Admin (6 tools)
+| Tool | What it does for you |
+|------|---------------------|
+| `berry_bootstrap` | Seed a new project's graph — project/module entities, agent, starter principles. Idempotent |
+| `berry_ingest_codebase` | Cold start in one call: scan the repo, bootstrap the graph, index every symbol, seed memory blocks |
+| `berry_consolidate` | Run a consolidation pass, check its status, or review a proposal before it applies |
+| `berry_provenance` | Trace a principle back to the episodes it was promoted from and the knowledge it superseded |
+| `berry_resolve` | Resolve a `memberry://entity/...` or `memberry://tag/...` URI to rendered markdown |
+| `berry_query` | Raw scoped Cypher against the graph, JSON rows back — for what the shaped tools don't cover |
+
+### Retrieval Feedback (1 tool)
+| Tool | What it does for you |
+|------|---------------------|
+| `berry_feedback` | Tell MemBerry which results helped and which didn't — later rankings follow |
+
 ### Architecture Understanding (6 tools)
 | Tool | What it does for you |
 |------|---------------------|
 | `berry_impact` | "If I change this module, what breaks?" — blast radius before you touch code |
 | `berry_arch_register/relate` | Build a living architecture map that stays current |
+| `berry_arch_aspect` | Track cross-cutting concerns — rate-limiting, audit logging, HIPAA — and which components carry them |
 | `berry_arch_drift` | Detect when code has changed since the agent last looked |
 | `berry_arch_context` | Deterministic architectural context — same graph always produces same output |
 
@@ -221,15 +245,19 @@ Copy `CLAUDE.md.example` (or `GEMINI.md.example`, `.cursorrules`) to your projec
 | `berry_code_index` | AST-parse your project — every function, class, import becomes searchable |
 | `berry_code_search` | Hybrid search: fulltext + dense vectors + lexical vectors + semantic memory |
 | `berry_code_ast_grep` | Structural AST search with ast-grep patterns and meta-variable captures |
+| `berry_code_symbols` | Look up indexed symbols directly — everything in a file, or every definition of a name |
 | `berry_code_deps` | "Who calls this function? What does it import? What inherits from it?" |
-| `berry_code_watch` | Background watcher — auto-reindexes source files as they change |
+| `berry_code_context` | Token-budgeted context for a task — the relevant symbols plus the memories about them |
+| `berry_code_watch` | Background watcher — auto-reindexes source files as they change. Test and mock files (`*.test.*`, `*.spec.*`, `__tests__/`, `__mocks__/`) are skipped, so once `berry_code_index` has indexed them they are not refreshed |
 
 ### Research & Experiments (6 tools)
 | Tool | What it does for you |
 |------|---------------------|
 | `berry_research_init/log` | Track optimization experiments with metrics, hypotheses, and lineage |
 | `berry_research_context` | Build context for the next experiment based on what worked and what didn't |
+| `berry_research_tree` | See the hypothesis tree for a campaign — which experiment came from which, and where each landed |
 | `berry_research_contradictions` | Find where your experiments disagree — resolve conflicts before they compound |
+| `berry_research_consolidate` | Turn experiment history into principles — which components pay off, which directions are exhausted |
 
 ### Knowledge Wiki (5 tools)
 | Tool | What it does for you |
@@ -300,6 +328,25 @@ The wiki round-trips: edit a compiled article in the viewer (Edit button) or syn
 | `MEMBERRY_WIKI_AUTOREFRESH` | off (direct), on (Compose/systemd) | Recompile the served wiki after graph mutations |
 | `MEMBERRY_WIKI_OUTPUT_DIR` | `/app/wiki` | Directory the MCP server compiles the wiki into for autorefresh (must match the wiki viewer's dir) |
 
+### Retrieval flags
+
+Off unless set to `1` (`MEMBERRY_RERANKER_V1` takes `disabled`, `shadow`, or
+`served`). Compose reads all six from `.env`; unset means off.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMBERRY_QUERY_PLANNER_V1` | off | Plan the query before retrieving; prerequisite for the two below |
+| `MEMBERRY_CANDIDATE_CHANNEL_V1` | off | Route `berry_context` / `berry_ask` through the candidate channel instead of the ranked assembler |
+| `MEMBERRY_RERANKER_V1` | `disabled` | `shadow` scores alongside; `served` reranks for real. Both need the two flags above, or bootstrap throws `reranker_<mode>:prerequisite_unavailable` |
+| `MEMBERRY_KIND_RANK_V1` | off | Rank `variable` and test-path symbols last within the window code search already returned |
+| `MEMBERRY_CODE_SCOPE_V2` | off | Make `project_name` a hard scope for code search — an un-stamped symbol needs path evidence |
+| `MEMBERRY_CODE_RERANK_V1` | off | Retrieve a wide window and rerank it (BM25F) before the kind prior. `berry_code_search` only — callers opt in per call, so `berry_context` / `berry_ask` are unaffected |
+
+The reference deployment runs all six on, with `MEMBERRY_RERANKER_V1=served`.
+For the design and the measurements behind them, see
+[RET010_SERVED_RERANKER_DESIGN.md](RET010_SERVED_RERANKER_DESIGN.md) and
+[bench/eval/BASELINE.md](bench/eval/BASELINE.md).
+
 ## MCP Health Checks
 
 When running the MCP server, MemBerry exposes two non-streaming HTTP checks:
@@ -346,7 +393,7 @@ never perform a broad memory reset. See [bench/lab/README.md](bench/lab/README.m
 
 ```bash
 npm run build          # Build all packages
-npm test               # Run tests (1,300+)
+npm test               # Run all tests
 npm run dev            # MCP server with hot reload
 ```
 

@@ -230,3 +230,83 @@ describe('AMPService.loadFreshObserved', () => {
     expect(source).toMatch(/const candidateChannels = observation\s*\? new Map/);
   });
 });
+
+describe('RL-010 — a raw episode enters at the neutral prior, not as ground truth', () => {
+  // The episode and the semantic are made identical on every ranking term rankMemories uses
+  // except confidence: same updated_at (identical recency) and same relevance. Whatever order
+  // comes back is therefore attributable to confidence alone.
+  const SAME_TIME = '2026-08-14T00:00:00.000Z';
+
+  function orderingFixture() {
+    const corroborated: SemanticNode = {
+      id: 'sem-corroborated',
+      content: 'consolidated knowledge',
+      confidence: 0.9,          // the highest this system ever ASSIGNS (approved decision)
+      signal_count: 5,
+      created_at: SAME_TIME,
+      updated_at: SAME_TIME,
+      decay_class: 'stable',
+      tags: ['project:test'],
+      scope: 'project:test',
+    };
+    const rawEpisode = {
+      id: 'epi-raw',
+      content: 'a single uncorroborated capture',
+      task: 'capture',
+      created_at: SAME_TIME,
+      updated_at: SAME_TIME,
+      tags: ['project:test'],
+      scope: 'project:test',
+      score: 0.8,
+    };
+    const service = new AMPService(
+      {
+        cache: {
+          get: vi.fn(async () => null),
+          set: vi.fn(async () => undefined),
+          invalidateByScope: vi.fn(async () => 0),
+          invalidateByNodeId: vi.fn(async () => 0),
+        },
+        embeddings: { get: vi.fn(async () => null), set: vi.fn(async () => undefined) },
+        dedup: { isDuplicate: vi.fn(), markSeen: vi.fn(), checkAndMark: vi.fn(), unmark: vi.fn() },
+        signals: { publish: vi.fn() },
+        queue: { incrementScore: vi.fn() },
+      } as never,
+      {
+        episodic: {} as never,
+        query: {
+          byScope: vi.fn(async () => []),
+          // same relevance as the episode, so only confidence differs
+          byVector: vi.fn(async () => [{ ...corroborated, score: 0.8 }]),
+          byVectorEpisodic: vi.fn(async () => [rawEpisode]),
+        },
+      } as never,
+      { available: true, embed: vi.fn(async () => [0.1]), embedBatch: vi.fn() },
+      config,
+    );
+    return service;
+  }
+
+  it('does not rank a raw capture above a corroborated semantic on confidence alone', async () => {
+    const service = orderingFixture();
+    const { observation } = await service.loadFreshObserved({ task: 'anything' });
+
+    const episodeAt = observation.finalIds.indexOf('epi-raw');
+    const semanticAt = observation.finalIds.indexOf('sem-corroborated');
+    expect(episodeAt).toBeGreaterThanOrEqual(0);
+    expect(semanticAt).toBeGreaterThanOrEqual(0);
+
+    // Pre-fix the episode was injected at confidence 1.0 and won this outright.
+    expect(semanticAt).toBeLessThan(episodeAt);
+  });
+
+  it('injects the episode at the neutral prior, where the provenance multiplier is neutral', async () => {
+    const service = orderingFixture();
+    const { observation } = await service.loadFreshObserved({ task: 'anything' });
+
+    const episode = observation.candidates.find((c) => c.privateId === 'epi-raw');
+    expect(episode?.sourceType).toBe('episodic');
+    // scoring.ts computes (confidence - 0.5) * 0.2 downstream: 0.5 asserts nothing either way.
+    expect(episode?.evidence.confidence).toBe(0.5);
+  });
+});

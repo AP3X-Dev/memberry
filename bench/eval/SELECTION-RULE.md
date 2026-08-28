@@ -117,6 +117,9 @@ Strata are `plane × project`:
 | code | `berry_code_search` | `keywordRecall` + `noiseRate` |
 | mixed | `berry_context` | both, code items only for `noiseRate` |
 
+**Read this table through amendment A7.** `noiseRate` was retired unimplemented; the
+implemented secondary metric is `testFileRate@k`.
+
 ### 5.1 Deliberate code-plane over-sampling — declared, not hidden
 
 By raw frequency the population is 87% memory-plane. Sampling proportionally would put
@@ -445,3 +448,22 @@ miner reads exactly what is present at the moment it runs.
 single-client *and* time-decaying. A query issued today may be unminable next month. Anyone
 extending this set should mine early and treat the committed question file as the record of
 record.
+
+### A7 — 2026-08-27 — `noiseRate` retired from §5's metric-coverage column
+
+**Changed:** §5's metric-coverage column no longer describes what is measured. Read it as
+`keywordRecall` + `testFileRate` for the code plane, and the same for the code items of the
+mixed plane. The memory-plane row is unaffected.
+
+**Reason.** Spec §2.2's bare-variable clause was measured unsound (amendment A2):
+`doc_comment` is a *preceding* comment rather than a docstring, so `noiseRate` was never
+implemented. The implemented secondary metric is `testFileRate@k` — share of top-`k` items
+whose path contains `__tests__` or `.test.` — and the runner says so at the scorer
+(`run-eval001.mjs:210-212`). The full retirement rationale, including why the name is retired
+rather than redefined, is in `BASELINE.md` §2.6 at the metric list.
+
+**Not rewritten, on purpose:** §5.1's over-sampling rationale and the two a priori
+justifications in amendment A2 both invoke `noiseRate`. Those record why the code plane was
+over-sampled and given the head of the cycle at the time the decision was made.
+The decisions stand — `testFileRate` is likewise a code-plane-only metric, so the reasoning
+carries over unchanged — and the historical text is left as written.

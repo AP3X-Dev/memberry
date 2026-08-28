@@ -29,15 +29,16 @@ overturned what this file predicted the next real defect would be.
 - Only the root orchestrator updates this file, and only after a parent package,
   gate, terminal rejection, or active `NEXT ACTION` changes.
 
-## Planning surface (reconciled 2026-08-26)
+## Planning surface (reconciled 2026-08-28)
 
 This file is the ONLY document that describes current program state. Everything
 else is either design detail or a historical record.
 
 - **Supporting design references** (durable detail, not plans):
   [`bench/lab/ROADMAP.md`](bench/lab/ROADMAP.md) for evaluation-dataset state and
-  the CMP-006 licence blocker; `RET010_SERVED_RERANKER_DESIGN.md` (RET-010A–D
-  promoted, E/F/parent open); `SEC001B_RUNTIME_BINDING_DESIGN.md` (implemented).
+  the CMP-006 licence blocker; `RET010_SERVED_RERANKER_DESIGN.md` (RET-010A–F all
+  promoted, parent closed 2026-08-25 — see the exit checklist below);
+  `SEC001B_RUNTIME_BINDING_DESIGN.md` (implemented).
 - **Run records** live in the gitignored `docs/` workspace, which is a nested
   private repo with no remote. `docs/agent-runs/run-state-*.md` files are
   autonomous-run RESTART ANCHORS, not plans — a cold session resumes from the
@@ -49,19 +50,24 @@ else is either design detail or a historical record.
 
 ## Current program position
 
-- **Last updated:** 2026-08-27
-- **Exact remote master:** `a1439fb` — see `git rev-parse master`; PR #116
-  (docs/new-direction-eval-first). Prior: #113 COD-010b served code plane,
-  #115 RET golden v2 tombstone, #111 RET-006 precision gate.
-  **The deployed box runs `3eba9a9`, 12 commits behind — but
-  `git diff --stat 3eba9a9..a1439fb -- packages/ src/` is EMPTY, so deployed code
-  is identical to master code and the delta is docs-only.**
-- **Test ratchet:** 3,631 passed / <=72 skipped per Node major (3579 → 3621 PR #109
-  → 3631 PR #113). The 3579 in `run-state-cod010b.md` and 3621 in
-  `run-state-ret007-v4.md` are both superseded. There is **no mechanical
-  enforcement** anywhere — no count check in `package.json`, `ci.yml`, or
-  `scripts/`; it is a verifier obligation to sum the "N passed" lines on both
-  Node majors.
+- **Last updated:** 2026-08-28
+- **Exact remote master:** `30c9083` — see `git rev-parse origin/master` (the local
+  ref lags); PR #126 (fix/gate-harness-and-guard-scope). Prior: #125 IDX-004 live
+  result, #124 research ledger, #123 IDX-004 code rerank, #121 IDX-003 code
+  embeddings, #119 IDX-002B code scope, #118 IDX-002A kind-aware ranking,
+  #117 EVAL-001.
+  **The deployed Cerebro box runs `30c9083` — exactly `origin/master`, zero drift.**
+  The `3eba9a9` pin this bullet used to carry is retired: it was accurate on
+  2026-08-26, but the box has since taken IDX-002A/002B/003/004 and the shipped-code
+  delta from `3eba9a9` to master is no longer docs-only.
+- **Test ratchet:** 3,697 passed / <=72 skipped per Node major (3631 PR #113 → 3651
+  IDX-002A → 3665 IDX-002B → 3680 IDX-003 → 3697 IDX-004). Source is
+  `docs/agent-runs/run-state-idx004-code-rerank.md`; each earlier step is attested
+  in its own packet's run-state. There is still
+  **no mechanical threshold enforcement** — no count check in `package.json` or
+  `ci.yml`, and nothing fails a build on a dropped count. `scripts/gate.sh:61-64`
+  does sum the "N passed" lines across workspaces for each Node major; comparing
+  that total to the ratchet remains a verifier obligation.
 - **Active critical-path phase:** Phase 2 — Retrieval 2.0. G2 is the only gate
   still open below the current work front: RET-010's holdout evaluation was
   never authorized or run, and RET-007 is parked blocked on indexing.
@@ -69,23 +75,34 @@ else is either design detail or a historical record.
 - **Closed phase gates:** G0, G1, G3
 - **Open phase gates:** G2, G4 through G9, and GF
 - **Program estimate:** approximately 35–40% complete
-- **Measured retrieval-quality improvement:** still exactly zero. RET-007 v3 was
-  tombstoned on a qualified holdout; RET-007 v4 measured control 28/60 vs
-  candidate 30/60 on dev (+3.3 points, CI [-5.0, +11.7]) and did not pass. The
-  lifecycle work that closed G3 improved noise load and calibration, not
-  retrieval quality.
+- **Measured retrieval-quality improvement:** the first real gains landed
+  2026-08-27/28, and they are on the **code plane only**. Across IDX-002A/002B/003
+  the ten-case outcome probe moved answerAt1 0.10 → 0.50, answerAt5 0.20 → 0.60,
+  MRR 0.16 → 0.53 (tables under NEXT ACTION); IDX-004's widening then took top-5
+  60% → 70% and variable share@5 50% → 8%, live-confirmed 2026-08-28
+  (`RESEARCH-LEDGER.md` RL-001). The **memory plane** still has no outcome
+  instrument and therefore still no measured improvement (RL-006) — and it is ~87%
+  of call volume. RET-007 v3 stays tombstoned on a qualified holdout; RET-007 v4
+  measured control 28/60 vs candidate 30/60 on dev (+3.3 points, CI [-5.0, +11.7])
+  and did not pass. The lifecycle work that closed G3 improved noise load and
+  calibration, not retrieval quality.
 - **Deployment state:** Phase 3 packets are merged, deployed to Cerebro, and
   live-verified. **COD-010b deployed 2026-08-26** (master `3eba9a9`); the served
   code plane is live and verified at `**Code:** served (16 of 20)` on a mixed
-  request. Code index live counts: `project:memberry` 8,928, `project:neuri`
-  12,339, `project:hermes-agent` 15,055, `project:ag3ntic` 5,385, NULL 5,136.
+  request. Code index live counts (2026-08-28 census): `project:memberry` 16,399,
+  `project:hermes-agent` 15,055, `project:neuri` 12,339, `project:ag3ntic` 5,385,
+  NULL 5,136 — 54,314 symbols, **100% embedded** since the IDX-003 backfill.
+  Live retrieval flags on the box: `MEMBERRY_QUERY_PLANNER_V1=1`,
+  `MEMBERRY_CANDIDATE_CHANNEL_V1=1`, `MEMBERRY_RERANKER_V1=served`,
+  `MEMBERRY_KIND_RANK_V1=1`, `MEMBERRY_CODE_SCOPE_V2=1`, `MEMBERRY_CODE_RERANK_V1=1`.
   No Retrieval 2.0 capability-policy activation has been authorized.
 - **Golden v2 instrument: TOMBSTONED 2026-08-26.** Both permitted corpus shapes
   measured infeasible before any build; band never adjusted, **zero version slots
   opened**. The binding constraint is the CONTROL: under plural relevance
   (>=5 relevant/query) `memberry-retrieval-core-v1` tops out near 0.32 P@5,
   below the pre-registered `[0.42,0.58]`. Evidence:
-  `bench/lab/golden-v2/CALIBRATION-GOLDEN-V2.md` on branch `feat/ret-golden-v2`.
+  `bench/lab/golden-v2/CALIBRATION-GOLDEN-V2.md`, tracked on master; the
+  `feat/ret-golden-v2` branch no longer exists.
 
 ## NEXT ACTION
 
@@ -131,24 +148,27 @@ are unchanged: hermes-agent 15,055, neuri 12,339, ag3ntic 5,385, NULL 5,136.
 
 **CORRECTION — the ranking description below was wrong and cost a wrong mental
 model.** Ranking is NOT `ORDER BY score DESC` with one `* 0.8` adjustment. That
-`ORDER BY` (`packages/code/src/search.ts:348`) sorts one of four channels. The final
+`ORDER BY` (`packages/code/src/search.ts:500`) sorts one of four channels. The final
 rank is `rrfFusion` (k=60), which **discards raw scores** for `1/(k+rank+1)` sums,
 followed by feedback boosts, a `{symbol: 0.25}` source-type boost
-(`scoring.ts:233-240`), a multiplicative lexical text boost (`assembler.ts:1338-1341`),
+(`packages/retrieval/src/scoring.ts:233-240`), a multiplicative lexical text boost
+(`packages/retrieval/src/assembler.ts:1338-1341`),
 MMR diversity, dedup, and the served reranker. The `* 0.8` semantics discount
-(`search.ts:535`) **never fires** on this path — the assembler passes
+(`search.ts:705`) **never fires** on this path — the assembler passes
 `include_semantics: false` (`assembler.ts:1119`, `:629`).
 
 What DOES hold: `SymbolKind` is **never used for ranking** — it is only an equality
 filter and is explicitly stripped from the title before scoring by `stripKindSuffix`
-(`scoring.ts:103-105`). Note `inferSourceTypeBoost` boosts source_type `symbol`, not
+(`packages/retrieval/src/scoring.ts:103-105`). Note `inferSourceTypeBoost` boosts source_type `symbol`, not
 SymbolKind, so a query containing "class" boosts variables just as much as classes.
 
 Test-path handling is **not uniformly absent**, and the split is worse than either
-half: the bulk indexer applies none (`indexer.ts:450-478`), but `CodeWatcher`
-excludes `.test.`, `.spec.`, `__tests__`, `__mocks__` by default
-(`watcher.ts:47-49`). So a full re-index admits test symbols and the incremental
-watch then never refreshes or deletes them.
+half: the bulk indexer applies none (`walkDirectory`, `indexer.ts:496-525`, which
+contains no `isTestPath` call), but `CodeWatcher` excludes `.test.`, `.spec.`,
+`__tests__`, `__mocks__` by default (`TEST_FILE_PATTERNS` at `types.ts:45` and
+`isTestPath` at `types.ts:55-59`, applied at `watcher.ts:264` under `skipTests`,
+which defaults true at `watcher.ts:144`). So a full re-index admits test symbols and
+the incremental watch then never refreshes or deletes them.
 
 A live query for assembler internals returned `class UnifiedAssembler` at rank 4,
 behind `results` (variable, test file), `ranked` (variable), and `compose` (function,
@@ -156,23 +176,31 @@ test file). Re-confirmed live 2026-08-27.
 
 ### The lanes, in order
 
-1. **EVAL-001 — real-query evaluation (DO THIS FIRST).** Replace synthetic
-   instruments with ~15-25 questions actually asked of this system, each with
-   ground-truth KEYWORDS a correct answer must contain. Keyword presence is scored
-   automatically, so no synthetic corpus and no hand-labelled relevance set is
-   needed, and no difficulty band has to be calibrated — the queries are as hard as
-   they really are. Grow it from real failure cases. This is the industry-validated
-   shape and it is cheap. **Everything below is unmeasurable until this exists.**
-2. **IDX-002 — chunk granularity.** Controlled study evidence: function-level
-   chunking "consistently underperforms all other strategies by 3.57-5.64 pp EM
-   and is never Pareto-optimal". MemBerry indexes INDIVIDUAL SYMBOLS, which is
-   finer than function-level, so it sits on the losing side of that result. What
-   wins is AST-aligned structural chunks sized to budget (32-64 lines under ~4k
-   tokens, 64-128 as budgets grow) and MIXED granularity. Returning 20 disconnected
-   one-line symbols is the wrong SHAPE of answer even when every line is relevant.
+1. **EVAL-001 — BUILT AND BASELINED (PR #117, merge `5563490`); the baseline is
+   now VOID.** The harness, the frozen selection rule and the question set are
+   tracked under `bench/eval/` (`run-eval001.mjs`, `select-questions.mjs`,
+   `mine-queries.mjs`, `SELECTION-RULE.md`, `eval001-questions.jsonl`), and the
+   origin was pinned 2026-08-27 at `a1439fb` — real numbers in `BASELINE.md` §2.6
+   (dev `keywordRecall@5` 0.0833 over 3 scored of 4, one non-retrieval; holdout
+   0.1000 / @10 0.3000, aggregate only). **Three retrieval flags went live after
+   that pin** — `MEMBERRY_KIND_RANK_V1`, `MEMBERRY_CODE_SCOPE_V2`,
+   `MEMBERRY_CODE_RERANK_V1` — which voids cross-run comparison under spec §3.2
+   item 2. **A fresh baseline is owed before EVAL-001 can act as a regression
+   guard again** (`BASELINE.md` §2.7). Interim measurement has all run on
+   `bench/eval/run-outcome-probe.mjs` instead — file-level ground truth, and only
+   10 cases (`RESEARCH-LEDGER.md` RL-005).
+2. ~~**IDX-002 — chunk granularity.**~~ **DEAD — tested and rejected 2026-08-27.**
+   The controlled-study argument (function-level chunking "consistently
+   underperforms all other strategies by 3.57-5.64 pp EM") predicted that MemBerry's
+   individual-symbol unit was the defect. It was not. Coarsening the retrieval unit
+   by excluding variables — the crude form of a bigger chunk — left the same five
+   misses and made MRR *worse*, 0.3250 against 0.4000. The misses were never chunk
+   size; there was no semantic retrieval at all (IDX-003). What shipped under the
+   IDX-002 name is ranking, not chunking: 002A kind prior and 002B project scope.
+   Do not reopen this without new evidence.
 3. **IDX-001 Phase A — index-time structure.** Relationships, call graphs, module
-   hierarchy. Still the structural bet, but it lands on a far cleaner index once
-   lane 2 fixes the unit of retrieval. Prerequisite for RET-007.
+   hierarchy. Still the structural bet, and now it lands on an index that has
+   embeddings, project scope and a kind prior. Prerequisite for RET-007.
 4. **G2 (Phase 2 close).** Needs explicit owner authorization for one RET-010
    holdout evaluation. **Read the G2 checkbox before spending the one shot** —
    golden v1 reports 0.4000 against a 0.4667 structural cap, and a fair instrument
@@ -232,17 +260,25 @@ made MRR *worse* (0.3250 vs 0.4000). The misses were never about chunk size;
 they were about there being no semantic retrieval at all. Lane 2 as written
 would have re-chunked a lexical-only index.
 
-**What is now the bottleneck.** With embeddings live, the 11,847 embedded
-variables compete inside the dense channel and crowd real answers out of its
-top-k before fusion sees them: excluding variables recovers **8 of 10** answers
-versus 6. That is a per-channel cap or a kind-aware dense filter — a
-ranking-layer knob, reversible — not an indexer change.
+**That bottleneck was closed by IDX-004** (PR #123, merge `9fb40f1`), live 2026-08-28
+behind `MEMBERRY_CODE_RERANK_V1`. With embeddings live, the 11,847 embedded
+variables were crowding real answers out of the dense channel's top-k before fusion
+saw them. The fix was not a per-channel cap: widening the retrieval window to 50
+rows so the kind prior sorts a bigger pool (`widenLimit`,
+`packages/code/src/search.ts:128`, applied at `:248`) cut variable share@5 from 50%
+to 8% and lifted top-5 60% → 70%. The BM25F reranker that shipped on the same flag
+adds only +0.8 MRR and is a wash by case — see `RESEARCH-LEDGER.md` RL-001 (decide
+it) and RL-002 (split the flag, so the proven half can be kept without the
+unproven one). **The open ranking question is now RL-002, not a per-channel cap.**
 
-**Still open, same class:** the boot guard added in IDX-003 found **29,269
-`Fact` nodes with zero embeddings** on its first run. Semantic was fixed once,
-Symbol is fixed now, Fact is not. The instruments are `bench/eval/run-outcome-probe.mjs`
-(is the answer there, and how far down) and `bench/eval/scope-probe.mjs` (what
-is occupying the slots).
+**Still open, same class:** the boot guard added in IDX-003 found `Fact` nodes with
+zero embeddings on its first run, and the 2026-08-28 census still reads
+**0 of 29,314**. Semantic was fixed once, Symbol is fixed now, Fact is not — and
+nothing reads `fact_embedding`, which is why the guard no longer reports it
+(RL-016). That decision now hangs on RL-008 alone. The instruments are
+`bench/eval/run-outcome-probe.mjs` (is the answer there, and how far down),
+`bench/eval/scope-probe.mjs` (what is occupying the slots), and
+`bench/eval/idx004-measure.mjs` (which carries a `--no-reranker` isolation arm).
 
 **The discipline that survives the direction change.** Never tune weights because
 a number moved on the same queries used to choose them; that is measuring on
@@ -384,13 +420,19 @@ piece catalog split or explicitly report which required evidence is missing.
 
 ```text
 COMPLETED: SEC-001 capability binding; RET-010A-F; Phase 3 (MEM-002..008,
-          MEM-006H) -> G3 CLOSED 2026-08-25; COD-010 fail-loud slice
-TERMINAL:  RET-007 v1 (saturated), v2 (no control headroom), v3 (dev rejected)
+          MEM-006H) -> G3 CLOSED 2026-08-25; COD-010 fail-loud slice;
+          COD-010b served code plane (PR #113, 3eba9a9); EVAL-001 harness
+          (PR #117); IDX-002A/002B/003/004 (PRs #118/#119/#121/#123)
+TERMINAL:  RET-007 v1 (saturated), v2 (no control headroom), v3 (dev rejected);
+          IDX-002 chunk granularity (hypothesis tested, rejected 2026-08-27)
 PARKED:    RET-007 v4 — measured, blocked on indexing, resumes after IDX-001
 NOW (owner picks the order; these do not block each other)
+  -> RL-006: an outcome instrument for the MEMORY plane — ~87% of call volume,
+       nothing measures it, and it gates ranking every finding under RL-007..011
+  -> EVAL-001 re-baseline: the 2026-08-27 origin is void under three later flags,
+       so the harness is not a guard until a fresh run replaces it
   -> G2: one authorized RET-010 holdout -> decide Retrieval 2.0 and stop
   -> IDX-001 Phase A: index-time structure, the measured prerequisite for RET-007
-  -> COD-010b: code service under the live candidate-channel composition
        |-> Lane A: G3 CLOSED -> G5 temporal -> G7 reliability
        |-> Lane B: G4 Git-native coding memory
        |-> Lane C: G6 security/tenancy -> G9 operations UI
@@ -419,6 +461,12 @@ freeze G3, G6, or G8 indefinitely.
 - [x] LAB-005 — PR comparison gate
 - [x] LAB-006 — Dataset acquisition and license registry
 - [x] LAB-007 — Temporal/isolation scenario expansion
+- [x] EVAL-001 — Real-query retrieval evaluation `(PR #117, 5563490. Harness,
+  frozen selection rule, mined question set and sealed holdout under bench/eval/;
+  origin pinned 2026-08-27 at a1439fb, numbers in BASELINE.md 2.6. It is NOT
+  currently a live regression guard: IDX-002A/002B/004 turned on three retrieval
+  flags after the pin, which voids cross-run comparison per spec 3.2 item 2, so a
+  fresh baseline is owed — BASELINE.md 2.7.)`
 - [x] G1 — Reproducible comparison with regression enforcement
 
 ## Phase 2 — Retrieval 2.0
@@ -453,8 +501,9 @@ freeze G3, G6, or G8 indefinitely.
   error the RET-007 campaign spent four attempts avoiding. Closing RET-006
   honestly needs either a mechanism gain that shows up somewhere other than
   this set, or a golden set with more relevant docs per query. A regression
-  guard at precisionAt5 0.39 plus a pinned ceiling test now exists on branch
-  feat/ret006-precision-gate.)`
+  guard at precisionAt5 0.39 plus a pinned ceiling test are on master (PR #111,
+  2ad56a4): packages/retrieval/bench/quality-eval.ts:485 and
+  packages/retrieval/src/__tests__/quality.regression.test.ts.)`
 - [ ] RET-007 — Query decomposition for multi-hop tasks `(v4 measured and
   parked 2026-08-25 — BLOCKED ON INDEXING, resume after IDX-001; see the
   Phase 3 tail RETURN POINT and docs/agent-runs/advisor-log-2026-08-25-ret007v4.md
@@ -496,6 +545,17 @@ freeze G3, G6, or G8 indefinitely.
   self-heal 15/15 fault injection against real Redis with zero unsafe
   mutations. Evidence pack docs/agent-runs/g3-evidence-2026-08-25.md plus
   -raw/. Packets 9/9 merged, deployed, and live-verified; ratchet 3351→3579.)`
+- [x] IDX-002A — Kind-aware code ranking, sinking trivial symbols and test paths
+  behind `MEMBERRY_KIND_RANK_V1` `(PR #118, 5ef90bc; feature commit 3874f7a)`
+- [x] IDX-002B — Project-scoped code search that ranks code ahead of memory rows,
+  behind `MEMBERRY_CODE_SCOPE_V2` `(PR #119, afcf3b2)`
+- [x] IDX-003 — Dense embeddings for indexed code symbols, plus the boot guard for
+  empty vector indexes `(PR #121, 51fcd99. CodeIndexer had no embedding provider,
+  so 0 of 54,314 symbols were embedded and the dense channel returned nothing
+  while reporting success. Backfilled; the 2026-08-28 census reads 54,314/54,314.)`
+- [x] IDX-004 — Wide candidate window with BM25F reranking, behind
+  `MEMBERRY_CODE_RERANK_V1` `(PR #123, 9fb40f1; live 2026-08-28. The widening is
+  proven and the reranker is not — RESEARCH-LEDGER RL-001/RL-002.)`
 - [ ] IDX-001 — Index-time structure: write-time extraction plus local-model
   backfill. Plan at docs/agent-runs/packet-plan-idx-001-local-llm-indexing.md.
   Phase A (atomic facts as additional retrieval keys) is measurable on today's
@@ -672,8 +732,20 @@ freeze G3, G6, or G8 indefinitely.
   investigation drove second-hop recovery from 0/14 to 13/14 but could not build
   a firing gate from text alone. Do not tune this further at query time; the
   missing signal is index-side. See the RETURN POINT below.
-- **Flag-only reranker promotion:** the current reranker is shadow-only and the
-  wired baseline provider is identity. A flag flip cannot improve served order.
+- **Flag-only reranker promotion (superseded by RET-010):** while the reranker was
+  shadow-only and the wired provider was identity, a flag flip could not improve
+  served order. RET-010 closed that gap — `MEMBERRY_RERANKER_V1=served` now wires a
+  real served reranker (`packages/mcp/src/bootstrap.ts:211-213`). The rule that
+  survives: never claim a served improvement from a flag state alone.
+- **IDX-002 chunk granularity:** the published-evidence argument that
+  individual-symbol indexing is too fine was tested on 2026-08-27 and failed.
+  Coarsening the pool by excluding variables left the same five misses and made MRR
+  worse (0.3250 vs 0.4000). The defect was the absent dense channel (IDX-003), not
+  chunk size. Do not re-chunk on this argument alone.
+- **Stopword stripping before the fulltext channel:** a six-config sweep raised
+  coverage but dropped rank-1 from 50% to 30%. Negative result, recorded in
+  `RESEARCH-LEDGER.md` RL-004. Do not retry it unpaired with a precision mechanism
+  proven on code text.
 - **Endless evaluator repair:** a candidate failure is not permission to build a
   new dataset, change thresholds, or inspect sealed per-case outcomes.
 
@@ -709,8 +781,8 @@ Every new session must do exactly this before proposing work:
 1. Read this file completely.
 2. Read `AGENTS.md` and the authoritative PRP only for the active package's
    detailed acceptance criteria.
-3. Fetch and verify `origin/master`, open PRs, active worktrees, and the run named
-   under `NEXT ACTION`.
+3. Fetch and verify `origin/master`, open PRs, active worktrees, and the current
+   lane under `NEXT ACTION`.
 4. If repository state matches this file, resume the exact next unchecked item.
 5. If it does not match, update factual identity/state first; do not redesign the
    roadmap.

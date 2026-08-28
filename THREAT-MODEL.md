@@ -43,6 +43,9 @@ instance), that is called out explicitly.
                               OpenAI API (embeddings / extraction / synthesis)
 ```
 
+The diagram traces the MCP request path. **B6** below is a second inbound
+listener on the same host, not shown above.
+
 - **B1 — MCP transport boundary.** Network edge between a calling agent and the
   server (`packages/mcp/src/server.ts`). Origin checks, Bearer auth, CORS, and
   the health-endpoint split live here.
@@ -57,6 +60,14 @@ instance), that is called out explicitly.
 - **B5 — Outbound to OpenAI.** Memory content is sent to OpenAI for embeddings,
   fact extraction, and `berry_ask`/dream synthesis. Anything stored may transit
   this boundary.
+- **B6 — Wiki viewer HTTP surface.** `startWikiViewer`
+  (`packages/wiki/src/viewer.ts`) serves the compiled wiki on port `3200` from a
+  second HTTP server with **no authentication and no origin check**. It reads
+  compiled memory and, because both CLI entry points wire a Neo4j driver, also
+  writes it back (`/api/edit`) and runs the hook installer
+  (`/api/settings/hooks-install`). It binds all interfaces unless
+  `MEMBERRY_WIKI_HOST` / `MEMBERRY_HOST` / `HOST` is set (`resolveWikiHost`), so
+  the only control on this boundary is where the port is reachable from.
 
 ---
 
@@ -68,16 +79,16 @@ instance), that is called out explicitly.
 *Mitigation:* Bearer token required by default. Token resolution fails closed: if
 no token is configured and the explicit opt-out is not set, the server generates
 a random `randomUUID()` token rather than serving unauthenticated
-(`server.ts`, `startSSE` ~193-234). `MEMBERRY_ALLOW_UNAUTHENTICATED=true` is the
+(`server.ts`, `startSSE`). `MEMBERRY_ALLOW_UNAUTHENTICATED=true` is the
 only way to disable auth and logs a warning.
 
 **T-S2 — Token brute force / timing side channel.**
 *Mitigation:* Tokens are matched in constant time with `timingSafeEqual`
-(`actorForToken`, `server.ts` ~242-249), guarded by a length pre-check.
+(`actorForToken`, `server.ts`), guarded by a length pre-check.
 *Residual:* No rate limiting / lockout on repeated failed auth (see R-DoS).
 
 **T-S3 — Cross-site request from a browser context.**
-*Mitigation:* Origin allowlist (`isOriginAllowed`, `server.ts` ~171-191) restricts
+*Mitigation:* Origin allowlist (`isOriginAllowed`, `server.ts`) restricts
 browser origins to localhost; non-localhost origins get `403` on both preflight
 and the actual request. CORS echoes the specific origin, never `*`.
 *Residual:* Requests with no `Origin` (all non-browser MCP clients) are allowed by
@@ -87,13 +98,16 @@ browser) but means the token is the sole control for direct clients.
 **T-S4 — Actor impersonation in the audit trail.**
 *Mitigation:* Named tokens bind a token to an actor identity (`MEMBERRY_API_TOKENS`
 → `tokenToActor`), so audit/attribution reflects which key was used.
-*Residual:* The MCP tool layer records `agent_id: 'mcp'` for stored episodes
-(`buildToolHandlers.berry_store`), so episode-level attribution is currently the
-fixed MCP actor rather than the authenticated token's actor name; the
-token→actor mapping is established at the transport but not yet threaded into the
-per-tool audit `actor`.
+The mapping is threaded all the way through: each session resolves
+`actorFor(req)` and passes it into `registerAllTools`, which builds a
+`ServiceContainer` carrying that actor (`coreContainerForTenant`, `tools.ts`), so
+`berry_store` stamps `agent_id = <authenticated actor>` and the audit append uses
+that same value (`AMPService.store`, `core/src/service.ts`).
+*Residual:* `mcp` remains as the fallback identity when auth is disabled or the
+actor cannot be resolved, so attribution is only as strong as the token
+configuration.
 
-### 3.2 Tampering / Write-path integrity (B2, B3)
+### 3.2 Tampering / Write-path integrity (B2, B3, B6)
 
 **T-T1 — Unauthorized graph mutation via raw Cypher.**
 *Mitigation:* Defense in depth in `query.ts`. `validateReadOnlyCypher` strips
@@ -132,7 +146,20 @@ or wrong content stored by a caller can later be retrieved and influence an agen
 This is inherent to a memory system and is mitigated operationally (trust the
 callers, scope tightly), not by the store.
 
-### 3.3 Information disclosure — cross-tenant & secrets (B2, B3, B5)
+**T-T6 — Unauthenticated writes through the wiki viewer (B6).**
+*Acknowledged:* Port `3200` accepts `POST /api/edit` (reconciles edited markdown
+back into Neo4j through `WikiEditReconciler` and recompiles the portal),
+`POST /api/refresh`, `POST /api/settings/hooks-tuning`, and
+`POST /api/settings/hooks-install` (runs the hook installer against the viewer's
+working directory). None of them checks a token or an origin, and the reconciler
+writes with its own Neo4j driver rather than through `AMPService`, so
+`MEMBERRY_READONLY` does not reach this path either.
+*Residual:* No code-level control exists on this boundary. Anyone who can reach
+`3200` can rewrite compiled memory in the graph and change hook configuration on
+the host. Keep the port on loopback (`MEMBERRY_WIKI_HOST=127.0.0.1`, or the
+compose publish address `MEMBERRY_PUBLISH_HOST=127.0.0.1`).
+
+### 3.3 Information disclosure — cross-tenant & secrets (B2, B3, B5, B6)
 
 **T-I1 — Cross-project leakage.**
 *Mitigation:* Mandatory project tagging on store (`resolveProjectTag`,
@@ -160,26 +187,54 @@ accept this boundary or run with `OPENAI_API_KEY` unset (embeddings disabled,
 lexical/fulltext retrieval only — `bootstrap.ts`, `service._vectorSearch`).
 
 **T-I4 — Health endpoint info leak.**
-*Mitigation:* `/healthz` is intentionally unauthenticated but returns only
-non-sensitive liveness fields (no secrets, no memory). `/readyz` requires auth
-(`server.ts` ~353-376).
+*Mitigation:* `/healthz` is intentionally unauthenticated and carries no secrets
+and no memory content. `/readyz` requires auth (the `/healthz` handler returns
+before the auth gate; `/readyz` sits after it — `statusPayload`, `server.ts`).
+*Residual:* The `/healthz` payload is wider than liveness. Alongside service
+name, transport, session counts, `auth_required`, and uptime it embeds
+`consolidation_automation` (`getConsolidationAutomationHealth`,
+`packages/mcp/src/consolidation-coordinator.ts`), whose per-worker snapshot
+carries `running_scope` and `queued_scopes` — project scope names — plus the
+worker's last internal error string and `limitation` text. Any unauthenticated
+caller who can reach the port learns which projects are being consolidated and
+reads raw operational error text. Moving `consolidation_automation` behind the
+auth gate would cost nothing operationally, since `/readyz` already returns it
+authenticated; until then, network reach is the control.
 
 **T-I5 — Path traversal in file-reading tools.**
 *Mitigation:* `berry_ingest` / `berry_braindump` / `berry_wiki_sync` resolve and
 validate every input path against `MEMBERRY_INGEST_ALLOW_DIR` (default cwd) and
 reject paths escaping the base (`validatePath`, `packages/wiki/src/tools.ts`).
 
-### 3.4 Denial of service / Availability (B1, B6)
+**T-I6 — Compiled memory readable without auth on the wiki viewer (B6).**
+*Acknowledged:* The viewer serves the whole compiled wiki — every project's
+articles, decisions, and semantics — plus `/api/graph/*` exports and a settings
+page, to any caller that can open port `3200`. There is no token check, no
+origin check, and no project scoping: the compose service compiles with
+`project_tag: 'all'`. The write side of the same surface is T-T6.
+*Residual:* Restricting reach is the only control. This is the surface most
+likely to be published by accident, because the bind default is all interfaces
+and the port is easy to forward for convenience.
+
+### 3.4 Denial of service / Availability (B1, A6)
 
 **T-D1 — Unbounded query/result cost.**
 *Mitigation:* Raw Cypher result sets are capped (`MAX_RAW_CYPHER_LIMIT = 100`,
 `normalizeRawCypherLimit`), `berry_query` limit is schema-capped at 100, audit
 queries cap at 500, and tool inputs are length-bounded by Zod schemas
-(`tools.ts`). Block size is capped (`MAX_BLOCK_SIZE`).
-*Residual:* No global request-rate limiting, no per-actor quota, no query-time
-budget. A trusted-but-abusive or compromised actor can still drive load
-(many requests, expensive traversals within the limit). Acceptable under the
-single-operator model; would need attention for shared deployments.
+(`tools.ts`). Block size is capped (`MAX_BLOCK_SIZE`). Every raw Cypher
+execution carries a server-side transaction timeout
+(`MEMBERRY_RAW_CYPHER_TIMEOUT_MS`, default 15s — `defaultRawCypherTimeoutMs`,
+`neo4j/src/query.ts`; the grep path passes a tighter explicit bound). At the HTTP
+layer, request bodies are capped at 1 MB (`MEMBERRY_MAX_BODY_BYTES`) and
+slow-client receive timeouts bound header and body reads (headers 20s, request
+30s, keep-alive 10s — `server.ts`).
+*Residual:* No global request-rate limiting and no per-actor quota. The
+query-time budget covers the raw Cypher path only: scoped read, retrieval, and
+vector/fulltext queries run with no transaction timeout, so a
+trusted-but-abusive or compromised actor can still drive load (many requests,
+expensive traversals within the limit). Acceptable under the single-operator
+model; would need attention for shared deployments.
 
 **T-D2 — Resource exhaustion via failed-auth spam.** No lockout/backoff on
 repeated bad tokens. Loopback/private-network exposure is the compensating control.
@@ -206,21 +261,34 @@ administrative/diagnostic tool and is **disabled by default** behind the `admin`
 progressive-disclosure domain (`registerAllTools` disables all Tier-2 tools;
 `berry_tools` enables on demand — `server.ts`, `tools.ts`). An agent must
 explicitly enable `admin` to use it.
-*Residual:* Any authenticated caller *can* enable the admin domain — progressive
-disclosure is a context-hygiene and least-surprise mechanism, not an authorization
-boundary. There is no per-actor capability/role restriction on which domains a
-token may enable.
+A per-actor capability model ships behind `MEMBERRY_CAPABILITY_POLICIES_V1`:
+when it is set, each `(tenant, actor)` carries an explicit grant set of
+scope/domain/tool/operation (`ActorCapabilityGrantV1`,
+`core/src/capability-policy.ts`) and a per-session runtime interposer denies
+every ungranted call (`installCapabilityRuntimeInterposerV1`,
+`mcp/src/capability-runtime.ts`, installed per session in `server.ts`).
+`berry_tools` carries capability metadata like every other tool, so enabling a
+domain is itself a gated operation. The runtime refuses to start alongside
+`MEMBERRY_ALLOW_UNAUTHENTICATED=true` and on the stdio transport, neither of
+which has a per-session actor to key a policy on.
+*Residual:* Capability policies are **off by default**. With the variable unset
+there is no interposer, and any authenticated caller *can* enable the admin
+domain — progressive disclosure is context hygiene and least surprise, not an
+authorization boundary.
 
 **T-E2 — Privilege via shared process state.**
-*Acknowledged:* The tool layer supports per-session/per-tenant `ServiceContainer`
-injection (`createServiceContainer`, `buildToolHandlers(container)`,
-`registerTools(..., container)` — `tools.ts`), but the running server wires a
-single process-default container (`setServiceInstances` in `bootstrap.ts`) shared
-by every session. So while transport-level sessions are isolated, the underlying
-services (and thus the datastore identity/scope) are shared. Real per-tenant
-service isolation is supported by the API but not yet threaded through all
-satellite tool packages (research/arch/code/retrieval/wiki/graph each use their
-own `setXServiceInstances` module singletons).
+*Mitigation:* Every SSE and Streamable-HTTP session gets its own `McpServer` and
+its own `ServiceContainer`, bound to the request's tenant and authenticated actor
+(`coreContainerForTenant` via `registerAllTools` — `server.ts`, `tools.ts`).
+Tenants listed in `MEMBERRY_TENANT_DATASTORES` are bound at boot to a container
+backed by their own Neo4j/Redis (`setTenantContainer`, `bootstrap.ts`), which is
+genuine physical isolation.
+*Residual:* For every other tenant the per-session container wraps the *same*
+shared service instances (`{ ...defaultContainer, tenantId, actor }`), separated
+by `tenant_id` filtering rather than by datastore identity — logical, not
+physical. The satellite tool packages (research/arch/code/wiki/graph) still use
+their own `setXServiceInstances` module singletons and remain process-global,
+which is why those domains are withheld from tenant sessions rather than served.
 
 **T-E3 — Host compromise via tool input.**
 *Mitigation:* No `eval`/shell execution on user input in the core paths; file I/O
@@ -234,26 +302,28 @@ validated+READ-boxed in the raw path.
 These are accepted or in-progress limitations operators should weigh against
 their deployment model. None contradict the controls above; they bound them.
 
-1. **Single shared service container.** The process wires one global
-   `ServiceContainer` (`bootstrap.ts` → `setServiceInstances`). Per-session
-   containers are supported by the API surface but not yet threaded through every
-   satellite tool package, so all sessions share one service instance and one
-   datastore identity. Not a multi-tenant isolation boundary.
+1. **Shared service instances behind per-session containers.** Each session does
+   get its own `ServiceContainer` bound to its tenant and actor, but unless the
+   tenant is listed in `MEMBERRY_TENANT_DATASTORES` that container wraps the same
+   process-wide service instances and one datastore identity, separated only by
+   `tenant_id` filtering. The satellite tool packages are still module
+   singletons. Logical isolation, not a physical multi-tenant boundary.
 
 2. **`berry_query` is read-only but not project-scoped.** The admin raw-Cypher
    tool can read across all projects in the graph. It is disabled by default and
    intended as an admin/diagnostic tool; enabling the `admin` domain is not gated
    per-actor.
 
-3. **Progressive disclosure is not authorization.** Disabled-by-default domains
-   reduce context clutter and accidental use, but any authenticated caller can
-   enable any domain (including `admin`). There is no role/capability model that
-   restricts a given token to a subset of tools.
+3. **Progressive disclosure is not authorization, and the capability model is
+   opt-in.** Disabled-by-default domains reduce context clutter and accidental
+   use, but they do not restrict anyone: with
+   `MEMBERRY_CAPABILITY_POLICIES_V1` unset — the default — any authenticated
+   caller can enable any domain, including `admin`. Configuring policies gives a
+   real per-actor grant model (T-E1); nothing enables it for you.
 
 4. **Audit covers the store path, not every mutation.** The append-only audit log
    currently records the `berry_store` write. Block-level and admin mutations are
-   not yet uniformly audited, and episode `actor` is the fixed MCP identity rather
-   than the authenticated token's actor name.
+   not yet uniformly audited.
 
 5. **Tenant isolation is logical (enforced), not physical.** Opt-in multi-tenant
    mode (`MEMBERRY_TENANT_TOKENS`) binds each session to a tenant and ENFORCES a
@@ -261,10 +331,14 @@ their deployment model. None contradict the controls above; they bound them.
    blocks, grep), with a default-deny tool surface and an adversarial cross-tenant
    test. This is logical isolation over one shared Neo4j + Redis — strong enough
    for cooperative multi-tenancy, but not a physical (per-database) boundary.
-   Residual gaps: `berry_context`/`berry_ask` and the satellite domains are not
-   yet tenant-scoped (so they are *withheld* from tenant sessions, not leaked);
-   the Redis block cache is bypassed (not namespaced) for non-default tenants; the
-   `default` tenant still shares one keyspace. Highly-sensitive or regulated
+   Residual gaps: raw Cypher (`berry_query`) and the not-yet-tenant-scoped
+   satellite domains (code/arch/wiki/graph/research) are *withheld* from tenant
+   sessions rather than leaked — `berry_context`/`berry_ask` are tenant-scoped
+   and are served, with `berry_context` forced to the `ranked` strategy for named
+   tenants; the Redis block cache is tenant-namespaced
+   (`amp:block:<tenant>:…`, `redis/src/blocks.ts`) and used for every tenant, but
+   the `default` tenant still shares one keyspace with legacy rows that carry no
+   `tenant_id`. Highly-sensitive or regulated
    tenants should use a dedicated deployment (the per-session `ServiceContainer`
    seam supports routing a tenant to its own datastore).
 
@@ -274,9 +348,11 @@ their deployment model. None contradict the controls above; they bound them.
    the scoped read/write paths. Rotation/revocation requires editing env and
    restarting.
 
-7. **No rate limiting or per-actor quotas.** Result sizes and input lengths are
-   capped, but request rate, concurrency, and total query cost are not. A
-   compromised or abusive trusted actor can still cause load (T-D1, T-D2).
+7. **No rate limiting or per-actor quotas.** Result sizes, input lengths, request
+   bodies, and receive timeouts are capped, and raw Cypher carries a transaction
+   timeout — but request rate, concurrency, and the cost of scoped/retrieval
+   queries are not bounded. A compromised or abusive trusted actor can still
+   cause load (T-D1, T-D2).
 
 8. **Secret redaction is best-effort and opt-in.** `MEMBERRY_REDACT_ON_INGEST`
    uses conservative patterns; the export-boundary pass is a backstop but neither
@@ -294,6 +370,18 @@ their deployment model. None contradict the controls above; they bound them.
     returns what was stored; poisoned/incorrect content can later influence an
     agent. Mitigated by trusting callers and scoping tightly, not by the store.
 
+12. **The wiki viewer has no authentication.** Port `3200` reads all compiled
+    memory and accepts writes (`/api/edit`, `/api/settings/hooks-install`) with
+    no token and no origin check, is unaffected by `MEMBERRY_READONLY`, and binds
+    all interfaces by default. It ships in the bundled compose stack. Network
+    placement is the whole of the control (T-I6, T-T6).
+
+13. **Both HTTP listeners bind all interfaces by default.** Neither the MCP
+    server nor the wiki viewer restricts itself to loopback unless the operator
+    sets a host (`MEMBERRY_HOST` / `MEMBERRY_WIKI_HOST`), or runs under compose,
+    where `MEMBERRY_PUBLISH_HOST` defaults to `127.0.0.1`. A systemd or
+    `npm start` deployment that sets neither is LAN-reachable.
+
 ---
 
 ## 5. Summary of controls → assets
@@ -310,4 +398,5 @@ their deployment model. None contradict the controls above; they bound them.
 | Mandatory project-tag scoping + scoped retrieval | `core/src/service.ts`, `neo4j/src/query.ts` | A3 |
 | Path validation against allow-dir | `wiki/src/tools.ts` | A7 |
 | Progressive disclosure (admin/destructive disabled by default) | `mcp/src/tools.ts`, `mcp/src/server.ts` | A1 (context hygiene) |
+| Per-actor capability policies (opt-in, `MEMBERRY_CAPABILITY_POLICIES_V1`) | `core/src/capability-policy.ts`, `mcp/src/capability-runtime.ts` | A1–A3, A5 |
 | Result/input caps, optimistic concurrency, graceful shutdown | `neo4j/src/query.ts`, `core/src/blocks.ts`, `mcp/src/server.ts` | A6 |

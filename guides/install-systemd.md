@@ -12,7 +12,11 @@ with **placeholders** — substitute your own values before installing:
 |-------------|---------|---------|
 | `<INSTALL_DIR>` | Absolute path to the cloned MemBerry repo | `/opt/memberry` |
 | `<USER>` | The system user the services run as | `memberry` |
-| `<ENV_FILE>` | Path to the environment file (see below) | `/etc/memberry/env` |
+
+Every unit also sets `EnvironmentFile=/etc/memberry/env` outright — that path
+is not a placeholder. This guide writes it as `<ENV_FILE>` when referring to
+the file's contents; edit the `EnvironmentFile=` line in the units only if you
+keep your environment file somewhere else.
 
 These templates assume you run the **databases** (Neo4j + Redis) yourself —
 either via `./scripts/setup.sh --db-only` (Docker) or as native services — and
@@ -90,7 +94,8 @@ Lock it down — it holds secrets:
 
 ```bash
 sudo install -d -m 0750 /etc/memberry
-sudo install -m 0640 /etc/memberry/env /etc/memberry/env   # adjust owner to <USER>
+sudo chown <USER> /etc/memberry/env
+sudo chmod 0640 /etc/memberry/env
 ```
 
 ## 3. The MCP server unit
@@ -110,7 +115,7 @@ ExecStartPre=/usr/bin/mkdir -p <INSTALL_DIR>/wiki
 ExecStart=/usr/bin/npx tsx packages/mcp/src/server.ts
 Restart=always
 RestartSec=5
-EnvironmentFile=<ENV_FILE>
+EnvironmentFile=/etc/memberry/env
 Environment=NODE_ENV=production
 Environment=MEMBERRY_EXPORT_PATH=<INSTALL_DIR>/.memberry
 Environment=MCP_PORT=3101
@@ -170,7 +175,7 @@ ExecStartPre=/usr/bin/npx tsx packages/wiki/src/cli.ts compile --output <INSTALL
 ExecStart=/usr/bin/npx tsx packages/wiki/src/cli.ts serve --output <INSTALL_DIR>/wiki --port 3200
 Restart=always
 RestartSec=10
-EnvironmentFile=<ENV_FILE>
+EnvironmentFile=/etc/memberry/env
 Environment=NODE_ENV=production
 
 [Install]
@@ -184,7 +189,7 @@ restrict it to loopback-only (falls back to `MEMBERRY_HOST`, then `HOST`).
 ## 5. The background timers
 
 Four periodic jobs ship as `oneshot` services paired with timers. Each unit
-sets `WorkingDirectory=<INSTALL_DIR>` and `EnvironmentFile=<ENV_FILE>`.
+sets `WorkingDirectory=<INSTALL_DIR>` and `EnvironmentFile=/etc/memberry/env`.
 
 ### Dream pass — nightly gap-filling + abductive hypotheses
 
@@ -266,7 +271,8 @@ Persistent=true
 
 ## 6. Install and enable
 
-After substituting `<INSTALL_DIR>`, `<USER>`, and `<ENV_FILE>` in the templates:
+After substituting `<INSTALL_DIR>` and `<USER>` in the templates (and
+repointing `EnvironmentFile=` if your env file is not at `/etc/memberry/env`):
 
 ```bash
 sudo cp deploy/systemd/memberry-*.service deploy/systemd/memberry-*.timer /etc/systemd/system/

@@ -44,6 +44,10 @@ Store Policy:
 Data Exclusions:
 - Secrets, credentials, raw customer data, routine diffs.
 
+Agent Coordination:
+- Share one session ID; use distinct runtime `agent_id` identities per agent.
+- Subagents return durable findings; the parent stores one integrated summary.
+
 Priors:
 - <low-confidence observation>
 ```
