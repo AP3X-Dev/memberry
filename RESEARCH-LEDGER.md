@@ -342,7 +342,45 @@ duplicate groups are one episode restating itself, which OPT-70b's distinct-epis
 not a defect. The total realistically promotable population is **~358 of 29,148, about 1.2%**,
 which would move active facts from 152 to roughly 510.
 
-**So the open question is a product decision, not a repair:** should a claim seen once, in one
+**ROOT CAUSE FOUND 2026-08-28, and it is none of the four above.** Splitting the corroborated
+population by inference type is decisive:
+
+| | facts | mean distinct source episodes |
+|---|---|---|
+| tentative `deductive` | 27,168 | **exactly 1.00** |
+| tentative `inductive` | 1,980 | 1.49 |
+| tentative with >=2 distinct episodes | 340 | **all 340 `inductive`** |
+| active | 152 | 138 deductive, 14 inductive |
+
+**Deductive was never broken.** A deductive fact promotes on its SECOND sighting, so a mean of
+exactly 1.00 across 27,168 rows is the correct signature of claims that were only ever stated
+once. That is a corpus shape, not a defect — and it is explained by history: facts accumulated for
+months while the consolidation engine was not yet running.
+
+**Inductive is where it breaks, and it breaks by construction.** `promotable`
+(`packages/core/src/service.ts`) admitted only `abductive` or `deductive`. Consolidation mints
+`inductive` (`packages/core/src/consolidation.ts:1119`, `:1156`), so the engine's own output could accumulate
+corroboration forever and never become servable. Every one of the 340 corroborated-but-stuck facts
+is exactly that.
+
+**The exclusion existed for a real reason, and that reason was fixable.** `corroborate`
+(`packages/neo4j/src/fact.ts`) welded two operations together: `SET f.status = 'active'` AND
+`f.inference_type = 'deductive'`. Relabelling a generalization to deductive would destroy its
+provenance — the code comment says so — so instead of separating the two, inductive was barred
+from promoting at all. Splitting them (inference type is now an argument, defaulting to
+`'deductive'`) lets a generalization be confirmed as a generalization.
+
+**Also explains the August duplicate spike.** 985 of the 999 duplicate groups are one `deductive`
++ one `inductive` twin of the same claim. The inductive twin absorbs the corroboration and cannot
+use it; the deductive twin stays at one episode. All 2,008 duplicate rows are August-only — 26% of
+this month's fact writes — which is when the engine started running.
+
+**Fixed forward, NOT backfilled.** The mechanism now promotes inductive facts on distinct-episode
+corroboration, with the OPT-70b independence bar untouched. The existing 340 stay tentative until
+something restates them; realising that population needs a separate sweep, which mutates the live
+graph and is therefore an owner decision.
+
+**So the remaining open question is a product decision, not a repair:** should a claim seen once, in one
 episode, ever be servable? Today it is not, and 99% of the fact corpus is exactly that. Answering
 "no" means the Fact plane is permanently a ~500-row store and should be sized accordingly.
 Answering "yes" means changing what corroboration is for, which is a deliberate weakening of an

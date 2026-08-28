@@ -104,8 +104,13 @@ export interface FactLayer {
   /** OPT-42: batch confidence updates in one round-trip (optional — staleness
    *  decay falls back to per-fact updateConfidence when absent). */
   updateConfidenceBatch?(updates: Array<{ id: string; confidence: number }>): Promise<void>;
-  /** Promote a corroborated tentative/abductive fact to active+deductive (optional) */
-  corroborate?(id: string, confidence: number): Promise<void>;
+  /** Promote a corroborated tentative fact to active (optional). `inferenceType`
+   *  defaults to 'deductive'; pass the fact's own type to preserve it. */
+  corroborate?(
+    id: string,
+    confidence: number,
+    inferenceType?: 'deductive' | 'inductive' | 'abductive',
+  ): Promise<void>;
 }
 
 export interface Neo4jLayer {
@@ -1129,13 +1134,35 @@ export class AMPService {
             const independent =
               reinforcing.source_episode_ids.length > 0 &&
               !reinforcing.source_episode_ids.includes(episodeId);
+            // Inductive facts are promotable too, under the SAME distinct-episode bar
+            // as deductive ones. They were excluded only because `corroborate` used to
+            // relabel everything it promoted to deductive, which would have destroyed a
+            // generalization's provenance — the comment above says as much. That is now
+            // an argument to `corroborate`, so the exclusion is no longer needed.
+            //
+            // This was not a theoretical gap. Measured on the live graph 2026-08-28:
+            // all 340 tentative facts carrying two or more distinct source episodes were
+            // inductive, against 152 active facts in total. Consolidation mints inductive
+            // (`consolidation.ts:1119`, `:1156`), so the pile grew with every run of the
+            // engine and nothing could ever drain it.
+            //
+            // OPT-70b is UNCHANGED: `independent` still requires a DISTINCT episode with
+            // non-empty provenance, so this widens WHICH facts can promote, never the
+            // evidence bar they must clear.
             const promotable =
               reinforcing.status === 'tentative' &&
               (reinforcing.inference_type === 'abductive' ||
-                (reinforcing.inference_type === 'deductive' && independent));
+                ((reinforcing.inference_type === 'deductive'
+                  || reinforcing.inference_type === 'inductive') && independent));
             if (promotable && factLayer.corroborate) {
               const boosted = Math.min(1, Math.max(reinforcing.confidence, 0.5) + 0.1);
-              await factLayer.corroborate(reinforcing.id, boosted);
+              // Preserve a generalization as a generalization. An abductive hypothesis
+              // confirmed by explicit evidence still becomes deductive, as before.
+              await factLayer.corroborate(
+                reinforcing.id,
+                boosted,
+                reinforcing.inference_type === 'inductive' ? 'inductive' : 'deductive',
+              );
               // OPT-70b: the contender is now CONFIRMED (active). Only NOW may it
               // supersede an ESTABLISHED active fact it conflicts with — supersession
               // is deferred from first-sight to corroboration-time so unconfirmed

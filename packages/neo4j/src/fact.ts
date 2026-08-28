@@ -646,18 +646,36 @@ export class FactStore {
   }
 
   /**
-   * Promote a tentative/abductive fact that explicit evidence has now corroborated:
-   * mark it active + deductive and raise its confidence. Used when a real episode
-   * yields the same subject/predicate/object a dream hypothesis had guessed.
+   * Promote a tentative fact that explicit evidence has now corroborated: mark it
+   * active and raise its confidence. Used when a real episode yields the same
+   * subject/predicate/object a prior tentative fact already claimed.
+   *
+   * `inferenceType` defaults to 'deductive', which is right for an abductive
+   * hypothesis that explicit evidence has just confirmed. Pass the fact's own type
+   * to PRESERVE it.
+   *
+   * Why that option exists: promoting and relabelling used to be one welded
+   * operation. An inductive fact is a generalization, and rewriting it to deductive
+   * would destroy that provenance — so rather than separate the two, inductive facts
+   * were excluded from promotion entirely (`core/service.ts` promotable gate). The
+   * result was that consolidation's own output could accumulate corroboration
+   * forever and never become servable: measured 2026-08-28, every one of the 340
+   * tentative facts holding two or more distinct source episodes was inductive,
+   * while active facts stood at 152. Splitting the two lets a generalization be
+   * confirmed as a generalization.
    */
-  async corroborate(id: string, confidence: number): Promise<void> {
+  async corroborate(
+    id: string,
+    confidence: number,
+    inferenceType: 'deductive' | 'inductive' | 'abductive' = 'deductive',
+  ): Promise<void> {
     const session = this.driver.session();
     try {
       await session.run(
         `MATCH (f:Fact {id: $id})
-         SET f.status = 'active', f.inference_type = 'deductive',
+         SET f.status = 'active', f.inference_type = $inferenceType,
              f.confidence = $confidence, f.updated_at = $now`,
-        { id, confidence, now: new Date().toISOString() },
+        { id, confidence, inferenceType, now: new Date().toISOString() },
       );
     } finally {
       await session.close();
