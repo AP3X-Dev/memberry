@@ -45,6 +45,13 @@ fixes `oc-02` (4→1) and `oc-05` (2→1), breaks `oc-09` (1→2) and `oc-10` (1
 the reranker's weights were calibrated on memory prose, and code signatures are a different token
 distribution, so this is a mis-aimed instrument rather than a broken one.
 
+**Live confirmation, 2026-08-28.** Deployed and the flag turned on. The deployed server reproduces
+the container numbers exactly — top-5 **70.0%**, MRR **58.3%**, variable share **8.0%**,
+test-file share **0.0%**, 0 errors — and the deploy-with-flag-off step measured byte-identical to
+the old build, so the two are separately attributable. The +0.8 MRR and the two-up-two-down case
+split both hold in production. **This entry is unchanged by shipping:** the reranker's value is
+still unproven at n=10, it is just now unproven while switched on.
+
 **Revisit when:** `bench/eval/outcome-cases.jsonl` exceeds ~30 cases (see RL-005), or if anyone
 recalibrates the reranker weights on code.
 
@@ -66,8 +73,20 @@ scales with candidates² — and the window just went from 10 to 50, against a 2
 timeout it silently returns the unranked order (a latched warning was added, but it degrades
 quietly by design).
 
-**Revisit when:** before turning `MEMBERRY_CODE_RERANK_V1` on in production, OR when RL-001 is
-decided. Whichever comes first.
+**Trigger fired 2026-08-28, and the decision was to ship both.** The flag is now on in
+production. Recording what that means rather than quietly retiring the entry:
+
+- The latency risk **did not materialise** on the 10-case probe. No `rerank declined (baseline
+  outcome)` warning appeared in the logs, so the reranker completed inside its 250ms budget on
+  every query. That is evidence, not a guarantee — 10 queries against one project is a narrow
+  sample, and the warning is latched to once per process, so a later degradation on a busier or
+  wordier corpus would log once and then go quiet.
+- **The coupling is now a live liability, not a hypothetical one.** Turning off the unproven half
+  currently means turning off the proven half with it. If the reranker ever misbehaves, the only
+  lever available is one that also discards top-5 60% → 70% and variable share 50% → 8%.
+
+**Revisit when:** RL-001 is decided, or at the first sign of rerank latency — whichever comes
+first. Splitting the flags is the mechanism that makes RL-001 answerable without a rollback.
 
 ---
 
