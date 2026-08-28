@@ -35,7 +35,10 @@ export { SymbolStore } from './symbol-store.js';
 export { CodeIndexer, computeComponentModuleLinks } from './indexer.js';
 export type { ComponentModuleLink, KnownModule } from './indexer.js';
 export { ImportResolver } from './resolver.js';
-export { CodeSearch } from './search.js';
+export { CodeSearch, widenLimit } from './search.js';
+// IDX-004: @memberry/retrieval implements this. The type must cross the package boundary; the
+// implementation must not (retrieval depends on code, never the reverse).
+export type { CodeReranker } from './search.js';
 export { structuralSearch } from './structural-search.js';
 export type {
   StructuralSearchCapture,

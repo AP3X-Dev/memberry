@@ -362,29 +362,50 @@ export interface VectorIndexDimension {
  * them against EMBEDDING_DIM reported two permanent "mismatches" that pinned the
  * server in DEGRADED MODE — masking the real degradation the mode exists to show.
  */
-/** A vector index that exists, has the right dimensions, and holds nothing. */
-export interface EmptyVectorIndex {
+/** A label whose embedding coverage has fallen below the floor. `ratio` is 0..1. */
+export interface VectorIndexCoverage {
   label: string;
   nodes: number;
   embedded: number;
+  ratio: number;
 }
 
 /**
- * IDX-003 fail-loud guard. The dimension check above catches an index whose
- * shape drifted. It does NOT catch the failure that actually happened: an index
- * created correctly and never written to, because the writer was constructed
- * without an embedding provider. Every query against it returns zero rows and
- * the channel reports SUCCESS, so retrieval silently degrades to lexical-only
- * with nothing in any log. That shipped on the memory side once and on the code
- * side for the entire life of the code index.
+ * Coverage floor. Deliberately not 1.0: indexing and embedding are not atomic, so a live system
+ * always has a few just-written nodes awaiting a vector.
  *
- * Reports labels that have nodes but no embeddings at all. A partially embedded
- * label is backfill-in-progress, not a wiring defect, so it is not reported.
+ * Two different numbers follow from the current Symbol population of 54,314/54,314, and they are
+ * NOT the same scenario:
+ *   - ~2,715 existing symbols could LOSE their embedding before the floor trips (denominator
+ *     fixed at 54,314; 5% of it).
+ *   - ~2,860 NEW un-embedded symbols must arrive to trip it (the denominator grows with them:
+ *     new > 0.05 * (54,314 + new)).
  */
-export async function checkEmptyVectorIndexes(driver: Driver): Promise<EmptyVectorIndex[]> {
+const COVERAGE_FLOOR = 0.95;
+
+/**
+ * IDX-003 fail-loud guard, widened by IDX-004. The dimension check above catches an index whose
+ * shape drifted. It does NOT catch the failure that actually happened: an index created
+ * correctly and never written to, because the writer was constructed without an embedding
+ * provider. Every query against it returns zero rows and the channel reports SUCCESS, so
+ * retrieval silently degrades to lexical-only with nothing in any log. That shipped on the
+ * memory side once and on the code side for the entire life of the code index.
+ *
+ * IDX-004 CHANGES THE PREDICATE, and reverses a recorded IDX-003 decision. The original guard
+ * fired only at `embedded === 0`, on the reasoning that one embedding proves the writer is wired
+ * and reporting a partial state "would cry wolf through every backfill". That was correct while
+ * a backfill was the expected state. It is now obsolete, and its cost was concrete: it called
+ * Symbol at 16,399/54,314 — 30% — perfectly healthy.
+ *
+ * The residual cry-wolf window is real and narrow, and is being shipped stated rather than
+ * hidden: indexing a NEW project of ~2,860+ symbols and restarting the server before its embed
+ * pass completes will report DEGRADED, pinned for that process lifetime (the guard runs once, at
+ * boot). That requires a restart mid-backfill.
+ */
+export async function checkVectorIndexCoverage(driver: Driver): Promise<VectorIndexCoverage[]> {
   const session = driver.session();
   try {
-    const empty: EmptyVectorIndex[] = [];
+    const under: VectorIndexCoverage[] = [];
     for (const label of ['Symbol', 'Semantic', 'Episodic', 'Fact']) {
       const res = await session.run(
         `MATCH (n:${label})
@@ -395,9 +416,15 @@ export async function checkEmptyVectorIndexes(driver: Driver): Promise<EmptyVect
       if (!record) continue;
       const nodes = Number(record.get('nodes'));
       const embedded = Number(record.get('embedded'));
-      if (nodes > 0 && embedded === 0) empty.push({ label, nodes, embedded });
+      // A label with no nodes is not a defect — nothing is wrong with empty.
+      if (nodes === 0) continue;
+      const ratio = embedded / nodes;
+      // Written `!(ratio >= FLOOR)` rather than `ratio < FLOOR` so a NaN ratio REPORTS instead of
+      // silently passing. That also makes the `nodes === 0` guard above load-bearing and
+      // therefore testable: remove it and a zero-node label yields 0/0 = NaN, which reports.
+      if (!(ratio >= COVERAGE_FLOOR)) under.push({ label, nodes, embedded, ratio });
     }
-    return empty;
+    return under;
   } catch {
     // Restricted permissions or an unavailable server: skip the guard rather
     // than fail boot, exactly as the dimension check does.

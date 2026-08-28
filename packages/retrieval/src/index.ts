@@ -159,6 +159,9 @@ export type {
   ServedRerankerConstructionV1,
 } from './served-reranker.js';
 
+// IDX-004: the code plane's adapter onto that same served reranker.
+export { createCodeRerankerV1 } from './code-reranker.js';
+
 // Read-only project/tenant-qualified stable Entity-ID resolution (RET-002B)
 export {
   SCOPED_ENTITY_RESOLVER_MAX_RESULTS,

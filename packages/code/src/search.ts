@@ -98,6 +98,49 @@ export function noisePenalty(r: CodeSearchResult): number {
 export const CODE_SCOPE_FLAG = 'MEMBERRY_CODE_SCOPE_V2';
 const CODE_SCOPE_V2 = process.env[CODE_SCOPE_FLAG] === '1';
 
+// ─── IDX-004: retrieve wide, rerank, prior last (flagged + opt-in, default OFF) ─
+
+/**
+ * Process flag, read ONCE at module load. '1' = on; anything else = shipped behaviour.
+ * Separate from KIND_RANK_V1 and CODE_SCOPE_V2 so it can be reverted alone.
+ *
+ * The flag is NECESSARY BUT NOT SUFFICIENT, and that is deliberate. `bootstrap.ts` shares ONE
+ * CodeSearch instance with UnifiedAssembler, so an env-only gate would also change
+ * berry_context / berry_ask / berry_code_context — a plane with no outcome instrument, and one
+ * this packet puts out of scope. Callers opt in per call via `options.rerank`; only the
+ * berry_code_search handler does.
+ */
+export const CODE_RERANK_FLAG = 'MEMBERRY_CODE_RERANK_V1';
+const CODE_RERANK_V1 = process.env[CODE_RERANK_FLAG] === '1';
+
+/**
+ * The window IDX-004 retrieves into before reranking. 50 is not a guess: the headroom sweep
+ * measured limit-50 recovering 7 of 10 probe answers on its own, and 9 of 10 with a widened
+ * query, against 6 at the shipped default.
+ *
+ * NOTE the real composition of that window: `semanticVectorSearch` caps itself at
+ * `Math.min(limit, 10)`, so widening does NOT widen the memory channel. A wide window is
+ * <=50 symbol rows plus <=10 memory rows, not 50 of each.
+ */
+const WIDE_WINDOW = 50;
+
+/** Never narrower than the caller asked for. A caller wanting 100 still gets 100. */
+export function widenLimit(limit: number): number {
+  return Math.max(limit, WIDE_WINDOW);
+}
+
+/**
+ * Injected from the composition root. `@memberry/retrieval` depends on `@memberry/code`, so the
+ * dependency can only run this direction — code declares the shape, retrieval implements it.
+ *
+ * Contract: returns a PERMUTATION of `rows`. An implementation that drops or invents rows is a
+ * defect, and `searchStandard` defends against it by falling back to the unreranked window.
+ */
+export type CodeReranker = (
+  query: string,
+  rows: CodeSearchResult[],
+) => Promise<CodeSearchResult[]>;
+
 /** Stable sort in place. Permutation of the input window; length and ids are invariant. */
 export function rankByNoise(rows: CodeSearchResult[]): CodeSearchResult[] {
   return rows.sort((a, b) => noisePenalty(a) - noisePenalty(b));
@@ -107,6 +150,7 @@ export class CodeSearch {
   constructor(
     private driver: Driver,
     private embedding: EmbeddingProvider,
+    private reranker?: CodeReranker,
   ) {}
 
   /**
@@ -128,6 +172,12 @@ export class CodeSearch {
       expandedTokens?: string[];
       as_of?: string;
       queryVector?: number[];
+      /**
+       * IDX-004 opt-in, required IN ADDITION to CODE_RERANK_FLAG. Only the berry_code_search
+       * handler sets it; the assembler and buildContext deliberately do not, which is what keeps
+       * this off the memory plane.
+       */
+      rerank?: boolean;
     },
   ): Promise<CodeSearchResult[]> {
     return this.searchStandard(query, options, false);
@@ -146,6 +196,12 @@ export class CodeSearch {
       expandedTokens?: string[];
       as_of?: string;
       queryVector?: number[];
+      /**
+       * IDX-004 opt-in, required IN ADDITION to CODE_RERANK_FLAG. Only the berry_code_search
+       * handler sets it; the assembler and buildContext deliberately do not, which is what keeps
+       * this off the memory plane.
+       */
+      rerank?: boolean;
     },
   ): Promise<InternallyObserved<CodeSearchResult[]>> {
     return this.searchStandard(query, options, true);
@@ -173,10 +229,23 @@ export class CodeSearch {
       expandedTokens?: string[];
       as_of?: string;
       queryVector?: number[];
+      /**
+       * IDX-004 opt-in, required IN ADDITION to CODE_RERANK_FLAG. Only the berry_code_search
+       * handler sets it; the assembler and buildContext deliberately do not, which is what keeps
+       * this off the memory plane.
+       */
+      rerank?: boolean;
     } | undefined,
     observed: boolean,
   ): Promise<CodeSearchResult[] | InternallyObserved<CodeSearchResult[]>> {
     const limit = options?.limit ?? 20;
+    // IDX-004. BOTH conditions required — see CODE_RERANK_FLAG for why the flag alone must not
+    // be enough. Computed ONCE so the widen, the rerank, the prior and the truncate cannot drift
+    // apart into a configuration nobody measured.
+    const rerankThisCall = CODE_RERANK_V1 && options?.rerank === true;
+    // Retrieve wide: the channels themselves open up, because widening only the fusion window
+    // would fuse the same narrow candidate lists and change nothing.
+    const retrieveLimit = rerankThisCall ? widenLimit(limit) : limit;
     const includeSemantics = options?.include_semantics ?? true;
     const channelOutcomes = observed
       ? new Map<InternalRetrievalChannel, InternalRetrievalChannelObservation>()
@@ -199,7 +268,7 @@ export class CodeSearch {
         : this.embedding.available === false ? Promise.resolve(null) : this.embedding.embed(query);
 
     // 4-way parallel: fulltext + dense vector + lexical vector + semantic
-    const fulltextPromise = this.fulltextSearch(options?.expandedTokens?.join(' ') ?? query, limit, options);
+    const fulltextPromise = this.fulltextSearch(options?.expandedTokens?.join(' ') ?? query, retrieveLimit, options);
     const observedFulltextPromise = observed
       ? fulltextPromise.then(
           (value) => { settle!({ channel: 'code.fulltext', outcome: 'success' }); return value; },
@@ -209,15 +278,15 @@ export class CodeSearch {
     const searches = [
       observedFulltextPromise,
       observed
-        ? this.vectorSearch(query, limit, options, queryVectorPromise, settle)
-        : this.vectorSearch(query, limit, options, queryVectorPromise),
+        ? this.vectorSearch(query, retrieveLimit, options, queryVectorPromise, settle)
+        : this.vectorSearch(query, retrieveLimit, options, queryVectorPromise),
       observed
-        ? this.lexicalVectorSearch(query, limit, options, settle)
-        : this.lexicalVectorSearch(query, limit, options),
+        ? this.lexicalVectorSearch(query, retrieveLimit, options, settle)
+        : this.lexicalVectorSearch(query, retrieveLimit, options),
       includeSemantics
         ? observed
-          ? this.semanticVectorSearch(query, limit, options?.as_of, options?.project_tag, queryVectorPromise, settle)
-          : this.semanticVectorSearch(query, limit, options?.as_of, options?.project_tag, queryVectorPromise)
+          ? this.semanticVectorSearch(query, retrieveLimit, options?.as_of, options?.project_tag, queryVectorPromise, settle)
+          : this.semanticVectorSearch(query, retrieveLimit, options?.as_of, options?.project_tag, queryVectorPromise)
         : Promise.resolve([]),
     ] as const;
     let fulltextResults: CodeSearchResult[];
@@ -241,13 +310,43 @@ export class CodeSearch {
 
     // RRF fusion across all result lists (source_type already set per list)
     const allLists: CodeSearchResult[][] = [fulltextResults, lexicalResults, vectorResults, semanticResults];
-    const fused = rrfFusion(allLists, limit);
+    const fused = rrfFusion(allLists, retrieveLimit);
+
     // IDX-002A: rank prior, behind KIND_RANK_FLAG (default OFF = baseline order).
     // Within the window rrfFusion already returned, `variable` symbols and test-path
     // symbols sort last. Stable sort => a permutation of that window, never a filter.
-    if (KIND_RANK_V1) rankByNoise(fused);
+    //
+    // IDX-004 ORDER IS LOAD-BEARING, and all three steps hang off the SAME boolean:
+    //   - rerank FIRST. The served reranker is effectively 100% BM25F — it never reads
+    //     source_type, and rrfFusion has already overwritten each row's score with an RRF score
+    //     of ~0.016..0.065, so the 0.15 baseline term contributes ~0.003. Run it after the prior
+    //     and it erases everything IDX-002A and IDX-002B established.
+    //   - prior SECOND, and `rerankThisCall` is in the condition on purpose: with
+    //     CODE_RERANK_V1=1 and KIND_RANK_V1 at its shipped default OFF, this would otherwise be
+    //     fuse-wide -> rerank -> truncate with NO prior. That is worse than baseline — the
+    //     reranker's coverage and phrase terms favour memory prose over a short signature when
+    //     the query is an English question, so IDX-002B reopens, widened.
+    //   - truncate LAST. Cutting before the prior strands a code row the prior could have
+    //     promoted from reranked position 25 into the returned window.
+    let final = fused;
+    if (rerankThisCall && this.reranker) {
+      try {
+        const reranked = await this.reranker(query, fused);
+        // Permutation contract. A reranker that loses or invents rows is ignored outright
+        // rather than allowed to silently shrink a result set.
+        if (Array.isArray(reranked) && reranked.length === fused.length) final = reranked;
+      } catch {
+        // A reranker failure degrades to the fused order. Never an error, never empty.
+        final = fused;
+      }
+    }
+    // Aliasing note: on the non-reranked path `final` IS `fused`, so this sorts that array in
+    // place; on the reranked path it is a new array. Harmless only because `fused` is never
+    // read again below this point — every downstream use is `final`.
+    if (KIND_RANK_V1 || rerankThisCall) rankByNoise(final);
+    if (rerankThisCall) final = final.slice(0, limit);
 
-    if (!observed) return fused;
+    if (!observed) return final;
 
     const observation: InternalRetrievalObservation = { channels: [], candidates: [], finalIds: [] };
     {
@@ -279,9 +378,11 @@ export class CodeSearch {
         });
       }
       observation.candidates = [...candidates.values()];
-      observation.finalIds = fused.map((result) => result.id);
+      // IDX-004: `final`, not `fused` — finalIds must describe what was RETURNED (prior-sorted
+      // and truncated), while `candidates` above legitimately holds the wider set considered.
+      observation.finalIds = final.map((result) => result.id);
     }
-    return { value: fused, observation };
+    return { value: final, observation };
   }
 
   /**

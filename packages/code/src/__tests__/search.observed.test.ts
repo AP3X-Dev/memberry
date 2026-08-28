@@ -130,11 +130,11 @@ describe('CodeSearch.searchObserved', () => {
     const source = readFileSync(resolve(import.meta.dirname, '../search.ts'), 'utf8');
     expect(source).toMatch(/const channelOutcomes = observed\s*\? new Map/);
     expect(source).toMatch(/const observedFulltextPromise = observed\s*\? fulltextPromise\.then/);
-    expect(source).toContain('if (!observed) return fused;');
-    expect(source.indexOf('if (!observed) return fused;')).toBeLessThan(
+    expect(source).toContain('if (!observed) return final;');
+    expect(source.indexOf('if (!observed) return final;')).toBeLessThan(
       source.indexOf('const observation: InternalRetrievalObservation'),
     );
-    expect(source.indexOf('if (!observed) return fused;')).toBeLessThan(
+    expect(source.indexOf('if (!observed) return final;')).toBeLessThan(
       source.indexOf('const candidates = new Map<string, InternalRetrievalCandidateObservation>()'),
     );
   });

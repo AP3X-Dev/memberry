@@ -20,8 +20,12 @@ export interface ICodeIndexer {
 }
 
 export interface ICodeSearch {
+  // `rerank` is IDX-004's per-call opt-in. This interface is a deliberately narrowed view (it
+  // already omits expandedTokens/queryVector), so it does not inherit the field — without it
+  // listed here, `rerank: true` in the handler below trips the excess-property check.
   search(query: string, options?: {
-    language?: string; file_path?: string; kind?: string; project_tag?: string; limit?: number; include_semantics?: boolean; as_of?: string;
+    language?: string; file_path?: string; kind?: string; project_tag?: string; limit?: number;
+    include_semantics?: boolean; as_of?: string; rerank?: boolean;
   }): Promise<CodeSearchResult[]>;
   buildContext(task: string, maxTokens?: number, as_of?: string, filters?: {
     language?: string; file_path?: string; kind?: string; project_tag?: string;
@@ -186,6 +190,11 @@ export function registerCodeTools(
         limit: args.limit,
         include_semantics: args.include_semantics,
         as_of: args.as_of,
+        // IDX-004: the ONLY opt-in site. Deliberately an internal literal and NOT a zod input
+        // field — this is a routing decision, not a caller knob, and exposing it would let a
+        // caller reach a configuration nothing measures. The assembler and buildContext omit it,
+        // which is what keeps the wide-window rerank off the memory plane.
+        rerank: true,
       });
 
       const formatted = results.map((r) => ({

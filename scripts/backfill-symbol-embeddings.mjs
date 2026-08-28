@@ -22,11 +22,12 @@ import { generateMiniVector } from '../packages/code/dist/vectors.js';
 
 const env = {};
 try {
-  for (const line of readFileSync('.env', 'utf8').split('\n')) {
+  // Split on /\r?\n/, not '\n'. JS `.` never matches \r and `$` (without /m) only
+  // matches end-of-input, so on a CRLF .env this regex fails to match ANY line and
+  // every var comes back undefined. That reads as a missing .env, not a mangled
+  // one — you get "No OPENAI_API_KEY" while the key sits right there in the file.
+  for (const line of readFileSync('.env', 'utf8').split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
-    // .trim() is load-bearing: a CRLF .env leaves a trailing CR on every value,
-    // and a key with CR on the end fails as "not a legal HTTP header value"
-    // rather than as an auth error, which sends you looking in the wrong place.
     if (m) env[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
   }
 } catch { /* no .env — rely on process.env */ }

@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import { DistributedLock, ProposalStore } from '@memberry/redis';
-import { runMigrations, checkVectorIndexDimensions, checkEmptyVectorIndexes, ProvenanceTraversal } from '@memberry/neo4j';
+import { runMigrations, checkVectorIndexDimensions, checkVectorIndexCoverage, ProvenanceTraversal } from '@memberry/neo4j';
 import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT } from '@memberry/core';
 import type { CoreServices } from '@memberry/core';
 import { setServiceInstances, setTenantContainer } from './tools.js';
@@ -48,6 +48,7 @@ import {
   baselineIdentityRerankerScoreV1,
   createLocalRerankerProviderV1,
   createServedRerankerProviderV1,
+  createCodeRerankerV1,
   type RerankerShadowSnapshotV1,
 } from '@memberry/retrieval';
 import {
@@ -274,18 +275,24 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   // IDX-003: an index with the right shape and nothing in it is just as broken,
   // and unlike a dimension mismatch it produces no error anywhere — the channel
   // returns zero rows and reports success. Say so at boot.
-  const emptyVectorIndexes = await checkEmptyVectorIndexes(driver);
-  for (const idx of emptyVectorIndexes) {
+  const underCoveredVectorIndexes = await checkVectorIndexCoverage(driver);
+  for (const idx of underCoveredVectorIndexes) {
+    // State the RATIO, not just the fact. Saying "has no embeddings" about a label that has 63%
+    // of them sends the reader looking for a wiring bug that is not there.
+    const pct = (idx.ratio * 100).toFixed(1);
     console.error(
-      `[memberry-mcp] WARNING: ${idx.nodes} :${idx.label} nodes and NOT ONE has an embedding. ` +
-      `Vector search over ${idx.label} returns nothing on every query while reporting success. ` +
-      `Backfill with: node scripts/backfill-symbol-embeddings.mjs (Symbol) ` +
+      `[memberry-mcp] WARNING: :${idx.label} embedding coverage is ${idx.embedded}/${idx.nodes} ` +
+      `(${pct}%). Vector search over ${idx.label} silently misses the un-embedded remainder on ` +
+      `every query while reporting success. Backfill with: ` +
+      `node scripts/backfill-symbol-embeddings.mjs (Symbol) ` +
       `or node scripts/backfill-embeddings.mjs (Semantic).`,
     );
   }
-  if (emptyVectorIndexes.length > 0) {
+  if (underCoveredVectorIndexes.length > 0) {
     status.degraded.push(
-      `vectors: ${emptyVectorIndexes.map((i) => `${i.label} 0/${i.nodes} embedded`).join(', ')}`,
+      `vectors: ${underCoveredVectorIndexes
+        .map((i) => `${i.label} ${i.embedded}/${i.nodes} embedded`)
+        .join(', ')}`,
     );
   }
 
@@ -493,7 +500,12 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   // write-only and the code.dense-vector channel was inert on every query.
   const codeIndexerService = new CodeIndexer(driver, embedding);
   const symbolStoreService = new SymbolStore(driver);
-  const codeSearchService = new CodeSearch(driver, embedding);
+  // IDX-004: the code plane borrows the BM25F reranker that has served the memory plane for
+  // months. Injected here because packages/mcp is the only package that depends on both, and
+  // packages/retrieval already depends on packages/code so the import cannot run the other way.
+  // Inert until BOTH MEMBERRY_CODE_RERANK_V1=1 and a caller passes `rerank: true` — only the
+  // berry_code_search handler does, which is what keeps this off the assembler.
+  const codeSearchService = new CodeSearch(driver, embedding, createCodeRerankerV1());
   const codeWatcherService = new CodeWatcher(codeIndexerService, symbolStoreService);
 
   // Wire post-store hook: re-index files mentioned in stored episode content.
