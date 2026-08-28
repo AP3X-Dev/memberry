@@ -161,7 +161,49 @@ a-priori argument for the fix, not a result of it.
 on the memory plane, which does not exist yet. The pre-registered rule in section 5 still did not
 fire, and this measurement does not retroactively fire it.
 
-## 7. Reproducing
+## 7. Live confirmation after deploy and sweep
+
+Both fixes were deployed (`9877414`) and the promotion sweep was run. Re-measured against the
+live graph afterwards:
+
+| | arm B prediction | live after deploy |
+|---|---|---|
+| delivered slots | 91 | 91 |
+| semantic | 74.7% | **74.7%** |
+| episodic | 25.3% | **25.3%** |
+| median episodic confidence | 0.5 | 0.5 |
+| queries where an episode outranked a semantic | 1 | 1 |
+| `episodicChannel` | success:10 | success:10 |
+
+**The deployed behaviour reproduces the measured arm exactly.** The confidence change is live and
+doing what the two-arm run said it would.
+
+### The sweep, and why this probe cannot see it
+
+The sweep promoted the 340 inductive facts that already held two or more distinct source episodes,
+mirroring `corroborate()` — status to active, inference type preserved, confidence raised the same
+way. Active facts went **152 → 492**, and the number of distinct subjects holding at least one
+active fact is now **306**.
+
+Fact delivery in the table above is still 0%, and that is honest rather than a failure. `berry_load`
+only fetches facts when the caller supplies `entities` (`service.ts:408-416`); only two of these ten
+queries do, and the five entities they name (`OrgMap`, `console-ui`, `memberry`, `memory-core`,
+`consolidation-engine`) have **no active facts** even after the sweep. The corpus got three times
+larger; this ten-query sample simply does not reach it.
+
+**Sizing the sweep by this probe would be wrong.** It measures `berry_load` occupancy on ten
+entity-poor queries, which is the wrong instrument for fact reachability. What the sweep is worth
+should be judged on the 306 subjects, not on this table.
+
+### One defect introduced and repaired
+
+The sweep initially wrote `updated_at` as epoch milliseconds while every other Fact in the graph
+carries an ISO-8601 string, which would have mis-parsed in recency ranking. Caught immediately and
+repaired on exactly the 340 backed-up ids; a full-graph check now returns zero Facts with a
+non-string `updated_at`. Original values for all 340 rows are retained in
+`/home/cerebro/gate/sweep-backup-20260828.csv`.
+
+## 8. Reproducing
 
 ```
 cd <worktree> && set -a && . <env-file> && set +a
