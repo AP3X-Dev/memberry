@@ -318,6 +318,41 @@ the pipeline:
   but a later episode phrasing the subject differently mints a fresh Entity, and the existing
   contenders become invisible to it. Weakest of the four; listed for completeness.
 
+**MEASURED 2026-08-28, and it overturns the four defects above as an explanation.** Counts taken
+read-only against the live graph:
+
+| question | answer |
+|---|---|
+| tentative facts | 29,148 |
+| already carrying >=2 distinct source episodes (promotable today, never promoted) | **340** |
+| carrying zero provenance | 0 |
+| inference_type `inductive` (excluded from `promotable` at `service.ts:1100-1103`) | 1,980 |
+| duplicate groups, byte-identical subject+predicate+object | **999** (2,008 rows) |
+| ...same groups once the object is case/whitespace-normalised | 1,006 (+7) |
+| ...duplicate groups whose rows come from **distinct** episodes | **18** |
+
+**The object-comparison defect is worth almost nothing.** Normalising it merges 7 groups out of
+1,006 — under 1%. It is still a real inconsistency (the predicate is normalised at `:1065` and the
+object is not) but fixing it will not move the corpus, and this entry should stop implying it
+might.
+
+**The corpus is not stuck on a bug. It is stuck on the bar being genuinely unmet.** 981 of the 999
+duplicate groups are one episode restating itself, which OPT-70b's distinct-episode requirement
+(`service.ts:1097-1099`) correctly refuses to count — that is anti-poisoning working as designed,
+not a defect. The total realistically promotable population is **~358 of 29,148, about 1.2%**,
+which would move active facts from 152 to roughly 510.
+
+**So the open question is a product decision, not a repair:** should a claim seen once, in one
+episode, ever be servable? Today it is not, and 99% of the fact corpus is exactly that. Answering
+"no" means the Fact plane is permanently a ~500-row store and should be sized accordingly.
+Answering "yes" means changing what corroboration is for, which is a deliberate weakening of an
+anti-poisoning gate and needs a security read.
+
+**This also re-sizes RL-008.** Any fact reader — `fact_content` or `fact_embedding` — serves the
+`status = 'active'` population only (`neo4j/fact.ts:302`, `mcp/tools.ts:810`). That is 152 rows
+now and ~510 after the most optimistic sweep. Indexing is not the fact plane's bottleneck and
+building readers first would be building over 1.7% of the data.
+
 **Revisit when:** RL-006 lands and can size which of the four actually accounts for the 29,109 —
 or sooner for the object-normalization one, which is a one-line change with an a-priori
 justification and needs no measurement. Loosening it touches an anti-poisoning gate, so it
