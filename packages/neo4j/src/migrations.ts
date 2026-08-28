@@ -402,11 +402,30 @@ const COVERAGE_FLOOR = 0.95;
  * pass completes will report DEGRADED, pinned for that process lifetime (the guard runs once, at
  * boot). That requires a restart mid-backfill.
  */
+/**
+ * Labels whose embeddings are actually READ by a retrieval channel.
+ *
+ * `Fact` is deliberately absent, and this is a scope correction rather than a mute. The guard
+ * exists to catch ONE failure: a vector index that queries hit and silently get nothing from.
+ * Nothing queries `fact_embedding` — it appears only in its own CREATE statement in schema.ts —
+ * so Fact coverage cannot produce that failure, and reporting it puts a permanent entry in
+ * `status.degraded` that no boot can ever clear. An alarm that is always on is not an alarm, which
+ * is the exact trap this guard was widened to escape.
+ *
+ * That does NOT make the Fact plane fine. 29,314 Fact nodes carry no embedding, the index has no
+ * reader, and the aggregate assembler discards Facts entirely. That is a real open decision —
+ * build a reader or drop the index — and removing it from here removes its only automated
+ * reminder. It is tracked as RL-008 in RESEARCH-LEDGER.md, which is now the only thing holding it.
+ *
+ * Add a label here when something starts reading its embeddings, not before.
+ */
+const EMBEDDING_READ_LABELS = ['Symbol', 'Semantic', 'Episodic'] as const;
+
 export async function checkVectorIndexCoverage(driver: Driver): Promise<VectorIndexCoverage[]> {
   const session = driver.session();
   try {
     const under: VectorIndexCoverage[] = [];
-    for (const label of ['Symbol', 'Semantic', 'Episodic', 'Fact']) {
+    for (const label of EMBEDDING_READ_LABELS) {
       const res = await session.run(
         `MATCH (n:${label})
          RETURN count(n) AS nodes,

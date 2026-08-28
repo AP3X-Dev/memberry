@@ -106,7 +106,25 @@ describe('vector index coverage guard (IDX-003 C10-C15, IDX-004 S11-S12)', () =>
     expect(await checkVectorIndexCoverage(driver as never)).toEqual([]);
   });
 
-  it('C13 — reports EVERY affected label, not just the first', async () => {
+  it('S18 — Fact is NOT guarded, because nothing reads fact_embedding', async () => {
+    const { driver } = driverWith({
+      Symbol: { nodes: 54314, embedded: 54314 },
+      Semantic: { nodes: 194, embedded: 194 },
+      Episodic: { nodes: 1695, embedded: 1695 },
+      Fact: { nodes: 29314, embedded: 0 },
+    });
+    // The live state as of 2026-08-28. Fact at 0/29,314 would otherwise pin `status.degraded`
+    // non-empty on every boot forever, and an alarm that can never clear is not an alarm — the
+    // exact trap this guard was widened to escape. `fact_embedding` appears only in its own
+    // CREATE statement in schema.ts, so no query can silently get nothing from it.
+    //
+    // This is a scope correction, NOT a mute, and it costs something real: the Fact plane's
+    // open decision (build a reader or drop the index) has just lost its only automated
+    // reminder. RESEARCH-LEDGER.md RL-008 is now the only thing holding it.
+    expect(await checkVectorIndexCoverage(driver as never)).toEqual([]);
+  });
+
+  it('C13 — reports EVERY affected READ label, not just the first', async () => {
     const { driver } = driverWith({
       Symbol: { nodes: 54314, embedded: 0 },
       Semantic: { nodes: 192, embedded: 0 },
@@ -114,7 +132,7 @@ describe('vector index coverage guard (IDX-003 C10-C15, IDX-004 S11-S12)', () =>
       Fact: { nodes: 3, embedded: 0 },
     });
     const under = await checkVectorIndexCoverage(driver as never);
-    expect(under.map((e) => e.label)).toEqual(['Symbol', 'Semantic', 'Episodic', 'Fact']);
+    expect(under.map((e) => e.label)).toEqual(['Symbol', 'Semantic', 'Episodic']);
   });
 
   it('C14 — a restricted or unavailable server skips the guard rather than failing boot', async () => {

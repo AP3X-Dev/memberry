@@ -178,7 +178,14 @@ Two live consequences:
 **Either build a reader or drop the index.** Doing neither is the current state and is the worst
 of the three.
 
-**Revisit when:** before the next boot-health change, or as part of RL-006's findings.
+**2026-08-28 — this entry lost its automated reminder.** RL-016 removed Fact from the coverage
+guard's label list, because a guard for indexes nobody reads was pinning `status.degraded`
+permanently non-empty. That was the right call for the guard and a real cost here: nothing in the
+running system will mention the Fact plane again. **This ledger entry is now the only thing
+holding this decision.** If it gets closed without a decision, the Fact plane silently becomes
+permanent.
+
+**Revisit when:** RL-006 lands and can size it — or sooner, since nothing else will raise its hand.
 
 ---
 
@@ -276,31 +283,54 @@ back). Both are prerequisites, not excuses.
 
 ---
 
-### RL-016 — HK-1's coverage alarm lands in a channel that is already dirty
-**Evidence:** verified · **Status:** open · **Opened:** 2026-08-27
+### RL-016 — HK-1's coverage alarm landed in a channel that was already dirty
+**Evidence:** verified · **Status:** RESOLVED 2026-08-28 · **Opened:** 2026-08-27
 
-The IDX-004 coverage guard reports any label below 95% embedding coverage. Fact sits at 0% (see
-RL-008) and already reported under the previous zero-check, so `status.degraded` is permanently
-non-empty on the live box.
+The coverage guard reported any label below 95%. Fact sits at 0%, so `status.degraded` was
+permanently non-empty and could never clear on any boot.
 
-An alarm nobody can act on gets ignored — which is the exact failure mode the guard was widened to
-prevent, with the sign flipped. HK-1 does not fully pay off until RL-008 is decided.
+**Fixed by correcting the guard's scope, not by muting it.** The guard exists to catch exactly one
+failure: a vector index that queries hit and silently get nothing from. Nothing reads
+`fact_embedding` — it appears only in its own CREATE statement in `schema.ts` — so Fact coverage
+cannot produce that failure. The guard now iterates `EMBEDDING_READ_LABELS`
+(`Symbol`, `Semantic`, `Episodic`), with the rule written down: add a label when something starts
+reading its embeddings, not before. Pinned by S18.
 
-**Revisit when:** RL-008 is decided.
+**What this cost, recorded because it is easy to lose:** the Fact plane's open decision just lost
+its only automated reminder. See RL-008 — this ledger is now the only thing holding it.
 
 ---
 
-### RL-017 — 14 pre-existing lab failures in RET-010E
-**Evidence:** measured · **Status:** open · **Opened:** 2026-08-27
+### RL-017 — 14 "pre-existing lab failures" were a broken gate harness
+**Evidence:** measured · **Status:** RESOLVED 2026-08-28 (13 of 14) · **Opened:** 2026-08-27
 
-`bench/lab/ret010/__tests__/dev-gate.test.ts` ("RET-010E CommonJS executable boundary") fails 14
-tests in both node:20 and node:22. Byte-identical across the IDX-003 and IDX-004 gates, so this
-is stable and pre-existing, not drift.
+`bench/lab/ret010/__tests__/dev-gate.test.ts` failed 14 tests in both Node majors, byte-identical
+across three consecutive gates. Stable and pre-existing — and read, for three packets, as a
+product defect nobody had time for.
 
-They are currently absorbed as known-red at every gate, which means `LAB_EXIT=1` carries no
-signal — the same "alarm nobody acts on" pattern as RL-016.
+**It was not a product defect. It was our own gate script.** CI runs `npm run bench:lab:test` and
+CI was green the whole time, which should have been the tell.
 
-**Revisit when:** the lab gate needs to be trustworthy, or before anyone relies on `LAB_EXIT`.
+- **13 of 14:** `fatal: detected dubious ownership in repository at '/w'`. The gate container ran
+  as root against a uid-1000 worktree. `git config --global --add safe.directory` does not help,
+  because the lab sandbox spawns git with a sanitised environment — HOME is unset, so the global
+  config is never read. Fixed by matching the container uid to the worktree owner **and** running
+  `npm ci` under the same uid; doing only one trades dubious-ownership for EACCES on
+  `node_modules/.cache`.
+- **1 of 14:** the finalizer-drain test shells out to the `docker` CLI, which the `node:NN` image
+  does not contain. Mounting the docker socket would hand the suite control of the host daemon —
+  not a trade worth making for one assertion. CI has a docker CLI and covers it.
+
+The fix lives in a tracked script, `scripts/gate.sh`, so the reasoning cannot evaporate with a
+box-local file again. **Expected steady state is `LAB_EXIT=1` with exactly ONE failure; two or
+more is a real regression.**
+
+**Lesson worth more than the fix:** "pre-existing, identical across gates" proved the failures were
+*stable*, and I treated that as evidence they were *legitimate*. It was only evidence they were
+consistent. A red gate nobody has diagnosed is not a baseline, it is an unread message.
+
+**Revisit when:** the finalizer test's environment gap becomes worth closing, or if lab failures
+ever exceed one.
 
 ---
 
