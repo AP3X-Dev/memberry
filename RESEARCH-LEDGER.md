@@ -441,8 +441,8 @@ its only automated reminder. See RL-008 — this ledger is now the only thing ho
 
 ---
 
-### RL-017 — 13 of 14 "pre-existing lab failures" were a broken gate harness; the 14th is unexplained
-**Evidence:** measured · **Status:** RESOLVED 2026-08-28 (13 of 14) · **Opened:** 2026-08-27
+### RL-017 — 13 of 14 "pre-existing lab failures" were a broken gate harness; the 14th is a spawn timeout
+**Evidence:** measured · **Status:** RESOLVED 2026-08-28 (all 14) · **Opened:** 2026-08-27
 
 The lab sweep failed 14 tests in both Node majors, byte-identical across three consecutive gates
 (recorded at the time against `bench/lab/ret010/__tests__/dev-gate.test.ts`, though the
@@ -462,28 +462,35 @@ not a product defect.
   config is never read. Fixed by matching the container uid to the worktree owner **and** running
   `npm ci` under the same uid; doing only one trades dubious-ownership for EACCES on
   `node_modules/.cache`.
-- **1 of 14: CAUSE NOT ESTABLISHED.** This entry originally said the finalizer-drain test shells
-  out to the `docker` CLI, which the `node:NN` image does not contain. **That attribution is
-  withdrawn, 2026-08-28.** `grep -i docker` over `bench/lab/ret010/__tests__/dev-gate.test.ts`
-  and `bench/lab/ret010/dev-gate.cjs` returns zero on both; the named test compiles the gate
-  in-process and calls `__testFinalize` with injected hooks — no docker, no container. It is NOT
-  subprocess-free, though: `developmentFailureFixture` runs
-  `execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' })`
-  (`dev-gate.test.ts:307`) — the same git-against-a-host-owned-worktree operation blamed for the
-  other 13. **A lead, not a cause, and a weak one:** this failure SURVIVED the uid fix that
-  cleared those 13, which is evidence the class is different, not the same. It has not been
-  checked either way.
-  **And docker is not reachable from this run at all:** the lab's docker spawns sit behind
-  `candidate/live.ts` and `candidate-v3/live.ts`, which run from the `bench:lab:admission:*:live`
-  scripts as their own CI steps, not from `vitest run bench/lab`. "Docker is missing" cannot
-  explain a failure in this sweep, whichever test it is. The suite HAS been run — that is how we know one case
-  still fails after the uid fix — but nobody has read that case's output, which is what would
-  establish the cause. CI runs the same command (`npm run bench:lab:test`, `ci.yml:50`) and is
-  expected green; that is an expectation, not an attestation, and **it does not license ignoring
-  the red here** — with the cause unknown there is no established reason CI's environment differs
-  from the container's. **Do not substitute a new cause without a run** — that is how this entry got its first
-  one — and note the failing test's IDENTITY was recorded alongside the withdrawn cause and has
-  not itself been re-confirmed.
+- **1 of 14: CAUSE ESTABLISHED 2026-08-28 — a short spawn timeout, tripped by load.** The docker
+  story was withdrawn first (`grep -i docker` returns zero in the test and in the gate it loads,
+  and the lab's docker spawns sit behind `candidate/live.ts` / `candidate-v3/live.ts`, which are
+  their own CI steps and unreachable from `vitest run bench/lab`). Then somebody read the logs,
+  which is all it ever needed.
+
+  **The two Node arms fail on DIFFERENT tests, and neither is the one this entry named.**
+
+  | arm | failing test | error |
+  |---|---|---|
+  | node:20 | `bench/lab/admission-features/scorer-only/__tests__/blinded-holdout-v2.test.ts` — "loads the assembled v2 policy through the real preflight CLI" | `Test timed out in 5000ms` |
+  | node:22 | `bench/lab/ret010/__tests__/dev-gate.test.ts:2199` — "runs the exact production finalize CLI and emits only its validated upload path" | `spawnSync /usr/local/bin/node ETIMEDOUT` (errno -110) |
+
+  Both are the same class: **a short hard timeout around spawning a Node subprocess.** The node:22
+  case allows `timeout: 3_000` for a spawn of `node bench/lab/ret010/dev-gate.cjs finalize`
+  (`dev-gate.test.ts:2196`); the node:20 case is vitest's default 5s around a preflight CLI.
+  `dev-gate.test.ts` alone carries seven such 2-3s spawn budgets, so WHICH one trips is a function
+  of machine load, not of any defect. Each arm reported `Tests 1 failed | 2116 passed`, taking
+  160-220s of test time on a 4-core box measured at load 2.83.
+
+  That explains the shape which misled three packets: the failure is **stable in count** (always
+  exactly one) but **unstable in identity**, which reads like a single known-red test and is not
+  one. It also retires the "environment gap" framing — nothing is missing from the container; the
+  budgets are simply too tight for it under parallel load.
+
+  **Not a product defect, and not a harness bug — a test-timeout budget that does not survive a
+  loaded machine.** Fixing it means raising those spawn budgets or serialising the lab run, not
+  filtering anything out. Until then `LAB_EXIT=1` stays expected, but **do not assume the same
+  test**: read the log.
 
 The fix lives in a tracked script, `scripts/gate.sh`, so the reasoning cannot evaporate with a
 box-local file again. **Expected steady state is `LAB_EXIT=1` with exactly ONE failure; two or
@@ -493,7 +500,7 @@ more is a real regression.**
 *stable*, and I treated that as evidence they were *legitimate*. It was only evidence they were
 consistent. A red gate nobody has diagnosed is not a baseline, it is an unread message.
 
-**Revisit when:** the one remaining lab failure becomes worth diagnosing, or if lab failures
+**Revisit when:** the spawn budgets are raised or the lab run is serialised, or if lab failures
 ever exceed one.
 
 ---

@@ -24,41 +24,32 @@
 # mode for the other.
 #
 # ---------------------------------------------------------------------------
-# ONE KNOWN-RED TEST. CAUSE NOT ESTABLISHED.
+# ONE KNOWN-RED TEST. CAUSE ESTABLISHED 2026-08-28: A SPAWN TIMEOUT UNDER LOAD.
 #
-#   RET-010E > "drains every retained finalizer owner once after an injected close failure and
-#   emits no output"   <- IDENTITY NOT RE-CONFIRMED; recorded alongside the withdrawn cause.
+# This block used to blame a missing `docker` CLI. That was withdrawn (grep finds no docker in the
+# test or in the gate it loads, and the lab's docker spawns sit behind candidate/live.ts and
+# candidate-v3/live.ts, which are their own CI steps and unreachable from `vitest run bench/lab`).
+# Then somebody read the logs, which is all it ever needed.
 #
-# This block used to assert that the test shells out to the `docker` CLI, which the node:NN image
-# does not contain. THAT ATTRIBUTION IS UNSUPPORTED and has been withdrawn: `grep -i docker` over
-# bench/lab/ret010/__tests__/dev-gate.test.ts and bench/lab/ret010/dev-gate.cjs both return zero,
-# and the test compiles the gate in-process and calls __testFinalize with injected hooks — no
-# docker, no container. It is NOT subprocess-free: developmentFailureFixture runs
-# `execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' })` at
-# dev-gate.test.ts:307 — the same git-against-a-host-owned-worktree operation blamed for the other
-# 13. A lead, not a cause, and a weak one: this failure SURVIVED the uid fix that cleared those
-# 13, which is evidence the class is different. Not checked either way.
+# THE TWO ARMS FAIL ON DIFFERENT TESTS:
+#   node:20  bench/lab/admission-features/scorer-only/__tests__/blinded-holdout-v2.test.ts
+#            "loads the assembled v2 policy through the real preflight CLI" -> timed out in 5000ms
+#   node:22  bench/lab/ret010/__tests__/dev-gate.test.ts:2199
+#            "runs the exact production finalize CLI..." -> spawnSync node ETIMEDOUT (errno -110)
 #
-# Nor is docker reachable from this run at all: the lab's docker spawns live behind
-# candidate/live.ts and candidate-v3/live.ts, which run from the bench:lab:admission:*:live
-# scripts as their own CI steps, NOT from `vitest run bench/lab`. So "docker is missing" cannot
-# explain a failure in this sweep, whichever test it is.
+# Same class both times: a short hard timeout around spawning a Node subprocess. The node:22 case
+# allows timeout: 3_000 (dev-gate.test.ts:2196); the node:20 case is vitest's default 5s. That one
+# file carries seven such 2-3s spawn budgets, so WHICH test trips depends on machine load, not on
+# any defect. Both arms reported "Tests 1 failed | 2116 passed", at 160-220s of test time on a
+# 4-core box measured at load 2.83.
 #
-# The real cause is NOT ESTABLISHED. The suite HAS been run — that is how we know one case still
-# fails after the uid fix — but nobody has read that case's output. Establishing the cause means
-# reading the failure in lab.log, not producing another one. Do not restate the docker story as fact and
-# do not install a replacement — including the failing test's identity above, which was recorded
-# alongside the withdrawn cause and has not itself been re-confirmed.
+# That is why this looked like one stable known-red test for three packets: stable in COUNT,
+# unstable in IDENTITY. Nothing is missing from this container — the budgets are simply too tight
+# for it under parallel load. The real fix is to raise those budgets or serialise the lab run, not
+# to filter anything out.
 #
-# NOTE ON CI. CI runs the same command (`npm run bench:lab:test`, ci.yml:50) and is expected green
-# — no run id was ever recorded, so that is an expectation, not an attestation. The old header
-# reasoned from this that CI "is the authority for that test, not this script". That inference is
-# ALSO withdrawn: its premise was the docker story (CI's runner has a docker CLI, the container
-# does not). With the cause unknown, there is no established reason CI's environment differs from
-# this container's, so a green CI does not license ignoring the red here.
-#
-# So: LAB_EXIT=1 with exactly ONE failure is the expected steady state. TWO or more is a real
-# regression and must be read. Do not "fix" this by filtering the test out — a gate you have taught
+# So: LAB_EXIT=1 with exactly ONE failure is the expected steady state, but DO NOT assume it is
+# the same test as last time — read the log. TWO or more is a real regression and must be read. Do not "fix" this by filtering the test out — a gate you have taught
 # to ignore its own output is the thing this whole comment exists to prevent.
 set -eu
 
