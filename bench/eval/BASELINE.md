@@ -388,16 +388,36 @@ else.
 
 ## 5. Re-pinning the origin — the ONLY permitted procedure
 
-The origin baseline is re-pinned **only on a deliberate re-index**, because a re-index
-changes the corpus underneath (spec §8 item 4). Nothing else re-pins it — not a run that
-looks anomalous, not a metric that has drifted, not a change of opinion about the question
-set, and never as a way to clear a monotonic-decline flag.
+**Amended 2026-08-28 (owner).** This section previously permitted re-pinning on a deliberate
+re-index alone, while §3.2 listed FOUR conditions that void comparison and said each "requires a
+fresh baseline, not a delta". Those two statements contradicted each other: three flags shipping
+after the origin (§2.7) voided comparison under §3.2 item 2 and simultaneously forbade the only
+documented way to restore it, leaving EVAL-001 runnable but unable to compare anything — most of
+what a regression guard is for. The permitted triggers are now the §3.2 list, so the two sections
+agree.
 
-When a deliberate re-index happens:
+The origin baseline is re-pinned **only when comparison has been voided by one of the four
+conditions in §3.2**:
+
+1. a deliberate re-index (the corpus changed underneath — spec §8 item 4);
+2. a change to any flag governing the measured path;
+3. re-selecting the question set by any rule other than `SELECTION-RULE.md`;
+4. discovery that the mined population is not what SELECTION-RULE §3 claims.
+
+Nothing else re-pins it — not a run that looks anomalous, not a metric that has drifted, not a
+change of opinion about the question set that does not go through the selection rule, and **never**
+as a way to clear a monotonic-decline flag. Widening the trigger list does not widen the ceremony:
+every re-pin still retains the prior origin verbatim, still records its reason, and still appears
+in §6 so the count stays visible. **A re-pin is never a way to escape a number** — if a re-pin and
+an unwelcome result ever coincide, the burden is on the re-pinner to show the voiding condition
+existed independently of the result.
+
+When one of those conditions occurs:
 
 1. **Retain the prior origin. It is never deleted.** Move section 2 verbatim into section 6
    under a heading `Superseded origin N — <date>`. Not edited, not summarised, not trimmed.
-2. Record the **reason** for the re-index — what was re-indexed and why — in that heading.
+2. Record the **reason** in that heading — which of the four conditions fired, and the evidence
+   for it (the re-index performed, or the flag and the PR that shipped it, and so on).
 3. Write a **new** section 2 with new SHAs, new flag state, new index state, and a new run.
    The new origin is a fresh capture, not an adjustment of the old one.
 4. Note in section 7 the exact row after which comparison switches to the new origin.
@@ -439,17 +459,22 @@ recorded as an observation and is explicitly **not** a claim that nothing change
 **This run does not re-pin the origin.** §5 permits re-pinning only on a deliberate re-index, and
 no re-index happened. See the blocked decision below.
 
-### BLOCKED: §3.2 and §5 contradict each other
+### RESOLVED 2026-08-28 (owner): §3.2 and §5 now agree
 
 §3.2 lists four conditions that void comparison and each "requires a **fresh baseline**, not a
 delta". §5 permits re-pinning the origin for exactly **one** of those four — a deliberate
 re-index — and says "nothing else re-pins it". A flag change (§3.2 item 2) therefore demands a
 fresh baseline and forbids the only documented procedure for producing one.
 
-That is a governance decision, not an engineering one, and amending a pre-registered instrument so
-that it permits the thing you want to do is how golden v2 died. Recorded here rather than resolved.
-Until it is resolved EVAL-001 can still be RUN — the dev split above is evidence of that — but its
-numbers cannot be compared to anything, which is most of what a regression guard is for.
+**Resolved by extending §5's permitted triggers to the §3.2 list** rather than by narrowing §3.2.
+The ceremony is unchanged — prior origin retained verbatim, reason recorded, every re-pin visible
+in §6 — and a clause was added making explicit that a re-pin is never a route around an unwelcome
+number.
+
+The dev run above therefore stands as the last measurement under the ORIGINAL origin. It is still
+not a re-pin: re-pinning is now permitted, but a re-pin is a deliberate act with its own record, and
+it should be taken against the system as it will actually run — after the `berry_context` defect in
+`RESEARCH-LEDGER.md` RL-018, which currently makes one of four dev questions unscoreable.
 
 
 Later runs append rows here. **They do not touch section 2.** Rows are never edited,
