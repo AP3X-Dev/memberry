@@ -17,6 +17,7 @@ import {
 import { RETRIEVAL_TRACE_CHANNEL_ORDER } from '../trace.js';
 import type { RetrievalTraceV1 } from '../trace.js';
 import type { UnifiedContext } from '../types.js';
+import { getRetrievalResolutionProcessStatusV1 } from '../resolution-observability.js';
 
 const approvedTrace = JSON.parse(readFileSync(
   new URL('./fixtures/retrieval-trace-deterministic-v2.json', import.meta.url),
@@ -54,6 +55,15 @@ function makeServerStub() {
     }),
   };
   return { server, handlers };
+}
+
+function processCounters() {
+  const status = getRetrievalResolutionProcessStatusV1();
+  return {
+    calls: status.calls as Record<string, number>,
+    routing: status.routing as Record<string, number>,
+    resolution: status.resolution as Record<string, number | null>,
+  };
 }
 
 /** The live production shape: planner ON, candidate channel ON, resolver that would succeed. */
@@ -236,11 +246,22 @@ describe('RL-018 unanchored requests route to the task-text path', () => {
     ] as const) {
       it(`rejects an unanchored request from an unauthenticated caller (${label})`, async () => {
         const { assembler, resolve, handlers } = unauthenticated(flags);
+        const before = processCounters();
 
         await expect(handlers.get('berry_context')!({ task: 'blocked' }))
           .rejects.toThrow('runtime_query_planner:authentication_required');
         await expect(handlers.get('berry_ask')!({ question: 'blocked' }))
           .rejects.toThrow('runtime_query_planner:authentication_required');
+
+        const after = processCounters();
+        expect(after.calls.total - before.calls.total).toBe(2);
+        expect(after.calls.berry_context - before.calls.berry_context).toBe(1);
+        expect(after.calls.berry_ask - before.calls.berry_ask).toBe(1);
+        expect(after.routing.unanchored - before.routing.unanchored).toBe(2);
+        expect((after.resolution.attempted as number) - (before.resolution.attempted as number)).toBe(2);
+        expect((after.resolution.authentication_required as number)
+          - (before.resolution.authentication_required as number)).toBe(2);
+        expect((after.resolution.resolved as number) - (before.resolution.resolved as number)).toBe(0);
 
         expect(resolve).not.toHaveBeenCalled();
         expect(assembler.assemble).not.toHaveBeenCalled();

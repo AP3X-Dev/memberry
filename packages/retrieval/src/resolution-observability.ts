@@ -68,17 +68,21 @@ export class RetrievalResolutionObservabilityV1 {
       this.counters.resolved = increment(this.counters.resolved);
       return value;
     } catch (error) {
-      if (error instanceof RuntimeQueryPlannerError) {
-        if (error.code === 'invalid_request') this.counters.invalidRequest = increment(this.counters.invalidRequest);
-        else if (error.code === 'resolution_failed') {
-          this.counters.resolutionFailed = increment(this.counters.resolutionFailed);
-        } else if (error.code === 'authentication_required') {
-          this.counters.authenticationRequired = increment(this.counters.authenticationRequired);
-        } else this.counters.unavailable = increment(this.counters.unavailable);
-      } else {
-        this.counters.otherFailure = increment(this.counters.otherFailure);
-      }
+      this.recordFailure(error);
       throw error;
+    }
+  }
+
+  recordFailure(error: unknown): void {
+    if (error instanceof RuntimeQueryPlannerError) {
+      if (error.code === 'invalid_request') this.counters.invalidRequest = increment(this.counters.invalidRequest);
+      else if (error.code === 'resolution_failed') {
+        this.counters.resolutionFailed = increment(this.counters.resolutionFailed);
+      } else if (error.code === 'authentication_required') {
+        this.counters.authenticationRequired = increment(this.counters.authenticationRequired);
+      } else this.counters.unavailable = increment(this.counters.unavailable);
+    } else {
+      this.counters.otherFailure = increment(this.counters.otherFailure);
     }
   }
 
@@ -136,6 +140,10 @@ export function recordRetrievalCallV1(tool: RetrievalCallerToolV1, shape: Retrie
 
 export function observeRetrievalResolutionV1<T>(operation: () => Promise<T>): Promise<T> {
   return processObservability.observeResolution(operation);
+}
+
+export function recordRetrievalResolutionFailureV1(error: unknown): void {
+  processObservability.recordFailure(error);
 }
 
 export function getRetrievalResolutionProcessStatusV1(): Record<string, unknown> {

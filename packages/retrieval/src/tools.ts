@@ -43,6 +43,7 @@ import type { RetrievalResult } from './types.js';
 import {
   observeRetrievalResolutionV1,
   recordRetrievalCallV1,
+  recordRetrievalResolutionFailureV1,
   type RetrievalRoutingShapeV1,
 } from './resolution-observability.js';
 
@@ -391,6 +392,19 @@ function assertPlannerAuthentication(
   }
 }
 
+function assertPlannerAuthenticationObserved(
+  candidateChannelEnabled: boolean,
+  queryPlannerEnabled: boolean,
+  authenticated: boolean,
+): void {
+  try {
+    assertPlannerAuthentication(candidateChannelEnabled, queryPlannerEnabled, authenticated);
+  } catch (error) {
+    recordRetrievalResolutionFailureV1(error);
+    throw error;
+  }
+}
+
 async function resolveRuntimeEntityIds(
   authenticated: boolean,
   resolverFactory: RuntimeScopedEntityResolverFactory | null,
@@ -575,12 +589,12 @@ export function registerRetrievalTools(
     { readOnlyHint: true, idempotentHint: true } satisfies ToolAnnotations,
     async (args) => {
       if (!assembler) throw new Error('Retrieval services not initialised');
-      assertPlannerAuthentication(candidateChannelEnabled, queryPlannerEnabled, authenticated);
       const anchored = plannerAnchored(args);
       recordRetrievalCallV1(
         'berry_context',
         retrievalRoutingShape(anchored, candidateChannelEnabled || queryPlannerEnabled),
       );
+      assertPlannerAuthenticationObserved(candidateChannelEnabled, queryPlannerEnabled, authenticated);
       // RL-018: an unanchored request cannot enter the candidate channel — it is pinned to one
       // resolved entity by construction. Fall through to the task-text path rather than reject.
       if (candidateChannelEnabled && anchored) {
@@ -714,12 +728,12 @@ export function registerRetrievalTools(
     { readOnlyHint: true, idempotentHint: true } satisfies ToolAnnotations,
     async (args) => {
       if (!assembler) throw new Error('Retrieval services not initialised');
-      assertPlannerAuthentication(candidateChannelEnabled, queryPlannerEnabled, authenticated);
       const anchored = plannerAnchored(args);
       recordRetrievalCallV1(
         'berry_ask',
         retrievalRoutingShape(anchored, candidateChannelEnabled || queryPlannerEnabled),
       );
+      assertPlannerAuthenticationObserved(candidateChannelEnabled, queryPlannerEnabled, authenticated);
       // RL-018: same routing as berry_context — berry_ask shares the constraint verbatim.
       if (candidateChannelEnabled && anchored) {
         const receipt = await observeRetrievalResolutionV1(() => resolveRuntimeQueryPlannerAuthorityV1({
