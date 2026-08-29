@@ -56,6 +56,30 @@ const readiness = (enabled: boolean) => ({
   },
 });
 
+const retrievalResolution = () => ({
+  schema_version: 1,
+  affects_readiness: false,
+  history_scope: 'process-lifetime',
+  history_complete: false,
+  counters_saturated: false,
+  caller_type_known: false,
+  content_captured: false,
+  identity_captured: false,
+  calls: { total: 0, berry_context: 0, berry_ask: 0 },
+  routing: { unanchored: 0, anchored_legacy: 0, anchored_resolver: 0 },
+  resolution: {
+    attempted: 0,
+    resolved: 0,
+    failed: 0,
+    success_rate: null,
+    invalid_request: 0,
+    resolution_failed: 0,
+    authentication_required: 0,
+    unavailable: 0,
+    other_failure: 0,
+  },
+});
+
 const canonicalDomains = [
   { domain: 'memory', description: 'Block memory operations: replace, rewrite, promote, archive', tools: ['berry_memory_replace', 'berry_memory_rewrite', 'berry_memory_promote', 'berry_memory_archive'], enabled: false },
   { domain: 'temporal', description: 'Temporal queries: timeline, fact diff', tools: ['berry_timeline', 'berry_fact_diff'], enabled: false },
@@ -123,6 +147,7 @@ function expectedDegradedReadiness() {
       }],
     },
     admission_shadow: readiness(false).admission_shadow,
+    retrieval_resolution: retrievalResolution(),
   };
 }
 
@@ -351,6 +376,30 @@ describe('MEM-001D2 live composition evidence contract', () => {
       const countersExtra = structuredClone(expectedDegraded) as any;
       countersExtra.admission_shadow.counters.note = 'FORGED-UPSTREAM-SECRET';
       hostile.push(countersExtra);
+      const missingResolution = structuredClone(expectedDegraded) as any;
+      delete missingResolution.retrieval_resolution;
+      hostile.push(missingResolution);
+      const resolutionExtra = structuredClone(expectedDegraded) as any;
+      resolutionExtra.retrieval_resolution.note = 'FORGED-UPSTREAM-SECRET';
+      hostile.push(resolutionExtra);
+      const resolutionCallsExtra = structuredClone(expectedDegraded) as any;
+      resolutionCallsExtra.retrieval_resolution.calls.note = 'FORGED-UPSTREAM-SECRET';
+      hostile.push(resolutionCallsExtra);
+      const resolutionRoutingExtra = structuredClone(expectedDegraded) as any;
+      resolutionRoutingExtra.retrieval_resolution.routing.note = 'FORGED-UPSTREAM-SECRET';
+      hostile.push(resolutionRoutingExtra);
+      const resolutionOutcomeExtra = structuredClone(expectedDegraded) as any;
+      resolutionOutcomeExtra.retrieval_resolution.resolution.note = 'FORGED-UPSTREAM-SECRET';
+      hostile.push(resolutionOutcomeExtra);
+      const negativeResolutionCounter = structuredClone(expectedDegraded) as any;
+      negativeResolutionCounter.retrieval_resolution.resolution.resolved = -1;
+      hostile.push(negativeResolutionCounter);
+      const inconsistentResolutionCalls = structuredClone(expectedDegraded) as any;
+      inconsistentResolutionCalls.retrieval_resolution.calls.total = 1;
+      hostile.push(inconsistentResolutionCalls);
+      const inconsistentResolutionRate = structuredClone(expectedDegraded) as any;
+      inconsistentResolutionRate.retrieval_resolution.resolution.success_rate = 1;
+      hostile.push(inconsistentResolutionRate);
 
       for (const forged of hostile) {
         globalThis.fetch = async () => new Response(JSON.stringify(forged), { status: 503 });

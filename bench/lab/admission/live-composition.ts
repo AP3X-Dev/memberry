@@ -166,6 +166,21 @@ const ADMISSION_SHADOW_COUNTER_KEYS = [
 const ADMISSION_SHADOW_FAILURE_CODES = [
   'preparation_failed', 'append_failed', 'timed_out', 'capacity_rejected', 'shutdown_skipped',
 ] as const;
+const RETRIEVAL_RESOLUTION_KEYS = [
+  'schema_version', 'affects_readiness', 'history_scope', 'history_complete',
+  'counters_saturated', 'caller_type_known', 'content_captured', 'identity_captured',
+  'calls', 'routing', 'resolution',
+] as const;
+const RETRIEVAL_CALL_KEYS = ['total', 'berry_context', 'berry_ask'] as const;
+const RETRIEVAL_ROUTING_KEYS = ['unanchored', 'anchored_legacy', 'anchored_resolver'] as const;
+const RETRIEVAL_RESOLUTION_COUNTER_KEYS = [
+  'attempted', 'resolved', 'failed', 'invalid_request', 'resolution_failed',
+  'authentication_required', 'unavailable', 'other_failure',
+] as const;
+const RETRIEVAL_RESOLUTION_KEYS_INNER = [
+  'attempted', 'resolved', 'failed', 'success_rate', 'invalid_request', 'resolution_failed',
+  'authentication_required', 'unavailable', 'other_failure',
+] as const;
 
 function isNonnegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
@@ -648,15 +663,65 @@ function hasClosedAdmissionShadowShape(value: unknown): boolean {
     && shadow.max_in_flight === 32;
 }
 
+function saturatedSum(values: readonly number[]): number {
+  return values.reduce((total, value) => Math.min(Number.MAX_SAFE_INTEGER, total + value), 0);
+}
+
+function hasClosedRetrievalResolutionShape(value: unknown): boolean {
+  let status: JsonRecord;
+  let calls: JsonRecord;
+  let routing: JsonRecord;
+  let resolution: JsonRecord;
+  try {
+    status = record(value, 'retrieval resolution');
+    calls = record(status.calls, 'retrieval resolution calls');
+    routing = record(status.routing, 'retrieval resolution routing');
+    resolution = record(status.resolution, 'retrieval resolution outcome');
+  } catch { return false; }
+  if (!exactKeys(status, RETRIEVAL_RESOLUTION_KEYS)
+    || !exactKeys(calls, RETRIEVAL_CALL_KEYS)
+    || !exactKeys(routing, RETRIEVAL_ROUTING_KEYS)
+    || !exactKeys(resolution, RETRIEVAL_RESOLUTION_KEYS_INNER)
+    || RETRIEVAL_CALL_KEYS.some((key) => !isNonnegativeSafeInteger(calls[key]))
+    || RETRIEVAL_ROUTING_KEYS.some((key) => !isNonnegativeSafeInteger(routing[key]))
+    || RETRIEVAL_RESOLUTION_COUNTER_KEYS.some((key) => !isNonnegativeSafeInteger(resolution[key]))) {
+    return false;
+  }
+  const callValues = RETRIEVAL_CALL_KEYS.map((key) => calls[key] as number);
+  const routeValues = RETRIEVAL_ROUTING_KEYS.map((key) => routing[key] as number);
+  const failedValues = [
+    resolution.invalid_request, resolution.resolution_failed, resolution.authentication_required,
+    resolution.unavailable, resolution.other_failure,
+  ] as number[];
+  const attempted = resolution.attempted as number;
+  const resolved = resolution.resolved as number;
+  const expectedRate = attempted === 0 ? null : resolved / attempted;
+  return status.schema_version === 1
+    && status.affects_readiness === false
+    && status.history_scope === 'process-lifetime'
+    && status.history_complete === false
+    && typeof status.counters_saturated === 'boolean'
+    && status.caller_type_known === false
+    && status.content_captured === false
+    && status.identity_captured === false
+    && callValues[0] === saturatedSum(callValues.slice(1))
+    && callValues[0] === saturatedSum(routeValues)
+    && resolution.failed === saturatedSum(failedValues)
+    && attempted === saturatedSum([resolved, resolution.failed as number])
+    && Object.is(resolution.success_rate, expectedRate);
+}
+
 function isExpectedDisposableMultiTenantDegradation(body: JsonRecord): boolean {
   if (!exactKeys(body, [
     'status', 'service', 'transport', 'active_sessions', 'registered_sessions',
     'auth_required', 'uptime_ms', 'consolidation_automation', 'admission_shadow',
+    'retrieval_resolution',
   ]) || body.status !== 'ready' || body.service !== 'memberry-mcp' || body.transport !== 'sse'
     || body.auth_required !== true || !isNonnegativeSafeInteger(body.active_sessions)
     || !isNonnegativeSafeInteger(body.registered_sessions) || body.active_sessions !== body.registered_sessions
     || typeof body.uptime_ms !== 'number' || !Number.isFinite(body.uptime_ms) || body.uptime_ms < 0
-    || !hasClosedAdmissionShadowShape(body.admission_shadow)) return false;
+    || !hasClosedAdmissionShadowShape(body.admission_shadow)
+    || !hasClosedRetrievalResolutionShape(body.retrieval_resolution)) return false;
   let automation: JsonRecord;
   try { automation = record(body.consolidation_automation, 'consolidation automation'); }
   catch { return false; }
