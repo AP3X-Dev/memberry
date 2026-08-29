@@ -506,6 +506,56 @@ deciding isolation first and plumbing second.
 
 ---
 
+### RL-021 — memory candidate selection on the live anchored path ignores the question entirely
+**Evidence:** verified in source (2026-08-29) · **Status:** open · **Opened:** 2026-08-29
+
+With `MEMBERRY_QUERY_PLANNER_V1` + `MEMBERRY_CANDIDATE_CHANNEL_V1` live, a `berry_context` or
+`berry_ask` call that names an entity runs through `RuntimeCandidateChannelService`. Its `SOURCES`
+list (`packages/retrieval/src/runtime-candidate-channel.ts:132-135`) holds **exactly two** entries:
+
+- `memory.scope` — `SCOPE_QUERY` (`:111-123`), every non-archived in-scope Semantic ABOUT the one
+  resolved entity, `ORDER BY coalesce(s.confidence, 0.0)`.
+- `arch.entity` — `ARCH_QUERY` (`:126-131`), with a hardcoded `1.0 AS score`.
+
+Every other channel — `memory.semantic-vector`, `memory.episodic-vector`, `memory.graph`,
+`memory.block` — is hardwired to `failure(channel, 'unavailable')` at `:339`. **The query text
+appears nowhere in that file, and no embedding is computed or read.** Candidate SELECTION on the
+live anchored path is therefore query-blind: it returns the entity's highest-confidence memories
+regardless of what was asked. Only the downstream reranker ever reads the question. Episodic nodes
+cannot appear at all, so a freshly stored episode is unreachable on this path.
+
+Three consequences verified in the same file and its neighbours:
+
+1. **The 65-row cliff.** `:368` requests `rowLimit: MAX_ROWS + 1` and `:210` throws
+   `budget-exceeded` on `records.length > MAX_ROWS` (`MAX_ROWS = 64`, `:39`). An entity with 65 or
+   more in-scope semantics contributes **zero** memory candidates rather than its top 64 — the
+   overflow probe is correct, the reaction to it is not. It bites the best-documented entities
+   hardest, which is exactly backwards.
+2. **Arch outranks memory by construction.** `arch.entity`'s hardcoded `1.0` is read downstream as
+   a provenance confidence. The highest value ever *assigned* to a memory is
+   `APPROVED_DECISION_CONFIDENCE = 0.9` (`core/consolidation.ts:39`), so an arch stub always sorts
+   above an approved decision. Compare RL-010, which was the same defect with episodes at 1.0.
+3. **The reranker's declared 15% baseline blend is ~1%.** `assembler.ts:468`/`:693` call
+   `rrfFusion` with `collectionSize` undefined, so `fusion.ts:120` never normalises and
+   `baselineScore` stays a raw RRF sum in roughly [0, 0.085]. The 0.15-weighted term spans about
+   0.013 of a 1.0 range. The local reranker is not blended with retrieval score; it is effectively
+   the entire ranker.
+
+**Not the same as RL-002.** RL-002 is about how the ranked path *weights* signals. This is that the
+anchored path has no relevance signal to weight.
+
+**Scope note.** This is the anchored path only. Unanchored requests take the task-text path (RL-018)
+which does run the vector channels — so as of RL-018 the tool is, counter-intuitively, more
+query-aware when you tell it LESS.
+
+**Separately, and cheap:** `arch.fulltext` on the legacy path reports `outcome: "success"` while
+returning nothing for every Entity nobody ran `berry_arch_register` against, because its index
+covers only hand-written fields (`packages/arch/src/schema.ts:19`). A silent ingestion gap of
+exactly the class COD-010 added fail-loud status for on the code plane.
+
+**Not yet measured against answer quality.** Everything above is read from source. What it costs a
+real answer is unknown until EVAL-001 is re-pinned, which is now unblocked.
+
 ### RL-020 — a dirty worktree fails the RET-010 custody tests, and the failure is unreadable
 **Evidence:** demonstrated (2026-08-29) · **Status:** mitigated in the harness · **Opened:** 2026-08-29
 
@@ -635,7 +685,7 @@ shape, so half of `berry_context`'s coverage was scoring `nonRetrieval` rather t
 | request shape | before | after (measured) |
 |---|---|---|
 | `task` + `project_name`, no entities (`eval001-d-08`) | `invalid_request` | 21 IDs, `Code: served (20 of 20)` |
-| `task` only (`eval001-d-04`) | `invalid_request` | assembles, **0 sources** — see caveat |
+| `task` only | `invalid_request` | 21-23 IDs, `Code: served (20 of 20)` — see correction |
 | `berry_ask` + `project_name`, no entities | `invalid_request` | cited synthesis, 23 evidence items |
 | `task` + project + resolvable entity | candidate channel | unchanged, candidate channel |
 | `task` + project + unresolvable entity | `resolution_failed` | `resolution_failed` — still loud |
@@ -644,10 +694,29 @@ The first row also confirms the predicted second effect: the task-text path **se
 plane** (20 of 20), which the candidate channel marks `unsupported / candidate-channel` for the
 same request. The answer is richer, not merely non-failing.
 
-**Caveat, stated rather than buried.** The no-project-no-entity shape now returns a well-formed
-context with **zero sources**. That is a retrieval-quality question, not a routing one — the call
-is answerable where it previously threw — but nobody should read row 2 as "fixed and returning
-good results". It is fixed and returning nothing, and why is not yet investigated.
+**CORRECTION 2026-08-29 — the "zero sources" caveat first written here was wrong.** It read: "the
+no-project-no-entity shape now returns a well-formed context with zero sources". That generalised
+from a single probe which had passed `include_code: false`, so it measured an arch-plus-memory call
+for one query, not the shape. Re-probed live: a task-only `berry_context` with the default
+`include_code` returns **21-23 IDs with `Code: served (20 of 20)`**, including foreign-project
+symbols that the project-scoped call correctly excludes. A missing project WIDENS every channel —
+memory tags (`assembler.ts:1041`, `:2058-2076`), the code layer's path filter (`:1121`), the arch
+fulltext channel (`:1500-1508`, `$projectName IS NULL OR ...`), `byScope`'s no-filter branch
+(`neo4j/query.ts:369`) — it narrows nothing. Row 2 of the table above is amended accordingly.
+
+Two real things were behind the bad probe and neither is a routing defect:
+- The `arch.fulltext` discovery channel returns nothing for Entities nobody hand-enriched. Its
+  index `entity_arch_content` covers only `responsibility`, `interface_desc`, `internals`
+  (`packages/arch/src/schema.ts:19`), whose sole production writer is the manual
+  `berry_arch_register` (`packages/arch/src/tools.ts:155-164`); `berry_bootstrap` writes
+  `e.description`, which is not indexed (`core/bootstrap-graph.ts:290-292`). It reports that as
+  `outcome: "success"`. An ingestion gap reported as a clean run — see RL-021.
+- A missing project drops core/working memory blocks, undisclosed. The one place absence really
+  does narrow.
+
+**The lesson is the generalisation, not the typo.** One probe, one query, one flag set, written up
+as a property of a request SHAPE. The row that says a shape returns nothing must come from probing
+that shape, not from one call that resembles it.
 
 **For the record, the hint relaxation is safe, just insufficient.** Entity hints are explicitly
 non-authoritative (`query-plan.ts:65-71`), the contract already accepts `minItems: 0`, and the
