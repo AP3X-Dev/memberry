@@ -319,9 +319,8 @@ function oneResolvedEntityId(input: unknown): readonly [string] {
  * RL-018 — is this request anchorable by the runtime query planner at all?
  *
  * The planner resolves to EXACTLY ONE entity (`runtime-candidate-channel.ts:328` pins
- * `resolvedEntityIds: [state.resolvedEntityId]`, and every channel query is parameterised on it),
- * and `buildRuntimeQueryPlannerReceiptV1` additionally requires a canonical `project:<slug>`.
- * A caller supplying neither is asking an ordinary open question, not sending a malformed
+ * `resolvedEntityIds: [state.resolvedEntityId]`, and every channel query is parameterised on it).
+ * A caller who names no entity is asking an ordinary open question, not sending a malformed
  * request: 5 of the 13 real mined `berry_context` calls carry no `entity_scope` (4 of those
  * still carry a project, 1 carries neither). Before this, every one of them was unanswerable —
  * `runtime_query_planner:invalid_request` on both tools.
@@ -331,19 +330,28 @@ function oneResolvedEntityId(input: unknown): readonly [string] {
  * `project_name` as ordinary filters, and it KEEPS the episodic vector channel that the
  * resolved-id lane disables (`core/service.ts:1284-1291`).
  *
- * ABSENT, NEVER INVALID. A supplied-but-malformed `entity_scope` or `project_name` still reaches
- * the planner and still fails loudly — this routes only the shapes the planner could never have
- * accepted. An explicitly empty array counts as absent; anything else present is the planner's
- * to judge.
+ * ABSENT, NEVER INVALID — and the ONLY thing that counts as absent is the entity anchor.
+ *
+ * This predicate deliberately does NOT also require `project_name`, and the first version of it
+ * did. That was a real defect, caught in review: requiring both made the predicate an AND, so a
+ * caller could name an entity, omit `project_name`, and convert an entity-anchored request into
+ * an unvalidated task-text sweep — skipping `SAFE_HINT` and `RESERVED_AUTHORITY_HINT` on their
+ * own `entity_scope`. That is precisely the shape-your-request-to-weaken-the-path class as the
+ * authentication bypass below, and it also contradicted every prose description of the routing.
+ *
+ * So: entity supplied → the planner judges the whole request, including the missing project,
+ * which `buildRuntimeQueryPlannerReceiptV1` rejects as `invalid_request`. That shape appears in
+ * ZERO of the 13 mined calls, so nothing real regresses, and a caller who names an entity gets a
+ * loud error rather than a silently different engine. An explicitly empty array counts as absent;
+ * anything else present is the planner's to judge.
  *
  * Tenant note: the task-text path opens no exposure the candidate path closed. It gates the code
  * plane on `isDefaultTenant` itself (`assembler.ts:1036`, `:1105`), so a named tenant gets the
  * same `code_plane: tenant-scope` either way.
  */
-function plannerAnchored(args: { entity_scope?: unknown; project_name?: unknown }): boolean {
+function plannerAnchored(args: { entity_scope?: unknown }): boolean {
   const scope = args.entity_scope;
-  const suppliedScope = scope !== undefined && !(Array.isArray(scope) && scope.length === 0);
-  return suppliedScope && args.project_name !== undefined;
+  return scope !== undefined && !(Array.isArray(scope) && scope.length === 0);
 }
 
 /**

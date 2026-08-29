@@ -110,11 +110,14 @@ function live(context: UnifiedContext) {
 }
 
 describe('RL-018 unanchored requests route to the task-text path', () => {
-  // The four real mined shapes. `eval001-d-08` is the first row; `eval001-d-04` is the last.
+  // Three shapes, all three genuinely present in mined-queries.jsonl's 13 berry_context calls:
+  // no entity_scope key (3 calls), an explicit `entity_scope: []` (1 call, q-9a3b156bf8d8), and
+  // neither field (1 call). A fourth row -- entities but no project_name -- was listed here as
+  // mined and is NOT: it appears in zero real calls, and it is no longer unanchored anyway.
+  // See "an entity named without a project" below for where that shape went and why.
   const unanchored: Array<[string, Record<string, unknown>]> = [
     ['no entity_scope key at all', { project_name: 'project:memberry' }],
     ['an explicitly empty entity_scope', { project_name: 'project:memberry', entity_scope: [] }],
-    ['entities but no project_name', { entity_scope: ['Resolver'] }],
     ['neither', {}],
   ];
 
@@ -148,6 +151,35 @@ describe('RL-018 unanchored requests route to the task-text path', () => {
       expect(options).not.toHaveProperty('resolvedEntityIds');
     });
   }
+
+  // REGRESSION PIN for a defect in the first cut of this fix. `plannerAnchored` originally
+  // required an entity anchor AND a project, which made "name an entity, omit project_name" route
+  // to the unvalidated task-text sweep -- letting a caller skip SAFE_HINT/RESERVED_AUTHORITY_HINT
+  // on their own entity_scope by dropping an unrelated field. Naming an entity always means the
+  // planner judges the request, including the part the caller left out.
+  it('an entity named without a project reaches the planner and fails loudly, never the sweep', async () => {
+    const { assembler, resolve, candidateRuntime, handlers } = live(emptyCtx());
+
+    await expect(handlers.get('berry_context')!({ task: 'q', entity_scope: ['Resolver'] }))
+      .rejects.toThrow('runtime_query_planner:invalid_request');
+    await expect(handlers.get('berry_ask')!({ question: 'q', entity_scope: ['Resolver'] }))
+      .rejects.toThrow('runtime_query_planner:invalid_request');
+
+    // The point of the pin: it must not have quietly answered from task text instead.
+    expect(assembler.assemble).not.toHaveBeenCalled();
+    expect(assembler.ask).not.toHaveBeenCalled();
+    expect(resolve).not.toHaveBeenCalled();
+    expect(candidateRuntime.execute).not.toHaveBeenCalled();
+  });
+
+  it('a reserved-authority hint cannot escape validation by dropping project_name', async () => {
+    const { assembler, handlers } = live(emptyCtx());
+
+    await expect(handlers.get('berry_context')!({ task: 'sneaky', entity_scope: ['project:other'] }))
+      .rejects.toThrow('runtime_query_planner:invalid_request');
+
+    expect(assembler.assemble).not.toHaveBeenCalled();
+  });
 
   it('an anchored request still takes the candidate channel — the fix routes nothing extra', async () => {
     const { assembler, resolve, candidateRuntime, handlers } = live(emptyCtx());
