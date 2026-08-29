@@ -511,7 +511,8 @@ deciding isolation first and plumbing second.
 
 With `MEMBERRY_QUERY_PLANNER_V1` + `MEMBERRY_CANDIDATE_CHANNEL_V1` live, a `berry_context` or
 `berry_ask` call that names an entity runs through `RuntimeCandidateChannelService`. Its `SOURCES`
-list (`packages/retrieval/src/runtime-candidate-channel.ts:132-135`) holds **exactly two** entries:
+list (`packages/retrieval/src/runtime-candidate-channel.ts:132-135`) holds two entries, and a
+third channel is special-cased outside it (see the correction at the end of this entry):
 
 - `memory.scope` — `SCOPE_QUERY` (`:111-123`), every non-archived in-scope Semantic ABOUT the one
   resolved entity, `ORDER BY coalesce(s.confidence, 0.0)`.
@@ -553,8 +554,50 @@ returning nothing for every Entity nobody ran `berry_arch_register` against, bec
 covers only hand-written fields (`packages/arch/src/schema.ts:19`). A silent ingestion gap of
 exactly the class COD-010 added fail-loud status for on the code plane.
 
-**Not yet measured against answer quality.** Everything above is read from source. What it costs a
-real answer is unknown until EVAL-001 is re-pinned, which is now unblocked.
+**CORRECTED 2026-08-29, same day, before anyone acted on it. Two errors, both mine.**
+
+**Error 1 — there are THREE live channels, not two.** `SOURCES` holds two specs, but `memory.fact`
+is special-cased outside it at `:336` (`const isFact = channel === 'memory.fact'`) and runs via
+`FactStore.getActiveByEntityIdsBatch` (`:255`, `:352-358`). The channel-enable test at `:337` is
+`(spec || isFact)`. "Exactly two entries in SOURCES" is true; "only two channels run" is not.
+`memory.fact` is query-blind in the same way — it fetches the entity's active facts — so the
+finding's direction survives, but the count was wrong.
+
+**Error 2 — and this one matters more — "query-blind" describes SELECTION only, and the practical
+cost is bounded by the cap, not unbounded.** Selection is genuinely query-independent. But the
+served reranker downstream DOES read the question, and per point 3 above it is effectively the
+entire ranker. So when an entity has FEWER in-scope semantics than `MAX_ROWS`, every one of them
+becomes a candidate, the reranker sees the whole set, and the answer is question-sensitive after
+all. Blind selection of a set that is not truncated costs nothing.
+
+**Measured live, which is how the error was caught.** Entity `memberry` has 57 attached semantics
+(57 < 64). Two unrelated questions — "How does tenant isolation work in the Neo4j Cypher queries"
+and "What are the token budget and reasoning level cost tradeoffs" — returned **12 vs 14 sources
+with substantially different content**. Entity `bench`, which has only 2, returned byte-identical
+results for the same two questions, which is what having no choice looks like.
+
+**So where does it actually bite?** Three places, all still real:
+
+1. **At 65 or more, you get nothing.** The cliff (point 1) is the severe case, and it is severe
+   precisely because selection is blind: there is no principled top-64 to fall back to, so the
+   channel discards everything. It punishes the best-documented entities hardest.
+2. **Episodic memory is unreachable on this path at any count.** `memory.episodic-vector`,
+   `memory.graph` and `memory.block` are hardwired `unavailable`, and no source spec returns
+   Episodic nodes. A freshly stored episode cannot be retrieved by an anchored call, ever —
+   independent of how many semantics the entity has.
+3. **Nothing is reachable by MEANING unless it is already filed `ABOUT` that entity.** A semantic
+   that answers the question perfectly but hangs off a different entity is invisible, because the
+   only lookup is a graph edge, not a similarity search.
+
+**The original framing here — "the tool ignores your question" — was wrong and is withdrawn.** It
+generalised a source read into a behavioural claim without probing the behaviour, which is the
+same mistake as the "zero sources" caveat corrected above, made twice in one day on the same
+entry. The accurate claim is narrower and still worth fixing: selection is blind, which is free
+under the cap, catastrophic at the cap, and permanently excludes episodes and meaning-based recall.
+
+**Not yet measured against answer quality.** The probes above show the pipeline is question-
+sensitive; they say nothing about whether the answers are GOOD. That needs EVAL-001 re-pinned,
+which is now unblocked.
 
 ### RL-020 — a dirty worktree fails the RET-010 custody tests, and the failure is unreadable
 **Evidence:** demonstrated (2026-08-29) · **Status:** mitigated in the harness · **Opened:** 2026-08-29
