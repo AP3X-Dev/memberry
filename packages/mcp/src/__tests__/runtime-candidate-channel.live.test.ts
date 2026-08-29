@@ -31,6 +31,7 @@ vi.mock('@memberry/retrieval', async (importOriginal) => {
   };
 });
 import { bootstrap, type BootstrapHandles } from '../bootstrap.js';
+import { RETRIEVAL_TRACE_CHANNEL_ORDER } from '@memberry/retrieval';
 import { closeSSEHandle, createAMPServer, type SSEHandle } from '../server.js';
 import { writeCandidateLiveEvidenceV1 } from './runtime-candidate-channel-live-evidence.js';
 import { writeRerankerShadowLiveEvidenceV1 } from './runtime-reranker-shadow-live-evidence.js';
@@ -407,10 +408,15 @@ describe.skipIf(!ENABLED)('RET-003B required real-bootstrap HTTP candidate compo
     expect(blocks[0]!.text).not.toContain('Future excluded memory');
     const trace = JSON.parse(blocks[1]!.text) as { events: Array<Record<string, unknown>> };
     const terminals = trace.events.filter((event) => event.kind === 'channel-terminal');
-    expect(terminals.filter((event) => event.outcome === 'success').map((event) => event.channel)).toEqual([
+    const successfulChannels = [
       'memory.scope', 'memory.fact', 'memory.block', 'arch.entity',
-    ]);
-    expect(terminals.filter((event) => event.code === 'unavailable')).toHaveLength(12);
+    ];
+    const successfulChannelSet = new Set(successfulChannels);
+    expect(terminals.map((event) => event.channel)).toEqual(RETRIEVAL_TRACE_CHANNEL_ORDER);
+    expect(terminals.filter((event) => event.outcome === 'success').map((event) => event.channel))
+      .toEqual(successfulChannels);
+    expect(terminals.filter((event) => event.code === 'unavailable').map((event) => event.channel))
+      .toEqual(RETRIEVAL_TRACE_CHANNEL_ORDER.filter((channel) => !successfulChannelSet.has(channel)));
 
     const defaultResult = await defaultClient!.callTool({ name: 'berry_context', arguments: {
       ...args, project_name: DEFAULT_PROJECT, entity_scope: [DEFAULT_HINT], include_trace: false,
