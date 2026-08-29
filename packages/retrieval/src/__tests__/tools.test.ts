@@ -414,12 +414,12 @@ describe('RET-002C2 authenticated planner wiring', () => {
     registerRetrievalTools(server as never, container);
     await handlers.get('berry_context')!({
       task: 'safe', strategy: 'ranked', project_name: 'project:memberry',
-      entity_scope: ['Resolver', 'alias', 'Resolver'], include_trace: traced,
+      entity_scope: ['Resolver', 'Call Context Resolver', 'alias', 'Resolver'], include_trace: traced,
     });
     const authority = resolverFactory.mock.calls[0]![0];
     const plan = resolve.mock.calls[0]![0] as QueryPlanV1;
     expect(authority).toEqual({ tenantId: 'tenant-a', projectScopes: ['project:memberry'] });
-    expect(plan.hints.entities).toEqual(['Resolver', 'alias']);
+    expect(plan.hints.entities).toEqual(['Call Context Resolver', 'Resolver', 'alias']);
     expect(authority.projectScopes).not.toBe(plan.authority.callerScopes.projects);
     const call = traced ? assembler.assembleTraced : assembler.assemble;
     expect(call).toHaveBeenCalledWith('safe', expect.objectContaining({
@@ -435,7 +435,7 @@ describe('RET-002C2 authenticated planner wiring', () => {
     const { server, handlers } = makeServerStub();
     registerRetrievalTools(server as never, container);
     await handlers.get('berry_ask')!({
-      question: 'safe', reasoning_level: 'high', project_name: 'project:memberry', entity_scope: ['Resolver'],
+      question: 'safe', reasoning_level: 'high', project_name: 'project:memberry', entity_scope: ['SOP lifecycle'],
     });
     expect(assembler.ask).toHaveBeenCalledWith('safe', expect.objectContaining({
       level: 'high', tenantId: 'tenant-a', resolvedEntityIds: ['entity-stable'],

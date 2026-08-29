@@ -40,6 +40,12 @@ import {
 } from './retrieval-explanation-view.js';
 import type { RerankerShadowCoordinatorPortV1 } from './reranker-shadow.js';
 import type { RetrievalResult } from './types.js';
+import {
+  observeRetrievalResolutionV1,
+  recordRetrievalCallV1,
+  recordRetrievalResolutionFailureV1,
+  type RetrievalRoutingShapeV1,
+} from './resolution-observability.js';
 
 // ─── Service interface (injected) ────────────────────────────────────────────
 
@@ -354,6 +360,14 @@ function plannerAnchored(args: { entity_scope?: unknown }): boolean {
   return scope !== undefined && !(Array.isArray(scope) && scope.length === 0);
 }
 
+function retrievalRoutingShape(
+  anchored: boolean,
+  resolverEnabled: boolean,
+): RetrievalRoutingShapeV1 {
+  if (!anchored) return 'unanchored';
+  return resolverEnabled ? 'anchored-resolver' : 'anchored-legacy';
+}
+
 /**
  * RL-018 — anchoring decides WHICH path answers a request, never WHETHER the caller may ask.
  *
@@ -375,6 +389,19 @@ function assertPlannerAuthentication(
 ): void {
   if ((candidateChannelEnabled || queryPlannerEnabled) && !authenticated) {
     throw fixedPlannerFailure('authentication_required');
+  }
+}
+
+function assertPlannerAuthenticationObserved(
+  candidateChannelEnabled: boolean,
+  queryPlannerEnabled: boolean,
+  authenticated: boolean,
+): void {
+  try {
+    assertPlannerAuthentication(candidateChannelEnabled, queryPlannerEnabled, authenticated);
+  } catch (error) {
+    recordRetrievalResolutionFailureV1(error);
+    throw error;
   }
 }
 
@@ -562,11 +589,16 @@ export function registerRetrievalTools(
     { readOnlyHint: true, idempotentHint: true } satisfies ToolAnnotations,
     async (args) => {
       if (!assembler) throw new Error('Retrieval services not initialised');
-      assertPlannerAuthentication(candidateChannelEnabled, queryPlannerEnabled, authenticated);
+      const anchored = plannerAnchored(args);
+      recordRetrievalCallV1(
+        'berry_context',
+        retrievalRoutingShape(anchored, candidateChannelEnabled || queryPlannerEnabled),
+      );
+      assertPlannerAuthenticationObserved(candidateChannelEnabled, queryPlannerEnabled, authenticated);
       // RL-018: an unanchored request cannot enter the candidate channel — it is pinned to one
       // resolved entity by construction. Fall through to the task-text path rather than reject.
-      if (candidateChannelEnabled && plannerAnchored(args)) {
-        const receipt = await resolveRuntimeQueryPlannerAuthorityV1({
+      if (candidateChannelEnabled && anchored) {
+        const receipt = await observeRetrievalResolutionV1(() => resolveRuntimeQueryPlannerAuthorityV1({
           authenticated,
           plannerEnabled: queryPlannerEnabled,
           resolverFactory,
@@ -574,7 +606,7 @@ export function registerRetrievalTools(
           projectName: args.project_name,
           entityScope: args.entity_scope,
           ...(args.as_of !== undefined ? { asOf: args.as_of } : {}),
-        });
+        }));
         const servedCandidate = assembler.servedRerankerEnabled === true
           && args.strategy !== 'deterministic';
         if (!candidateRuntime || !assembler.assembleCandidateExecution
@@ -652,10 +684,10 @@ export function registerRetrievalTools(
       };
       // RL-018: `undefined` here is the already-supported task-text shape — the same value this
       // takes with the planner flag off. Only anchored requests pay for resolution.
-      const resolvedEntityIds = queryPlannerEnabled && plannerAnchored(args)
-        ? await resolveRuntimeEntityIds(
+      const resolvedEntityIds = queryPlannerEnabled && anchored
+        ? await observeRetrievalResolutionV1(() => resolveRuntimeEntityIds(
           authenticated, resolverFactory, tenantId, args.project_name, args.entity_scope, args.as_of,
-        )
+        ))
         : undefined;
       const runtimeOptions = resolvedEntityIds === undefined
         ? options
@@ -696,10 +728,15 @@ export function registerRetrievalTools(
     { readOnlyHint: true, idempotentHint: true } satisfies ToolAnnotations,
     async (args) => {
       if (!assembler) throw new Error('Retrieval services not initialised');
-      assertPlannerAuthentication(candidateChannelEnabled, queryPlannerEnabled, authenticated);
+      const anchored = plannerAnchored(args);
+      recordRetrievalCallV1(
+        'berry_ask',
+        retrievalRoutingShape(anchored, candidateChannelEnabled || queryPlannerEnabled),
+      );
+      assertPlannerAuthenticationObserved(candidateChannelEnabled, queryPlannerEnabled, authenticated);
       // RL-018: same routing as berry_context — berry_ask shares the constraint verbatim.
-      if (candidateChannelEnabled && plannerAnchored(args)) {
-        const receipt = await resolveRuntimeQueryPlannerAuthorityV1({
+      if (candidateChannelEnabled && anchored) {
+        const receipt = await observeRetrievalResolutionV1(() => resolveRuntimeQueryPlannerAuthorityV1({
           authenticated,
           plannerEnabled: queryPlannerEnabled,
           resolverFactory,
@@ -707,7 +744,7 @@ export function registerRetrievalTools(
           projectName: args.project_name,
           entityScope: args.entity_scope,
           ...(args.as_of !== undefined ? { asOf: args.as_of } : {}),
-        });
+        }));
         const servedCandidate = assembler.servedRerankerEnabled === true;
         if (!candidateRuntime || !assembler.askFromContext || !assembler.assembleCandidateExecution
           || (servedCandidate && !assembler.assembleCandidateExecutionServed)) {
@@ -747,10 +784,10 @@ export function registerRetrievalTools(
         ];
         return textContent(lines.join('\n'));
       }
-      const resolvedEntityIds = queryPlannerEnabled && plannerAnchored(args)
-        ? await resolveRuntimeEntityIds(
+      const resolvedEntityIds = queryPlannerEnabled && anchored
+        ? await observeRetrievalResolutionV1(() => resolveRuntimeEntityIds(
           authenticated, resolverFactory, tenantId, args.project_name, args.entity_scope, args.as_of,
-        )
+        ))
         : undefined;
       const r = await assembler.ask(args.question, {
         level: args.reasoning_level,

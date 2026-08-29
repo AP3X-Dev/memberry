@@ -275,6 +275,10 @@ export type {
 
 // MCP tools
 export { registerRetrievalTools, setRetrievalServiceInstances, createRetrievalContainer, retrievalContainerForTenant, RETRIEVAL_TOOL_NAMES } from './tools.js';
+export {
+  RetrievalResolutionObservabilityV1,
+  getRetrievalResolutionProcessStatusV1,
+} from './resolution-observability.js';
 export type {
   IUnifiedAssembler,
   IFeedbackTracker,

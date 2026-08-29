@@ -477,6 +477,16 @@ describe('createAMPServer', () => {
           timeout_ms: [],
           max_in_flight: 0,
         },
+        retrieval_resolution: {
+          schema_version: 1,
+          affects_readiness: false,
+          history_scope: 'process-lifetime',
+          history_complete: false,
+          counters_saturated: false,
+          caller_type_known: false,
+          content_captured: false,
+          identity_captured: false,
+        },
       });
     });
   });

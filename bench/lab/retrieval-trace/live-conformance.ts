@@ -15,6 +15,7 @@ import type Redis from 'ioredis';
 
 import { createNeo4jDriver } from '../../../packages/neo4j/src/driver.js';
 import { createRedisClient } from '../../../packages/redis/src/client.js';
+import { hasClosedRetrievalResolutionStatusV1 } from '../contracts/retrieval-resolution-status.js';
 import type { RetrievalTraceAlgorithmVersion } from '../../../packages/retrieval/src/index.js';
 import {
   RETRIEVAL_TRACE_VALIDATION_DIAGNOSTIC_ENABLED,
@@ -697,12 +698,14 @@ function expectedNamedDegradation(body: JsonRecord): boolean {
   if (!exactStringKeys(body, [
     'status', 'service', 'transport', 'active_sessions', 'registered_sessions',
     'auth_required', 'uptime_ms', 'consolidation_automation', 'admission_shadow',
+    'retrieval_resolution',
   ]) || body.status !== 'ready' || body.service !== 'memberry-mcp' || body.transport !== 'sse'
     || body.auth_required !== true || !Number.isSafeInteger(body.active_sessions)
     || !Number.isSafeInteger(body.registered_sessions) || body.active_sessions !== body.registered_sessions
     || typeof body.uptime_ms !== 'number' || !Number.isFinite(body.uptime_ms) || body.uptime_ms < 0
     || typeof body.admission_shadow !== 'object' || body.admission_shadow === null
-    || Array.isArray(body.admission_shadow)) return false;
+    || Array.isArray(body.admission_shadow)
+    || !hasClosedRetrievalResolutionStatusV1(body.retrieval_resolution)) return false;
   if (typeof body.consolidation_automation !== 'object' || body.consolidation_automation === null
     || Array.isArray(body.consolidation_automation)) return false;
   const automation = body.consolidation_automation as JsonRecord;

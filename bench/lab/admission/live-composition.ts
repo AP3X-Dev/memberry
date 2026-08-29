@@ -18,6 +18,7 @@ import {
   type ToolDomain,
 } from '../../../packages/mcp/src/tools.js';
 import { createNeo4jDriver } from '../../../packages/neo4j/src/driver.js';
+import { hasClosedRetrievalResolutionStatusV1 } from '../contracts/retrieval-resolution-status.js';
 
 const execFileAsync = promisify(execFile);
 const OBSERVATION_KEYS = [
@@ -166,7 +167,6 @@ const ADMISSION_SHADOW_COUNTER_KEYS = [
 const ADMISSION_SHADOW_FAILURE_CODES = [
   'preparation_failed', 'append_failed', 'timed_out', 'capacity_rejected', 'shutdown_skipped',
 ] as const;
-
 function isNonnegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
@@ -652,11 +652,13 @@ function isExpectedDisposableMultiTenantDegradation(body: JsonRecord): boolean {
   if (!exactKeys(body, [
     'status', 'service', 'transport', 'active_sessions', 'registered_sessions',
     'auth_required', 'uptime_ms', 'consolidation_automation', 'admission_shadow',
+    'retrieval_resolution',
   ]) || body.status !== 'ready' || body.service !== 'memberry-mcp' || body.transport !== 'sse'
     || body.auth_required !== true || !isNonnegativeSafeInteger(body.active_sessions)
     || !isNonnegativeSafeInteger(body.registered_sessions) || body.active_sessions !== body.registered_sessions
     || typeof body.uptime_ms !== 'number' || !Number.isFinite(body.uptime_ms) || body.uptime_ms < 0
-    || !hasClosedAdmissionShadowShape(body.admission_shadow)) return false;
+    || !hasClosedAdmissionShadowShape(body.admission_shadow)
+    || !hasClosedRetrievalResolutionStatusV1(body.retrieval_resolution)) return false;
   let automation: JsonRecord;
   try { automation = record(body.consolidation_automation, 'consolidation automation'); }
   catch { return false; }

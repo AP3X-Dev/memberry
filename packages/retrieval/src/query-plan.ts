@@ -132,6 +132,7 @@ const SAFE_TENANT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROJECT_SCOPE_SHAPE = /^project:[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CANONICAL_PROJECT_SCOPE = /^project:[a-z0-9][a-z0-9._-]*$/;
 const SAFE_HINT = /^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$/;
+const SAFE_ENTITY_HINT = /^[A-Za-z0-9](?:[A-Za-z0-9._/@:+ -]*[A-Za-z0-9._/@:+-])?$/;
 const SAFE_ENTITY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const RESERVED_AUTHORITY_HINT = /^(?:project|tenant):/i;
 
@@ -477,6 +478,13 @@ function parseHints(input: unknown, state: TraversalState): QueryPlanTaskHintsV1
       SAFE_HINT,
       true,
     );
+    const parseEntityHint = (value: unknown, itemField: string) => boundedIdentifier(
+      value,
+      itemField,
+      MAX_HINT_LENGTH,
+      SAFE_ENTITY_HINT,
+      true,
+    );
     return Object.freeze({
       source: 'task',
       repositories: denseStringArray(
@@ -493,7 +501,7 @@ function parseHints(input: unknown, state: TraversalState): QueryPlanTaskHintsV1
         `${field}.entities`,
         state,
         QUERY_PLAN_MAX_HINTS_PER_KIND,
-        parseHint,
+        parseEntityHint,
         0,
         true,
       ),

@@ -61,6 +61,32 @@ const validEnv = {
   MEMBERRY_TRACE_LIVE_NEO4J_IMAGE_ID: `sha256:${'d'.repeat(64)}`,
 } as const;
 
+function retrievalResolutionStatus() {
+  return {
+    schema_version: 1,
+    affects_readiness: false,
+    history_scope: 'process-lifetime',
+    history_complete: false,
+    counters_saturated: false,
+    caller_type_known: false,
+    content_captured: false,
+    identity_captured: false,
+    calls: { total: 0, berry_context: 0, berry_ask: 0 },
+    routing: { unanchored: 0, anchored_legacy: 0, anchored_resolver: 0 },
+    resolution: {
+      attempted: 0,
+      resolved: 0,
+      failed: 0,
+      success_rate: null,
+      invalid_request: 0,
+      resolution_failed: 0,
+      authentication_required: 0,
+      unavailable: 0,
+      other_failure: 0,
+    },
+  };
+}
+
 const mappingFixture = {
   run: 'run-000000000001',
   default: {
@@ -1850,6 +1876,7 @@ describe('RET-001D live composition harness', () => {
       auth_required: true,
       uptime_ms: 12,
       admission_shadow: {},
+      retrieval_resolution: retrievalResolutionStatus(),
       consolidation_automation: {
         enabled: false,
         unhealthy: true,
@@ -1866,6 +1893,28 @@ describe('RET-001D live composition harness', () => {
       .toThrow('RET001D_READINESS_INVALID');
     expect(() => classifyTraceReadiness(200, body, 'named-tenant'))
       .toThrow('RET001D_READINESS_INVALID');
+
+    for (const invalid of [
+      { ...body, retrieval_resolution: undefined },
+      { ...body, retrieval_resolution: { ...retrievalResolutionStatus(), extra: true } },
+      {
+        ...body,
+        retrieval_resolution: {
+          ...retrievalResolutionStatus(),
+          resolution: { ...retrievalResolutionStatus().resolution, resolved: -1 },
+        },
+      },
+      {
+        ...body,
+        retrieval_resolution: {
+          ...retrievalResolutionStatus(),
+          calls: { ...retrievalResolutionStatus().calls, total: 1 },
+        },
+      },
+    ]) {
+      expect(() => classifyTraceReadiness(503, invalid, 'named-tenant'))
+        .toThrow('RET001D_READINESS_INVALID');
+    }
   });
 
   it('wires the trace runner into package scripts, CI, and a fixed live registry entry', async () => {
