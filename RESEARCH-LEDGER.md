@@ -396,8 +396,10 @@ more.
 only ever SKIPS a create, so seeing more facts can only mean writing less.
 
 **Two further misses in the same family, deliberately NOT in that diff, each with its own blast
-radius:** consolidation passes no tenant, so on a non-default tenant it cannot see extraction's
-facts at all and would keep minting twins forever; and it stores the RAW predicate while extraction
+radius:** consolidation passes no tenant, so on a non-default tenant it could not see extraction's
+facts at all (**correction 2026-08-28: this did NOT contribute to the measured duplicates** — the
+`includeTentative` fix stopped them while that call still passes `undefined` as its tenant, and
+every row in the graph is `default`; see RL-019); and it stores the RAW predicate while extraction
 stores `normalizePredicate(...)`, so predicates where normalization is not the identity (for example
 `depends_on` to `uses`) miss on the predicate too. The measured 999 byte-identical groups are
 necessarily predicates where normalization is the identity.
@@ -430,6 +432,58 @@ building readers first would be building over 1.7% of the data.
 or sooner for the object-normalization one, which is a one-line change with an a-priori
 justification and needs no measurement. Loosening it touches an anti-poisoning gate, so it
 wants a security read.
+
+---
+
+### RL-019 — the tenant gap is in the Cypher, not in the plumbing
+**Evidence:** verified (2026-08-28) · **Status:** open — decision needed before a 2nd tenant
+
+Consolidation and dream call tenant-aware methods without a tenant, and the obvious reading is
+"plumb the tenant through". Three designs were costed — pass it at the known sites, make
+`tenantId` required across the ~110 optional signatures, or bind it at store construction. **All
+three were rejected, and the reason is the finding.**
+
+**Binding or requiring a tenant makes it AVAILABLE. It does not make any Cypher USE it.**
+`packages/neo4j/src/entity-resolver.ts` contains **8 `.run()` calls and zero occurrences of the
+string "tenant"** — e.g. `MATCH (e:Entity {name: $text})`. `FactStore.create` calls
+`this.resolver.resolve(...)` inside its write transaction, so a perfectly tenant-bound `FactStore`
+still resolves subjects against a tenant-blind Entity graph. Counting the same way across
+`packages/neo4j/src`, roughly **19 queries carry no tenant predicate at all**
+(`entity-resolver.ts`, `provenance.ts`, `entity.ts`, `audit.ts`, `gds.ts`, `temporal-edges.ts`).
+A signature change converts an omission at the call site into an omission inside the query body,
+where nothing checks it.
+
+**Three further findings that kill the cheap options:**
+
+- The consolidation tenant field (`core/consolidation.ts:375`) is **dead in production** — both
+  constructions (`mcp/bootstrap.ts:317`, `:667`) omit it — and the default wiring adapter at
+  `bootstrap.ts:329` is a two-parameter lambda that **silently discards** the engine's tenant and
+  substitutes `DEFAULT_TENANT`. Passing the tenant two lines earlier changes nothing while that
+  adapter stands. (`:680`, the dedicated-tenant one, correctly closes over `tenant`.)
+- Dream has **no tenant in scope at any level** — not on `DreamEngineDeps`, not on `CoreServices`,
+  not on `AMPConfig`. The tenant is resolved per request from a bearer token, and dream is a
+  process-lifetime singleton on a timer. That is structural, not an oversight. Its WRITE is
+  untenanted too (`dream.ts` `toAbductiveFact` stamps no `tenant_id`), so fixing only the reads
+  produces a half-tenanted module — a worse state to hand the next reader than a uniformly
+  untenanted one.
+- Requiring the parameter forces `this.tenantId ?? DEFAULT_TENANT` at call sites: identical wrong
+  behaviour, now compile-clean and laundered past the type checker. It also cannot be enforced by
+  tests — all ten package tsconfigs exclude `src/__tests__` and there is no vitest typecheck, so
+  the doubles are never type-checked at all.
+
+**Zero behavioural change today, by construction.** `resolveTenant(undefined)` and
+`resolveTenant('default')` both return `DEFAULT_TENANT`, and `tenantWhere` emits identical Cypher
+for it. Every row in the live graph is `default`. All three options are insurance, not repairs.
+
+**The one cheap thing worth doing:** `resolveTenant` (`packages/neo4j/src/tenant.ts`) is a single
+chokepoint with 37 production call sites. A strict mode there — loud in dev/test, unchanged in
+production — makes an omitted tenant visible instead of silently becoming `default`. About five
+lines in one file, and it is useful whichever way the isolation question goes.
+
+**Revisit when:** before a second tenant exists, and BEFORE any tenant-isolation design is chosen.
+If the answer turns out to be a database or instance per tenant, most of the plumbing question
+disappears and the 19 tenant-blind queries stop mattering — which is itself an argument for
+deciding isolation first and plumbing second.
 
 ---
 
