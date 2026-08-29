@@ -451,9 +451,40 @@ the origin on 2026-08-27 and again on the post-deploy run on 2026-08-28. Of the 
 An agent asking a scoped question without naming entities is ordinary usage, not malformed input.
 Every such call is currently unanswerable.
 
-**Revisit when:** immediately — this is cheap to confirm and it silently caps what EVAL-001 can
-measure. Either the planner should accept an empty entity scope and fall back to task-text
-retrieval, or the tool should reject loudly at its boundary instead of degrading to null.
+**CORRECTED 2026-08-28 after a security review of the obvious fix — it is not a validation bug.**
+Accepting an empty entity scope in `snapshotEntityHints` **does not fix this**; it only renames the
+error. Verified chain: empty hints leave `canonicalEntityIds` empty
+(`packages/retrieval/src/scoped-entity-resolver.ts:888-895`, which is length-guarded and fails
+CLOSED to `not-found` + `entity_not_found` — it never issues an unfiltered query), and
+`exactResolvedEntityId` (`runtime-query-planner.ts:173-194`) demands zero diagnostics,
+`state === 'resolved'` and exactly ONE canonical id. So the call still fails, as
+`resolution_failed` instead of `invalid_request`, and still scores `nonRetrieval`.
+
+**The real constraint is architectural.** `berry_context` under `MEMBERRY_CANDIDATE_CHANNEL_V1`
+(live) is anchored on a single resolved entity by construction —
+`runtime-candidate-channel.ts:328` pins `resolvedEntityIds: Object.freeze([state.resolvedEntityId])`
+and every channel query is parameterised on it. **There is no task-text mode.** The legacy path
+does have one (`tools.ts` ends with `assembler.assemble(args.task, runtimeOptions)`, and
+`resolvedEntityIds === undefined` is an already-supported shape), but it too calls
+`resolveRuntimeEntityIds`, which returns `Promise<readonly [string]>` and throws rather than
+yielding nothing.
+
+So `berry_context` can only answer questions that NAME an entity. Everything else is unanswerable
+on both paths. Note the second edge of this: when entities ARE supplied, the resolved-id lane
+disables the episodic vector channel (`core/service.ts:1284-1291`), so the tool is constrained
+either way.
+
+**For the record, the hint relaxation is safe, just insufficient.** Entity hints are explicitly
+non-authoritative (`query-plan.ts:65-71`), the contract already accepts `minItems: 0`, and the
+sibling hint kinds `repositories` and `symbols` plus `callerScopes.entities` are hardcoded empty on
+every production call. An existing test pins the `>= 1` bound
+(`runtime-query-planner.test.ts:36`), grouped with genuinely hostile cases.
+
+**Revisit when:** the owner decides the routing question, because it is a product decision rather
+than a repair — should an entity-less `berry_context` call be routed to the legacy task-text path
+(an answer, from a supported but different engine, with no candidate channel), or rejected loudly
+at the tool boundary (no answer, but an honest one instead of a generic planner failure)? Doing
+neither leaves 5 of 13 mined real calls unanswerable.
 
 ---
 
