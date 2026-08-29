@@ -8,7 +8,10 @@ import {
 } from './query-plan.js';
 
 const SAFE_PROJECT_SCOPE = /^project:[a-z0-9][a-z0-9._-]*$/;
-const SAFE_HINT = /^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$/;
+// Entity hints are display names, not authority or Cypher fragments. Permit
+// ordinary internal ASCII spaces while keeping the bounded, parameterized
+// resolver input free of leading/trailing whitespace and control characters.
+const SAFE_ENTITY_HINT = /^[A-Za-z0-9](?:[A-Za-z0-9._/@:+ -]*[A-Za-z0-9._/@:+-])?$/;
 const RESERVED_AUTHORITY_HINT = /^(?:project|tenant):/i;
 const MAX_PROJECT_SCOPE_LENGTH = 136;
 const MAX_HINT_LENGTH = 200;
@@ -43,7 +46,7 @@ function snapshotEntityHints(input: unknown): readonly string[] {
       if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
         || descriptor.enumerable !== true || typeof descriptor.value !== 'string'
         || descriptor.value.length < 1 || descriptor.value.length > MAX_HINT_LENGTH
-        || !SAFE_HINT.test(descriptor.value) || RESERVED_AUTHORITY_HINT.test(descriptor.value)) {
+        || !SAFE_ENTITY_HINT.test(descriptor.value) || RESERVED_AUTHORITY_HINT.test(descriptor.value)) {
         return invalidRequest();
       }
       values.push(descriptor.value);

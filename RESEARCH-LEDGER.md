@@ -596,8 +596,99 @@ entry. The accurate claim is narrower and still worth fixing: selection is blind
 under the cap, catastrophic at the cap, and permanently excludes episodes and meaning-based recall.
 
 **Not yet measured against answer quality.** The probes above show the pipeline is question-
-sensitive; they say nothing about whether the answers are GOOD. That needs EVAL-001 re-pinned,
-which is now unblocked.
+sensitive; they say nothing about whether the answers are GOOD. EVAL-001 cannot measure this:
+of its nine questions, only `eval001-d-07` calls `berry_context` with an `entity_scope`, and that
+question's mined `originalInput` sets `include_memory: false`. A perfect memory-selection change
+therefore produces zero EVAL-001 delta. Anchored memory questions need their own blind-authored
+instrument; re-pinning EVAL-001 is not a substitute.
+
+---
+
+### RL-022 — anchored Entity reachability is poor; agent-weighted impact was not yet observable
+**Evidence:** measured live (2026-08-29) · **Status:** compatibility fix and agent-first measurement prepared; topology repair open · **Opened:** 2026-08-29
+
+The resolver concern flagged by RL-021's handoff is confirmed, but it is two failures rather than
+one. The measured population was every live Entity with at least one incoming Semantic `ABOUT`
+edge: 27 exact names. Each was then sent through the public `berry_context` path with
+`project_name: "project:memberry"`, its exact name as the sole `entity_scope`, memory/code off,
+and architecture on so successful resolution still exercised a real provider.
+
+| public outcome | count | share |
+|---|---:|---:|
+| resolved | 7 | 25.9% |
+| `runtime_query_planner:resolution_failed` | 14 | 51.9% |
+| `runtime_query_planner:invalid_request` | 6 | 22.2% |
+| **failed before an answer** | **20** | **74.1%** |
+
+**Scope correction (owner-confirmed): this is not a user-impact rate.** MemBerry is consumed
+primarily by agents; people very rarely query it directly. The 27-name population above is an
+unweighted graph census, not a sample of production agent calls. The checked-in mined snapshot is
+also insufficient to estimate agent failure: it has only 13 `berry_context` calls from one session,
+mostly deliberate engineering probes; five are unanchored (four omit `entity_scope`, one supplies
+an empty array) and eight supply an Entity. It is useful for request-shape regression tests, not a
+production miss-rate denominator.
+
+The correct active proxy is now prepared locally: content-free process-lifetime counters record
+`berry_context` versus `berry_ask`, unanchored versus anchored routing, and the planner's closed
+resolution outcome classes. Authenticated `/readyz` exposes the aggregate with explicit
+`caller_type_known:false`, `content_captured:false`, and `identity_captured:false`; no task text,
+Entity/project name, tenant, actor, or session is retained. This measures real MCP traffic after
+deployment while honestly acknowledging that the server cannot distinguish an agent from a human.
+
+The project guidance itself is a stronger agent-facing control. A new read-only audit,
+`scripts/audit-agent-entity-resolution.mjs`, parses configured Entity names and applies the real
+tenant/project containment boundary without graph mutation. Against live default-tenant data it
+reported exactly **1/12 resolvable, 2/12 uncontained, 9/12 missing, 0 ambiguous**. That is a
+configuration/topology defect in the names agents are instructed to use, independent of direct
+human querying. The script has an optional `--fail-on-drift` gate and prints no credentials or
+memory content.
+
+**Failure 1 — graph authority and memory filing disagree.** Direct Neo4j classification found
+12 of the 27 memory-bearing Entities reachable from canonical project Entity
+`Y-GCkJYdEeWm38j_HI1XX` by `CONTAINS*0..64`, and 15 outside it. Fourteen of those 15 produced
+`resolution_failed`; the remaining outside Entity has a spaced name and hit Failure 2 first.
+This is expected resolver behavior against inconsistent topology, not fuzzy matching: the resolver
+starts from an authorized project root (`scoped-entity-resolver.ts:304-317`) while a Semantic can
+be filed `ABOUT` any Entity.
+
+The repository guidance makes the drift more concrete. Of its 12 declared canonical Entity names,
+only `memberry` resolves. `mcp-server` and `wiki-compiler` exist but are outside the project
+containment tree; the other nine do not exist by exact case-folded name. No graph repair was run:
+creating or relinking those nodes is shared live-data mutation and needs a tenant-aware migration,
+especially while RL-019's entity namespace decision remains open.
+
+**Failure 2 — valid Entity display names containing spaces are rejected before resolution.** All
+six spaced names returned `invalid_request`; five are already correctly contained and therefore
+would otherwise resolve: `Call Context Resolver`, `Electron Renderer`, `Review-first Validator`,
+`SOP lifecycle`, and `Submission Builder`. The cause is the duplicated
+`SAFE_HINT = /^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$/` gate in
+`runtime-query-planner.ts` and `query-plan.ts`. The values are non-authoritative, bounded Entity
+name hints and are passed to Neo4j as parameters, but the identifier-only charset excluded a form
+the graph and public Entity URI already support.
+
+A narrow working-tree fix permits internal ASCII spaces only for task-derived Entity-name hints.
+Authority, repository, symbol, canonical ID, and project validators remain unchanged; leading or
+trailing whitespace, controls, reserved `project:`/`tenant:` prefixes, and injection characters
+still fail closed. Cerebro verification at exact base `618af4d`: retrieval TypeScript build passed;
+full package suite **874 passed / 7 skipped**; focused planner/contract/tool path **111/111** passed
+across ordinary/traced `berry_context` and `berry_ask`.
+
+Agent-first observability verification at the same exact base plus this working-tree diff: full
+monorepo TypeScript build passed; retrieval **876 passed / 7 skipped** and MCP **340 passed / 9
+skipped**. The focused changed-path suites also passed **143/143**. The read-only audit reproduced
+the 1 resolvable / 2 uncontained / 9 missing guidance result against Cerebro.
+
+**RL-021 severity correction.** The real `SCOPE_QUERY` filters were reproduced across every
+project/Entity pair in the deployed graph: tenant ownership, canonical project scope or tag,
+non-archived Semantic, current `ABOUT` edge, and exactly one authorized containment path. The
+maximum is **57**, across 17 pairs, and **zero are at 65 or above**. The row cliff is a real latent
+class bug, not an active deployed loss. Entity reachability is the active problem and should stay
+ahead of Phase 1a until topology coverage improves.
+
+**Revisit when:** land and deploy the compatibility/measurement slice, collect a representative
+window of real MCP outcome counters, then prepare an ID-based repair manifest from the dry-run
+report. Do not repair the live graph by name with `BootstrapGraphService` while RL-019 is undecided:
+its current entity and parent lookups are global name matches (`bootstrap-graph.ts:95-132`).
 
 ### RL-020 — a dirty worktree fails the RET-010 custody tests, and the failure is unreadable
 **Evidence:** demonstrated (2026-08-29) · **Status:** mitigated in the harness · **Opened:** 2026-08-29

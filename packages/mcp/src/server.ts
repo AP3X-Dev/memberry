@@ -12,7 +12,12 @@ import { DEFAULT_TENANT } from '@memberry/core';
 import { registerResearchTools, RESEARCH_TOOL_NAMES } from '@memberry/research';
 import { registerArchTools, ARCH_TOOL_NAMES } from '@memberry/arch';
 import { registerCodeTools, CODE_TOOL_NAMES } from '@memberry/code';
-import { registerRetrievalTools, retrievalContainerForTenant, RETRIEVAL_TOOL_NAMES } from '@memberry/retrieval';
+import {
+  getRetrievalResolutionProcessStatusV1,
+  registerRetrievalTools,
+  retrievalContainerForTenant,
+  RETRIEVAL_TOOL_NAMES,
+} from '@memberry/retrieval';
 import { registerWikiTools, WIKI_TOOL_NAMES } from '@memberry/wiki';
 import { registerGraphTools, GRAPH_TOOL_NAMES } from '@memberry/graph';
 import { readEnv, resolvePort } from '@memberry/core';
@@ -682,6 +687,7 @@ export function createAMPServer(): AMPMCPServer {
             const body: Record<string, unknown> = {
               ...statusPayload('ready'),
               admission_shadow: getAdmissionShadowProcessStatus(),
+              retrieval_resolution: getRetrievalResolutionProcessStatusV1(),
             };
             const automation = body['consolidation_automation'] as { unhealthy?: boolean };
             // During startup grace and while bounded retries are pending the

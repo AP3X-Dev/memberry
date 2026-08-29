@@ -118,6 +118,22 @@ describe('RET-002A QueryPlanV1 contract', () => {
     });
   });
 
+  it('allows spaces only in non-authoritative entity display-name hints', () => {
+    const spacedEntity = handFixture();
+    spacedEntity.hints.entities = ['Call Context Resolver'];
+    expect(parseQueryPlanV1(spacedEntity).hints.entities).toEqual(['Call Context Resolver']);
+
+    const spacedSymbol = handFixture();
+    spacedSymbol.hints.symbols = ['Call Context Resolver'];
+    expectContractError(spacedSymbol, 'invalid_identifier', 'queryPlan.hints.symbols[]');
+
+    for (const invalid of [' leading', 'trailing ', 'bad\tspace', "x') MATCH (n) RETURN n //"]) {
+      const input = handFixture();
+      input.hints.entities = [invalid];
+      expectContractError(input, 'invalid_identifier', 'queryPlan.hints.entities[]');
+    }
+  });
+
   it.each([
     ['root array', [], 'not_object', 'queryPlan'],
     ['unknown root key', { ...handFixture(), rawTask: 'secret-root' }, 'unknown_key', 'queryPlan'],
