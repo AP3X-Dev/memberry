@@ -628,6 +628,27 @@ loud-failure guards kept passing.
 **Unblocks the EVAL-001 re-pin.** `eval001-d-08` and the pending `eval001-d-04` were both this
 shape, so half of `berry_context`'s coverage was scoring `nonRetrieval` rather than a number.
 
+**VERIFIED LIVE 2026-08-29** against the deployed server at master `2cf8261`, flags
+`QUERY_PLANNER_V1,CANDIDATE_CHANNEL_V1,RERANKER_V1=served,KIND_RANK_V1,CODE_SCOPE_V2,CODE_RERANK_V1`
+— the exact configuration in which the defect bit:
+
+| request shape | before | after (measured) |
+|---|---|---|
+| `task` + `project_name`, no entities (`eval001-d-08`) | `invalid_request` | 21 IDs, `Code: served (20 of 20)` |
+| `task` only (`eval001-d-04`) | `invalid_request` | assembles, **0 sources** — see caveat |
+| `berry_ask` + `project_name`, no entities | `invalid_request` | cited synthesis, 23 evidence items |
+| `task` + project + resolvable entity | candidate channel | unchanged, candidate channel |
+| `task` + project + unresolvable entity | `resolution_failed` | `resolution_failed` — still loud |
+
+The first row also confirms the predicted second effect: the task-text path **served the code
+plane** (20 of 20), which the candidate channel marks `unsupported / candidate-channel` for the
+same request. The answer is richer, not merely non-failing.
+
+**Caveat, stated rather than buried.** The no-project-no-entity shape now returns a well-formed
+context with **zero sources**. That is a retrieval-quality question, not a routing one — the call
+is answerable where it previously threw — but nobody should read row 2 as "fixed and returning
+good results". It is fixed and returning nothing, and why is not yet investigated.
+
 **For the record, the hint relaxation is safe, just insufficient.** Entity hints are explicitly
 non-authoritative (`query-plan.ts:65-71`), the contract already accepts `minItems: 0`, and the
 sibling hint kinds `repositories` and `symbols` plus `callerScopes.entities` are hardcoded empty on
