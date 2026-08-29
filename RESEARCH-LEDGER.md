@@ -506,8 +506,52 @@ deciding isolation first and plumbing second.
 
 ---
 
+### RL-020 — a dirty worktree fails the RET-010 custody tests, and the failure is unreadable
+**Evidence:** demonstrated (2026-08-29) · **Status:** mitigated in the harness · **Opened:** 2026-08-29
+
+`bench/lab/ret010/dev-gate.cjs` `pinPaths()` and `auditPinnedPaths()` both open with
+
+    git rev-parse HEAD != head  ||  git status --porcelain=v1 --untracked-files=all != ''  ->  reject()
+
+so the finalizer refuses to pin sources it cannot prove match HEAD. That is the custody guarantee
+and it is correct. The problem is the *shape* of the refusal: it rejects before opening a single
+file handle, so the test that counts handles reports `expected [] to have a length of 62 but got
++0` — which reads as a product defect and is really one stray edited file anywhere in the tree.
+
+**Demonstrated, not inferred.** On a clean worktree the test passes; appending a single comment
+line to an unrelated source file (`packages/neo4j/src/tenant.ts`) flips it to failing; `git
+checkout --` flips it straight back.
+
+**How it was found, which is the part worth keeping.** It surfaced as a lab failure on the RL-018
+branch, and a first comparison — master passes, branch fails — pointed straight at the change.
+That comparison was invalid: the branch checkout carried leftover uncommitted edits from an
+earlier session, so the variable under test was tree cleanliness, not the diff. **`git clean -fd`
+is not enough to prevent this** — it removes untracked files but leaves modified tracked ones,
+which is exactly the state that bites.
+
+**Distinct from RL-017.** RL-017 is a spawn timeout under load, affects a different test in each
+Node arm, and is load-dependent. This one is deterministic, reproduces in under a second, and has
+a named cause in the source. Two different known-red modes in the same file.
+
+**Together they explain the "one stable known-red test", and removing both makes the lab green.**
+Measured 2026-08-29, node:22, clean worktree, no competing gate run: `LAB_EXIT=0`,
+`Test Files 68 passed (68)`, `Tests 2117 passed (2117)`. The lab is not unconditionally red. The
+count looked stable at one because two independent causes were running together — RL-017 supplying
+a moving identity under load, RL-020 supplying a fixed one whenever the tree was dirty.
+
+**The stale expectation was propagated in two places and both are corrected.** `scripts/gate.sh`
+and `.claude/agents/verifier.md` both instructed the reader that `LAB_EXIT=1` with one failure was
+the expected steady state. That is withdrawn: budgeting for a failure in advance is how a real
+regression gets waved through. Both now say expect zero, and both say to check tree cleanliness
+and concurrent runs before blaming a diff.
+
+**Mitigation:** `scripts/gate.sh` now runs `git status --porcelain=v1 --untracked-files=all`
+before the container starts and prints the offending paths with an explicit warning that the
+resulting failure is not a product defect. It warns rather than refuses, because gating a
+work-in-progress tree is otherwise legitimate.
+
 ### RL-018 — `berry_context` rejects a real call that names no entities
-**Evidence:** measured (2026-08-28) · **Status:** open · **Opened:** 2026-08-28
+**Evidence:** measured (2026-08-28) · **Status:** FIXED (2026-08-29) · **Opened:** 2026-08-28
 
 `eval001-d-08` is a real mined `berry_context` call — `task`, `project_name`, `include_code`,
 `include_memory`, `strategy`, `max_tokens`, and no `entity_scope`. The runtime query planner
@@ -546,6 +590,43 @@ So `berry_context` can only answer questions that NAME an entity. Everything els
 on both paths. Note the second edge of this: when entities ARE supplied, the resolved-id lane
 disables the episodic vector channel (`core/service.ts:1284-1291`), so the tool is constrained
 either way.
+
+**FIXED 2026-08-29 — routed, not accepted (PR #130).** The constraint is real and was left intact:
+the candidate channel is still anchored on exactly one resolved entity, and `snapshotEntityHints`
+still rejects an empty scope. What changed is which path answers. One predicate, `plannerAnchored`,
+gates the four sites where `berry_context` and `berry_ask` enter the planner; a request supplying
+neither an entity anchor nor a project takes the task-text path instead.
+
+That path is not a degraded mode. It is the same path both tools take with the planner flag off, it
+still honours `entity_scope` and `project_name` as ordinary filters, and it KEEPS the episodic
+vector channel the resolved-id lane disables — so it repairs the second edge noted above rather
+than inheriting it.
+
+**Absent, never invalid.** Only shapes the planner could never have accepted are routed. A supplied
+but malformed `entity_scope` or `project_name` still reaches the planner and still fails
+`invalid_request`; an entity that simply does not resolve still fails `resolution_failed`. Naming
+something that is not there is a real answer, and must never widen into a broad sweep.
+
+**Wider than the entry said.** The measured shape counts are 13 real mined `berry_context` calls,
+of which 5 are unanchored: 4 carry a project but no entities, 1 carries neither. `berry_ask` shares
+the constraint verbatim and was fixed in the same change; the original entry named only
+`berry_context`.
+
+**One hole found during the fix, by the gate.** The first cut routed unanchored requests past the
+planner — and the planner is where `authenticated` is checked, so omitting `entity_scope` bought an
+answer without authenticating. Caught by the two authentication-first precedence pins in
+`tools.test.ts`, both of which send an unanchored `{ task: 'blocked' }`. Anchoring decides WHICH
+path answers, never WHETHER the caller may ask; the gate now runs before the routing branch
+whenever either switch is on. Pinned in `tools.unanchored-routing.test.ts`, which the first 12
+tests had missed because every one of them authenticated.
+
+**Verified:** 15 tests across both tools and all four unanchored shapes. Checked that they bite —
+with the four `&& plannerAnchored(args)` guards removed, 8 of 12 failed with exactly
+`RuntimeQueryPlannerError: runtime_query_planner:invalid_request`, the original defect, while the
+loud-failure guards kept passing.
+
+**Unblocks the EVAL-001 re-pin.** `eval001-d-08` and the pending `eval001-d-04` were both this
+shape, so half of `berry_context`'s coverage was scoring `nonRetrieval` rather than a number.
 
 **For the record, the hint relaxation is safe, just insufficient.** Entity hints are explicitly
 non-authoritative (`query-plan.ts:65-71`), the contract already accepts `minItems: 0`, and the
