@@ -3,8 +3,7 @@
 // channel actually returns results.
 //
 // WHY THIS EXISTS. CodeIndexer was constructed without an embedding provider,
-// so `symbol.embedding` was never assigned and `mini_vector` (derived from it)
-// never generated. Every Symbol ever indexed has both null. The channel queried
+// so `symbol.embedding` was never assigned. The channel queried
 // an empty index, returned zero rows, and reported SUCCESS — so code search has
 // been lexical-only with nothing in any log. scripts/backfill-embeddings.mjs is
 // the same fix for Semantic nodes; this is its Symbol twin.
@@ -18,7 +17,6 @@
 import { readFileSync } from 'node:fs';
 import neo4j from 'neo4j-driver';
 import OpenAI from 'openai';
-import { generateMiniVector } from '../packages/code/dist/vectors.js';
 
 const env = {};
 try {
@@ -117,13 +115,11 @@ try {
     }
 
     const vectors = await embedBatch(usable.map((r) => r.text));
-    const updates = usable.map((r, i) => ({
-      id: r.id, vec: vectors[i], mini: Array.from(generateMiniVector(vectors[i])),
-    }));
+    const updates = usable.map((r, i) => ({ id: r.id, vec: vectors[i] }));
     await session.run(
       `UNWIND $updates AS u
        MATCH (s:Symbol {id: u.id})
-       SET s.embedding = u.vec, s.mini_vector = u.mini`,
+       SET s.embedding = u.vec`,
       { updates },
     );
     done += updates.length;
@@ -133,13 +129,12 @@ try {
   const verify = await session.run(
     `MATCH (s:Symbol) ${PROJECT ? 'WHERE s.project_tag = $project' : ''}
      RETURN count(s) AS total,
-            sum(CASE WHEN s.embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded,
-            sum(CASE WHEN s.mini_vector IS NOT NULL THEN 1 ELSE 0 END) AS mini`,
+            sum(CASE WHEN s.embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded`,
     { project: PROJECT },
   );
   const v = verify.records[0];
   console.log(`\nDone. embedded=${done} skipped_empty_text=${skipped}`);
-  console.log(`Verify: ${v.get('embedded')}/${v.get('total')} symbols have an embedding, ${v.get('mini')} have a mini_vector.`);
+  console.log(`Verify: ${v.get('embedded')}/${v.get('total')} symbols have an embedding.`);
 } finally {
   await session.close();
   await driver.close();

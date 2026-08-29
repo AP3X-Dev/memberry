@@ -31,6 +31,7 @@ vi.mock('@memberry/retrieval', async (importOriginal) => {
   };
 });
 import { bootstrap, type BootstrapHandles } from '../bootstrap.js';
+import { RETRIEVAL_TRACE_CHANNEL_ORDER } from '@memberry/retrieval';
 import { closeSSEHandle, createAMPServer, type SSEHandle } from '../server.js';
 import { writeCandidateLiveEvidenceV1 } from './runtime-candidate-channel-live-evidence.js';
 import { writeRerankerShadowLiveEvidenceV1 } from './runtime-reranker-shadow-live-evidence.js';
@@ -113,15 +114,22 @@ async function fixture(driver: Driver, prefix: string, tenant: string, hint: str
        CREATE (future)-[:ABOUT {valid_at:'2027-01-01T00:00:00.000Z',invalid_at:'2028-01-01T00:00:00.000Z'}]->(e)
        CREATE (f:Fact {id:$factId,subject:'safe',predicate:'uses',object:'bounded source',entity_id:$entityId,scope:'project',tenant_id:$tenant,confidence:0.8,status:'active',valid_at:'2026-01-01T00:00:00.000Z',invalid_at:null,source_episode_ids:[],tags:[$projectScope],created_at:'2026-01-01T00:00:00.000Z',updated_at:'2026-01-01T00:00:00.000Z',ret003b_owner:$owner})
        CREATE (pf:Fact {id:$pastFactId,subject:'past',predicate:'was',object:'valid',entity_id:$entityId,scope:'project',tenant_id:$tenant,confidence:0.7,status:'invalidated',valid_at:'2026-01-01T00:00:00.000Z',invalid_at:'2026-06-01T00:00:00.000Z',source_episode_ids:[],tags:[$projectScope],created_at:'2026-01-01T00:00:00.000Z',updated_at:'2026-06-01T00:00:00.000Z',ret003b_owner:$owner})
+       CREATE (b:MemoryBlock {id:$blockId,name:'Core fixture',content:$blockContent,scope:$projectScope,tier:'core',tenant_id:$tenant,ret003b_owner:$owner})
+       CREATE (wb:MemoryBlock {id:$workingBlockId,name:'Working fixture',content:$workingBlockContent,scope:$projectScope,tier:'working',session_id:$workingSession,tenant_id:$tenant,ret003b_owner:$owner})
        CREATE (fs:Semantic {id:$foreignSemanticId,content:'FOREIGN SEMANTIC SECRET',confidence:1.0,scope:$projectScope,tenant_id:$foreign,ret003b_owner:$owner})
        CREATE (fs)-[:ABOUT {valid_at:'2026-01-01T00:00:00.000Z'}]->(e)
-       CREATE (ff:Fact {id:$foreignFactId,subject:'FOREIGN',predicate:'FACT',object:'SECRET',entity_id:$entityId,scope:'project',tenant_id:$foreign,confidence:1.0,status:'active',valid_at:'2026-01-01T00:00:00.000Z',invalid_at:null,source_episode_ids:[],tags:[$projectScope],created_at:'2026-01-01T00:00:00.000Z',updated_at:'2026-01-01T00:00:00.000Z',ret003b_owner:$owner})`,
+       CREATE (ff:Fact {id:$foreignFactId,subject:'FOREIGN',predicate:'FACT',object:'SECRET',entity_id:$entityId,scope:'project',tenant_id:$foreign,confidence:1.0,status:'active',valid_at:'2026-01-01T00:00:00.000Z',invalid_at:null,source_episode_ids:[],tags:[$projectScope],created_at:'2026-01-01T00:00:00.000Z',updated_at:'2026-01-01T00:00:00.000Z',ret003b_owner:$owner})
+       CREATE (fb:MemoryBlock {id:$foreignBlockId,name:'Foreign fixture',content:$foreignBlockContent,scope:$projectScope,tier:'core',tenant_id:$foreign,ret003b_owner:$owner})`,
       {
         projectId: `${prefix}-project`, projectName: prefix, projectScope: `project:${prefix}`,
         entityId, entityName: `${prefix}-display`, hint, tenant, foreign: FOREIGN, owner: OWNER,
         semanticId: `${prefix}-semantic`, pastSemanticId: `${prefix}-semantic-past`, futureSemanticId: `${prefix}-semantic-future`,
         factId: `${prefix}-fact`, pastFactId: `${prefix}-fact-past`,
+        blockId: `${prefix}-block`, blockContent: `${prefix}-core-block`,
+        workingBlockId: `${prefix}-working-block`, workingBlockContent: `${prefix}-working-block-secret`,
+        workingSession: `${prefix}-working-session`,
         foreignSemanticId: `${prefix}-semantic-foreign`, foreignFactId: `${prefix}-fact-foreign`,
+        foreignBlockId: `${prefix}-block-foreign`, foreignBlockContent: `${prefix}-foreign-block-secret`,
       },
     );
   } finally { await session.close(); }
@@ -391,14 +399,24 @@ describe.skipIf(!ENABLED)('RET-003B required real-bootstrap HTTP candidate compo
     const blocks = first.content as Array<{ text: string }>;
     expect(blocks[0]!.text).toContain(`${RUN}-semantic`);
     expect(blocks[0]!.text).toContain(`${RUN}-fact`);
+    expect(blocks[0]!.text).toContain(`${RUN}-core-block`);
     expect(blocks[0]!.text).toContain(ENTITY_ID);
     expect(blocks[0]!.text).not.toContain('FOREIGN');
+    expect(blocks[0]!.text).not.toContain(`${RUN}-foreign-block-secret`);
+    expect(blocks[0]!.text).not.toContain(`${RUN}-working-block-secret`);
     expect(blocks[0]!.text).not.toContain('Past bounded memory');
     expect(blocks[0]!.text).not.toContain('Future excluded memory');
     const trace = JSON.parse(blocks[1]!.text) as { events: Array<Record<string, unknown>> };
     const terminals = trace.events.filter((event) => event.kind === 'channel-terminal');
-    expect(terminals.filter((event) => event.outcome === 'success')).toHaveLength(3);
-    expect(terminals.filter((event) => event.code === 'unavailable')).toHaveLength(12);
+    const successfulChannels = [
+      'memory.scope', 'memory.fact', 'memory.block', 'arch.entity',
+    ];
+    const successfulChannelSet = new Set(successfulChannels);
+    expect(terminals.map((event) => event.channel)).toEqual(RETRIEVAL_TRACE_CHANNEL_ORDER);
+    expect(terminals.filter((event) => event.outcome === 'success').map((event) => event.channel))
+      .toEqual(successfulChannels);
+    expect(terminals.filter((event) => event.code === 'unavailable').map((event) => event.channel))
+      .toEqual(RETRIEVAL_TRACE_CHANNEL_ORDER.filter((channel) => !successfulChannelSet.has(channel)));
 
     const defaultResult = await defaultClient!.callTool({ name: 'berry_context', arguments: {
       ...args, project_name: DEFAULT_PROJECT, entity_scope: [DEFAULT_HINT], include_trace: false,

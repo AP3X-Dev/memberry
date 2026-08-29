@@ -71,8 +71,8 @@ interface ReceiptState {
 }
 
 interface SourceSpec {
-  readonly channel: 'memory.scope' | 'arch.entity';
-  readonly sourceType: 'semantic' | 'arch_entity';
+  readonly channel: 'memory.scope' | 'memory.block' | 'arch.entity';
+  readonly sourceType: 'semantic' | 'block' | 'arch_entity';
   readonly query: string;
 }
 
@@ -129,8 +129,26 @@ WITH root, target, target.id AS evidenceId,
      1.0 AS score
 ${COMMON_RETURN}`;
 
+// A planner receipt carries no working-session authority, so the candidate path may expose only
+// project-scoped, sessionless core blocks. Working blocks remain available through the explicit
+// session-bound MemoryBlock tools and can never bleed into an unrelated agent session here.
+const BLOCK_QUERY = `${PROJECT_PROOF}
+MATCH (b:MemoryBlock {scope: $projectScope})
+WHERE (b.tenant_id = $tenantId OR (b.tenant_id IS NULL AND $tenantId = $defaultTenant))
+  AND b.tier = 'core'
+  AND b.session_id IS NULL
+  AND b.id IS NOT NULL
+  AND b.content IS NOT NULL
+  AND b.content <> ''
+WITH DISTINCT root, target, b.id AS evidenceId,
+     coalesce(b.name, 'MemoryBlock') AS title,
+     b.content AS content,
+     0.5 AS score
+${COMMON_RETURN}`;
+
 const SOURCES: readonly SourceSpec[] = FREEZE([
   FREEZE({ channel: 'memory.scope', sourceType: 'semantic', query: SCOPE_QUERY }),
+  FREEZE({ channel: 'memory.block', sourceType: 'block', query: BLOCK_QUERY }),
   FREEZE({ channel: 'arch.entity', sourceType: 'arch_entity', query: ARCH_QUERY }),
 ]);
 
@@ -193,7 +211,9 @@ function parseRecord(input: unknown, state: ReceiptState, spec: SourceSpec, rank
     : FREEZE({ mode: 'as-of' as const, asOf: state.asOf });
   const provenance = spec.sourceType === 'semantic'
     ? FREEZE({ kind: 'semantic' as const, semanticId: evidenceId })
-    : FREEZE({ kind: 'arch_entity' as const, entityId: evidenceId });
+    : spec.sourceType === 'block'
+      ? FREEZE({ kind: 'block' as const, blockId: evidenceId })
+      : FREEZE({ kind: 'arch_entity' as const, entityId: evidenceId });
   return FREEZE({
     contractId: CANDIDATE_CHANNEL_CONTRACT_ID,
     contractVersion: CANDIDATE_CHANNEL_CONTRACT_VERSION,
@@ -328,7 +348,10 @@ export class RuntimeCandidateChannelService {
       resolvedEntityIds: Object.freeze([state.resolvedEntityId]),
       temporalFrame,
       plannedChannels: RETRIEVAL_TRACE_CHANNEL_ORDER,
-      limits: Object.freeze({ maxCandidatesPerChannel: MAX_ROWS, maxCandidatesAggregate: 128 }),
+      // Four real channels can now each contribute up to the sealed per-channel cap. Keep the
+      // aggregate within the contract's 512 hard ceiling so a full earlier channel cannot evict a
+      // valid later MemoryBlock or architecture settlement merely because it runs later.
+      limits: Object.freeze({ maxCandidatesPerChannel: MAX_ROWS, maxCandidatesAggregate: 256 }),
     });
     const roster: Array<CandidateChannelRunnerRosterV1[number]> = [];
     for (const channel of RETRIEVAL_TRACE_CHANNEL_ORDER) {

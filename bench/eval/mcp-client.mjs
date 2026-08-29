@@ -33,6 +33,7 @@ export function createClient(base, token) {
       method: 'POST',
       headers,
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      signal: AbortSignal.timeout(30_000),
     })
     const sid = res.headers.get('mcp-session-id')
     if (sid) sessionId = sid
@@ -87,5 +88,24 @@ export function createClient(base, token) {
       return { codeDomainEnabled, codeToolsVisible: codeTools.length }
     },
     callTool,
+    async close() {
+      if (!sessionId) return
+      const closingSession = sessionId
+      sessionId = null
+      try {
+        await fetch(new URL('/mcp', base), {
+          method: 'DELETE',
+          headers: {
+            accept: 'application/json, text/event-stream',
+            authorization: `Bearer ${token}`,
+            'mcp-session-id': closingSession,
+          },
+          signal: AbortSignal.timeout(5_000),
+        })
+      } catch {
+        // Session teardown is best-effort after the measurement is already complete. Clearing the
+        // local id above and the bounded signal ensure a failed DELETE cannot pin the probe open.
+      }
+    },
   }
 }

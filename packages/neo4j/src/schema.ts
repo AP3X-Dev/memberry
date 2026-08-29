@@ -58,15 +58,13 @@ const INDEXES: string[] = [
 ];
 
 const FULLTEXT_INDEXES: string[] = [
-  'CREATE FULLTEXT INDEX semantic_content IF NOT EXISTS FOR (s:Semantic) ON EACH [s.content]',
-  'CREATE FULLTEXT INDEX episodic_content IF NOT EXISTS FOR (e:Episodic) ON EACH [e.content]',
+  // Keep fact_content for the bounded shadow qualification. It is not a served channel.
   'CREATE FULLTEXT INDEX fact_content IF NOT EXISTS FOR (f:Fact) ON EACH [f.subject, f.predicate, f.object]',
 ];
 
 const VECTOR_INDEXES = [
   `CREATE VECTOR INDEX semantic_embedding IF NOT EXISTS FOR (s:Semantic) ON (s.embedding) OPTIONS {indexConfig: {\`vector.dimensions\`: ${EMBEDDING_DIM}, \`vector.similarity_function\`: 'cosine'}}`,
   `CREATE VECTOR INDEX episodic_embedding IF NOT EXISTS FOR (e:Episodic) ON (e.embedding) OPTIONS {indexConfig: {\`vector.dimensions\`: ${EMBEDDING_DIM}, \`vector.similarity_function\`: 'cosine'}}`,
-  `CREATE VECTOR INDEX fact_embedding IF NOT EXISTS FOR (f:Fact) ON (f.embedding) OPTIONS {indexConfig: {\`vector.dimensions\`: ${EMBEDDING_DIM}, \`vector.similarity_function\`: 'cosine'}}`,
 ];
 
 export async function initSchema(driver: Driver): Promise<void> {
