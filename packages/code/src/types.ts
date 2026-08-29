@@ -119,8 +119,11 @@ export interface SymbolNode {
   project_tag?: string;
   embedding?: number[];
   lexical_vector?: number[];
+  /** @deprecated No production reader; new index writes no longer persist this property. */
   mini_vector?: number[];
+  /** @deprecated No production reader; new index writes no longer persist this property. */
   sparse_indices?: number[];
+  /** @deprecated No production reader; new index writes no longer persist this property. */
   sparse_values?: number[];
   created_at: string;
   updated_at: string;

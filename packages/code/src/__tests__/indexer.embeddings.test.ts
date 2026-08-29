@@ -1,15 +1,14 @@
 // IDX-003 acceptance gate — assertions C1-C8.
 //
 // THE DEFECT. CodeIndexer's constructor was `constructor(private driver: Driver)`.
-// It had no embedding provider, so `symbol.embedding` was never assigned and the
-// `if (symbol.embedding)` branch that derives `mini_vector` never once executed.
+// It had no embedding provider, so `symbol.embedding` was never assigned.
 // Live graph, 2026-08-27, every project since the code index was built:
 //
-//   project:memberry      16,399 symbols   embedding: 0   mini_vector: 0
-//   project:hermes-agent  15,055           0              0
-//   project:neuri         12,339           0              0
-//   project:ag3ntic        5,385           0              0
-//   (un-stamped)           5,136           0              0
+//   project:memberry      16,399 symbols   embedding: 0
+//   project:hermes-agent  15,055           0
+//   project:neuri         12,339           0
+//   project:ag3ntic        5,385           0
+//   (un-stamped)           5,136           0
 //
 // So `symbol_embedding` was an empty vector index, the `code.dense-vector`
 // channel returned zero rows on every query, and code search ran lexical-only.
@@ -106,7 +105,7 @@ describe('IDX-003 dense embeddings at index time', () => {
     mocks.symbolStore.getByFile.mockResolvedValue([]);
   });
 
-  it('C1 — with a provider, every stored symbol carries an embedding AND a mini_vector', async () => {
+  it('C1 — with a provider, every stored symbol carries only the served dense vector', async () => {
     const stored = await indexWith(makeProvider(), [
       makeSymbol({ id: 'a', name: 'alpha', content_hash: 'h-a' }),
       makeSymbol({ id: 'b', name: 'beta', content_hash: 'h-b' }),
@@ -114,8 +113,9 @@ describe('IDX-003 dense embeddings at index time', () => {
     expect(stored).toHaveLength(2);
     for (const s of stored) {
       expect(s.embedding).toHaveLength(1536);
-      // mini_vector was unreachable before: it is derived FROM the embedding.
-      expect(s.mini_vector).toHaveLength(64);
+      expect(s.mini_vector).toBeUndefined();
+      expect(s.sparse_indices).toBeUndefined();
+      expect(s.sparse_values).toBeUndefined();
     }
   });
 
@@ -161,7 +161,7 @@ describe('IDX-003 dense embeddings at index time', () => {
     expect(stored[0].mini_vector).toBeUndefined();
     // The lexical channels are unaffected — they never depended on the provider.
     expect(stored[0].lexical_vector).toBeDefined();
-    expect(stored[0].sparse_indices).toBeDefined();
+    expect(stored[0].sparse_indices).toBeUndefined();
   });
 
   it('C6 — a degraded provider (available === false) is skipped, not called', async () => {
@@ -201,7 +201,7 @@ describe('IDX-003 dense embeddings at index time', () => {
     expect(stored[0].embedding).toBeUndefined();
     expect(stored[0].mini_vector).toBeUndefined();
     expect(stored[1].embedding).toHaveLength(1536);
-    expect(stored[1].mini_vector).toHaveLength(64);
+    expect(stored[1].mini_vector).toBeUndefined();
   });
 
   it('C9 — unchanged symbols are not re-embedded: a no-op reindex costs nothing', async () => {

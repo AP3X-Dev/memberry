@@ -18,7 +18,6 @@ const ARCH_INDEXES: string[] = [
 const ARCH_FULLTEXT: string[] = [
   'CREATE FULLTEXT INDEX entity_arch_content IF NOT EXISTS FOR (e:Entity) ON EACH [e.responsibility, e.interface_desc, e.internals]',
   'CREATE FULLTEXT INDEX entity_name_search IF NOT EXISTS FOR (e:Entity) ON EACH [e.name, e.description]',
-  'CREATE FULLTEXT INDEX aspect_content IF NOT EXISTS FOR (a:Aspect) ON EACH [a.name, a.description]',
 ];
 
 export async function initArchSchema(driver: Driver): Promise<void> {

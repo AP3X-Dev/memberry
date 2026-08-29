@@ -106,7 +106,7 @@ describe('vector index coverage guard (IDX-003 C10-C15, IDX-004 S11-S12)', () =>
     expect(await checkVectorIndexCoverage(driver as never)).toEqual([]);
   });
 
-  it('S18 — Fact is NOT guarded, because nothing reads fact_embedding', async () => {
+  it('S18 — Fact is NOT guarded because no served channel reads a Fact embedding', async () => {
     const { driver } = driverWith({
       Symbol: { nodes: 54314, embedded: 54314 },
       Semantic: { nodes: 194, embedded: 194 },
@@ -115,12 +115,8 @@ describe('vector index coverage guard (IDX-003 C10-C15, IDX-004 S11-S12)', () =>
     });
     // The live state as of 2026-08-28. Fact at 0/29,314 would otherwise pin `status.degraded`
     // non-empty on every boot forever, and an alarm that can never clear is not an alarm — the
-    // exact trap this guard was widened to escape. `fact_embedding` appears only in its own
-    // CREATE statement in schema.ts, so no query can silently get nothing from it.
-    //
-    // This is a scope correction, NOT a mute, and it costs something real: the Fact plane's
-    // open decision (build a reader or drop the index) has just lost its only automated
-    // reminder. RESEARCH-LEDGER.md RL-008 is now the only thing holding it.
+    // exact trap this guard was widened to escape. Migration 0010 drops the old no-reader index;
+    // zero Fact coverage still cannot degrade a served channel.
     expect(await checkVectorIndexCoverage(driver as never)).toEqual([]);
   });
 

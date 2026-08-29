@@ -71,9 +71,6 @@ export class SymbolStore {
       const vectorProps: Record<string, unknown> = {};
       if (node.embedding) vectorProps.embedding = node.embedding;
       if (node.lexical_vector) vectorProps.lexical_vector = node.lexical_vector;
-      if (node.mini_vector) vectorProps.mini_vector = node.mini_vector;
-      if (node.sparse_indices) vectorProps.sparse_indices = node.sparse_indices;
-      if (node.sparse_values) vectorProps.sparse_values = node.sparse_values;
 
       if (Object.keys(vectorProps).length > 0) {
         await session.run(
@@ -261,9 +258,6 @@ export class SymbolStore {
       const vectorProps: Record<string, unknown> = {};
       if (node.embedding) vectorProps.embedding = node.embedding;
       if (node.lexical_vector) vectorProps.lexical_vector = node.lexical_vector;
-      if (node.mini_vector) vectorProps.mini_vector = node.mini_vector;
-      if (node.sparse_indices) vectorProps.sparse_indices = node.sparse_indices;
-      if (node.sparse_values) vectorProps.sparse_values = node.sparse_values;
 
       return {
         // Composite-key fields (MERGE pattern). '' sentinel for "no parent":

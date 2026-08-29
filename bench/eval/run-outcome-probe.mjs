@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// EVAL-001B outcome probe — "did the right FILE come back, and how far down?"
+// EVAL-001B outcome probe — "did the right evidence come back, and how far down?"
 //
 // WHY THIS EXISTS ALONGSIDE run-eval001.mjs.
 // keywordRecall@k asks whether a required term appears ANYWHERE in the top-k content. That is
 // satisfiable by junk: a variable named `to` matching the word "to" in the question contains the
 // token and scores a hit. This probe asks the question an agent actually cares about — is the
-// file that answers me in the top 5? — and file-level ground truth is UNARGUABLE, so it needs no
-// blind-authoring ceremony to be honest.
+// file or memory item that answers me in the top 5? Code cases use file-level truth. Memory cases
+// use adjudicated evidence ids, so the same Answer@k/MRR instrument measures Semantic, Episodic,
+// Fact, and MemoryBlock retrieval instead of inventing another harness.
 //
 // Measured 2026-08-27 on the origin index: 0 of 4 answers in the top 5. The junk occupying those
 // slots was single-word local variables whose names collide with ordinary English words in the
@@ -22,13 +23,15 @@ import { readFileSync } from 'node:fs'
 import { createClient } from './mcp-client.mjs'
 
 const TEST_PATH = /__tests__|\.test\.|\.spec\./
+const EVIDENCE_ID = /<!--\s+([^\s>]+)\s+-->/g
 
 function parseArgs(argv) {
-  const args = { cases: 'bench/eval/outcome-cases.jsonl', project: 'memberry', limit: 10 }
+  const args = { cases: 'bench/eval/outcome-cases.jsonl', project: 'memberry', limit: 10, plane: null }
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--cases') args.cases = argv[i + 1]
     if (argv[i] === '--project') args.project = argv[i + 1]
     if (argv[i] === '--limit') args.limit = Number(argv[i + 1])
+    if (argv[i] === '--plane') args.plane = argv[i + 1]
   }
   return args
 }
@@ -40,10 +43,18 @@ if (!token) {
   process.exit(2)
 }
 
-const cases = readFileSync(args.cases, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+const allCases = readFileSync(args.cases, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+const cases = args.plane === null
+  ? allCases
+  : allCases.filter((c) => (c.plane ?? 'code') === args.plane)
+if (cases.length === 0) {
+  console.error(`OUTCOME fatal: no cases selected for plane=${args.plane ?? 'all'}`)
+  process.exit(2)
+}
 const client = createClient(process.env.MEMBERRY_BASE_URL || 'http://192.168.0.25:3101', token)
 const session = await client.connect()
-if (!session.codeDomainEnabled) {
+const needsCode = cases.some((c) => (c.plane ?? 'code') === 'code')
+if (needsCode && !session.codeDomainEnabled) {
   // The code tools are disabled by default; without them every case is unmeasurable rather than
   // wrong, and reporting zeros would be a fabricated collapse.
   console.error('OUTCOME fatal: code domain could not be enabled — every case would be unmeasurable')
@@ -52,51 +63,96 @@ if (!session.codeDomainEnabled) {
 
 const rows = []
 for (const c of cases) {
-  const res = await client.callTool('berry_code_search', {
-    query: c.question,
-    project_name: args.project,
-    limit: args.limit,
-  })
-  if (res.isError) {
-    rows.push({ id: c.id, error: res.text.slice(0, 120) })
-    continue
-  }
-  let items = []
+  const plane = c.plane ?? 'code'
+  const isCode = plane === 'code'
+  const tool = isCode ? 'berry_code_search' : (c.tool ?? 'berry_context')
+  console.error(`OUTCOME progress case=${c.id} plane=${plane} tool=${tool}`)
+  const input = isCode
+    ? { query: c.question, project_name: args.project, limit: args.limit }
+    : {
+        ...(c.input ?? {}),
+        ...(tool === 'berry_context' ? { task: c.question } : { question: c.question }),
+        ...(c.input?.project_name === undefined ? { project_name: args.project } : {}),
+      }
+  let res
   try {
-    const parsed = JSON.parse(res.text)
-    items = (Array.isArray(parsed) ? parsed : Object.values(parsed).flat()).filter(Boolean)
-  } catch {
-    rows.push({ id: c.id, error: 'unparseable response' })
+    res = await client.callTool(tool, input)
+  } catch (error) {
+    rows.push({ id: c.id, plane, error: String(error?.message ?? error).slice(0, 120) })
     continue
   }
-  const rank = items.findIndex(
-    (x) =>
-      String(x.file ?? '').includes(c.expectFile) ||
-      (c.expectSymbol && String(x.name ?? '') === c.expectSymbol)
-  )
-  const top5 = items.slice(0, 5)
+  if (res.isError) {
+    rows.push({ id: c.id, plane, error: res.text.slice(0, 120) })
+    continue
+  }
+  let rank = -1
+  let top5 = []
+  if (isCode) {
+    let items = []
+    try {
+      const parsed = JSON.parse(res.text)
+      items = (Array.isArray(parsed) ? parsed : Object.values(parsed).flat()).filter(Boolean)
+    } catch {
+      rows.push({ id: c.id, plane, error: 'unparseable response' })
+      continue
+    }
+    rank = items.findIndex(
+      (x) =>
+        String(x.file ?? '').includes(c.expectFile) ||
+        (c.expectSymbol && String(x.name ?? '') === c.expectSymbol)
+    )
+    top5 = items.slice(0, 5)
+  } else {
+    const expected = new Set(c.expectEvidenceIds ?? (c.expectEvidenceId ? [c.expectEvidenceId] : []))
+    if (expected.size === 0) {
+      rows.push({ id: c.id, plane, error: 'memory case has no expected evidence id' })
+      continue
+    }
+    const evidenceIds = []
+    const seen = new Set()
+    for (const match of res.text.matchAll(EVIDENCE_ID)) {
+      const id = match[1]
+      if (!seen.has(id)) {
+        seen.add(id)
+        evidenceIds.push(id)
+      }
+    }
+    rank = evidenceIds.findIndex((id) => expected.has(id))
+    top5 = evidenceIds.slice(0, 5)
+  }
   rows.push({
     id: c.id,
+    plane,
     rank: rank < 0 ? null : rank + 1,
-    testInTop5: top5.filter((x) => TEST_PATH.test(String(x.file ?? ''))).length,
-    variableInTop5: top5.filter((x) => x.kind === 'variable').length,
-    top5: top5.map((x) => `${x.name}(${x.kind})${TEST_PATH.test(String(x.file ?? '')) ? '[T]' : ''}`),
+    testInTop5: isCode ? top5.filter((x) => TEST_PATH.test(String(x.file ?? ''))).length : 0,
+    variableInTop5: isCode ? top5.filter((x) => x.kind === 'variable').length : 0,
+    top5: isCode
+      ? top5.map((x) => `${x.name}(${x.kind})${TEST_PATH.test(String(x.file ?? '')) ? '[T]' : ''}`)
+      : top5,
   })
 }
+await client.close()
 
 const scored = rows.filter((r) => !r.error)
 const at = (k) => scored.filter((r) => r.rank !== null && r.rank <= k).length
 const mrr = scored.reduce((a, r) => a + (r.rank ? 1 / r.rank : 0), 0) / (scored.length || 1)
-const share = (f) => scored.reduce((a, r) => a + r[f], 0) / (scored.length * 5 || 1)
 const fmt = (v) => v.toFixed(4)
 
 console.log(`OUTCOME n=${scored.length} errors=${rows.length - scored.length} project=${args.project}`)
 console.log(`OUTCOME answerAt1=${fmt(at(1) / (scored.length || 1))} answerAt5=${fmt(at(5) / (scored.length || 1))} answerAt10=${fmt(at(10) / (scored.length || 1))} mrr=${fmt(mrr)}`)
-console.log(`OUTCOME variableShare5=${fmt(share('variableInTop5'))} testFileShare5=${fmt(share('testInTop5'))}`)
+const codeRows = scored.filter((r) => r.plane === 'code')
+const codeShare = (f) => codeRows.reduce((a, r) => a + r[f], 0) / (codeRows.length * 5 || 1)
+console.log(`OUTCOME variableShare5=${fmt(codeShare('variableInTop5'))} testFileShare5=${fmt(codeShare('testInTop5'))}`)
+for (const plane of [...new Set(scored.map((r) => r.plane))].sort()) {
+  const planeRows = scored.filter((r) => r.plane === plane)
+  const planeAt = (k) => planeRows.filter((r) => r.rank !== null && r.rank <= k).length / (planeRows.length || 1)
+  const planeMrr = planeRows.reduce((a, r) => a + (r.rank ? 1 / r.rank : 0), 0) / (planeRows.length || 1)
+  console.log(`OUTCOME plane=${plane} n=${planeRows.length} answerAt1=${fmt(planeAt(1))} answerAt5=${fmt(planeAt(5))} mrr=${fmt(planeMrr)}`)
+}
 for (const r of rows) {
   if (r.error) {
-    console.log(`OUTCOME case=${r.id} ERROR=${r.error}`)
+    console.log(`OUTCOME case=${r.id} plane=${r.plane} ERROR=${r.error}`)
     continue
   }
-  console.log(`OUTCOME case=${r.id} rank=${r.rank ?? 'MISS'} varTop5=${r.variableInTop5} testTop5=${r.testInTop5} top5=${r.top5.join(' ')}`)
+  console.log(`OUTCOME case=${r.id} plane=${r.plane} rank=${r.rank ?? 'MISS'} varTop5=${r.variableInTop5} testTop5=${r.testInTop5} top5=${r.top5.join(' ')}`)
 }

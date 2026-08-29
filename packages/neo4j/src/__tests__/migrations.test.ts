@@ -144,15 +144,17 @@ describe('runMigrations', () => {
         '0007-admission-observation-sidecar',
         '0008-evidence-authority-ledger-v1',
         '0009-semantic-lifecycle-backfill',
+        '0010-prune-unserved-derived-indexes',
       ],
     });
     expect(schemaStatements.filter((statement) => statement.includes('admission_observation')))
       .toHaveLength(4);
     expect(schemaStatements.filter((statement) => statement.includes('evidence_authority')))
       .toHaveLength(13);
-    expect(schemaStatements).toHaveLength(19);
+    expect(schemaStatements).toHaveLength(25);
     expect(schemaStatements.filter((s) => /^\s*CREATE\s/i.test(s)).every((s) => s.includes('IF NOT EXISTS'))).toBe(true);
-    expect(schemaStatements.filter((s) => !/^\s*CREATE\s/i.test(s)).every((s) => /IS NULL/.test(s))).toBe(true);
+    expect(schemaStatements.filter((s) => /^\s*MATCH\s/i.test(s)).every((s) => /IS NULL/.test(s))).toBe(true);
+    expect(schemaStatements.filter((s) => /^\s*DROP INDEX\s/i.test(s)).every((s) => /IF EXISTS/.test(s))).toBe(true);
   });
 
   it('0008 is additive, directly repeatable, and contains no data backfill', async () => {
@@ -223,12 +225,17 @@ describe('runMigrations', () => {
 
     await expect(runMigrations(driver)).rejects.toThrow('ambiguous migration record');
     await expect(runMigrations(driver)).resolves.toMatchObject({
-      applied: ['0008-evidence-authority-ledger-v1', '0009-semantic-lifecycle-backfill'],
+      applied: [
+        '0008-evidence-authority-ledger-v1',
+        '0009-semantic-lifecycle-backfill',
+        '0010-prune-unserved-derived-indexes',
+      ],
     });
     expect(schemaStatements.length).toBeGreaterThan(10);
     expect(schemaStatements.length % 2).toBe(0);
     expect(schemaStatements.filter((s) => /^\s*CREATE\s/i.test(s)).every((s) => s.includes('IF NOT EXISTS'))).toBe(true);
-    expect(schemaStatements.filter((s) => !/^\s*CREATE\s/i.test(s)).every((s) => /IS NULL/.test(s))).toBe(true);
+    expect(schemaStatements.filter((s) => /^\s*MATCH\s/i.test(s)).every((s) => /IS NULL/.test(s))).toBe(true);
+    expect(schemaStatements.filter((s) => /^\s*DROP INDEX\s/i.test(s)).every((s) => /IF EXISTS/.test(s))).toBe(true);
   });
 });
 
@@ -291,5 +298,48 @@ describe('0009-semantic-lifecycle-backfill', () => {
     const statements = await captureStatements();
     expect(statements.some((statement) => statement.includes('IF NOT EXISTS'))).toBe(false);
     expect(statements.some((statement) => /^\s*CREATE\s/i.test(statement))).toBe(false);
+  });
+});
+
+describe('0010-prune-unserved-derived-indexes', () => {
+  it('drops only the six measured no-reader indexes and leaves fact_content for shadow qualification', async () => {
+    const target = MIGRATIONS.find((item) => item.id === '0010-prune-unserved-derived-indexes');
+    expect(target).toBeDefined();
+    const upStatements: string[] = [];
+    const upClose = vi.fn(async () => undefined);
+    const upDriver = {
+      session: vi.fn(() => ({
+        run: vi.fn(async (statement: string) => { upStatements.push(statement); return { records: [] }; }),
+        close: upClose,
+      })),
+    } as any;
+
+    await target!.up(upDriver);
+    expect(upStatements).toEqual([
+      'DROP INDEX semantic_content IF EXISTS',
+      'DROP INDEX episodic_content IF EXISTS',
+      'DROP INDEX fact_embedding IF EXISTS',
+      'DROP INDEX aspect_content IF EXISTS',
+      'DROP INDEX symbol_mini IF EXISTS',
+      'DROP INDEX symbol_content_hash IF EXISTS',
+    ]);
+    expect(upStatements.join('\n')).not.toContain('fact_content');
+    expect(upClose).toHaveBeenCalledTimes(1);
+
+    const downStatements: string[] = [];
+    const downDriver = {
+      session: vi.fn(() => ({
+        run: vi.fn(async (statement: string) => { downStatements.push(statement); return { records: [] }; }),
+        close: vi.fn(async () => undefined),
+      })),
+    } as any;
+    expect(target!.down).toBeDefined();
+    await target!.down!(downDriver);
+    expect(downStatements).toHaveLength(6);
+    expect(downStatements.every((statement) => /^CREATE (FULLTEXT |VECTOR )?INDEX/.test(statement))).toBe(true);
+    expect(downStatements.every((statement) => statement.includes('IF NOT EXISTS'))).toBe(true);
+    for (const name of ['semantic_content', 'episodic_content', 'fact_embedding', 'aspect_content', 'symbol_mini', 'symbol_content_hash']) {
+      expect(downStatements.some((statement) => statement.includes(name))).toBe(true);
+    }
   });
 });

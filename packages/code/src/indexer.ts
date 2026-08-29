@@ -7,7 +7,7 @@ import { type Driver } from 'neo4j-driver';
 import { parseFile } from './parser.js';
 import { ImportResolver } from './resolver.js';
 import { SymbolStore } from './symbol-store.js';
-import { generateLexicalVector, generateMiniVector, generateSparseVector } from './vectors.js';
+import { generateLexicalVector } from './vectors.js';
 import type { EmbeddingProvider } from '@memberry/core';
 import type { SupportedLanguage, SymbolKind, SymbolNode, IndexResult } from './types.js';
 import { detectLanguage, isMcpConfigBasename } from './types.js';
@@ -84,7 +84,6 @@ export class CodeIndexer {
         // should store a broken embedding for — leave it lexical-only.
         if (!Array.isArray(vector) || vector.length === 0) return;
         symbol.embedding = vector;
-        symbol.mini_vector = generateMiniVector(vector);
       });
     } catch (err: unknown) {
       console.error(
@@ -218,12 +217,9 @@ export class CodeIndexer {
         continue;
       }
 
-      // Generate multi-vectors from symbol text
+      // Generate the one lexical vector that has a production reader.
       const vectorText = symbolVectorText(symbol);
       symbol.lexical_vector = generateLexicalVector(vectorText);
-      const sparse = generateSparseVector(vectorText);
-      symbol.sparse_indices = sparse.indices;
-      symbol.sparse_values = sparse.values;
 
       changed.push(symbol);
     }
@@ -231,8 +227,6 @@ export class CodeIndexer {
     // Dense vectors in ONE batched provider call per file, AFTER the changed set
     // is known — embedding is the expensive step and unchanged symbols are
     // skipped by content_hash, so a no-op reindex costs nothing.
-    // `mini_vector` is derived here too; it was previously unreachable because
-    // nothing ever assigned `symbol.embedding`.
     await this.embedSymbols(changed);
 
     // Single batched UNWIND MERGE: identical composite-key identity, property set,

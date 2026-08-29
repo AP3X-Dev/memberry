@@ -13,7 +13,6 @@ const CODE_INDEXES: string[] = [
   'CREATE INDEX symbol_name IF NOT EXISTS FOR (s:Symbol) ON (s.name)',
   'CREATE INDEX symbol_kind IF NOT EXISTS FOR (s:Symbol) ON (s.kind)',
   'CREATE INDEX symbol_language IF NOT EXISTS FOR (s:Symbol) ON (s.language)',
-  'CREATE INDEX symbol_content_hash IF NOT EXISTS FOR (s:Symbol) ON (s.content_hash)',
   'CREATE INDEX symbol_project IF NOT EXISTS FOR (s:Symbol) ON (s.project_tag)',
   'CREATE INDEX symbol_file_kind IF NOT EXISTS FOR (s:Symbol) ON (s.file_path, s.kind)',
   'CREATE INDEX symbol_name_kind IF NOT EXISTS FOR (s:Symbol) ON (s.name, s.kind)',
@@ -27,7 +26,6 @@ const CODE_FULLTEXT: string[] = [
 const CODE_VECTOR: string[] = [
   `CREATE VECTOR INDEX symbol_embedding IF NOT EXISTS FOR (s:Symbol) ON (s.embedding) OPTIONS {indexConfig: {\`vector.dimensions\`: ${EMBEDDING_DIM}, \`vector.similarity_function\`: 'cosine'}}`,
   "CREATE VECTOR INDEX symbol_lexical IF NOT EXISTS FOR (s:Symbol) ON (s.lexical_vector) OPTIONS {indexConfig: {`vector.dimensions`: 4096, `vector.similarity_function`: 'cosine'}}",
-  "CREATE VECTOR INDEX symbol_mini IF NOT EXISTS FOR (s:Symbol) ON (s.mini_vector) OPTIONS {indexConfig: {`vector.dimensions`: 64, `vector.similarity_function`: 'cosine'}}",
 ];
 
 export async function initCodeSchema(driver: Driver): Promise<void> {

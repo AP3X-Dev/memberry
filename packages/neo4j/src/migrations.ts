@@ -31,6 +31,8 @@ export interface Migration {
   id: string;
   description: string;
   up(driver: Driver): Promise<void>;
+  /** Optional operator-invoked rollback for migrations that remove schema capabilities. */
+  down?(driver: Driver): Promise<void>;
 }
 
 /** Singleton node id used to track applied migrations. */
@@ -268,6 +270,46 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    id: '0010-prune-unserved-derived-indexes',
+    description:
+      'Drop derived indexes with no production reader while retaining their node properties for ' +
+      'rollback. fact_content remains for bounded shadow qualification.',
+    up: async (driver) => {
+      const session = driver.session();
+      try {
+        for (const stmt of [
+          'DROP INDEX semantic_content IF EXISTS',
+          'DROP INDEX episodic_content IF EXISTS',
+          'DROP INDEX fact_embedding IF EXISTS',
+          'DROP INDEX aspect_content IF EXISTS',
+          'DROP INDEX symbol_mini IF EXISTS',
+          'DROP INDEX symbol_content_hash IF EXISTS',
+        ]) {
+          await session.run(stmt);
+        }
+      } finally {
+        await session.close();
+      }
+    },
+    down: async (driver) => {
+      const session = driver.session();
+      try {
+        for (const stmt of [
+          'CREATE FULLTEXT INDEX semantic_content IF NOT EXISTS FOR (s:Semantic) ON EACH [s.content]',
+          'CREATE FULLTEXT INDEX episodic_content IF NOT EXISTS FOR (e:Episodic) ON EACH [e.content]',
+          `CREATE VECTOR INDEX fact_embedding IF NOT EXISTS FOR (f:Fact) ON (f.embedding) OPTIONS {indexConfig: {\`vector.dimensions\`: ${EMBEDDING_DIM}, \`vector.similarity_function\`: 'cosine'}}`,
+          'CREATE FULLTEXT INDEX aspect_content IF NOT EXISTS FOR (a:Aspect) ON EACH [a.name, a.description]',
+          'CREATE VECTOR INDEX symbol_mini IF NOT EXISTS FOR (s:Symbol) ON (s.mini_vector) OPTIONS {indexConfig: {`vector.dimensions`: 64, `vector.similarity_function`: \'cosine\'}}',
+          'CREATE INDEX symbol_content_hash IF NOT EXISTS FOR (s:Symbol) ON (s.content_hash)',
+        ]) {
+          await session.run(stmt);
+        }
+      } finally {
+        await session.close();
+      }
+    },
+  },
 ];
 
 export interface MigrationResult {
@@ -339,7 +381,7 @@ export async function runMigrations(
 }
 
 /** The node property holding an embedding-model vector. Vector indexes over any
- *  OTHER property (lexical_vector, mini_vector) are not embedding indexes and are
+ *  OTHER properties such as lexical_vector are not embedding indexes and are
  *  exempt from the EMBEDDING_DIM drift check. */
 const EMBEDDING_PROPERTY = 'embedding';
 
@@ -357,9 +399,8 @@ export interface VectorIndexDimension {
  * introspection query).
  *
  * Only indexes over the `embedding` property are checked. Not every vector index
- * holds an embedding-model vector: `symbol_lexical` (4096-d hashed lexical) and
- * `symbol_mini` (64-d reduced) are deliberately other dimensions, and comparing
- * them against EMBEDDING_DIM reported two permanent "mismatches" that pinned the
+ * holds an embedding-model vector: `symbol_lexical` is a 4096-d hashed lexical
+ * vector, and comparing it against EMBEDDING_DIM reported a permanent "mismatch" that pinned the
  * server in DEGRADED MODE — masking the real degradation the mode exists to show.
  */
 /** A label whose embedding coverage has fallen below the floor. `ratio` is 0..1. */
@@ -405,17 +446,11 @@ const COVERAGE_FLOOR = 0.95;
 /**
  * Labels whose embeddings are actually READ by a retrieval channel.
  *
- * `Fact` is deliberately absent, and this is a scope correction rather than a mute. The guard
+ * `Fact` is deliberately absent. Migration 0010 drops the unserved `fact_embedding` index;
+ * a future versioned Fact vector channel must add Fact here only after its reader ships. The guard
  * exists to catch ONE failure: a vector index that queries hit and silently get nothing from.
- * Nothing queries `fact_embedding` — it appears only in its own CREATE statement in schema.ts —
- * so Fact coverage cannot produce that failure, and reporting it puts a permanent entry in
- * `status.degraded` that no boot can ever clear. An alarm that is always on is not an alarm, which
- * is the exact trap this guard was widened to escape.
- *
- * That does NOT make the Fact plane fine. 29,314 Fact nodes carry no embedding, the index has no
- * reader, and the aggregate assembler discards Facts entirely. That is a real open decision —
- * build a reader or drop the index — and removing it from here removes its only automated
- * reminder. It is tracked as RL-008 in RESEARCH-LEDGER.md, which is now the only thing holding it.
+ * Until then Fact coverage cannot produce a served-reader failure. The active exact-entity Fact
+ * channel remains independent of embeddings.
  *
  * Add a label here when something starts reading its embeddings, not before.
  */

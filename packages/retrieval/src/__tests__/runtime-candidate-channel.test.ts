@@ -50,7 +50,9 @@ function driver(rows: Record<string, Neo4jRecord[]>): { driver: RuntimeCandidate
       } }));
       return { records: [record(['ordinal', 'eid', 'facts'], ['0', entityId, facts])] };
     }
-    const kind = query.includes('MATCH (s:Semantic)') ? 'scope' : 'arch';
+    const kind = query.includes('MATCH (s:Semantic)')
+      ? 'scope'
+      : query.includes('MATCH (b:MemoryBlock') ? 'block' : 'arch';
     return { records: rows[kind] ?? [] };
   };
   const session = {
@@ -70,6 +72,10 @@ function validRows(): Record<string, Neo4jRecord[]> {
     fact: [record(
       ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
       ['tenant-a', project, entityId, 'fact-1', 'Fact', 'subject predicate object', 0.8],
+    )],
+    block: [record(
+      ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+      ['tenant-a', project, entityId, 'project:memberry/project_state', 'project_state', 'Project inventory', 0.5],
     )],
     arch: [record(
       ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
@@ -100,7 +106,7 @@ describe('RET-003B runtime candidate channel service', () => {
     expect(mock.driver.session).not.toHaveBeenCalled();
   });
 
-  it('binds a private receipt and runs only the three authorized channels in canonical order', async () => {
+  it('binds a private receipt and runs only the four authorized channels in canonical order', async () => {
     const mock = driver(validRows());
     const service = new RuntimeCandidateChannelService(mock.driver);
     const receipt = await authorityReceipt();
@@ -108,10 +114,10 @@ describe('RET-003B runtime candidate channel service', () => {
 
     expect(result.settlements.map((item) => item.channel)).toEqual(RETRIEVAL_TRACE_CHANNEL_ORDER);
     expect(result.settlements.filter((item) => item.outcome === 'success').map((item) => item.channel))
-      .toEqual(['memory.scope', 'memory.fact', 'arch.entity']);
+      .toEqual(['memory.scope', 'memory.fact', 'memory.block', 'arch.entity']);
     expect(result.candidates.map((item) => item.evidenceId))
-      .toEqual(['semantic-1', 'fact-1', entityId]);
-    expect(mock.calls).toHaveLength(3);
+      .toEqual(['semantic-1', 'fact-1', 'project:memberry/project_state', entityId]);
+    expect(mock.calls).toHaveLength(4);
     for (const [query, params] of mock.calls) {
       if (query.includes('UNWIND $ids AS eid')) expect(params).toMatchObject({ tenantId: 'tenant-a', ids: [entityId] });
       else {
@@ -145,7 +151,8 @@ describe('RET-003B runtime candidate channel service', () => {
     expect(result.settlements.find((item) => item.channel === 'memory.scope'))
       .toMatchObject({ outcome: 'safe-failure', code: 'query-failed' });
     expect(JSON.stringify(result)).not.toContain('foreign-secret');
-    expect(result.candidates.map((item) => item.evidenceId)).toEqual(['fact-1', entityId]);
+    expect(result.candidates.map((item) => item.evidenceId))
+      .toEqual(['fact-1', 'project:memberry/project_state', entityId]);
   });
 
   it('binds current and as-of temporal authority into every source query', async () => {
@@ -159,6 +166,18 @@ describe('RET-003B runtime candidate channel service', () => {
       .toBe('2026-08-16T10:20:30.000Z');
     expect(mock.calls.find(([query]) => query.includes('arch.entity') || query.includes('target.id AS evidenceId'))?.[0])
       .not.toContain('$asOf');
+  });
+
+  it('serves only project-scoped sessionless core blocks for the sealed tenant', async () => {
+    const mock = driver(validRows());
+    const service = new RuntimeCandidateChannelService(mock.driver);
+    await service.execute(await authorityReceipt(), { includeArchitecture: false, includeMemory: true });
+    const blockQuery = mock.calls.find(([query]) => query.includes('MATCH (b:MemoryBlock'))?.[0] ?? '';
+    expect(blockQuery).toContain('MATCH (b:MemoryBlock {scope: $projectScope})');
+    expect(blockQuery).toContain('b.tenant_id = $tenantId');
+    expect(blockQuery).toContain('b.tenant_id IS NULL AND $tenantId = $defaultTenant');
+    expect(blockQuery).toContain("b.tier = 'core'");
+    expect(blockQuery).toContain('b.session_id IS NULL');
   });
 
   it('accepts the exact per-source row cap without truncating it', async () => {
@@ -240,6 +259,7 @@ describe('RET-003B runtime candidate channel service', () => {
         records: [record(['ordinal', 'eid', 'facts'], ['0', entityId, Array.from({ length: 65 }, () => ({ properties: {} }))])],
       };
       if (query.includes('MATCH (s:Semantic)')) return { records: new Proxy([], { get: () => { hooks(); return undefined; } }) };
+      if (query.includes('MATCH (b:MemoryBlock')) return { records: rows.block };
       return { records: rows.arch };
     };
     const session = {
@@ -251,7 +271,8 @@ describe('RET-003B runtime candidate channel service', () => {
     const receipt = await authorityReceipt();
     const result = await service.execute(receipt, { includeArchitecture: true, includeMemory: true });
     expect(hooks).not.toHaveBeenCalled();
-    expect(result.candidates.map((item) => item.evidenceId)).toEqual([entityId]);
+    expect(result.candidates.map((item) => item.evidenceId))
+      .toEqual(['project:memberry/project_state', entityId]);
     expect(result.settlements.filter((item) => item.outcome === 'safe-failure' && item.code === 'query-failed'))
       .toHaveLength(1);
     expect(result.settlements).toContainEqual(expect.objectContaining({
@@ -369,11 +390,11 @@ describe('RET-003B runtime candidate channel service', () => {
     const execution = await service.execute(receipt, { includeArchitecture: true, includeMemory: true });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
     const result = assembler.assembleCandidateExecution('task', execution, 1, true, true, true);
-    expect(execution.candidates).toHaveLength(3);
+    expect(execution.candidates).toHaveLength(4);
     expect(result.context.sections.flatMap((section) => section.items)).toHaveLength(0);
     const trace = result.trace!;
     expect(trace.complete).toBe(true);
-    expect(trace.terminalExclusions).toHaveLength(3);
+    expect(trace.terminalExclusions).toHaveLength(4);
     expect(trace.terminalExclusions.every((item) => item.reasons.includes('token-budget'))).toBe(true);
     expect(() => JSON.parse(canonicalTraceJson(trace))).not.toThrow();
   });
@@ -384,6 +405,7 @@ describe('RET-003B runtime candidate channel service', () => {
       ['tenant-a', project, entityId, evidenceId, 'Semantic', content, 0.9],
     );
     const rows = validRows();
+    rows.block = [];
     rows.scope = [
       scopeRow('semantic-long', 'L'.repeat(400)),
       scopeRow('semantic-short-a', 'A'.repeat(40)),
@@ -410,6 +432,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('keeps one item that exactly fills the budget over a denser item that strands the rest', async () => {
     const rows = validRows();
+    rows.block = [];
     // 40 chars -> 10 tokens, confidence 1 -> provenance 1.1: fills a 10-token budget exactly.
     rows.scope![0] = record(
       ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
@@ -447,6 +470,7 @@ describe('RET-003B runtime candidate channel service', () => {
       ['tenant-a', project, entityId, evidenceId, 'Semantic', content, score],
     );
     const rows = validRows();
+    rows.block = [];
     // 20 chars -> 5 tokens each: the two confidence-1 rows exactly fill a 10-token budget
     // together. The confidence-0 row is 8 chars -> 2 tokens, so it is denser but worth less,
     // and taking it first leaves 8 tokens that can only hold one of the other two.
@@ -472,6 +496,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('serves only receipt candidates, changes candidate order, and records replayable ranked-v2 evidence', async () => {
     const rows = validRows();
+    rows.block = [];
     rows.scope = [
       record(
         ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],

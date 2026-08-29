@@ -166,6 +166,16 @@ until something measured it.
 **Revisit when:** immediately. `bench/eval/run-outcome-probe.mjs` is the template and took under a
 day for the code plane.
 
+**2026-08-29 implementation update — blind spot closed locally, live qualification pending.** The
+existing outcome runner now accepts evidence-ID cases for `semantic`, `episodic`, `fact`, and
+`block` while preserving the ten code cases and their file-level scoring. Five adjudicated memory
+cases were derived from mined agent calls. Pre-change live baseline: Semantic n=2 Answer@5 0.5000
+MRR 0.2500; Episodic n=1 Answer@5 0.0000; Fact n=1 Answer@5/MRR 1.0000; MemoryBlock n=1
+Answer@5 0.0000. `mine-queries.mjs` now reads both Claude and Codex transcript shapes; the
+2026-08-29 Codex fixture recovered 22 retrieval calls with session and cwd provenance. This is
+local benchmark implementation and a live baseline against the deployed old server, not proof
+that the candidate retrieval changes are deployed.
+
 ---
 
 ### RL-007 — `FactStore` cannot embed a Fact, and a constructor param would not change that
@@ -238,6 +248,22 @@ permanent.
 
 **Revisit when:** RL-006 lands and can size it — or sooner, since nothing else will raise its hand.
 
+**2026-08-29 decision update — do not add Fact embeddings yet.** Refreshed live status is 492
+active, 28,924 tentative, and 54 invalidated. The new outcome set's one adjudicated Fact case is
+already rank 1 through the served exact-entity channel. A read-only `fact_content` shadow query,
+with no top-k before the authorized active/entity filter, also returned the same Fact at rank 1:
+zero incremental Answer@1 or MRR on the evidence available. The local cleanup therefore drops
+`fact_embedding`, keeps `fact_content` only for bounded shadow expansion, and does not embed the
+tentative population. Revisit Fact embeddings only after additional agent-derived Fact cases expose
+a paraphrase miss that lexical or exact retrieval does not close.
+
+Exact shadow query shape: `CALL db.index.fulltext.queryNodes('fact_content', 'neuri OR located')
+YIELD node, score WITH node AS f, score WHERE f.entity_id = 'ent-8ZNBr-RICORj' AND f.status =
+'active' AND (f.tenant_id = 'default' OR f.tenant_id IS NULL) RETURN f.id, score ORDER BY score
+DESC, f.id ASC LIMIT 10`. It returned `fact-fW6Rmp-TTMCs` first at score 4.387264251708984. The
+absence of a pre-filterable authority field in the existing full-text index is why this remains a
+shadow experiment rather than a production reader.
+
 ---
 
 ### RL-009 — `berry_context` / `berry_ask` discard every MemoryBlock, not every Fact
@@ -267,6 +293,14 @@ This does not weaken RL-008. The fact channel reads Fact node properties by enti
 
 **Revisit when:** RL-006 lands and can size the impact, or if a user reports a block that should
 have been cited and was not.
+
+**2026-08-29 implementation update — local, not deployed.** The candidate runtime now supplies
+`memory.block` from tenant/project-scoped, sessionless `core` blocks after the same sealed project
+proof used by other anchored channels. Working blocks remain session-bound and are intentionally
+excluded because the planner receipt carries no session authority. The aggregate candidate budget
+is raised from 128 to 256 so four full real channels cannot evict a later valid settlement. The
+pre-change outcome case for `project:memberry/project_state` is a measured miss; it is the biting
+post-change qualification case.
 
 ---
 
@@ -914,6 +948,17 @@ It has been read since the package landed in `195c5f0`.
 
 **Revisit when:** write latency or graph size becomes a complaint, or during any index cleanup.
 Pair it with RL-012, which is the same kind of housekeeping.
+
+**2026-08-29 implementation update — local, reversible, not deployed.** New Symbol writes retain
+only the served dense embedding and 4096-slot lexical vector; they stop generating or persisting
+`mini_vector`, `sparse_indices`, and `sparse_values`. Migration
+`0010-prune-unserved-derived-indexes` drops `symbol_mini`, `symbol_content_hash`,
+`semantic_content`, `episodic_content`, `aspect_content`, and `fact_embedding` with `IF EXISTS`.
+It removes no stored properties, so rolling back the code/schema recreates the indexes and resumes
+the old writers. Migration 0010 also carries an explicit `down()` that recreates all six indexes
+with `IF NOT EXISTS`; this is required because the core schema is not reinitialized by a simple
+binary rollback after the migration record advances. `fact_content` is intentionally retained for
+the bounded shadow experiment.
 
 ---
 
