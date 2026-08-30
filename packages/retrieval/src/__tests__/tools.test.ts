@@ -205,6 +205,49 @@ describe('registerRetrievalTools — tenant threading', () => {
     ]);
   });
 
+  it('berry_context trace_detail=summary uses the ordinary path and returns bounded content-free diagnostics', async () => {
+    const assembler = makeAssembler();
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, createRetrievalContainer({ assembler, tenantId: 'acme' }));
+
+    const result = await handlers.get('berry_context')!({
+      task: 'sk_live_NEVER_EXPOSE_SUMMARY_TASK',
+      strategy: 'ranked',
+      include_code: false,
+      include_arch: false,
+      include_memory: true,
+      max_tokens: 6_500,
+      project_name: 'secret-project-name',
+      entity_scope: ['secret-entity-name'],
+      include_trace: true,
+      trace_detail: 'summary',
+    }) as { content: Array<{ type: string; text: string }> };
+
+    expect(assembler.assemble).toHaveBeenCalledTimes(1);
+    expect(assembler.assembleTraced).not.toHaveBeenCalled();
+    expect(result.content[0]).toEqual({ type: 'text', text: '# md' });
+    const summary = JSON.parse(result.content[1]!.text);
+    expect(summary).toMatchObject({
+      schemaVersion: '1.0.0', kind: 'retrieval-trace-summary', bounded: true, replayable: false,
+      requestShape: { tenantScope: 'named', projectScopeApplied: true, entityScope: 'one' },
+    });
+    expect(result.content[1]!.text).not.toContain('NEVER_EXPOSE');
+    expect(result.content[1]!.text).not.toContain('secret-project-name');
+    expect(result.content[1]!.text).not.toContain('secret-entity-name');
+  });
+
+  it('rejects explain with bounded summary before retrieval work begins', async () => {
+    const assembler = makeAssembler();
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, createRetrievalContainer({ assembler }));
+
+    await expect(handlers.get('berry_context')!({
+      task: 'find auth', strategy: 'ranked', include_trace: true, trace_detail: 'summary', explain: true,
+    })).rejects.toThrow('Retrieval trace summary does not support explain');
+    expect(assembler.assemble).not.toHaveBeenCalled();
+    expect(assembler.assembleTraced).not.toHaveBeenCalled();
+  });
+
   it('berry_context include_trace=true preserves forced-ranked isolation for named tenants', async () => {
     const assembler = makeAssembler();
     const { server, handlers } = makeServerStub();
@@ -617,6 +660,25 @@ describe('RET-003B candidate-channel runtime wiring', () => {
       'stable', expect.anything(), 8_000, true, true, false,
     );
     expect(assembler.assembleCandidateExecutionServed).not.toHaveBeenCalled();
+  });
+
+  it('candidate summary diagnostics do not allocate the full trace collector', async () => {
+    const { assembler, container } = candidateContainer();
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+
+    const result = await handlers.get('berry_context')!({
+      task: 'bounded', strategy: 'ranked', project_name: 'project:memberry', entity_scope: ['Resolver'],
+      max_tokens: 8_000, include_code: false, include_arch: true, include_memory: true,
+      include_trace: true, trace_detail: 'summary',
+    }) as { content: Array<{ text: string }> };
+
+    expect(assembler.assembleCandidateExecution).toHaveBeenCalledWith(
+      'bounded', expect.anything(), 8_000, true, true, false,
+    );
+    expect(JSON.parse(result.content[1]!.text)).toMatchObject({
+      kind: 'retrieval-trace-summary', bounded: true, replayable: false,
+    });
   });
 
   it('checks the selected served method before candidate execution', async () => {

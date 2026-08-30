@@ -46,6 +46,10 @@ import {
   recordRetrievalResolutionFailureV1,
   type RetrievalRoutingShapeV1,
 } from './resolution-observability.js';
+import {
+  buildRetrievalTraceSummaryV1,
+  serializeRetrievalTraceSummaryV1,
+} from './retrieval-trace-summary.js';
 
 // ─── Service interface (injected) ────────────────────────────────────────────
 
@@ -597,12 +601,20 @@ export function registerRetrievalTools(
       as_of: z.string().optional().describe('ISO 8601 timestamp for point-in-time queries. When set, only knowledge valid at this time is included.'),
       include_trace: z.boolean().optional().default(false)
         .describe('Include a validated canonical retrieval trace as a second text block'),
+      trace_detail: z.enum(['full', 'summary']).optional().default('full')
+        .describe('Trace detail: full is replayable and backward-compatible; summary is bounded, content-free, and non-replayable'),
       explain: z.boolean().optional().default(false)
-        .describe('Requires include_trace. Add a human-readable explanation of why this evidence was selected as a third text block'),
+        .describe('Requires include_trace with trace_detail=full. Add a human-readable explanation of why this evidence was selected as a third text block'),
     },
     { readOnlyHint: true, idempotentHint: true } satisfies ToolAnnotations,
     async (args) => {
       if (!assembler) throw new Error('Retrieval services not initialised');
+      const requestStartedAt = performance.now();
+      const summaryTraceRequested = args.include_trace === true && args.trace_detail === 'summary';
+      const fullTraceRequested = args.include_trace === true && !summaryTraceRequested;
+      if (summaryTraceRequested && args.explain === true) {
+        throw new Error('Retrieval trace summary does not support explain');
+      }
       const anchored = plannerAnchored(args);
       const projectName = candidateChannelEnabled || queryPlannerEnabled
         ? canonicalPlannerProjectScope(args.project_name)
@@ -646,22 +658,22 @@ export function registerRetrievalTools(
           : candidateShadowObserver(rerankerShadowCoordinator, receipt, execution, args.task);
         const assembled = servedCandidate && multihopExpansionEnabled
           ? await assembler.assembleCandidateExecutionServed!(
-            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
+            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, fullTraceRequested,
             servedMultihopProbe(receipt, executeOptions),
             { includeCode: args.include_code === true },
           )
           : servedCandidate
           ? await assembler.assembleCandidateExecutionServed!(
-            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
+            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, fullTraceRequested,
             undefined, { includeCode: args.include_code === true },
           )
           : shadowObserver
           ? assembler.assembleCandidateExecution(
-            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
+            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, fullTraceRequested,
             shadowObserver,
           )
           : assembler.assembleCandidateExecution(
-            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, args.include_trace === true,
+            args.task, execution, args.max_tokens, args.include_arch, args.include_memory, fullTraceRequested,
           );
         // COD-010: the UNSERVED candidate runtime composes memory/arch only — when
         // code was requested, disclose the drop instead of returning a successful-
@@ -681,6 +693,25 @@ export function registerRetrievalTools(
             : assembled.context,
         );
         if (args.include_trace !== true) return textContent(md);
+        if (summaryTraceRequested) {
+          return tracedTextContent(md, serializeRetrievalTraceSummaryV1(buildRetrievalTraceSummaryV1(
+            assembled.context,
+            {
+              strategy: assembled.context.strategy,
+              includeCode: args.include_code === true,
+              includeArchitecture: args.include_arch === true,
+              includeMemory: args.include_memory === true,
+              namedTenant: tenantId !== DEFAULT_TENANT,
+              projectScopeApplied: projectName !== undefined,
+              entityCount: args.entity_scope?.length ?? 0,
+              tagCount: args.tag_scope?.length ?? 0,
+              temporalFilterApplied: args.as_of !== undefined,
+              task: args.task,
+              maxTokens: args.max_tokens,
+            },
+            performance.now() - requestStartedAt,
+          )));
+        }
         if (!assembled.trace) throw new Error('candidate_runtime:unavailable');
         if (args.explain !== true) return tracedTextContent(md, serializeApprovedRetrievalTrace(assembled.trace));
         return tracedTextContent(
@@ -721,9 +752,28 @@ export function registerRetrievalTools(
       // Keep the historical path byte/call/allocation-identical unless the
       // caller explicitly opts in. In particular, omitted and false do not
       // allocate trace collectors or invoke trace validation.
-      if (args.include_trace !== true) {
+      if (args.include_trace !== true || summaryTraceRequested) {
         const ctx = await assembler.assemble(args.task, runtimeOptions);
         const md = assembler.renderMarkdown(ctx);
+        if (summaryTraceRequested) {
+          return tracedTextContent(md, serializeRetrievalTraceSummaryV1(buildRetrievalTraceSummaryV1(
+            ctx,
+            {
+              strategy: ctx.strategy,
+              includeCode: args.include_code === true,
+              includeArchitecture: args.include_arch === true,
+              includeMemory: args.include_memory === true,
+              namedTenant: tenantId !== DEFAULT_TENANT,
+              projectScopeApplied: projectName !== undefined,
+              entityCount: args.entity_scope?.length ?? 0,
+              tagCount: args.tag_scope?.length ?? 0,
+              temporalFilterApplied: args.as_of !== undefined,
+              task: args.task,
+              maxTokens: args.max_tokens,
+            },
+            performance.now() - requestStartedAt,
+          )));
+        }
         return textContent(md);
       }
       const traced = await assembler.assembleTraced(args.task, runtimeOptions);

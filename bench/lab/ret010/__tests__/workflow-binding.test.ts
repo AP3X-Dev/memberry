@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
 const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/ret010-holdout-qualification.yml');
+const PACKAGE_JSON = resolve(REPO_ROOT, 'package.json');
 const LOADER = resolve(REPO_ROOT, 'bench/lab/ret010/load-dev.ts');
 const REGISTRY = resolve(REPO_ROOT, 'bench/lab/registry/datasets.json');
 const DEV_POLICY = resolve(REPO_ROOT, 'bench/lab/ret010/dev-policy.json');
@@ -51,6 +52,27 @@ async function staticRelativeGraph(entry: string): Promise<Map<string, string>> 
 }
 
 describe('RET-010A qualification and binding boundary', () => {
+  it('isolates the complete RET-010 custody suite without weakening child timeouts', async () => {
+    const packageJson = JSON.parse(await readFile(PACKAGE_JSON, 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(packageJson.scripts['bench:lab:test']).toBe(
+      'vitest run bench/lab --exclude=bench/lab/ret010/** '
+      + '&& vitest run bench/lab/ret010 --fileParallelism=false',
+    );
+
+    const devGateTests = await readFile(
+      resolve(REPO_ROOT, 'bench/lab/ret010/__tests__/dev-gate.test.ts'),
+      'utf8',
+    );
+    const holdoutGateTests = await readFile(
+      resolve(REPO_ROOT, 'bench/lab/ret010/__tests__/holdout-gate.test.ts'),
+      'utf8',
+    );
+    expect(devGateTests).toContain("timeout: 3_000, killSignal: 'SIGKILL'");
+    expect(holdoutGateTests).toContain("timeout: 3_000, killSignal: 'SIGKILL'");
+  });
+
   it('keeps the qualification workflow manual-only, immutable, read-only, and pinned', async () => {
     const workflow = await readFile(WORKFLOW, 'utf8');
     expect(workflow).toMatch(/^on:\s*\n\s+workflow_dispatch:/m);

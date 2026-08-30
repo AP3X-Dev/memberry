@@ -15,6 +15,7 @@
 // the test-file contamination the roadmap named, and it is what IDX-002A and IDX-002 target.
 //
 // Usage: node bench/eval/run-outcome-probe.mjs [--project memberry] [--limit 10]
+//   [--trace-mode case|off|on|summary]
 //
 // ponytail: file-level truth only. No keyword sets, no splits, no holdout ceremony -- this is a
 // diagnostic, not a gate. It complements EVAL-001; it does not replace it.
@@ -28,6 +29,7 @@ const EVIDENCE_ID = /<!--\s+([^\s>]+)\s+-->/g
 function parseArgs(argv) {
   const args = {
     cases: 'bench/eval/outcome-cases.jsonl', project: 'memberry', limit: 10, plane: null, caseId: null, memoryOnly: false,
+    traceMode: 'case',
   }
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--cases') args.cases = argv[i + 1]
@@ -36,6 +38,10 @@ function parseArgs(argv) {
     if (argv[i] === '--plane') args.plane = argv[i + 1]
     if (argv[i] === '--case') args.caseId = argv[i + 1]
     if (argv[i] === '--memory-only') args.memoryOnly = true
+    if (argv[i] === '--trace-mode') args.traceMode = argv[i + 1]
+  }
+  if (!['case', 'off', 'on', 'summary'].includes(args.traceMode)) {
+    throw new Error(`invalid --trace-mode ${args.traceMode}; expected case, off, on, or summary`)
   }
   return args
 }
@@ -85,16 +91,25 @@ for (const c of cases) {
         ...(c.input ?? {}),
         [queryField]: c.question,
         ...(c.input?.project_name === undefined ? { project_name: args.project } : {}),
+        ...(args.traceMode === 'off' ? { include_trace: false } : {}),
+        ...(args.traceMode === 'on' ? { include_trace: true } : {}),
+        ...(args.traceMode === 'summary' ? { include_trace: true, trace_detail: 'summary' } : {}),
       }
   let res
+  const startedAt = performance.now()
   try {
     res = await client.callTool(tool, input)
   } catch (error) {
-    rows.push({ id: c.id, plane, error: String(error?.message ?? error).slice(0, 120) })
+    rows.push({
+      id: c.id, plane, latencyMs: performance.now() - startedAt,
+      error: String(error?.message ?? error).slice(0, 120),
+    })
     continue
   }
+  const latencyMs = performance.now() - startedAt
+  const responseBytes = Buffer.byteLength((res.texts ?? [res.text]).join(''), 'utf8')
   if (res.isError) {
-    rows.push({ id: c.id, plane, error: res.text.slice(0, 500) })
+    rows.push({ id: c.id, plane, latencyMs, responseBytes, error: res.text.slice(0, 500) })
     continue
   }
   let rank = -1
@@ -133,7 +148,7 @@ for (const c of cases) {
     top5 = evidenceIds.slice(0, 5)
   }
   let reranker = null
-  if (!isCode && c.input?.include_trace === true) {
+  if (!isCode && input.include_trace === true) {
     for (const block of res.texts ?? []) {
       try {
         const parsed = JSON.parse(block)
@@ -152,6 +167,8 @@ for (const c of cases) {
     plane,
     rank: rank < 0 ? null : rank + 1,
     reranker,
+    latencyMs,
+    responseBytes,
     testInTop5: isCode ? top5.filter((x) => TEST_PATH.test(String(x.file ?? ''))).length : 0,
     variableInTop5: isCode ? top5.filter((x) => x.kind === 'variable').length : 0,
     top5: isCode
@@ -165,10 +182,19 @@ const scored = rows.filter((r) => !r.error)
 const at = (k) => scored.filter((r) => r.rank !== null && r.rank <= k).length
 const mrr = scored.reduce((a, r) => a + (r.rank ? 1 / r.rank : 0), 0) / (scored.length || 1)
 const fmt = (v) => v.toFixed(4)
+const percentile = (values, p) => {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted[Math.ceil(p * sorted.length) - 1]
+}
+const latencyValues = scored.map((r) => r.latencyMs)
+const responseByteValues = scored.map((r) => r.responseBytes)
 
-console.log(`OUTCOME n=${scored.length} errors=${rows.length - scored.length} project=${args.project}`)
+console.log(`OUTCOME n=${scored.length} errors=${rows.length - scored.length} project=${args.project} traceMode=${args.traceMode}`)
 console.log(`OUTCOME adjudicationExcluded=${invalidCases.length} excludedIds=${invalidCases.map((c) => c.id).join(',') || 'none'}`)
 console.log(`OUTCOME answerAt1=${fmt(at(1) / (scored.length || 1))} answerAt5=${fmt(at(5) / (scored.length || 1))} answerAt10=${fmt(at(10) / (scored.length || 1))} mrr=${fmt(mrr)}`)
+console.log(`OUTCOME latencyMsP50=${fmt(percentile(latencyValues, 0.50))} latencyMsP95=${fmt(percentile(latencyValues, 0.95))} latencyMsMax=${fmt(Math.max(0, ...latencyValues))}`)
+console.log(`OUTCOME responseBytesP50=${fmt(percentile(responseByteValues, 0.50))} responseBytesP95=${fmt(percentile(responseByteValues, 0.95))} responseBytesMax=${fmt(Math.max(0, ...responseByteValues))}`)
 const rerankerEligible = scored.filter((r) => r.plane !== 'code' && r.reranker !== null)
 const reranked = rerankerEligible.filter((r) => r.reranker === 'reranked').length
 const baseline = rerankerEligible.filter((r) => r.reranker === 'baseline').length
@@ -188,5 +214,5 @@ for (const r of rows) {
     console.log(`OUTCOME case=${r.id} plane=${r.plane} ERROR=${r.error}`)
     continue
   }
-  console.log(`OUTCOME case=${r.id} plane=${r.plane} rank=${r.rank ?? 'MISS'} reranker=${r.reranker ?? 'missing'} varTop5=${r.variableInTop5} testTop5=${r.testInTop5} top5=${r.top5.join(' ')}`)
+  console.log(`OUTCOME case=${r.id} plane=${r.plane} rank=${r.rank ?? 'MISS'} reranker=${r.reranker ?? 'missing'} latencyMs=${fmt(r.latencyMs)} responseBytes=${r.responseBytes} varTop5=${r.variableInTop5} testTop5=${r.testInTop5} top5=${r.top5.join(' ')}`)
 }
