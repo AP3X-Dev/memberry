@@ -147,6 +147,47 @@ function preferSemanticVectorRanking(listsByChannel: Map<string, RetrievalResult
   listsByChannel.delete('memory.scope');
 }
 
+const IDENTIFIER_TOKEN_PATTERN = /[a-z0-9]+/g;
+const IDENTIFIER_LETTER_PATTERN = /[a-z]/;
+const IDENTIFIER_DIGIT_PATTERN = /[0-9]/;
+const EPISODIC_CHANNEL_BOUNDARY = 50;
+
+function identifierTokens(input: string): Set<string> {
+  const tokens = input.toLowerCase().match(IDENTIFIER_TOKEN_PATTERN) ?? [];
+  return new Set(tokens.filter((token) => token.length >= 4
+    && IDENTIFIER_LETTER_PATTERN.test(token)
+    && IDENTIFIER_DIGIT_PATTERN.test(token)));
+}
+
+function selectUncoveredEpisodicIdentifier(
+  task: string,
+  episodic: readonly RetrievalResult[],
+): RetrievalResult | undefined {
+  const queryIdentifiers = identifierTokens(task);
+  if (queryIdentifiers.size === 0 || episodic.length <= EPISODIC_CHANNEL_BOUNDARY) return undefined;
+  const covered = new Set<string>();
+  for (const candidate of episodic.slice(0, EPISODIC_CHANNEL_BOUNDARY)) {
+    for (const token of identifierTokens(`${candidate.title}\n${candidate.content}`)) {
+      if (queryIdentifiers.has(token)) covered.add(token);
+    }
+  }
+  const uncovered = new Set([...queryIdentifiers].filter((token) => !covered.has(token)));
+  if (uncovered.size === 0) return undefined;
+  let selected: RetrievalResult | undefined;
+  let selectedMatches = 0;
+  for (const candidate of episodic.slice(EPISODIC_CHANNEL_BOUNDARY)) {
+    let matches = 0;
+    for (const token of identifierTokens(`${candidate.title}\n${candidate.content}`)) {
+      if (uncovered.has(token)) matches += 1;
+    }
+    if (matches > selectedMatches) {
+      selected = candidate;
+      selectedMatches = matches;
+    }
+  }
+  return selected;
+}
+
 /** @internal RET-007 v4: default-off multihop expansion configuration (flag read at bootstrap). */
 export interface MultihopExpansionOptionsV1 {
   policy: MultihopBridgeDerivation;
@@ -318,6 +359,7 @@ export class UnifiedAssembler {
   readonly servedRerankerEnabled: boolean;
   private multihop: MultihopExpansionOptionsV1 | undefined;
   private episodicRecallV1 = false;
+  private episodicIdentifierReserveV1 = false;
 
   constructor(
     private driver: Driver,
@@ -342,6 +384,12 @@ export class UnifiedAssembler {
    * the authority-bound served lane. */
   enableEpisodicRecallV1(): void {
     this.episodicRecallV1 = true;
+  }
+
+  /** @internal RET-Q-005 experiment: preserve one tail episode only when it
+   * exactly covers a high-precision query identifier absent from the head. */
+  enableEpisodicIdentifierReserveV1(): void {
+    this.episodicIdentifierReserveV1 = true;
   }
 
   /** @internal Query vector for the receipt-bound candidate runtime. The runtime snapshots and
@@ -558,6 +606,7 @@ export class UnifiedAssembler {
     const evidenceByPrivateId = new Map<string, string>();
     const privateIdByEvidence = new Map<string, string>();
     const incompleteReasons: RetrievalTraceIncompleteReason[] = [];
+    let identifierReserve: RetrievalResult | undefined;
     for (const settlement of execution.settlements) {
       if (settlement.outcome === 'safe-failure' && settlement.code === 'budget-exceeded') {
         if (!incompleteReasons.includes('limit-overflow')) incompleteReasons.push('limit-overflow');
@@ -724,6 +773,16 @@ export class UnifiedAssembler {
         codeFailure = 'query-failed';
       }
     }
+    if (this.episodicIdentifierReserveV1) {
+      const episodic = listsByChannel.get('memory.episodic-vector');
+      identifierReserve = episodic ? selectUncoveredEpisodicIdentifier(task, episodic) : undefined;
+      if (episodic && identifierReserve) {
+        listsByChannel.set('memory.episodic-vector', [
+          identifierReserve,
+          ...episodic.filter((candidate) => candidate !== identifierReserve),
+        ]);
+      }
+    }
     preferSemanticVectorRanking(listsByChannel);
     const lists = execution.request.plannedChannels
       .map((channel) => listsByChannel.get(channel))
@@ -746,11 +805,14 @@ export class UnifiedAssembler {
     const fused = rrfFusion(lists, 50, 60, undefined, undefined, undefined, traceAdapter);
     const deduped = dedup(fused);
     traceAdapter?.recordDedup(fused.map((result) => result.id), deduped.map((result) => result.id));
-    const outcome = await this.applyServedReranker(task, deduped, this.episodicRecallV1);
+    const outcome = await this.applyServedReranker(
+      task, deduped, this.episodicRecallV1, identifierReserve,
+    );
     traceAdapter?.recordReranker(deduped, outcome);
     const privateSections = groupAndBudget(outcome.results, maxTokens, {
       preserveUnclassifiedEpisodicTopFive:
         this.episodicRecallV1 && outcome.outcome === 'reranked',
+      ...(identifierReserve ? { preserveResultId: identifierReserve.id } : {}),
     });
     traceAdapter?.recordBudget(privateSections.flatMap((section) => section.items.map((item) => item.id)));
     const sections: ContextSection[] = privateSections.map((section) => ({
@@ -1067,10 +1129,12 @@ export class UnifiedAssembler {
     task: string,
     results: readonly RetrievalResult[],
     preserveBaselineEpisodicHead = false,
+    preserveBaselineResult?: RetrievalResult,
   ): Promise<ServedRerankerApplicationResultV1> {
     if (this.servedReranker === null) throw new Error('served_reranker:unavailable');
     return applyServedRerankerV1(task, results, this.servedReranker, {
       preserveBaselineEpisodicHead,
+      ...(preserveBaselineResult ? { preserveBaselineResult } : {}),
     });
   }
 
@@ -2437,7 +2501,7 @@ function renderCodePlaneSegment(status: CodePlaneStatusV1): string {
 function groupAndBudget(
   results: readonly RetrievalResult[],
   maxTokens: number,
-  options: { preserveUnclassifiedEpisodicTopFive?: boolean } = {},
+  options: { preserveUnclassifiedEpisodicTopFive?: boolean; preserveResultId?: string } = {},
 ): ContextSection[] {
   const headingMap: Record<string, string> = {
     arch_entity: 'Architecture',
@@ -2487,6 +2551,17 @@ function groupAndBudget(
   const reservedSources = new Set<string>();
   const reserved = new Set<RetrievalResult>();
   let reservedTokens = 0;
+  if (options.preserveResultId !== undefined) {
+    const exact = results.find((result) => result.id === options.preserveResultId);
+    if (exact !== undefined) {
+      const cost = itemTokens(exact);
+      if (cost <= maxTokens) {
+        reserved.add(exact);
+        reservedSources.add(exact.source_type);
+        reservedTokens += cost;
+      }
+    }
+  }
   // RET-Q-004: legacy unclassified episodes use the literal fallback title
   // `Episodic`. Keep an exact reranked rank-five episode when it fits; the
   // previous density optimizer could discard that boundary answer. Other
@@ -2494,6 +2569,7 @@ function groupAndBudget(
   if (options.preserveUnclassifiedEpisodicTopFive === true) {
     for (const result of results.slice(4, 5).filter((candidate) =>
       candidate.source_type === 'episodic' && candidate.title === 'Episodic')) {
+      if (reserved.has(result)) continue;
       const cost = itemTokens(result);
       if (reservedTokens + cost > maxTokens) continue;
       reserved.add(result);

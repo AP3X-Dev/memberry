@@ -93,6 +93,9 @@ services:
       # RET-Q-004: guard catastrophic architecture-episode demotion and exact
       # unclassified episodic top-five budget attrition. Unset = inert.
       MEMBERRY_EPISODIC_RECALL_V1: "${MEMBERRY_EPISODIC_RECALL_V1:-}"
+      # RET-Q-005 experiment: preserve one tail candidate only for an exact
+      # query identifier absent from the episodic channel head. Unset = inert.
+      MEMBERRY_EPISODIC_IDENTIFIER_RESERVE_V1: "${MEMBERRY_EPISODIC_IDENTIFIER_RESERVE_V1:-}"
       # Default-off MEM-001 observation only; no admission/routing behavior.
       MEMBERRY_ADMISSION_SHADOW_ENABLED: ${MEMBERRY_ADMISSION_SHADOW_ENABLED:-false}
       MEMBERRY_ADMISSION_SHADOW_TIMEOUT_MS: ${MEMBERRY_ADMISSION_SHADOW_TIMEOUT_MS:-50}

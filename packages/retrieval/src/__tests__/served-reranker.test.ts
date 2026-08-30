@@ -147,6 +147,29 @@ describe('RET-010B frozen served reranker', () => {
     expect(ids(guarded).indexOf('episode-head')).toBe(5);
   });
 
+  it('RET-Q-005 preserves only the exact selected baseline result at reranked rank five', async () => {
+    const reserved = { ...result('identifier-reserve', 0.1, 'decision'), source_type: 'episodic' as const };
+    const baseline = [
+      ...Array.from({ length: 7 }, (_, index) => result(`ordinary-${index}`, 1 - index * 0.1, 'ordinary')),
+      reserved,
+    ];
+    const provider = exactProvider([1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.1]);
+
+    const ordinary = await applyServedRerankerV1('match', baseline, provider);
+    const guarded = await applyServedRerankerV1('match', baseline, provider, {
+      preserveBaselineResult: reserved,
+    });
+    const unrelated = await applyServedRerankerV1('match', baseline, provider, {
+      preserveBaselineResult: result('not-in-baseline', 1, 'decision'),
+    });
+
+    expect(ids(ordinary).indexOf('identifier-reserve')).toBe(7);
+    expect(ids(guarded).indexOf('identifier-reserve')).toBe(4);
+    expect(ids(unrelated)).toEqual(ids(ordinary));
+    if (guarded.outcome !== 'reranked') throw new Error('expected reranked outcome');
+    expect(guarded.candidates.map((candidate) => candidate.result.id)).toEqual(ids(guarded));
+  });
+
   it('reranks mixed batches containing a MemoryBlock instead of falling back wholesale', async () => {
     const baseline = [
       result('semantic-distractor', 1, 'unrelated roadmap'),

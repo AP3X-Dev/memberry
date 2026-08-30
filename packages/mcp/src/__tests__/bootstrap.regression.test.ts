@@ -108,6 +108,16 @@ describe('bootstrap.ts regression', () => {
     expect(COMPOSE_SOURCE.split(exactEntry)).toHaveLength(2);
     expect(wikiService).not.toContain('MEMBERRY_EPISODIC_RECALL_V1');
   });
+  it('RET-Q-005 keeps episodic identifier reserve exact-value default-off and MCP-only', () => {
+    expect(BOOTSTRAP_SOURCE).toContain("const episodicIdentifierReserveEnabled = process.env['MEMBERRY_EPISODIC_IDENTIFIER_RESERVE_V1'] === '1'");
+    expect(BOOTSTRAP_SOURCE).toContain('if (episodicIdentifierReserveEnabled) unifiedAssembler.enableEpisodicIdentifierReserveV1()');
+    const mcpService = COMPOSE_SOURCE.split('\n  mcp:')[1]?.split('\n  wiki:')[0];
+    const wikiService = COMPOSE_SOURCE.split('\n  wiki:')[1]?.split('\nvolumes:')[0];
+    const exactEntry = 'MEMBERRY_EPISODIC_IDENTIFIER_RESERVE_V1: "${MEMBERRY_EPISODIC_IDENTIFIER_RESERVE_V1:-}"';
+    expect(mcpService).toContain(exactEntry);
+    expect(COMPOSE_SOURCE.split(exactEntry)).toHaveLength(2);
+    expect(wikiService).not.toContain('MEMBERRY_EPISODIC_IDENTIFIER_RESERVE_V1');
+  });
   it('RET-010D requires both authority switches for shadow and served before core effects', () => {
     expect(BOOTSTRAP_SOURCE).toContain("const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1'");
     expect(BOOTSTRAP_SOURCE).toContain("const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1'");

@@ -757,6 +757,76 @@ describe('RET-003B runtime candidate channel service', () => {
       .toEqual(ordinaryIds);
   });
 
+  it('RET-Q-005 preserves one exact uncovered identifier through fusion, hostile reranking, and tight packing', async () => {
+    const rows = validRows();
+    rows.scope = [];
+    rows.fact = [];
+    rows.block = [];
+    rows.episodicVector = Array.from({ length: 64 }, (_, index) => {
+      const target = index === 52;
+      return record(
+        ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+        [
+          'tenant-a', project, entityId, target ? 'episode-target' : `episode-distractor-${index + 1}`,
+          'decision',
+          target
+            ? `Approved RET-001A2 deterministic trace amendment closure ${'t'.repeat(160)}`
+            : `routine unrelated maintenance record ${index + 1}`,
+          0.99 - index * 0.001,
+        ],
+      );
+    });
+    const queryVector = new Array(EMBEDDING_DIM).fill(0);
+    queryVector[0] = 1;
+    const execution = await new RuntimeCandidateChannelService(driver(rows).driver).execute(
+      await authorityReceipt(), { includeArchitecture: false, includeMemory: true, queryVector },
+    );
+    expect(execution.candidates.find((candidate) => candidate.evidenceId === 'episode-target'))
+      .toMatchObject({ channel: 'memory.episodic-vector', rank: 53 });
+
+    const requests: ReturnType<typeof parseSerializedRerankerProviderRequestV1>[] = [];
+    const provider = createRerankerProviderV1(
+      SERVED_RERANKER_PROVIDER_IDENTITY,
+      async (serialized) => {
+        const request = parseSerializedRerankerProviderRequestV1(serialized);
+        requests.push(request);
+        return serializeRerankerProviderResponseV1(
+          request,
+          SERVED_RERANKER_PROVIDER_IDENTITY,
+          request.candidates.map((candidate, index) => candidate.content.includes('RET-001A2')
+            ? 0
+            : Number((1 - index * 0.001).toFixed(6))),
+        );
+      },
+    ) as ServedRerankerConstructionV1;
+    const ordinaryAssembler = candidateAssembler(provider);
+    ordinaryAssembler.enableEpisodicRecallV1();
+    const guardedAssembler = candidateAssembler(provider);
+    guardedAssembler.enableEpisodicRecallV1();
+    guardedAssembler.enableEpisodicIdentifierReserveV1();
+    const task = 'Implement approved RET-001A2 deterministic-v2 retrieval trace amendment';
+
+    const ordinary = await ordinaryAssembler.assembleCandidateExecutionServed(
+      task, execution, 70, false, true, true,
+    );
+    const synchronous = guardedAssembler.assembleCandidateExecution(
+      task, execution, 70, false, true, true,
+    );
+    const guarded = await guardedAssembler.assembleCandidateExecutionServed(
+      task, execution, 70, false, true, true,
+    );
+    const ids = (result: typeof ordinary | typeof synchronous) => result.context.sections
+      .flatMap((section) => section.items.map((item) => item.id));
+
+    expect(ids(ordinary)).not.toContain('episode-target');
+    expect(ids(synchronous)).not.toContain('episode-target');
+    expect(ids(guarded).indexOf('episode-target')).toBeGreaterThanOrEqual(0);
+    expect(ids(guarded).indexOf('episode-target')).toBeLessThan(5);
+    expect(guarded.context.token_count).toBeLessThanOrEqual(70);
+    expect(requests.map((request) => request.candidates.length)).toEqual([50, 50]);
+    expect(replayRetrievalTrace(guarded.trace!).resultOrder).toEqual(guarded.trace!.resultOrder);
+  }, 60_000);
+
   it('keeps parallel served candidate executions receipt-local', async () => {
     const firstRows = validRows();
     const secondRows = validRows();

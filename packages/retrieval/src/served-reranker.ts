@@ -450,7 +450,10 @@ export async function applyServedRerankerV1(
   query: string,
   results: readonly RetrievalResult[],
   provider: RerankerProviderV1,
-  options: { preserveBaselineEpisodicHead?: boolean } = {},
+  options: {
+    preserveBaselineEpisodicHead?: boolean;
+    preserveBaselineResult?: RetrievalResult;
+  } = {},
 ): Promise<ServedRerankerApplicationResultV1> {
   let snapshots: readonly SafeResult[];
   try {
@@ -536,6 +539,26 @@ export async function applyServedRerankerV1(
         }
         defineArrayItem(ownedResults, 0, pinnedResult);
         defineArrayItem(applications, 0, pinnedApplication);
+      }
+    }
+    if (options.preserveBaselineResult !== undefined) {
+      let reservedRank = -1;
+      for (let index = 0; index < applications.length; index += 1) {
+        if (applications[index]!.baselineResult === options.preserveBaselineResult) {
+          reservedRank = index;
+          break;
+        }
+      }
+      if (reservedRank >= 5) {
+        const preserveAt = 4;
+        const reservedResult = ownedResults[reservedRank]!;
+        const reservedApplication = applications[reservedRank]!;
+        for (let index = reservedRank; index > preserveAt; index -= 1) {
+          defineArrayItem(ownedResults, index, ownedResults[index - 1]!);
+          defineArrayItem(applications, index, applications[index - 1]!);
+        }
+        defineArrayItem(ownedResults, preserveAt, reservedResult);
+        defineArrayItem(applications, preserveAt, reservedApplication);
       }
     }
     return nullRecord({

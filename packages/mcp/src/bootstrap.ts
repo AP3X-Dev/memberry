@@ -193,6 +193,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   // RET-007 v4: default-off second retrieval pass over the memory channel.
   const multihopExpansionEnabled = process.env['MEMBERRY_MULTIHOP_EXPANSION_V1'] === '1';
   const episodicRecallEnabled = process.env['MEMBERRY_EPISODIC_RECALL_V1'] === '1';
+  const episodicIdentifierReserveEnabled = process.env['MEMBERRY_EPISODIC_IDENTIFIER_RESERVE_V1'] === '1';
   const rerankerMode = resolveBootstrapRerankerModeV1(process.env['MEMBERRY_RERANKER_V1']);
   if (rerankerMode === 'shadow' && (!queryPlannerEnabled || !candidateChannelEnabled)) {
     throw new Error('reranker_shadow:prerequisite_unavailable');
@@ -601,6 +602,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     unifiedAssembler.enableMultihopExpansionV1({ policy: 'evidence-bridge', clock: () => Date.now() });
   }
   if (episodicRecallEnabled) unifiedAssembler.enableEpisodicRecallV1();
+  if (episodicIdentifierReserveEnabled) unifiedAssembler.enableEpisodicIdentifierReserveV1();
   const feedbackTrackerService = new FeedbackTracker(feedbackRedis);
   const dedicatedTenantCandidateDrivers = new Map<string, typeof driver>();
 
