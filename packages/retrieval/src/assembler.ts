@@ -805,9 +805,7 @@ export class UnifiedAssembler {
     const fused = rrfFusion(lists, 50, 60, undefined, undefined, undefined, traceAdapter);
     const deduped = dedup(fused);
     traceAdapter?.recordDedup(fused.map((result) => result.id), deduped.map((result) => result.id));
-    const outcome = await this.applyServedReranker(
-      task, deduped, this.episodicRecallV1, identifierReserve,
-    );
+    const outcome = await this.applyServedReranker(task, deduped, this.episodicRecallV1);
     traceAdapter?.recordReranker(deduped, outcome);
     const privateSections = groupAndBudget(outcome.results, maxTokens, {
       preserveUnclassifiedEpisodicTopFive:
@@ -1129,12 +1127,10 @@ export class UnifiedAssembler {
     task: string,
     results: readonly RetrievalResult[],
     preserveBaselineEpisodicHead = false,
-    preserveBaselineResult?: RetrievalResult,
   ): Promise<ServedRerankerApplicationResultV1> {
     if (this.servedReranker === null) throw new Error('served_reranker:unavailable');
     return applyServedRerankerV1(task, results, this.servedReranker, {
       preserveBaselineEpisodicHead,
-      ...(preserveBaselineResult ? { preserveBaselineResult } : {}),
     });
   }
 
@@ -2551,6 +2547,7 @@ function groupAndBudget(
   const reservedSources = new Set<string>();
   const reserved = new Set<RetrievalResult>();
   let reservedTokens = 0;
+  let exactReserved: RetrievalResult | undefined;
   if (options.preserveResultId !== undefined) {
     const exact = results.find((result) => result.id === options.preserveResultId);
     if (exact !== undefined) {
@@ -2559,6 +2556,7 @@ function groupAndBudget(
         reserved.add(exact);
         reservedSources.add(exact.source_type);
         reservedTokens += cost;
+        exactReserved = exact;
       }
     }
   }
@@ -2601,6 +2599,15 @@ function groupAndBudget(
   const selected = new Set(reserved);
   const fill = best !== undefined && best.score > bestOfPacks.score ? new Set([best]) : bestOfPacks.set;
   for (const result of fill) selected.add(result);
+  if (exactReserved !== undefined) {
+    let deliveredBeforeReserve = 0;
+    for (const result of results) {
+      if (result === exactReserved) break;
+      if (!selected.has(result)) continue;
+      deliveredBeforeReserve += 1;
+      if (deliveredBeforeReserve > 4) selected.delete(result);
+    }
+  }
 
   const toContextItem = (result: RetrievalResult): ContextItem => ({
     id: result.id,
