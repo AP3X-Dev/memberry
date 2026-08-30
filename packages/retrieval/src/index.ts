@@ -274,6 +274,19 @@ export type {
   RetrievalExplanationReplayReceiptV1,
 } from './retrieval-explanation-view.js';
 
+// Bounded, content-free operator diagnostic for ordinary retrieval (RET-Q-003)
+export {
+  RETRIEVAL_TRACE_SUMMARY_VERSION,
+  RETRIEVAL_TRACE_SUMMARY_MAX_BYTES,
+  RETRIEVAL_TRACE_SUMMARY_MAX_RESULTS,
+  buildRetrievalTraceSummaryV1,
+  serializeRetrievalTraceSummaryV1,
+} from './retrieval-trace-summary.js';
+export type {
+  RetrievalTraceSummaryRequestV1,
+  RetrievalTraceSummaryV1,
+} from './retrieval-trace-summary.js';
+
 // MCP tools
 export { registerRetrievalTools, setRetrievalServiceInstances, createRetrievalContainer, retrievalContainerForTenant, RETRIEVAL_TOOL_NAMES } from './tools.js';
 export {
