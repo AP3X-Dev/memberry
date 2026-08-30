@@ -297,26 +297,58 @@ ORDER BY ordinal`;
 
 /*
  * Detected text is candidate material only. The query starts from authorized
- * project roots and never falls back to a global result. A canonical ID remains
- * only a hint here: it must resolve through the same authorized project path as
- * names and aliases. Collisions are returned to the caller and become an
- * explicit ambiguous resolution, never a LIMIT 1 guess.
+ * project roots and never falls back to a global result. Exact IDs and names
+ * use their indexes before the contained-path proof; the path-first scan remains
+ * only as the case-insensitive/alias fallback. A canonical ID remains only a
+ * hint here: it must resolve through the same authorized project path as names
+ * and aliases. Collisions are returned to the caller and become an explicit
+ * ambiguous resolution, never a LIMIT 1 guess.
  */
 const HINT_ENTITY_QUERY = `
 CALL {
   UNWIND $entityHints AS hint
-  MATCH candidatePath = (candidateRoot:Entity {type: 'project'})-[:CONTAINS*0..${SCOPED_ENTITY_RESOLVER_MAX_CONTAINMENT_DEPTH}]->(candidate:Entity)
-  WHERE candidateRoot.id IN $authorizedProjectIds
-    AND (candidateRoot.tenant_id = $tenantId
-      OR (candidateRoot.tenant_id IS NULL AND $tenantId = $defaultTenant))
-    AND all(scopedNode IN nodes(candidatePath) WHERE
-      (scopedNode.tenant_id IS NULL OR scopedNode.tenant_id = $tenantId)
-      AND (scopedNode.type <> 'project' OR scopedNode.id IN $authorizedProjectIds))
+  CALL {
+    WITH hint
+    OPTIONAL MATCH idCandidatePath = (idRoot:Entity {type: 'project'})-[:CONTAINS*0..${SCOPED_ENTITY_RESOLVER_MAX_CONTAINMENT_DEPTH}]->(idCandidate:Entity {id: hint})
+    WHERE idRoot.id IN $authorizedProjectIds
+      AND (idRoot.tenant_id = $tenantId
+        OR (idRoot.tenant_id IS NULL AND $tenantId = $defaultTenant))
+      AND all(scopedNode IN nodes(idCandidatePath) WHERE
+        (scopedNode.tenant_id IS NULL OR scopedNode.tenant_id = $tenantId)
+        AND (scopedNode.type <> 'project' OR scopedNode.id IN $authorizedProjectIds))
+    RETURN idCandidate AS candidate
+    UNION
+    WITH hint
+    OPTIONAL MATCH nameCandidatePath = (nameRoot:Entity {type: 'project'})-[:CONTAINS*0..${SCOPED_ENTITY_RESOLVER_MAX_CONTAINMENT_DEPTH}]->(nameCandidate:Entity {name: hint})
+    WHERE nameRoot.id IN $authorizedProjectIds
+      AND (nameRoot.tenant_id = $tenantId
+        OR (nameRoot.tenant_id IS NULL AND $tenantId = $defaultTenant))
+      AND all(scopedNode IN nodes(nameCandidatePath) WHERE
+        (scopedNode.tenant_id IS NULL OR scopedNode.tenant_id = $tenantId)
+        AND (scopedNode.type <> 'project' OR scopedNode.id IN $authorizedProjectIds))
+    RETURN nameCandidate AS candidate
+  }
+  WITH hint, [candidate IN collect(DISTINCT candidate) WHERE candidate IS NOT NULL] AS exactCandidates
+  CALL {
+    WITH hint, exactCandidates
+    UNWIND exactCandidates AS candidate
+    RETURN candidate
+    UNION
+    WITH hint, exactCandidates
+    WITH hint WHERE size(exactCandidates) = 0
+    MATCH candidatePath = (candidateRoot:Entity {type: 'project'})-[:CONTAINS*0..${SCOPED_ENTITY_RESOLVER_MAX_CONTAINMENT_DEPTH}]->(candidate:Entity)
+    WHERE candidateRoot.id IN $authorizedProjectIds
+      AND (candidateRoot.tenant_id = $tenantId
+        OR (candidateRoot.tenant_id IS NULL AND $tenantId = $defaultTenant))
+      AND all(scopedNode IN nodes(candidatePath) WHERE
+        (scopedNode.tenant_id IS NULL OR scopedNode.tenant_id = $tenantId)
+        AND (scopedNode.type <> 'project' OR scopedNode.id IN $authorizedProjectIds))
+      AND (toLower(candidate.name) = toLower(hint)
+        OR any(alias IN coalesce(candidate.aliases, []) WHERE toLower(alias) = toLower(hint)))
+    RETURN candidate
+  }
   WITH DISTINCT hint, candidate
-  WHERE (candidate.id = hint
-     OR toLower(candidate.name) = toLower(hint)
-     OR any(alias IN coalesce(candidate.aliases, []) WHERE toLower(alias) = toLower(hint)))
-    AND (size($explicitEntityIds) = 0 OR candidate.id IN $explicitEntityIds)
+  WHERE size($explicitEntityIds) = 0 OR candidate.id IN $explicitEntityIds
   LIMIT $resultCapPlusOne
   RETURN hint, candidate
 }
