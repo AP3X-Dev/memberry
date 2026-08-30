@@ -20,6 +20,11 @@ import {
   readRuntimeQueryPlannerAuthorityV1,
   type RuntimeQueryPlannerResolvedReceiptV1,
 } from './runtime-query-planner.js';
+import {
+  applyServedRerankerV1,
+  createServedRerankerProviderV1,
+} from './served-reranker.js';
+import type { RetrievalResult } from './types.js';
 
 const OWN_KEYS = Reflect.ownKeys;
 const GET_DESCRIPTOR = Object.getOwnPropertyDescriptor;
@@ -64,6 +69,7 @@ export interface RuntimeCandidateDriver {
 export interface RuntimeCandidateExecuteOptions {
   readonly includeArchitecture: boolean;
   readonly includeMemory: boolean;
+  readonly queryText?: string;
   readonly queryVector?: readonly number[];
 }
 
@@ -377,6 +383,30 @@ function parseFacts(input: unknown, state: ReceiptState): readonly CandidateChan
   return FREEZE(candidates);
 }
 
+async function rerankAuthorizedFacts(
+  queryText: string | undefined,
+  candidates: readonly CandidateChannelCandidateV1[],
+): Promise<readonly CandidateChannelCandidateV1[]> {
+  if (queryText === undefined || queryText.length === 0 || candidates.length < 2) return candidates;
+  if (queryText.length > 5_000) throw new SourceFailure('invalid-result');
+  const byId = new Map(candidates.map((candidate) => [candidate.evidenceId, candidate]));
+  const results: RetrievalResult[] = candidates.map((candidate) => ({
+    id: candidate.evidenceId,
+    source_type: 'fact',
+    title: candidate.title,
+    content: candidate.content,
+    score: candidate.score,
+    metadata: {},
+  }));
+  const outcome = await applyServedRerankerV1(queryText, results, createServedRerankerProviderV1());
+  if (outcome.outcome !== 'reranked') return candidates;
+  return FREEZE(outcome.results.map((result, index) => {
+    const candidate = byId.get(result.id);
+    if (!candidate) throw new SourceFailure('invalid-result');
+    return FREEZE({ ...candidate, rank: index + 1, score: result.score });
+  }));
+}
+
 function failure(channel: RetrievalTraceChannel, code: 'unavailable' | 'timeout' | 'query-failed'): CandidateChannelRunnerResultV1 {
   return Object.freeze({
     contractId: CANDIDATE_CHANNEL_CONTRACT_ID,
@@ -468,7 +498,7 @@ export class RuntimeCandidateChannelService {
                 : { time_mode: 'historical' as const, as_of: state.asOf };
               const rawFacts = await new FactStore(this.driver as unknown as Driver)
                 .getActiveByEntityIdsBatch([state.resolvedEntityId], temporal, state.tenantId);
-              candidates = parseFacts(rawFacts, state);
+              candidates = await rerankAuthorizedFacts(options.queryText, parseFacts(rawFacts, state));
             } else {
               session = this.driver.session({ defaultAccessMode: 'READ' });
               tx = session.beginTransaction({ timeout: QUERY_TIMEOUT_MS });

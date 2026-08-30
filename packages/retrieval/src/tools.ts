@@ -637,6 +637,7 @@ export function registerRetrievalTools(
         const executeOptions: RuntimeCandidateExecuteOptions = {
           includeArchitecture: args.include_arch,
           includeMemory: args.include_memory,
+          queryText: args.task,
           ...(queryVector !== undefined ? { queryVector } : {}),
         };
         const execution = await candidateRuntime.execute(receipt, executeOptions);
@@ -785,6 +786,7 @@ export function registerRetrievalTools(
         const executeOptions: RuntimeCandidateExecuteOptions = {
           includeArchitecture: true,
           includeMemory: true,
+          queryText: args.question,
           ...(queryVector !== undefined ? { queryVector } : {}),
         };
         const execution = await candidateRuntime.execute(receipt, executeOptions);

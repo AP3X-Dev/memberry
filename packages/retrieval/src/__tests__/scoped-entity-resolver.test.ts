@@ -225,6 +225,7 @@ describe('ScopedEntityResolver', () => {
       expect(query).not.toMatch(/\bLIMIT\s+1\b/i);
     }
     expect(calls[0]![0]).toContain('toLower(project.name) = substring(projectScope, 8)');
+    expect(calls[2]![0]).toContain('candidate.id = hint');
     expect(calls[0]![0]).not.toMatch(/owned:(?:Semantic|Episodic|Fact)/);
     expect(calls[0]![0]).toContain('MATCH (tenantProject:Entity {tenant_id: $tenantId})');
     expect(calls[0]![0]).toContain('$tenantId = $defaultTenant');
