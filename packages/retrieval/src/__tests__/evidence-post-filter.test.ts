@@ -436,6 +436,24 @@ describe('applyEvidencePostFilterV1', () => {
     }
   });
 
+  it('accepts persisted Nano IDs without widening authority identifiers', () => {
+    const accepted = applyEvidencePostFilterV1({
+      request: request({
+        plannedChannels: ['memory.episodic-vector', 'memory.block'],
+      }),
+      candidates: [
+        candidate('episode', { sourceType: 'episodic', evidenceId: '_episode' }),
+        candidate('block', { sourceType: 'block', evidenceId: '-block' }),
+      ],
+    });
+
+    expect(accepted.included.map((entry) => entry.value)).toEqual(['episode', 'block']);
+    expectFailure(() => applyEvidencePostFilterV1({
+      request: request(),
+      candidates: [candidate('unsafe', { evidenceId: '.not-an-id' })],
+    }), 'invalid-receipt');
+  });
+
   it('supports 512 candidates and rejects 513 before processing candidates', () => {
     const values = Array.from({ length: EVIDENCE_POST_FILTER_MAX_CANDIDATES }, (_, index) => ({ index }));
     const candidates = values.map((value, index) => candidate(value, { evidenceId: `e-${index}` }));

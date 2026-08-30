@@ -86,7 +86,9 @@ const MAX_LITERAL_BYTES = 64;
 const SAFE_TENANT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CANONICAL_PROJECT_SCOPE = /^project:[a-z0-9][a-z0-9._-]*$/;
 const SAFE_ENTITY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
-const SAFE_EVIDENCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/+~-]*$/;
+// Evidence includes persisted Nano IDs, whose URL alphabet permits a leading
+// "_" or "-". Tenant, project, and entity authorities remain unchanged.
+const SAFE_EVIDENCE_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:@/+~-]*$/;
 
 export type EvidencePostFilterSourceTypeV1 =
   | 'semantic'

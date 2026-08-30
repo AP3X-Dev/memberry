@@ -870,6 +870,22 @@ describe('RET-003A candidate channel contract', () => {
     }
   });
 
+  it('accepts persisted Nano IDs that begin with underscore or hyphen', async () => {
+    const plannedChannels = ['memory.episodic-vector', 'memory.block'] as const;
+    const result = await executeCandidateChannelsV1(
+      request({ plannedChannels }),
+      roster([
+        ['memory.episodic-vector', () => success('memory.episodic-vector', [
+          candidate('memory.episodic-vector', '_episode', 1),
+        ])],
+        ['memory.block', () => success('memory.block', [candidate('memory.block', '-block', 1)])],
+      ]),
+    );
+
+    expect(result.candidates.map((item) => item.evidenceId)).toEqual(['_episode', '-block']);
+    expect(result.settlements.every((settlement) => settlement.outcome === 'success')).toBe(true);
+  });
+
   it('enforces the closed channel source mapping and evidence/provenance identity', async () => {
     const valid = await executeCandidateChannelsV1(
       request({ plannedChannels: [...CHANNELS].reverse() }),
