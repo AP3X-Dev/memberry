@@ -80,7 +80,7 @@ function validRows(): Record<string, Neo4jRecord[]> {
     )],
     block: [record(
       ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
-      ['tenant-a', project, entityId, 'project:memberry/project_state', 'project_state', 'Project inventory', 0.5],
+      ['tenant-a', project, entityId, '-project-state', 'project_state', 'Project inventory', 0.5],
     )],
     arch: [record(
       ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
@@ -121,7 +121,7 @@ describe('RET-003B runtime candidate channel service', () => {
     expect(result.settlements.filter((item) => item.outcome === 'success').map((item) => item.channel))
       .toEqual(['memory.scope', 'memory.fact', 'memory.block', 'arch.entity']);
     expect(result.candidates.map((item) => item.evidenceId))
-      .toEqual(['semantic-1', 'fact-1', 'project:memberry/project_state', entityId]);
+      .toEqual(['semantic-1', 'fact-1', '-project-state', entityId]);
     expect(mock.calls).toHaveLength(4);
     for (const [query, params] of mock.calls) {
       if (query.includes('UNWIND $ids AS eid')) expect(params).toMatchObject({ tenantId: 'tenant-a', ids: [entityId] });
@@ -141,7 +141,7 @@ describe('RET-003B runtime candidate channel service', () => {
     )];
     rows.episodicVector = [record(
       ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
-      ['tenant-a', project, entityId, 'episode-needle', 'decision', 'episodic needle decision', 0.91],
+      ['tenant-a', project, entityId, '_episode-needle', 'decision', 'episodic needle decision', 0.91],
     )];
     const mock = driver(rows);
     const queryVector = new Array(EMBEDDING_DIM).fill(0);
@@ -172,7 +172,7 @@ describe('RET-003B runtime candidate channel service', () => {
     const served = await candidateAssembler(createServedRerankerProviderV1())
       .assembleCandidateExecutionServed('episodic needle decision', execution, 8_000, false, true, true);
     const ids = served.context.sections.flatMap((section) => section.items).map((item) => item.id);
-    expect(ids[0]).toBe('episode-needle');
+    expect(ids[0]).toBe('_episode-needle');
     expect(ids.filter((id) => id === 'semantic-1')).toHaveLength(1);
     expect(served.trace!.events).toContainEqual(expect.objectContaining({
       kind: 'reranker-stage', outcome: 'reranked',
@@ -218,7 +218,7 @@ describe('RET-003B runtime candidate channel service', () => {
       .toMatchObject({ outcome: 'safe-failure', code: 'query-failed' });
     expect(JSON.stringify(result)).not.toContain('foreign-secret');
     expect(result.candidates.map((item) => item.evidenceId))
-      .toEqual(['fact-1', 'project:memberry/project_state', entityId]);
+      .toEqual(['fact-1', '-project-state', entityId]);
   });
 
   it('binds current and as-of temporal authority into every source query', async () => {
@@ -338,7 +338,7 @@ describe('RET-003B runtime candidate channel service', () => {
     const result = await service.execute(receipt, { includeArchitecture: true, includeMemory: true });
     expect(hooks).not.toHaveBeenCalled();
     expect(result.candidates.map((item) => item.evidenceId))
-      .toEqual(['project:memberry/project_state', entityId]);
+      .toEqual(['-project-state', entityId]);
     expect(result.settlements.filter((item) => item.outcome === 'safe-failure' && item.code === 'query-failed'))
       .toHaveLength(1);
     expect(result.settlements).toContainEqual(expect.objectContaining({

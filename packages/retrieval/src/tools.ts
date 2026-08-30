@@ -361,6 +361,19 @@ function plannerAnchored(args: { entity_scope?: unknown }): boolean {
   return scope !== undefined && !(Array.isArray(scope) && scope.length === 0);
 }
 
+/**
+ * Public tools have always described this field as a project name, and real
+ * agent calls commonly send `memberry`. The sealed planner deliberately accepts
+ * only canonical authority scopes, so adapt the safe lowercase bare-name form
+ * at this boundary without weakening the planner contract or case-folding an
+ * ambiguous caller value.
+ */
+function canonicalPlannerProjectScope(projectName: unknown): unknown {
+  return typeof projectName === 'string' && /^[a-z0-9][a-z0-9._-]*$/.test(projectName)
+    ? `project:${projectName}`
+    : projectName;
+}
+
 function retrievalRoutingShape(
   anchored: boolean,
   resolverEnabled: boolean,
@@ -591,6 +604,9 @@ export function registerRetrievalTools(
     async (args) => {
       if (!assembler) throw new Error('Retrieval services not initialised');
       const anchored = plannerAnchored(args);
+      const projectName = candidateChannelEnabled || queryPlannerEnabled
+        ? canonicalPlannerProjectScope(args.project_name)
+        : args.project_name;
       recordRetrievalCallV1(
         'berry_context',
         retrievalRoutingShape(anchored, candidateChannelEnabled || queryPlannerEnabled),
@@ -613,7 +629,7 @@ export function registerRetrievalTools(
           plannerEnabled: queryPlannerEnabled,
           resolverFactory,
           tenantId,
-          projectName: args.project_name,
+          projectName,
           entityScope: args.entity_scope,
           ...(args.as_of !== undefined ? { asOf: args.as_of } : {}),
         }));
@@ -686,7 +702,7 @@ export function registerRetrievalTools(
         max_tokens: args.max_tokens,
         entity_scope: args.entity_scope,
         tag_scope: args.tag_scope,
-        project_name: args.project_name,
+        project_name: projectName as string | undefined,
         as_of: args.as_of,
         tenantId,
         ...(forcedRanked ? { servedRerankerDisabled: true as const } : {}),
@@ -695,7 +711,7 @@ export function registerRetrievalTools(
       // takes with the planner flag off. Only anchored requests pay for resolution.
       const resolvedEntityIds = queryPlannerEnabled && anchored
         ? await observeRetrievalResolutionV1(() => resolveRuntimeEntityIds(
-          authenticated, resolverFactory, tenantId, args.project_name, args.entity_scope, args.as_of,
+          authenticated, resolverFactory, tenantId, projectName, args.entity_scope, args.as_of,
         ))
         : undefined;
       const runtimeOptions = resolvedEntityIds === undefined
@@ -738,6 +754,9 @@ export function registerRetrievalTools(
     async (args) => {
       if (!assembler) throw new Error('Retrieval services not initialised');
       const anchored = plannerAnchored(args);
+      const projectName = candidateChannelEnabled || queryPlannerEnabled
+        ? canonicalPlannerProjectScope(args.project_name)
+        : args.project_name;
       recordRetrievalCallV1(
         'berry_ask',
         retrievalRoutingShape(anchored, candidateChannelEnabled || queryPlannerEnabled),
@@ -758,7 +777,7 @@ export function registerRetrievalTools(
           plannerEnabled: queryPlannerEnabled,
           resolverFactory,
           tenantId,
-          projectName: args.project_name,
+          projectName,
           entityScope: args.entity_scope,
           ...(args.as_of !== undefined ? { asOf: args.as_of } : {}),
         }));
@@ -803,14 +822,14 @@ export function registerRetrievalTools(
       }
       const resolvedEntityIds = queryPlannerEnabled && anchored
         ? await observeRetrievalResolutionV1(() => resolveRuntimeEntityIds(
-          authenticated, resolverFactory, tenantId, args.project_name, args.entity_scope, args.as_of,
+          authenticated, resolverFactory, tenantId, projectName, args.entity_scope, args.as_of,
         ))
         : undefined;
       const r = await assembler.ask(args.question, {
         level: args.reasoning_level,
         entity_scope: args.entity_scope,
         tag_scope: args.tag_scope,
-        project_name: args.project_name,
+        project_name: projectName as string | undefined,
         as_of: args.as_of,
         tenantId,
         ...(resolvedEntityIds !== undefined ? { resolvedEntityIds } : {}),

@@ -120,7 +120,9 @@ const MAX_GRAPH_KEYS = 16_384;
 const SAFE_TENANT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_ENTITY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const CANONICAL_PROJECT_SCOPE = /^project:[a-z0-9][a-z0-9._-]*$/;
-const SAFE_EVIDENCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/+~-]*$/;
+// Evidence includes persisted Nano IDs, whose URL alphabet permits a leading
+// "_" or "-". Authority identifiers retain their narrower grammars below.
+const SAFE_EVIDENCE_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:@/+~-]*$/;
 const SOURCE_TYPES = RETRIEVAL_SOURCE_TYPES;
 const EXPLICIT_FAILURE_CODES = INTRINSIC_OBJECT_FREEZE([
   'unavailable', 'timeout', 'query-failed',

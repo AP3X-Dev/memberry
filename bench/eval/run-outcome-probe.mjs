@@ -48,9 +48,11 @@ if (!token) {
 }
 
 const allCases = readFileSync(args.cases, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+const invalidCases = allCases.filter((c) => c.adjudication === 'invalid')
 const cases = allCases.filter((c) => {
   const plane = c.plane ?? 'code'
-  return (!args.memoryOnly || plane !== 'code')
+  return c.adjudication !== 'invalid'
+    && (!args.memoryOnly || plane !== 'code')
     && (args.plane === null || plane === args.plane)
     && (args.caseId === null || c.id === args.caseId)
 })
@@ -165,6 +167,7 @@ const mrr = scored.reduce((a, r) => a + (r.rank ? 1 / r.rank : 0), 0) / (scored.
 const fmt = (v) => v.toFixed(4)
 
 console.log(`OUTCOME n=${scored.length} errors=${rows.length - scored.length} project=${args.project}`)
+console.log(`OUTCOME adjudicationExcluded=${invalidCases.length} excludedIds=${invalidCases.map((c) => c.id).join(',') || 'none'}`)
 console.log(`OUTCOME answerAt1=${fmt(at(1) / (scored.length || 1))} answerAt5=${fmt(at(5) / (scored.length || 1))} answerAt10=${fmt(at(10) / (scored.length || 1))} mrr=${fmt(mrr)}`)
 const rerankerEligible = scored.filter((r) => r.plane !== 'code' && r.reranker !== null)
 const reranked = rerankerEligible.filter((r) => r.reranker === 'reranked').length

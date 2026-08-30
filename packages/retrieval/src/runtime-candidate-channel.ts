@@ -41,7 +41,10 @@ const QUERY_TIMEOUT_MS = 2_000;
 const CLOSE_TIMEOUT_MS = 500;
 const SAFE_TENANT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SAFE_PROJECT = /^project:[a-z0-9][a-z0-9._-]*$/;
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/+~-]*$/;
+// Episodic and MemoryBlock writers use Nano ID, whose URL alphabet permits a
+// leading "_" or "-". Keep this evidence-only grammar aligned with persisted
+// IDs so one valid row cannot fail the entire source channel.
+const SAFE_EVIDENCE_ID = /^[A-Za-z0-9_-][A-Za-z0-9._:@/+~-]*$/;
 const EXPECTED_FIELDS = FREEZE([
   'tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score',
 ]);
@@ -283,7 +286,7 @@ function parseRecord(input: unknown, state: ReceiptState, spec: SourceSpec, rank
   const content = safeString(fields[5]);
   const score = fields[6];
   if (tenantId !== state.tenantId || projectScope !== state.projectScope
-    || resolvedEntityId !== state.resolvedEntityId || REGEXP_EXEC(SAFE_ID, evidenceId) === null
+    || resolvedEntityId !== state.resolvedEntityId || REGEXP_EXEC(SAFE_EVIDENCE_ID, evidenceId) === null
     || typeof score !== 'number' || !IS_FINITE(score) || score < 0 || score > 1 || OBJECT_IS(score, -0)) {
     throw new SourceFailure('invalid-result');
   }
@@ -347,7 +350,7 @@ function parseFacts(input: unknown, state: ReceiptState): readonly CandidateChan
     const score = ownData(fact, 'confidence');
     if (entityId !== state.resolvedEntityId || (state.tenantId === DEFAULT_TENANT
       ? tenantId !== undefined && tenantId !== DEFAULT_TENANT : tenantId !== state.tenantId)
-      || REGEXP_EXEC(SAFE_ID, evidenceId) === null || SET_HAS(ids, evidenceId)
+      || REGEXP_EXEC(SAFE_EVIDENCE_ID, evidenceId) === null || SET_HAS(ids, evidenceId)
       || typeof score !== 'number' || !IS_FINITE(score) || score < 0 || score > 1 || OBJECT_IS(score, -0)) {
       throw new SourceFailure('invalid-result');
     }

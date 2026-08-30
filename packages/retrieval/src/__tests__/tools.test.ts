@@ -413,7 +413,7 @@ describe('RET-002C2 authenticated planner wiring', () => {
     const { server, handlers } = makeServerStub();
     registerRetrievalTools(server as never, container);
     await handlers.get('berry_context')!({
-      task: 'safe', strategy: 'ranked', project_name: 'project:memberry',
+      task: 'safe', strategy: 'ranked', project_name: 'memberry',
       entity_scope: ['Resolver', 'Call Context Resolver', 'alias', 'Resolver'], include_trace: traced,
     });
     const authority = resolverFactory.mock.calls[0]![0];
@@ -435,10 +435,10 @@ describe('RET-002C2 authenticated planner wiring', () => {
     const { server, handlers } = makeServerStub();
     registerRetrievalTools(server as never, container);
     await handlers.get('berry_ask')!({
-      question: 'safe', reasoning_level: 'high', project_name: 'project:memberry', entity_scope: ['SOP lifecycle'],
+      question: 'safe', reasoning_level: 'high', project_name: 'memberry', entity_scope: ['SOP lifecycle'],
     });
     expect(assembler.ask).toHaveBeenCalledWith('safe', expect.objectContaining({
-      level: 'high', tenantId: 'tenant-a', resolvedEntityIds: ['entity-stable'],
+      level: 'high', tenantId: 'tenant-a', project_name: 'project:memberry', resolvedEntityIds: ['entity-stable'],
     }));
   });
 });
@@ -596,7 +596,7 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     const { server, handlers } = makeServerStub();
     registerRetrievalTools(server as never, container);
     await handlers.get('berry_context')!({
-      task: 'vector query', strategy: 'ranked', project_name: 'project:memberry', entity_scope: ['Resolver'],
+      task: 'vector query', strategy: 'ranked', project_name: 'memberry', entity_scope: ['Resolver'],
       include_arch: false, include_memory: true,
     });
     expect(assembler.candidateQueryVector).toHaveBeenCalledWith('vector query');
