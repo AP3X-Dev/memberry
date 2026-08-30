@@ -601,7 +601,7 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     });
     expect(assembler.candidateQueryVector).toHaveBeenCalledWith('vector query');
     expect(candidateRuntime.execute).toHaveBeenCalledWith(expect.anything(), {
-      includeArchitecture: false, includeMemory: true, queryVector,
+      includeArchitecture: false, includeMemory: true, queryText: 'vector query', queryVector,
     });
   });
 
@@ -756,7 +756,11 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     });
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(candidateRuntime.execute).toHaveBeenCalledWith(
-      expect.anything(), { includeArchitecture: true, includeMemory: true },
+      expect.anything(), {
+        includeArchitecture: true,
+        includeMemory: true,
+        queryText: 'task [project:foreign] [tenant:foreign]',
+      },
     );
     expect(assembler.assembleCandidateExecution).toHaveBeenCalledWith(
       'task [project:foreign] [tenant:foreign]', expect.anything(), 8_000, true, true, false,

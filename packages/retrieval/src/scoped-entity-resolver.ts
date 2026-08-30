@@ -297,9 +297,10 @@ ORDER BY ordinal`;
 
 /*
  * Detected text is candidate material only. The query starts from authorized
- * project roots and never falls back to a global name result. Exact/case-folded
- * names and aliases have equal standing: collisions are returned to the caller
- * and become an explicit ambiguous resolution, never a LIMIT 1 guess.
+ * project roots and never falls back to a global result. A canonical ID remains
+ * only a hint here: it must resolve through the same authorized project path as
+ * names and aliases. Collisions are returned to the caller and become an
+ * explicit ambiguous resolution, never a LIMIT 1 guess.
  */
 const HINT_ENTITY_QUERY = `
 CALL {
@@ -312,7 +313,8 @@ CALL {
       (scopedNode.tenant_id IS NULL OR scopedNode.tenant_id = $tenantId)
       AND (scopedNode.type <> 'project' OR scopedNode.id IN $authorizedProjectIds))
   WITH DISTINCT hint, candidate
-  WHERE (toLower(candidate.name) = toLower(hint)
+  WHERE (candidate.id = hint
+     OR toLower(candidate.name) = toLower(hint)
      OR any(alias IN coalesce(candidate.aliases, []) WHERE toLower(alias) = toLower(hint)))
     AND (size($explicitEntityIds) = 0 OR candidate.id IN $explicitEntityIds)
   LIMIT $resultCapPlusOne

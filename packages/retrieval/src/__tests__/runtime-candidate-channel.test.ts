@@ -43,8 +43,13 @@ function driver(rows: Record<string, Neo4jRecord[]>): { driver: RuntimeCandidate
     calls.push([query, params]);
     if (query.includes('UNWIND $ids AS eid')) {
       const facts = (rows.fact ?? []).map((source) => ({ properties: {
-        id: source.get('evidenceId'), subject: 'subject', predicate: 'predicate', object: 'object',
-        entity_id: entityId, source_episode_ids: [], valid_at: '2026-01-01T00:00:00.000Z', invalid_at: null,
+        id: source.get('evidenceId'),
+        subject: source.has('factSubject') ? source.get('factSubject') : 'subject',
+        predicate: source.has('factPredicate') ? source.get('factPredicate') : 'predicate',
+        object: source.has('factObject') ? source.get('factObject') : 'object',
+        entity_id: entityId, source_episode_ids: [],
+        valid_at: source.has('factValidAt') ? source.get('factValidAt') : '2026-01-01T00:00:00.000Z',
+        invalid_at: null,
         confidence: source.get('score'), status: 'active', inference_type: 'deductive', supersedes_fact_id: null,
         scope: 'project', tags: [project], tenant_id: 'tenant-a', created_at: '2026-01-01T00:00:00.000Z',
         updated_at: '2026-01-01T00:00:00.000Z',
@@ -183,6 +188,31 @@ describe('RET-003B runtime candidate channel service', () => {
     expect(new Set(tight.context.sections.map((section) => section.source_type)))
       .toEqual(new Set(['semantic', 'episodic', 'fact', 'block']));
     expect(tight.context.token_count).toBeLessThanOrEqual(21);
+  });
+
+  it('lexically reranks only the already-authorized active fact set before fusion', async () => {
+    const rows = validRows();
+    rows.fact = [
+      record(
+        ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score', 'factSubject', 'factPredicate', 'factObject', 'factValidAt'],
+        ['tenant-a', project, entityId, 'fact-recent', 'Fact', 'generic recent state', 1, 'Neuri', 'status', 'running', '2026-02-01T00:00:00.000Z'],
+      ),
+      record(
+        ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score', 'factSubject', 'factPredicate', 'factObject', 'factValidAt'],
+        ['tenant-a', project, entityId, 'fact-location', 'Fact', 'Neuri located at Desktop', 0.1, 'Neuri', 'located_at', 'Desktop', '2026-01-01T00:00:00.000Z'],
+      ),
+    ];
+    const execution = await new RuntimeCandidateChannelService(driver(rows).driver).execute(
+      await authorityReceipt(),
+      {
+        includeArchitecture: false,
+        includeMemory: true,
+        queryText: 'Where is Neuri located?',
+      },
+    );
+    const facts = execution.candidates.filter((candidate) => candidate.sourceType === 'fact');
+    expect(facts.map((candidate) => candidate.evidenceId)).toEqual(['fact-location', 'fact-recent']);
+    expect(facts.map((candidate) => candidate.rank)).toEqual([1, 2]);
   });
 
   it('rejects malformed query vectors before opening a database session', async () => {
