@@ -24,7 +24,7 @@ import { HebbianEngine, type HebbianRunResult } from './hebbian.js';
 import { resolveAntiEntropyConfig, resolveHebbianConfig, resolveLifecycleConfig } from './config/lifecycle.js';
 import { OpenAiLlmClient } from './llm.js';
 import { extractEpisodeStructuredIndexV1 } from './structured-index-extractor.js';
-import { buildEpisodeIndexKeysV1 } from './structured-index.js';
+import { buildEpisodeIndexKeysV1, buildGraphBackfillIndexKeysV1 } from './structured-index.js';
 import { DEFAULT_TENANT } from './types.js';
 
 // ─── Arg parsing ──────────────────────────────────────────────────────────────
@@ -186,7 +186,67 @@ async function runIndexBackfill(positionals: string[], flags: Record<string, str
       console.log(JSON.stringify({ deleted, tenant: tenantId, scope: projectScope }));
       return;
     }
-    if (action !== 'run') throw new Error('index-backfill action must be run, status, or reset');
+    if (action === 'graph-dry-run' || action === 'graph-run') {
+      const write = action === 'graph-run';
+      if (write && flags['yes'] !== true) throw new Error('index-backfill graph-run requires --yes');
+      const maxEpisodes = boundedIntFlag(flags, 'max-episodes', 100, 10_000);
+      const batchSize = boundedIntFlag(flags, 'batch-size', 10, 100);
+      const before = await store.stats({ tenantId, projectScope });
+      let cursor: { createdAt: string; id: string } | undefined;
+      let examined = 0;
+      let indexable = 0;
+      let empty = 0;
+      let keys = 0;
+      let failed = 0;
+
+      while (examined < maxEpisodes) {
+        const batch = await store.nextGraphBackfillBatch({
+          tenantId, projectScope, limit: Math.min(batchSize, maxEpisodes - examined),
+          ...(cursor ? { after: cursor } : {}),
+        });
+        if (batch.length === 0) break;
+        for (const episode of batch) {
+          examined += 1;
+          cursor = { createdAt: episode.createdAt, id: episode.id };
+          try {
+            const derived = buildGraphBackfillIndexKeysV1({
+              episodeId: episode.id,
+              facts: episode.facts,
+              tenantId,
+              projectScope,
+              createdAt: new Date().toISOString(),
+            });
+            if (derived.length === 0) {
+              if (write) await store.markBackfillEmpty(episode, 'graph-v1');
+              empty += 1;
+              continue;
+            }
+            if (write) await store.replaceBackfillKeys(episode, derived);
+            indexable += 1;
+            keys += derived.length;
+          } catch {
+            failed += 1;
+          }
+        }
+      }
+      const after = write ? await store.stats({ tenantId, projectScope }) : before;
+      const coveredEpisodes = write
+        ? after.indexed
+        : Math.min(before.episodes, before.indexed + indexable);
+      const coveragePercent = before.episodes === 0
+        ? 100
+        : Number(((coveredEpisodes / before.episodes) * 100).toFixed(1));
+      console.log(JSON.stringify({
+        mode: write ? 'graph-run' : 'graph-dry-run', examined, indexable, empty, keys, failed,
+        coveragePercent, coverageTargetPercent: 85, tenant: tenantId, scope: projectScope,
+        before, after,
+      }));
+      if (failed > 0 || (examined >= before.episodes && coveragePercent < 85)) process.exitCode = 2;
+      return;
+    }
+    if (action !== 'run') {
+      throw new Error('index-backfill action must be run, graph-dry-run, graph-run, status, or reset');
+    }
     if (flags['yes'] !== true) throw new Error('index-backfill run requires --yes');
     if (core.embedding.available === false) throw new Error('index-backfill requires a configured embedding provider');
 
@@ -510,7 +570,7 @@ async function main(): Promise<void> {
       console.error('  dream      [--scope project:x] [--max-entities N] [--no-cards]');
       console.error('  lifecycle  [--scope project:x] [--dry-run] | unarchive --id <id>   (MEMBERRY_LIFECYCLE_V1=live gates the pass; MEMBERRY_LIFECYCLE_ANTIENTROPY=live adds the anti-entropy pass)');
       console.error('  extraction status|replay   (durable fact-extraction queue: counts / replay dead-letters)');
-      console.error('  index-backfill run|status|reset --scope project:x [--tenant t] [--yes]   (IDX-001A local-model derived keys)');
+      console.error('  index-backfill run|graph-dry-run|graph-run|status|reset --scope project:x [--tenant t] [--yes]');
       console.error('  tenant stats|export|delete --tenant <name> [--out file] [--yes]   (per-tenant admin)');
       console.error('');
       console.error('Agent hook commands:');

@@ -111,7 +111,7 @@ else is either design detail or a historical record.
 
 ## NEXT ACTION
 
-### IDX-001B — Historical-backfill viability decision; reader stays off
+### IDX-001B-D — Deterministic graph-native backfill; activation qualification
 
 IDX-001A merged in PR #141 and its production-discovered Neo4j integer correction
 merged in PR #142. The frozen 60-case dev gate moved from **28/60 (46.7%)** to
@@ -120,25 +120,46 @@ bootstrap interval **[+5.0, +23.3]**, eight improved cases and zero regressions.
 The default-off production release preserved 34/34 memory Answer@5 and all
 latency/response-size caps.
 
-Production qualification then stopped at the pre-registered pilot gate. Under a
+The original production qualification stopped at the pre-registered pilot gate. Under a
 2-core, 4-GiB, loopback-only, no-restart Ollama container, `qwen2.5:3b-instruct`
 examined 10 episodes and timed out all 10; `qwen2.5:1.5b-instruct` examined three
 and timed out all three. Both used a 60-second per-episode limit. Neither wrote a
 key or outcome. The reader was never enabled, and the model container is stopped.
 
-1. Do not enable `MEMBERRY_EPISODIC_STRUCTURED_INDEX_V1`, resume RET-007, or
-   start Phase B from the dev-only gain.
-2. Treat a new backfill attempt as IDX-001B with a newly authorized resource or
-   hardware budget. Pre-register extraction throughput and validity before any
-   retrieval measurement; merely lengthening production-host timeouts is not a
-   qualification result.
-3. A retry must first produce a zero-failure bounded batch with clean
-   tenant/project provenance, then demonstrate the original >=10-point multi-hop
-   gain with a positive confidence bound while the 34-case production gate stays
-   34/34, p95 <=500 ms, and responses <=32 KiB.
-4. If no bounded extractor qualifies, close IDX-001 as a negative production
-   result and move to the separately authorized G2 decision. Do not broaden
-   Phase B.
+The owner then authorized IDX-001B-D: use the `SOURCED_FROM` and `FACT_ABOUT`
+structure already present instead of retrying a language model. The implementation
+is isolated on `feat/idx-001b-deterministic-backfill` and adds a model-free
+`graph-dry-run`/`graph-run`, exact tenant matching, Episode-derived project scope,
+one current Fact per canonical Entity, a 16-key cap, source-Fact provenance,
+resumable graph outcomes, active-source rechecks in the reader, and a corrected
+rollback query.
+
+Measured 2026-08-30 before reader activation:
+
+- Production read-only dry run: **183 examined, 167 indexable (91.3%), 1,853
+  keys, 16 empty, zero failures**, with zero derived writes.
+- Production default-off write/repeat/reset/rebuild: first write 167/183; repeat
+  examined zero; reset deleted exactly 1,869 derived nodes; original graph stayed
+  **183 Episodes / 4,304 source Facts / zero derived nodes**; rebuild returned to
+  167 indexed plus 16 empty outcomes.
+- Frozen 60-case dev: **28/60 -> 36/60**, +13.3 points, 8 improved/0 regressed.
+  The new checked runner uses the shared deterministic 2,000-resample function
+  and reports two-sided 95% **[+5.0,+21.7]** and one-sided lower **+6.7**.
+- Core 1,079 passed/7 skipped; Neo4j 563/30; Retrieval 899 passed/8 skipped in
+  fresh broad serial runs. Focused contracts, clean root build, guidance
+  validation, and the disposable Neo4j write/resume/reset preservation gate
+  pass. Exact hosted integration is wired to rerun that lifecycle and execute
+  the graph-reader active-source invalidation gate.
+
+1. Keep `MEMBERRY_EPISODIC_STRUCTURED_INDEX_V1` unset until the exact reviewed
+   source is deployed default-off and the existing 34-case gate remains 34/34.
+2. Then enable only that flag and require 34/34, p95 <=500 ms, responses <=32
+   KiB, zero query errors, and no scope/provenance mismatch.
+3. If activation passes twice, close IDX-001 and return to RET-007. Rollback is
+   unset the reader flag; data rollback is the now-live-proven scoped reset.
+4. If activation loses the multi-hop gain or any production gate, unset the
+   flag, reset only derived nodes, close IDX-001 negative, and move to the
+   separately authorized G2 decision. Do not buy hardware or retry model tuning.
 
 ### Historical measurement-first direction (superseded by RET-Q-005)
 

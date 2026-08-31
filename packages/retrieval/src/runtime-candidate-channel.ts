@@ -227,21 +227,70 @@ CALL {
   WITH root, target, baseIndex, item
   WITH root, target, baseIndex, item
   WHERE baseIndex < 5
-  MATCH (item.ep)-[seedRef:REFERENCES]->(bridge:Entity)<-[neighborRef:REFERENCES]-(neighbor:Episodic)
-  WHERE bridge <> target
-    AND neighbor <> item.ep
+  CALL {
+    WITH item, target
+    MATCH (item.ep)-[seedRef:REFERENCES]->(bridge:Entity)<-[neighborRef:REFERENCES]-(neighbor:Episodic)
+    WHERE bridge <> target
+      AND (($asOf IS NULL AND seedRef.invalid_at IS NULL AND neighborRef.invalid_at IS NULL)
+        OR ($asOf IS NOT NULL
+          AND coalesce(seedRef.valid_at, '1970-01-01T00:00:00.000Z') <= $asOf
+          AND (seedRef.invalid_at IS NULL OR seedRef.invalid_at > $asOf)
+          AND coalesce(neighborRef.valid_at, '1970-01-01T00:00:00.000Z') <= $asOf
+          AND (neighborRef.invalid_at IS NULL OR neighborRef.invalid_at > $asOf)))
+    RETURN neighbor
+    UNION
+    WITH item, target
+    MATCH (item.ep)-[:HAS_INDEX_KEY]->(seedKey:EpisodicIndexKey)
+    MATCH (neighbor:Episodic)-[:HAS_INDEX_KEY]->(neighborKey:EpisodicIndexKey)
+    WHERE seedKey.tenant_id = $tenantId
+      AND seedKey.project_scope = $projectScope
+      AND seedKey.schema_version = 1
+      AND seedKey.entity_id IS NOT NULL
+      AND seedKey.entity_id <> target.id
+      AND neighborKey.tenant_id = $tenantId
+      AND neighborKey.project_scope = $projectScope
+      AND neighborKey.schema_version = 1
+      AND neighborKey.entity_id = seedKey.entity_id
+      AND (coalesce(seedKey.derivation, '') <> 'graph-v1' OR EXISTS {
+        MATCH (seedFact:Fact)-[:SOURCED_FROM]->(item.ep)
+        MATCH (seedFact)-[seedAbout:FACT_ABOUT]->(seedEntity:Entity)
+        WHERE seedFact.id = seedKey.source_fact_id
+          AND seedFact.tenant_id = $tenantId
+          AND seedEntity.id = seedKey.entity_id
+          AND (($asOf IS NULL
+              AND seedFact.status <> 'invalidated'
+              AND seedAbout.invalid_at IS NULL)
+            OR ($asOf IS NOT NULL
+              AND coalesce(seedFact.valid_at, '1970-01-01T00:00:00.000Z') <= $asOf
+              AND (seedFact.invalid_at IS NULL OR seedFact.invalid_at > $asOf)
+              AND coalesce(seedAbout.valid_at, '1970-01-01T00:00:00.000Z') <= $asOf
+              AND (seedAbout.invalid_at IS NULL OR seedAbout.invalid_at > $asOf)))
+      })
+      AND (coalesce(neighborKey.derivation, '') <> 'graph-v1' OR EXISTS {
+        MATCH (neighborFact:Fact)-[:SOURCED_FROM]->(neighbor)
+        MATCH (neighborFact)-[neighborAbout:FACT_ABOUT]->(neighborEntity:Entity)
+        WHERE neighborFact.id = neighborKey.source_fact_id
+          AND neighborFact.tenant_id = $tenantId
+          AND neighborEntity.id = neighborKey.entity_id
+          AND (($asOf IS NULL
+              AND neighborFact.status <> 'invalidated'
+              AND neighborAbout.invalid_at IS NULL)
+            OR ($asOf IS NOT NULL
+              AND coalesce(neighborFact.valid_at, '1970-01-01T00:00:00.000Z') <= $asOf
+              AND (neighborFact.invalid_at IS NULL OR neighborFact.invalid_at > $asOf)
+              AND coalesce(neighborAbout.valid_at, '1970-01-01T00:00:00.000Z') <= $asOf
+              AND (neighborAbout.invalid_at IS NULL OR neighborAbout.invalid_at > $asOf)))
+      })
+    RETURN neighbor
+  }
+  WITH DISTINCT item, neighbor
+  WHERE neighbor <> item.ep
     AND (neighbor.tenant_id = $tenantId
       OR (neighbor.tenant_id IS NULL AND $tenantId = $defaultTenant))
     AND (neighbor.scope = $projectScope OR $projectScope IN coalesce(neighbor.tags, []))
     AND coalesce(neighbor.archived, false) = false
     AND neighbor.embedding IS NOT NULL
     AND coalesce(neighbor.content, '') <> ''
-    AND (($asOf IS NULL AND seedRef.invalid_at IS NULL AND neighborRef.invalid_at IS NULL)
-      OR ($asOf IS NOT NULL
-        AND coalesce(seedRef.valid_at, '1970-01-01T00:00:00.000Z') <= $asOf
-        AND (seedRef.invalid_at IS NULL OR seedRef.invalid_at > $asOf)
-        AND coalesce(neighborRef.valid_at, '1970-01-01T00:00:00.000Z') <= $asOf
-        AND (neighborRef.invalid_at IS NULL OR neighborRef.invalid_at > $asOf)))
   WITH DISTINCT item, neighbor,
        vector.similarity.cosine(neighbor.embedding, $queryVector) AS neighborOriginalScore
   OPTIONAL MATCH (neighbor)-[:HAS_INDEX_KEY]->(neighborKey:EpisodicIndexKey)

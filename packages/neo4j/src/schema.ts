@@ -38,6 +38,7 @@ const INDEXES: string[] = [
   'CREATE INDEX episodic_agent IF NOT EXISTS FOR (e:Episodic) ON (e.agent_id)',
   'CREATE INDEX episodic_index_key_episode IF NOT EXISTS FOR (k:EpisodicIndexKey) ON (k.episode_id)',
   'CREATE INDEX episodic_index_key_scope IF NOT EXISTS FOR (k:EpisodicIndexKey) ON (k.tenant_id, k.project_scope)',
+  'CREATE INDEX episodic_index_key_entity_scope IF NOT EXISTS FOR (k:EpisodicIndexKey) ON (k.tenant_id, k.project_scope, k.entity_id)',
   'CREATE INDEX episodic_index_outcome_scope IF NOT EXISTS FOR (o:EpisodicIndexOutcome) ON (o.tenant_id, o.project_scope)',
   'CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)',
   'CREATE INDEX fact_status_valid IF NOT EXISTS FOR (f:Fact) ON (f.status, f.valid_at)',
