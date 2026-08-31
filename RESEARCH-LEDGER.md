@@ -25,37 +25,6 @@ evidence that corrected it does not live only in someone's head.
 
 ## Open
 
-### RL-027 — Existing Fact/Entity incidence replaces the failed model backfill
-**Evidence:** measured · **Status:** default-off qualified; reader activation pending · **Opened:** 2026-08-30
-
-IDX-001A failed because a small local language model could not return one valid
-historical extraction inside 60 seconds. It did not test the structure already
-stored by consolidation. A production read-only graph pass found that 167 of 183
-project Episodes already have at least one current, same-tenant `Fact` connected
-through `SOURCED_FROM` and `FACT_ABOUT`. Selecting one Fact per canonical Entity,
-then capping at 16 Entities per Episode, deterministically yields 1,853 keys with
-zero extraction failures and 91.3% Episode coverage. It calls neither a language
-model nor an embedding provider.
-
-The default-off production lifecycle is proven rather than inferred. The first
-run indexed 167 Episodes and marked 16 empty; an immediate repeat examined zero.
-The reset deleted exactly 1,869 derived keys/outcomes while the original graph
-remained 183 Episodes and 4,304 source Facts, then an identical rebuild restored
-the derived state. The drill exposed an older Neo4j 5 implicit-grouping error in
-`deleteDerived`; the fix was audited across the repository and the disposable
-live gate now proves write, resume, provenance, and rollback.
-
-The frozen dev result remains 28/60 to 36/60 (+13.3 points), eight improvements
-and zero regressions. The checked runner's shared deterministic bootstrap reports
-a two-sided 95% interval of [+5.0,+21.7] and one-sided lower bound +6.7.
-
-**Revisit when:** the reader is deployed default-off. Activation still requires
-two 34/34 production runs, p95 <=500 ms, responses <=32 KiB, zero errors, and no
-tenant/project/provenance mismatch. If any gate fails, unset the flag and use the
-scoped reset; do not retry model tuning or buy extraction hardware.
-
----
-
 ### RL-026 — The bounded Cerebro local-model backfill produced zero usable extractions
 **Evidence:** measured · **Status:** closed-negative for IDX-001A production activation · **Opened:** 2026-08-30
 
@@ -1252,5 +1221,35 @@ exceeds 500 ms, a response exceeds 32 KiB, or the rollback image is retired.
 
 ## Closed
 
-_Nothing yet. When an entry closes, move it here with the PR that closed it and keep the trigger
-visible, so the reasoning survives the fix._
+### RL-027 — Graph-native backfill was viable; structured-reader activation was not
+**Evidence:** measured · **Status:** CLOSED-NEGATIVE after PR #144 · **Opened:** 2026-08-30 · **Closed:** 2026-08-31
+
+IDX-001A failed because a small local language model could not return one valid
+historical extraction inside 60 seconds. It did not test the structure already
+stored by consolidation. The graph-native path shipped in PR #144 and proved that
+167 of 183 project Episodes can deterministically yield 1,853 keys from current,
+same-tenant `SOURCED_FROM` / `FACT_ABOUT` incidence. Coverage was 91.3%, with 16
+empty Episodes and zero extraction, scope, or provenance failures. It calls no
+language model or embedding provider.
+
+The write lifecycle succeeded, but the reader missed its immutable production
+activation contract. Its first warm run passed 34/34 with zero errors, p95
+493.4764 ms, and maximum response size 29,500 bytes. Its second warm run preserved
+34/34 and zero errors but measured p95 500.5354 ms, 0.5354 ms over the declared
+`<=500 ms` ceiling. Two qualifying passes therefore did not exist. The earlier
+cold run was not counted and had already shown 33/34 with p95 1,297.7932 ms.
+
+Rollback unset the reader flag and deleted exactly 1,869 derived keys/outcomes.
+The original 183 Episodes and 4,304 source Facts remained. A post-reset dry run
+reproduced 167 indexable, 16 empty, 1,853 prospective keys, and zero failures
+without writes. The final default-off production baseline returned to 34/34,
+zero errors, p95 382.4412 ms, and maximum response size 29,411 bytes.
+
+**Decision:** keep graph backfill available as an explicit scoped operator/user
+operation, but do not enable this structured reader or retain production-derived
+state by default. IDX-001 is closed negative and the active roadmap moves to the
+separately authorized G2 decision.
+
+**Revisit when:** a new frozen instrument and reader design are approved with a
+new activation contract. Do not rerun this reader, relax the threshold, retry
+model tuning, or buy extraction hardware on the current evidence.

@@ -50,46 +50,45 @@ else is either design detail or a historical record.
 
 ## Current program position
 
-- **Last updated:** 2026-08-30
-- **Exact deployed runtime pin:** `c80edeb86b2b55ebd5a038ca082009b97af98a55` —
-  PR #142 (IDX-001A backfill limit correction), after PR #141 shipped the
-  default-off structured-index implementation. Prior: #140 RET-Q-005 episodic
-  identifier reserve. **The live Cerebro MCP and wiki images were built from this
-  exact commit.** The checkout's
+- **Last updated:** 2026-08-31
+- **Exact deployed runtime pin:** `501bc51e27f31baa3ff4af643e8784de1719cf5c` —
+  PR #144 (IDX-001B-D graph-native backfill and snapshot privacy), after PR #143
+  closed the IDX-001A production stop gate. **The live Cerebro MCP and wiki images
+  were built from this exact commit.** The checkout's
   only untracked files remain the preserved operator files
   `docker-compose.override.yml` and `parsecheck.mjs`.
-- **Current verification ratchet:** hosted CI runs `33319740708` (PR #141),
-  `33320341046` (merged master), and `33322940933` (PR #142) passed Node 20,
-  Node 22, and the full live-container integration job, including authenticated
-  scoped retrieval and trace conformance. The focused local Neo4j package suite
-  passed 560 tests with 29 intentional live-service skips. The repository
+- **Current verification ratchet:** hosted post-merge CI run `33397680101`
+  passed Node 20, Node 22, and the full live-container integration job, including
+  authenticated scoped retrieval, exact structured Neo4j lifecycle, and trace
+  conformance. A clean local build and 46 focused structured-index tests passed.
+  The repository
   still has no mechanical
   total-test-count threshold; the verifier must continue checking both outcomes
   and counts rather than treating a green exit alone as the ratchet.
-- **Active critical-path lane:** IDX-001B — decide whether a different offline
-  extraction budget can make the historical backfill viable. IDX-001A shipped
-  default-off, but production qualification stopped before reader activation:
-  both bounded local models timed out every extraction. RET-007 remains blocked
-  and Phase B must not begin. G2 remains open until its parent acceptance
-  criteria are explicitly reconciled.
+- **Active critical-path lane:** G2 — obtain explicit owner authorization before
+  the one permitted RET-010 holdout evaluation, then decide Retrieval 2.0. IDX-001
+  is closed negative: graph-native backfill was viable, but the structured reader
+  missed its strict two-pass production latency gate. RET-007 remains blocked and
+  Phase B must not begin.
 - **Highest phase started:** Phase 9
 - **Closed phase gates:** G0, G1, G3
 - **Open phase gates:** G2, G4 through G9, and GF
 - **Program estimate:** approximately 35–40% complete
 - **Measured retrieval quality:** RET-Q-005 moved the live 34-case memory gate
-  from 33/34 (97.06%) to **34/34 (100%)** without regressing prior wins. After
-  the IDX-001A default-off deployment, two consecutive production probes remained
-  34/34 with zero errors; p95 was 427.7408 ms then 291.5251 ms and maximum
-  response size was 30,402 bytes.
+  from 33/34 (97.06%) to **34/34 (100%)** without regressing prior wins. The final
+  post-IDX-001 rollback baseline remained 34/34 with zero errors, p95 382.4412 ms,
+  and maximum response size 29,411 bytes.
   The earlier code-plane gains remain: Answer@5 moved 20% → 70% across
   IDX-002A/B/003/004.
-- **Deployment state:** IDX-001A is merged and deployed at `c80edeb` with
-  `MEMBERRY_EPISODIC_STRUCTURED_INDEX_V1` unset. MCP and wiki are healthy with
-  zero restarts on image
-  `sha256:2a630c29e030901fb15950a28bbde89a52ac14bd1d64fba0bfa033f4b0bcde0e`.
-  The stopped/no-restart local-model container is outside query time. The live
-  graph has zero `EpisodicIndexKey` and `EpisodicIndexOutcome` nodes, zero
-  orphans, and zero scope mismatches. RET-Q-005 remains enabled through
+- **Deployment state:** PR #144 is merged and exact master
+  `501bc51e27f31baa3ff4af643e8784de1719cf5c` is deployed. MCP and wiki are
+  healthy with zero restarts on image
+  `sha256:51b438ded11a3fbea8029c887a7349c349b899ca1ac322d607ab8bc50f515d41`.
+  `MEMBERRY_EPISODIC_STRUCTURED_INDEX_V1` is unset after strict activation
+  rollback. The scoped reset removed 1,869 derived nodes and preserved 183
+  Episodes plus 4,304 source Facts; the live graph now has zero derived keys or
+  outcomes. The former image is retained as
+  `memberry:rollback-idx001bd-c80edeb-20260831`. RET-Q-005 remains enabled through
   `MEMBERRY_EPISODIC_IDENTIFIER_RESERVE_V1=1`.
   **COD-010b deployed
   2026-08-26** (master `3eba9a9`); the served
@@ -111,55 +110,43 @@ else is either design detail or a historical record.
 
 ## NEXT ACTION
 
-### IDX-001B-D — Deterministic graph-native backfill; activation qualification
+### G2 — Explicit owner decision before the sealed RET-010 holdout
 
-IDX-001A merged in PR #141 and its production-discovered Neo4j integer correction
-merged in PR #142. The frozen 60-case dev gate moved from **28/60 (46.7%)** to
-**36/60 (60.0%)** multi-hop success@10: **+13.3 percentage points**, paired 95%
-bootstrap interval **[+5.0, +23.3]**, eight improved cases and zero regressions.
-The default-off production release preserved 34/34 memory Answer@5 and all
-latency/response-size caps.
+IDX-001B-D is closed negative after completing its pre-registered production
+route. PR #144 merged the graph-native backfill and reader as exact master
+`501bc51e27f31baa3ff4af643e8784de1719cf5c`; hosted post-merge CI run
+`33397680101`, a clean local build, and 46 focused structured-index tests passed.
+The exact source was deployed default-off as image
+`sha256:51b438ded11a3fbea8029c887a7349c349b899ca1ac322d607ab8bc50f515d41`.
 
-The original production qualification stopped at the pre-registered pilot gate. Under a
-2-core, 4-GiB, loopback-only, no-restart Ollama container, `qwen2.5:3b-instruct`
-examined 10 episodes and timed out all 10; `qwen2.5:1.5b-instruct` examined three
-and timed out all three. Both used a 60-second per-episode limit. Neither wrote a
-key or outcome. The reader was never enabled, and the model container is stopped.
+Production qualification on 2026-08-31 followed the declared gates exactly:
 
-The owner then authorized IDX-001B-D: use the `SOURCED_FROM` and `FACT_ABOUT`
-structure already present instead of retrying a language model. The implementation
-is isolated on `feat/idx-001b-deterministic-backfill` and adds a model-free
-`graph-dry-run`/`graph-run`, exact tenant matching, Episode-derived project scope,
-one current Fact per canonical Entity, a 16-key cap, source-Fact provenance,
-resumable graph outcomes, active-source rechecks in the reader, and a corrected
-rollback query.
+- Before activation, 1,853 graph-derived keys had zero scope or provenance
+  mismatches. The warm default-off gate was 34/34 with zero errors, p95 315.8345
+  ms, and maximum response size 29,411 bytes.
+- The activated cold run was not counted: it scored 33/34 and p95 1,297.7932 ms.
+  The first warm run passed at 34/34, zero errors, p95 493.4764 ms, and maximum
+  response size 29,500 bytes.
+- The second warm run preserved 34/34 and zero errors but measured p95 500.5354
+  ms, 0.5354 ms above the immutable `<=500 ms` ceiling. It therefore did not
+  produce two qualifying passes; the threshold was not rounded or changed.
+- Rollback unset `MEMBERRY_EPISODIC_STRUCTURED_INDEX_V1`, recreated only MCP,
+  and reset only `default` / `project:memberry` derived state. Exactly 1,869
+  keys/outcomes were removed while 183 Episodes and 4,304 source Facts remained.
+  A final read-only dry run still found 167 indexable Episodes, 16 empty, 1,853
+  keys, 91.3% coverage, and zero failures, with zero before/after writes.
+- The final default-off production baseline is 34/34, zero errors, p95 382.4412
+  ms, maximum response size 29,411 bytes. MCP, wiki, Neo4j, and Redis are healthy;
+  Neo4j and Redis were never recreated.
 
-Measured 2026-08-30 before reader activation:
-
-- Production read-only dry run: **183 examined, 167 indexable (91.3%), 1,853
-  keys, 16 empty, zero failures**, with zero derived writes.
-- Production default-off write/repeat/reset/rebuild: first write 167/183; repeat
-  examined zero; reset deleted exactly 1,869 derived nodes; original graph stayed
-  **183 Episodes / 4,304 source Facts / zero derived nodes**; rebuild returned to
-  167 indexed plus 16 empty outcomes.
-- Frozen 60-case dev: **28/60 -> 36/60**, +13.3 points, 8 improved/0 regressed.
-  The new checked runner uses the shared deterministic 2,000-resample function
-  and reports two-sided 95% **[+5.0,+21.7]** and one-sided lower **+6.7**.
-- Core 1,079 passed/7 skipped; Neo4j 563/30; Retrieval 899 passed/8 skipped in
-  fresh broad serial runs. Focused contracts, clean root build, guidance
-  validation, and the disposable Neo4j write/resume/reset preservation gate
-  pass. Exact hosted integration is wired to rerun that lifecycle and execute
-  the graph-reader active-source invalidation gate.
-
-1. Keep `MEMBERRY_EPISODIC_STRUCTURED_INDEX_V1` unset until the exact reviewed
-   source is deployed default-off and the existing 34-case gate remains 34/34.
-2. Then enable only that flag and require 34/34, p95 <=500 ms, responses <=32
-   KiB, zero query errors, and no scope/provenance mismatch.
-3. If activation passes twice, close IDX-001 and return to RET-007. Rollback is
-   unset the reader flag; data rollback is the now-live-proven scoped reset.
-4. If activation loses the multi-hop gain or any production gate, unset the
-   flag, reset only derived nodes, close IDX-001 negative, and move to the
-   separately authorized G2 decision. Do not buy hardware or retry model tuning.
+1. Do not re-enable the structured reader, retry either local model, buy extraction
+   hardware, or change the activation threshold on the current instrument.
+2. Obtain explicit owner authorization for the one actual RET-010 holdout
+   evaluation. This deployment request did not authorize spending that sealed
+   holdout.
+3. Before dispatch, reconcile the G2 precision clause against the holdout corpus
+   shape exactly as required by the unchecked G2 item below. If authorized, run
+   the holdout once and accept its result without retuning the instrument.
 
 ### Historical measurement-first direction (superseded by RET-Q-005)
 
