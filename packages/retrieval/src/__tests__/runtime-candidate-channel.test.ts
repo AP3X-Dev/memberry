@@ -246,6 +246,7 @@ describe('RET-003B runtime candidate channel service', () => {
       expect(query).toContain('neighbor.scope = $projectScope');
       expect(query).toContain('neighborKey.project_scope = $projectScope');
       expect(query).toContain('WHERE neighborScore IS NOT NULL\n  WITH item, neighbor, neighborScore\n  ORDER BY');
+      expect(query).toContain('candidate AS ep, score\nWITH root, target, evidenceId, ep,');
       expect(query).toContain('LIMIT 1');
     } finally {
       if (previous === undefined) delete process.env[EPISODIC_STRUCTURED_INDEX_FLAG];

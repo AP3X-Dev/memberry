@@ -313,7 +313,8 @@ CALL {
 }
 WITH root, target, candidate, max(candidateScore) AS score
 WITH root, target, candidate.id AS evidenceId,
-     candidate AS ep,
+     candidate AS ep, score
+WITH root, target, evidenceId, ep,
      coalesce(ep.memory_type, 'Episodic') AS title,
      CASE WHEN coalesce(ep.task, '') = '' THEN ep.content ELSE ep.task + '\n\n' + ep.content END AS content,
      score
