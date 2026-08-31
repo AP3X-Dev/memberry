@@ -225,11 +225,11 @@ CALL {
   RETURN item.ep AS candidate, item.score AS candidateScore
   UNION ALL
   WITH root, target, baseIndex, item
-  WITH root, target, baseIndex, item
+  WITH root, target, baseIndex, item, item.ep AS seed
   WHERE baseIndex < 5
   CALL {
-    WITH item, target
-    MATCH (item.ep)-[seedRef:REFERENCES]->(bridge:Entity)<-[neighborRef:REFERENCES]-(neighbor:Episodic)
+    WITH seed, target
+    MATCH (seed)-[seedRef:REFERENCES]->(bridge:Entity)<-[neighborRef:REFERENCES]-(neighbor:Episodic)
     WHERE bridge <> target
       AND (($asOf IS NULL AND seedRef.invalid_at IS NULL AND neighborRef.invalid_at IS NULL)
         OR ($asOf IS NOT NULL
@@ -239,8 +239,8 @@ CALL {
           AND (neighborRef.invalid_at IS NULL OR neighborRef.invalid_at > $asOf)))
     RETURN neighbor
     UNION
-    WITH item, target
-    MATCH (item.ep)-[:HAS_INDEX_KEY]->(seedKey:EpisodicIndexKey)
+    WITH seed, target
+    MATCH (seed)-[:HAS_INDEX_KEY]->(seedKey:EpisodicIndexKey)
     MATCH (neighbor:Episodic)-[:HAS_INDEX_KEY]->(neighborKey:EpisodicIndexKey)
     WHERE seedKey.tenant_id = $tenantId
       AND seedKey.project_scope = $projectScope
@@ -252,7 +252,7 @@ CALL {
       AND neighborKey.schema_version = 1
       AND neighborKey.entity_id = seedKey.entity_id
       AND (coalesce(seedKey.derivation, '') <> 'graph-v1' OR EXISTS {
-        MATCH (seedFact:Fact)-[:SOURCED_FROM]->(item.ep)
+        MATCH (seedFact:Fact)-[:SOURCED_FROM]->(seed)
         MATCH (seedFact)-[seedAbout:FACT_ABOUT]->(seedEntity:Entity)
         WHERE seedFact.id = seedKey.source_fact_id
           AND seedFact.tenant_id = $tenantId
