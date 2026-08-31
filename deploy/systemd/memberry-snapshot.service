@@ -1,5 +1,5 @@
 [Unit]
-Description=MemBerry Nightly Snapshot
+Description=MemBerry Nightly Local Snapshot Export
 
 # Template — substitute <USER>, <INSTALL_DIR>, and the EnvironmentFile path.
 # See guides/install-systemd.md.
@@ -7,5 +7,5 @@ Description=MemBerry Nightly Snapshot
 Type=oneshot
 User=<USER>
 WorkingDirectory=<INSTALL_DIR>
-ExecStart=/usr/bin/npx tsx packages/core/src/cli.ts snapshot --path ./.memberry --commit
+ExecStart=/usr/bin/npx tsx packages/core/src/cli.ts snapshot --path ./.memberry
 EnvironmentFile=/etc/memberry/env

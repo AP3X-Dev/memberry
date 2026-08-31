@@ -7,12 +7,19 @@ const CLI_SOURCE = fs.readFileSync(
   path.resolve(__dirname, '../cli.ts'),
   'utf-8',
 );
+const SNAPSHOT_SERVICE_SOURCE = fs.readFileSync(
+  path.resolve(__dirname, '../../../../deploy/systemd/memberry-snapshot.service'),
+  'utf-8',
+);
+const ROOT_GITIGNORE = fs.readFileSync(
+  path.resolve(__dirname, '../../../../.gitignore'),
+  'utf-8',
+);
 
 describe('cli.ts regression', () => {
   it('BUG-0002: must not use execSync with interpolated strings (shell injection)', () => {
-    // Before the fix, runSnapshot() used execSync(`git commit -m "${message}"`)
-    // which allowed shell command injection via $(…) or backtick substitution.
-    // The fix replaced all execSync calls with execFileSync using array arguments.
+    // Before the fix, runSnapshot() used execSync with a caller-controlled commit
+    // message. Snapshot publishing has since been removed completely.
 
     // Verify no execSync usage with template literals or string concatenation
     const execSyncWithTemplate = /execSync\s*\(\s*`/;
@@ -23,18 +30,35 @@ describe('cli.ts regression', () => {
     expect(CLI_SOURCE).not.toMatch(execSyncWithConcat);
     expect(CLI_SOURCE).not.toMatch(execSyncWithVariable);
 
-    // Additionally verify execSync is not imported at all (only execFileSync should be)
+    // No synchronous child-process primitive belongs in this top-level CLI.
     const importsExecSync = /import\s*\{[^}]*\bexecSync\b[^}]*\}\s*from\s*['"]child_process['"]/;
     expect(CLI_SOURCE).not.toMatch(importsExecSync);
+    expect(CLI_SOURCE).not.toContain('execFileSync');
   });
 
-  it('snapshot commit force-adds the requested path so ignored .amp exports can be committed', () => {
-    expect(CLI_SOURCE).toContain("execFileSync('git', ['add', '-f', snapshotPath]");
+  it('rejects legacy Git-publishing flags before exporting memory', () => {
+    const snapshotStart = CLI_SOURCE.indexOf('async function runSnapshot');
+    const snapshotEnd = CLI_SOURCE.indexOf('async function runDream', snapshotStart);
+    const snapshotSource = CLI_SOURCE.slice(snapshotStart, snapshotEnd);
+    const guard = snapshotSource.indexOf("Object.hasOwn(flags, 'commit')");
+    const exportCall = snapshotSource.indexOf('await runExport({ path: snapshotPath })');
+
+    expect(guard).toBeGreaterThanOrEqual(0);
+    expect(snapshotSource).toContain("Object.hasOwn(flags, 'message')");
+    expect(snapshotSource).toContain('snapshot:git_publishing_disabled');
+    expect(exportCall).toBeGreaterThan(guard);
+    expect(snapshotSource).not.toMatch(/['"]git['"]/);
+    expect(snapshotSource).not.toContain("['add', '-f'");
+    expect(snapshotSource).not.toContain("['commit'");
+    expect(CLI_SOURCE).not.toContain('[--commit]');
+    expect(CLI_SOURCE).not.toContain('[--message');
   });
 
-  it('snapshot commit only checks and commits the requested snapshot path', () => {
-    expect(CLI_SOURCE).toContain("execFileSync('git', ['diff', '--cached', '--quiet', '--', snapshotPath]");
-    expect(CLI_SOURCE).toContain("execFileSync('git', ['commit', '-m', message, '--', snapshotPath]");
+  it('ships nightly snapshots as ignored local exports only', () => {
+    expect(SNAPSHOT_SERVICE_SOURCE).toContain('snapshot --path ./.memberry');
+    expect(SNAPSHOT_SERVICE_SOURCE).not.toContain('--commit');
+    expect(ROOT_GITIGNORE).toMatch(/^\.memberry\/$/m);
+    expect(ROOT_GITIGNORE).toMatch(/^\.amp\/$/m);
   });
 
   it('wires the setup/configure/project/doctor spine into the dispatcher', () => {

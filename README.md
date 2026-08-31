@@ -159,7 +159,7 @@ Step-by-step install and upgrade guides live in [`guides/`](guides/):
 |-------|----------------|
 | [Local Docker](guides/install-local-docker.md) | Default — agent and MemBerry on the **same machine** (`127.0.0.1`). |
 | [Remote / LAN Server](guides/install-remote-server.md) | MemBerry on a server, agents on **other machines**. Covers the publish-layer security model, the `/workspace` mount, and **dynamic tool exposure** across clients. |
-| [systemd Production](guides/install-systemd.md) | Run under **systemd** (services + dream/snapshot/wiki-compile timers) outside Docker. |
+| [systemd Production](guides/install-systemd.md) | Run under **systemd** (services + dream/local-snapshot/wiki-compile timers) outside Docker. |
 | [Migration from AMP](guides/migration-from-amp.md) | Upgrading an older **AMP** install — the retained `AMP_*` / `amp://` / `/sse` aliases and the user-facing renames. |
 
 ### Hooks — a deterministic context floor (optional)

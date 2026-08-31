@@ -3,8 +3,8 @@ dist/
 .env
 *.tsbuildinfo
 
-# MemBerry data (user-specific memory exports). Gitignored from casual adds but
-# force-tracked by the snapshot service (git add -f). Legacy .amp/ kept ignored.
+# MemBerry data (user-specific memory exports). Never force-add these paths to a
+# source repository. Legacy .amp/ remains ignored for upgraded installations.
 .memberry/
 .amp/
 
@@ -56,6 +56,8 @@ GEMINI.md
 # === Universal ===
 .DS_Store
 Thumbs.db
+__pycache__/
+.venv/
 *.log
 *.tmp
 *.swp

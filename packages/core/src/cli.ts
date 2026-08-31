@@ -3,7 +3,6 @@
 // MemBerry CLI — export, import, snapshot commands.
 // Usage: npx memberry <command> [options]
 
-import { execFileSync } from 'child_process';
 import { createNeo4jDriver, TenantAdmin, LifecycleStore, EpisodicIndexStore } from '@memberry/neo4j';
 import { writeFileSync } from 'fs';
 import { createRedisClient, ProposalStore, EpisodicBuffer } from '@memberry/redis';
@@ -127,44 +126,13 @@ async function runImport(flags: Record<string, string | boolean>): Promise<void>
 
 async function runSnapshot(flags: Record<string, string | boolean>): Promise<void> {
   const snapshotPath = String(flags['path'] ?? defaultExportPath());
-  const shouldCommit = flags['commit'] === true;
-  const message =
-    typeof flags['message'] === 'string'
-      ? flags['message']
-      : `MemBerry snapshot ${new Date().toISOString().slice(0, 10)}`;
+  if (Object.hasOwn(flags, 'commit') || Object.hasOwn(flags, 'message')) {
+    throw new Error(
+      'snapshot:git_publishing_disabled: memory exports must not be committed from a source checkout',
+    );
+  }
 
-  // 1. Run full export
   await runExport({ path: snapshotPath });
-
-  if (!shouldCommit) return;
-
-  // 2. Stage snapshot changes. The default .memberry path is intentionally ignored
-  // in source worktrees, so snapshot commits must force-add this explicit path.
-  try {
-    execFileSync('git', ['add', '-f', snapshotPath], { stdio: 'inherit' });
-  } catch (err) {
-    console.error('git add failed:', err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
-
-  // 3. Check if there are staged snapshot changes only.
-  try {
-    execFileSync('git', ['diff', '--cached', '--quiet', '--', snapshotPath], { stdio: 'inherit' });
-    // Exit code 0 means no changes
-    console.log('No changes to commit — snapshot is already up to date.');
-    return;
-  } catch (err: unknown) {
-    // Non-zero exit = there are staged snapshot changes — proceed with commit.
-  }
-
-  // 4. Commit only the snapshot path, preserving any unrelated staged work.
-  try {
-    execFileSync('git', ['commit', '-m', message, '--', snapshotPath], { stdio: 'inherit' });
-    console.log(`Snapshot committed: ${message}`);
-  } catch (err) {
-    console.error('git commit failed:', err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
 }
 
 async function runDream(flags: Record<string, string | boolean>): Promise<void> {
@@ -536,7 +504,7 @@ async function main(): Promise<void> {
       console.error('Memory snapshot commands:');
       console.error('  export    [--path ./.memberry] [--entity Name] [--tag tag]');
       console.error('  import    [--path ./.memberry] [--strategy confidence-weighted|overwrite] [--dry-run]');
-      console.error('  snapshot  [--path ./.memberry] [--commit] [--message "..."]');
+      console.error('  snapshot  [--path ./.memberry]   (local export only; never stages or commits files)');
       console.error('');
       console.error('Background memory commands:');
       console.error('  dream      [--scope project:x] [--max-entities N] [--no-cards]');
