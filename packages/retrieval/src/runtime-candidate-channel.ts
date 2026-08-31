@@ -304,6 +304,7 @@ CALL {
        CASE WHEN neighborKeyScore IS NULL OR neighborOriginalScore >= neighborKeyScore
          THEN neighborOriginalScore ELSE neighborKeyScore END AS neighborScore
   WHERE neighborScore IS NOT NULL
+  WITH item, neighbor, neighborScore
   ORDER BY neighborScore DESC, neighbor.id ASC
   LIMIT 1
   RETURN neighbor AS candidate,
