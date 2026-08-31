@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildEpisodeIndexKeysV1,
+  buildGraphBackfillIndexKeysV1,
   validateEpisodeStructuredIndexV1,
 } from '../structured-index.js';
 
@@ -87,5 +88,42 @@ describe('IDX-001A structured episode index contract', () => {
       tenant_id: 'tenant1', project_scope: 'project:memberry', schema_version: 1,
     });
     expect(keys[0]!.id).toMatch(/^eik1:ep1:[0-9a-f]{64}$/);
+  });
+
+  it('builds model-free graph keys bound to the source Fact and canonical Entity', () => {
+    const facts = [{
+      source_fact_id: 'fact-1', entity_id: 'entity-gale',
+      subject: ' Sensor Gale ', predicate: 'is maintained by', object: ' Team Nimbus ',
+    }];
+    const keys = buildGraphBackfillIndexKeysV1({
+      episodeId: 'ep1', facts, tenantId: 'tenant1', projectScope: 'project:memberry',
+      createdAt: '2026-08-30T00:00:00.000Z',
+    });
+    expect(keys).toEqual([expect.objectContaining({
+      episode_id: 'ep1', kind: 'fact', value: 'Sensor Gale is maintained by Team Nimbus',
+      entity_id: 'entity-gale', source_fact_id: 'fact-1', derivation: 'graph-v1',
+      source: 'backfill', tenant_id: 'tenant1', project_scope: 'project:memberry',
+    })]);
+    expect(keys[0]).not.toHaveProperty('embedding');
+    expect(keys[0]!.id).toMatch(/^eik1:ep1:[0-9a-f]{64}$/);
+  });
+
+  it('rejects duplicate entities, over-cap input, and malformed graph provenance', () => {
+    const fact = (index: number) => ({
+      source_fact_id: `fact-${index}`, entity_id: `entity-${index}`,
+      subject: `Subject ${index}`, predicate: 'uses', object: `Object ${index}`,
+    });
+    expect(() => buildGraphBackfillIndexKeysV1({
+      episodeId: 'ep1', facts: [{ ...fact(1) }, { ...fact(2), entity_id: 'entity-1' }],
+      tenantId: 'tenant1', projectScope: 'project:memberry', createdAt: '2026-08-30T00:00:00.000Z',
+    })).toThrow('duplicate_fact_or_entity');
+    expect(() => buildGraphBackfillIndexKeysV1({
+      episodeId: 'ep1', facts: Array.from({ length: 17 }, (_, index) => fact(index)),
+      tenantId: 'tenant1', projectScope: 'project:memberry', createdAt: '2026-08-30T00:00:00.000Z',
+    })).toThrow('invalid_facts');
+    expect(() => buildGraphBackfillIndexKeysV1({
+      episodeId: 'ep1', facts: [{ ...fact(1), source_fact_id: 'bad id' }],
+      tenantId: 'tenant1', projectScope: 'project:memberry', createdAt: '2026-08-30T00:00:00.000Z',
+    })).toThrow('invalid_fact_identity');
   });
 });

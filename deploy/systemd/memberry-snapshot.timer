@@ -1,5 +1,5 @@
 [Unit]
-Description=Run MemBerry snapshot nightly
+Description=Run MemBerry local snapshot export nightly
 
 [Timer]
 OnCalendar=*-*-* 03:00:00

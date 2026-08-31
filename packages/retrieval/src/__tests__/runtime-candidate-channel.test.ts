@@ -229,9 +229,24 @@ describe('RET-003B runtime candidate channel service', () => {
       expect(query).toContain('MATCH (ep:Episodic)-[r:REFERENCES]->(target)');
       expect(query).toContain('WHERE baseIndex < 5');
       expect(query).toContain('bridge <> target');
+      expect(query).toContain('item.ep AS seed');
+      expect(query).toContain('(seed)-[:HAS_INDEX_KEY]->(seedKey:EpisodicIndexKey)');
+      expect(query).toContain('(neighbor:Episodic)-[:HAS_INDEX_KEY]->(neighborKey:EpisodicIndexKey)');
+      expect(query).toContain('seedKey.tenant_id = $tenantId');
+      expect(query).toContain('seedKey.project_scope = $projectScope');
+      expect(query).toContain('seedKey.entity_id <> target.id');
+      expect(query).toContain('neighborKey.entity_id = seedKey.entity_id');
+      expect(query).toContain("coalesce(seedKey.derivation, '') <> 'graph-v1'");
+      expect(query).toContain('(seedFact:Fact)-[:SOURCED_FROM]->(seed)');
+      expect(query).not.toContain('(item.ep)');
+      expect(query).toContain("seedFact.status <> 'invalidated'");
+      expect(query).toContain("coalesce(neighborKey.derivation, '') <> 'graph-v1'");
+      expect(query).toContain('(neighborFact:Fact)-[:SOURCED_FROM]->(neighbor)');
       expect(query).toContain('neighbor.tenant_id = $tenantId');
       expect(query).toContain('neighbor.scope = $projectScope');
       expect(query).toContain('neighborKey.project_scope = $projectScope');
+      expect(query).toContain('WHERE neighborScore IS NOT NULL\n  WITH item, neighbor, neighborScore\n  ORDER BY');
+      expect(query).toContain('candidate AS ep, score\nWITH root, target, evidenceId, ep,');
       expect(query).toContain('LIMIT 1');
     } finally {
       if (previous === undefined) delete process.env[EPISODIC_STRUCTURED_INDEX_FLAG];

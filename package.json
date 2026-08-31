@@ -38,6 +38,7 @@
     "bench:lab:multihop-v4:join-control": "tsx bench/lab/multihop/qualify-control-v4.ts join",
     "bench:lab:multihop-v4:evaluate-dev": "tsx bench/lab/multihop/evaluate-dev-v4.ts node",
     "bench:lab:multihop-v4:join-dev": "tsx bench/lab/multihop/evaluate-dev-v4.ts join",
+    "bench:lab:idx001bd:measure-dev": "tsx bench/lab/multihop/measure-structured-dev.ts",
     "bench:lab:validate": "tsx bench/lab/registry/validate.ts",
     "bench:lab:baseline:verify": "tsx bench/lab/baselines/verify.ts",
     "bench:lab:dataset:acquire": "tsx bench/lab/datasets/acquire.ts",

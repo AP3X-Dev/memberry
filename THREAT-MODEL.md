@@ -177,6 +177,9 @@ A second, independent redaction + property allowlist + XSS-escape pass runs at t
 graph-export boundary (`packages/graph/src/allowlist.ts`,
 `packages/graph/src/snapshot.ts`) so reports/exports/HTML maps never emit secrets
 even if ingest redaction was off.
+Full `.memberry/` memory exports are a different, sensitive backup surface. They
+remain gitignored, and the snapshot CLI refuses legacy Git-publishing flags
+before exporting; versioned backups belong in a separate private destination.
 *Residual:* Redaction is conservative pattern matching, opt-in on ingest, and not
 a guarantee — novel secret shapes or secrets split across lines can slip through.
 

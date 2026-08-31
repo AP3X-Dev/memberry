@@ -43,6 +43,8 @@ The default export / local-memory directory resolves to `./.memberry` if it
 exists, else falls back to `./.amp` (`defaultExportPath()` in `settings.ts`).
 The document-conversion cache likewise still lives under `.amp/converted/`
 (gitignored). Both `.memberry/` and the legacy `.amp/` are kept in `.gitignore`.
+The snapshot command only exports locally and refuses the retired `--commit`
+and `--message` flags; keep versioned backups in a separate private destination.
 
 ### URI scheme: `amp://` → `memberry://`
 

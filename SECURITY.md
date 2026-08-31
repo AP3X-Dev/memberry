@@ -282,6 +282,15 @@ Redaction is **best-effort pattern matching**: it raises the bar significantly
 but is not a guarantee that no secret can ever be stored. Do not deliberately
 feed credentials into memory and rely on redaction to scrub them.
 
+### Local memory exports
+
+The `.memberry/` export contains user-specific memory and must be treated as
+sensitive backup data. It is gitignored, and `memberry snapshot` performs a
+local export only. The retired `--commit` and `--message` options fail before
+the export begins; MemBerry never stages or commits memory data. Put versioned
+backups in a separate private, access-controlled destination outside the source
+checkout.
+
 ---
 
 ## Audit trail

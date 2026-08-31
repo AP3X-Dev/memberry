@@ -212,24 +212,28 @@ Unit=memberry-dream.service
 
 > Replace the hard-coded `--scope project:<your-tag>` with your project tag.
 
-### Snapshot — nightly memory export + commit
+### Snapshot — nightly local memory export
 
 `memberry-snapshot.service` exports memory to `<INSTALL_DIR>/.memberry` and
-commits it (the snapshot path is force-added since `.memberry/` is gitignored);
-`memberry-snapshot.timer` fires nightly at 03:00:
+`memberry-snapshot.timer` runs it nightly at 03:00. The export stays local and
+gitignored; MemBerry never stages or commits memory data:
 
 ```ini
 # memberry-snapshot.service (ExecStart)
-ExecStart=/usr/bin/npx tsx packages/core/src/cli.ts snapshot --path ./.memberry --commit
+ExecStart=/usr/bin/npx tsx packages/core/src/cli.ts snapshot --path ./.memberry
 ```
+
+Treat `.memberry/` as sensitive backup data. If you need versioned backups,
+copy the export to a separate private, access-controlled backup destination
+outside the MemBerry source checkout. Do not force-add it to this repository.
 
 ### Lifecycle pass — nightly retention + decay proposals + archive
 
 `memberry-lifecycle.service` runs the per-scope lifecycle pass (sidecar
 retention budgets, review-gated decay proposals, reversible archive);
-`memberry-lifecycle.timer` fires nightly at 04:00 — deliberately after snapshot
-(03:00) and dream (03:30) so the snapshot commit always precedes any lifecycle
-mutation:
+`memberry-lifecycle.timer` fires nightly at 04:00 — deliberately after the local
+snapshot export (03:00) and dream (03:30) so backup bytes exist before any
+lifecycle mutation:
 
 ```ini
 # memberry-lifecycle.service (ExecStart)

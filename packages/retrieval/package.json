@@ -7,7 +7,7 @@
   "main": "src/index.ts",
   "scripts": {
     "build": "tsc -b",
-    "test": "vitest run",
+    "test": "vitest run --exclude src/__tests__/runtime-candidate-channel.structured.live.test.ts && vitest run src/__tests__/runtime-candidate-channel.structured.live.test.ts --no-file-parallelism",
     "bench": "tsx bench/benchmark.ts",
     "bench:quality": "tsx bench/quality-eval.ts"
   },
