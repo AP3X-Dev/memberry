@@ -39,6 +39,13 @@ describe('RET-002C2 authenticated runtime query planner', () => {
     expect(plan.hints.entities).toEqual(['Call Context Resolver', 'SOP lifecycle']);
   });
 
+  it('accepts npm-scoped package names as entity hints', () => {
+    const plan = buildRuntimeQueryPlanV1({
+      tenantId: 'tenant-a', projectName: 'project:memberry', entityScope: ['@memberry/core'],
+    });
+    expect(plan.hints.entities).toEqual(['@memberry/core']);
+  });
+
   it.each([
     ['', ['entity']], ['memberry', ['entity']], ['project:Memberry', ['entity']],
     ['project:memberry', []], ['project:memberry', Array.from({ length: 17 }, (_, i) => `e${i}`)],
