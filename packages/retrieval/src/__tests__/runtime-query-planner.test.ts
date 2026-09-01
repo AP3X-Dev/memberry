@@ -51,6 +51,8 @@ describe('RET-002C2 authenticated runtime query planner', () => {
     ['project:memberry', []], ['project:memberry', Array.from({ length: 17 }, (_, i) => `e${i}`)],
     ['project:memberry', ['tenant:foreign']], ['project:memberry', [' leading']],
     ['project:memberry', ['trailing ']], ['project:memberry', ['bad\tspace']],
+    ['project:memberry', ['@']], ['project:memberry', ['@/x']],
+    ['project:memberry', ['@@x']], ['project:memberry', ['@ x']],
   ])('rejects invalid project/hint input with one fixed value-free error', (projectName, entityScope) => {
     expect(() => buildRuntimeQueryPlanV1({ tenantId: 'tenant-a', projectName, entityScope }))
       .toThrowError('runtime_query_planner:invalid_request');
