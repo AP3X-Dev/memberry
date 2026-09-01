@@ -366,16 +366,21 @@ function plannerAnchored(args: { entity_scope?: unknown }): boolean {
 }
 
 /**
- * Public tools have always described this field as a project name, and real
- * agent calls commonly send `memberry`. The sealed planner deliberately accepts
- * only canonical authority scopes, so adapt the safe lowercase bare-name form
- * at this boundary without weakening the planner contract or case-folding an
- * ambiguous caller value.
+ * Public tools describe this field as a project name, so callers legitimately
+ * send both canonical slugs (`memberry`) and human display names (`Guardrail
+ * Control Plane`). The sealed planner deliberately accepts only canonical
+ * authority scopes. Adapt the bounded ASCII project-name forms here while
+ * leaving malformed, path-like, or control-bearing values for the planner to
+ * reject fail-closed.
  */
 function canonicalPlannerProjectScope(projectName: unknown): unknown {
-  return typeof projectName === 'string' && /^[a-z0-9][a-z0-9._-]*$/.test(projectName)
-    ? `project:${projectName}`
+  if (typeof projectName !== 'string') return projectName;
+  if (/^project:[a-z0-9][a-z0-9._-]*$/.test(projectName)) return projectName;
+  const name = projectName.startsWith('project:')
+    ? projectName.slice('project:'.length)
     : projectName;
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9._ -]*[A-Za-z0-9])?$/.test(name)) return projectName;
+  return `project:${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
 }
 
 function retrievalRoutingShape(

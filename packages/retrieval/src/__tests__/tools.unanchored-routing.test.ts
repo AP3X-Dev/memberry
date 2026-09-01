@@ -219,7 +219,7 @@ describe('RL-018 unanchored requests route to the task-text path', () => {
     const { assembler, handlers } = live(emptyCtx());
 
     await expect(handlers.get('berry_context')!({
-      task: 'sneaky', project_name: 'not a project scope', entity_scope: ['Resolver'],
+      task: 'sneaky', project_name: 'project:memberry/foreign', entity_scope: ['Resolver'],
     })).rejects.toThrow('runtime_query_planner:invalid_request');
 
     expect(assembler.assemble).not.toHaveBeenCalled();
