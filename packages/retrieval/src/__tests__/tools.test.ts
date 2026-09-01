@@ -403,13 +403,47 @@ describe('RET-002C2 authenticated planner wiring', () => {
     const { server, handlers } = makeServerStub();
     registerRetrievalTools(server as never, container);
     const args = tool === 'berry_context'
-      ? { task: 'blocked', project_name: 'Memberry', entity_scope: ['Resolver'] }
-      : { question: 'blocked', project_name: 'Memberry', entity_scope: ['Resolver'] };
+      ? { task: 'blocked', project_name: 'project:memberry/foreign', entity_scope: ['Resolver'] }
+      : { question: 'blocked', project_name: 'project:memberry/foreign', entity_scope: ['Resolver'] };
     await expect(handlers.get(tool)!(args)).rejects.toThrowError('runtime_query_planner:invalid_request');
     expect(resolverFactory).not.toHaveBeenCalled();
     expect(assembler.assemble).not.toHaveBeenCalled();
     expect(assembler.ask).not.toHaveBeenCalled();
     expect(assembler.renderMarkdown).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['berry_context', 'Guardrail Control Plane'],
+    ['berry_ask', 'project:Guardrail Control Plane'],
+    ['berry_context', 'Memberry'],
+    ['berry_ask', 'project:canonical_scope.v1'],
+  ] as const)('%s canonicalizes safe project display name %s before planning', async (tool, projectName) => {
+    const { assembler, resolverFactory, resolve, container } = plannerContainer();
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+    const args = tool === 'berry_context'
+      ? { task: 'safe', project_name: projectName, entity_scope: ['hhHACiJJL5t7AUBJyA2UU'] }
+      : { question: 'safe', project_name: projectName, entity_scope: ['hhHACiJJL5t7AUBJyA2UU'] };
+
+    await handlers.get(tool)!(args);
+
+    const expectedScope = projectName === 'Memberry'
+      ? 'project:memberry'
+      : projectName === 'project:canonical_scope.v1'
+      ? projectName
+      : 'project:guardrail-control-plane';
+    expect(resolverFactory).toHaveBeenCalledWith({
+      tenantId: 'tenant-a', projectScopes: [expectedScope],
+    });
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
+      authority: expect.objectContaining({
+        callerScopes: expect.objectContaining({ projects: [expectedScope] }),
+      }),
+    }));
+    const downstream = tool === 'berry_context' ? assembler.assemble : assembler.ask;
+    expect(downstream).toHaveBeenCalledWith('safe', expect.objectContaining({
+      project_name: expectedScope, resolvedEntityIds: ['entity-stable'],
+    }));
   });
 
   it.each([
@@ -586,6 +620,37 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     expect(container.assembler!.assembleCandidateExecution).toHaveBeenCalledWith(
       'stable', expect.anything(), 8_000, true, true, false,
     );
+  });
+
+  it('canonicalizes a documented display project name on deterministic candidate context', async () => {
+    const { container, resolve, candidateRuntime } = candidateContainer();
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+
+    await handlers.get('berry_context')!({
+      task: 'Write an exact resumption handoff after an interrupted verification run.',
+      project_name: 'Guardrail Control Plane',
+      tag_scope: ['project:guardrail-control-plane', 'clean-room', 'deterministic-enforcement'],
+      entity_scope: ['hhHACiJJL5t7AUBJyA2UU'],
+      include_arch: true,
+      include_code: true,
+      include_memory: true,
+      max_tokens: 3_000,
+      strategy: 'deterministic',
+    });
+
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
+      authority: expect.objectContaining({
+        callerScopes: expect.objectContaining({ projects: ['project:guardrail-control-plane'] }),
+      }),
+      hints: expect.objectContaining({ entities: ['hhHACiJJL5t7AUBJyA2UU'] }),
+    }));
+    const receipt = vi.mocked(candidateRuntime.execute).mock.calls[0]![0];
+    expect(readRuntimeQueryPlannerAuthorityV1(receipt)).toMatchObject({
+      tenantId: 'tenant-a',
+      projectScope: 'project:guardrail-control-plane',
+      resolvedEntityId: 'entity-stable',
+    });
   });
 
   it('berry_context raw deterministic for a named tenant forces ranked-v1 through the exact disable latch', async () => {

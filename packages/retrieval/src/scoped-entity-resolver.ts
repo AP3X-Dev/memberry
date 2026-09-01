@@ -68,6 +68,19 @@ const MAX_CANONICAL_ID_LENGTH = 200;
 const MAX_TENANT_ID_LENGTH = 128;
 const MAX_PROJECT_SCOPE_LENGTH = 136;
 
+// Mirrors the safe display-name canonicalization at the MCP boundary: lowercase
+// ASCII alphanumerics, collapse every separator run to one dash, and trim a
+// trailing dash. The exact lowercase-name comparison remains alongside it so
+// already-canonical project scopes containing dots or underscores retain their
+// historical identity.
+const PROJECT_DISPLAY_NAME_SLUG = `
+reduce(slug = '', character IN split(toLower(project.name), '') |
+  CASE
+    WHEN character =~ '[a-z0-9]' THEN slug + character
+    WHEN slug = '' OR right(slug, 1) = '-' THEN slug
+    ELSE slug + '-'
+  END)`;
+
 function requireTrustedAuthority(input: ScopedEntityTrustedAuthorityV1): ScopedEntityTrustedAuthorityV1 {
   try {
     if (typeof input !== 'object'
@@ -158,8 +171,17 @@ CALL {
     WHERE legacyProject.type = 'project'
     RETURN legacyProject AS project
   }
-  WITH projectScope, project
-  WHERE toLower(project.name) = substring(projectScope, 8)
+  WITH projectScope, project,
+       toLower(project.name) AS lowerProjectName,
+       ${PROJECT_DISPLAY_NAME_SLUG} AS projectSlugWithPossibleTrailingDash
+  WITH projectScope, project, lowerProjectName,
+       CASE
+         WHEN right(projectSlugWithPossibleTrailingDash, 1) = '-'
+         THEN left(projectSlugWithPossibleTrailingDash, size(projectSlugWithPossibleTrailingDash) - 1)
+         ELSE projectSlugWithPossibleTrailingDash
+       END AS projectSlug
+  WHERE lowerProjectName = substring(projectScope, 8)
+     OR projectSlug = substring(projectScope, 8)
   WITH project
   LIMIT 2
   RETURN collect(project) AS projects

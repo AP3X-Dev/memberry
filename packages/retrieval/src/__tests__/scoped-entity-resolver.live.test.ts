@@ -68,6 +68,14 @@ function addProject(label: string, tenantId = TENANT): ProjectFixture {
   return Object.freeze({ id, name, scope: `project:${name}` });
 }
 
+function addDisplayProject(label: string, displaySuffix: string, tenantId = TENANT): ProjectFixture {
+  const name = `${RUN} ${displaySuffix}`;
+  const id = addNode(`${RUN}-${label}-project`, 'project', tenantId);
+  nodeManifest[nodeManifest.length - 1] = { id, name, type: 'project', tenantId };
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return Object.freeze({ id, name, scope: `project:${slug}` });
+}
+
 function addRelationship(from: string, to: string): void {
   relationshipSequence += 1;
   relationshipManifest.push({
@@ -128,6 +136,7 @@ const CYCLE_17_IDS = addChain(CYCLE_17.id, 'cycle17', 16);
 addRelationship(CYCLE_17_IDS[15]!, CYCLE_17.id);
 
 const SELF_CYCLE = addProject('selfcycle');
+const DISPLAY_PROJECT = addDisplayProject('display', 'Guardrail Control Plane');
 const SELF_CYCLE_ID = addNode(`${RUN}-selfcycle-candidate`, 'module');
 addRelationship(SELF_CYCLE.id, SELF_CYCLE_ID);
 addRelationship(SELF_CYCLE_ID, SELF_CYCLE_ID);
@@ -970,6 +979,15 @@ describe('ScopedEntityResolver disposable Neo4j containment proof', () => {
       DEPTH_17_IDS[16]!,
       'denied',
       'entity_scope_overflow',
+    );
+  });
+
+  liveTest('resolves a canonical root ID under a slugged display project name', async (liveDriver) => {
+    await requireHintResolution(
+      liveDriver,
+      DISPLAY_PROJECT.scope,
+      DISPLAY_PROJECT.id,
+      DISPLAY_PROJECT.id,
     );
   });
 
