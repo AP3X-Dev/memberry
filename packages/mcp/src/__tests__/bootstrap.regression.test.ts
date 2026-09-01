@@ -67,6 +67,7 @@ describe('bootstrap.ts regression', () => {
   it('RET-002C2 keeps runtime planning exact-value default-off and injects a driver-backed resolver', () => {
     expect(BOOTSTRAP_SOURCE).toContain("const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1'");
     expect(BOOTSTRAP_SOURCE).toContain('new ScopedEntityResolver(driver, authority)');
+    expect(BOOTSTRAP_SOURCE).toContain('projectScopeDriver: driver');
   });
   it('RET-003B keeps candidate channels exact-value default-off and binds default plus dedicated drivers', () => {
     expect(BOOTSTRAP_SOURCE).toContain("const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1'");

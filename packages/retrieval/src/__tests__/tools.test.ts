@@ -339,6 +339,7 @@ describe('RET-002C2 authenticated planner wiring', () => {
     state?: 'resolved' | 'ambiguous' | 'not-found' | 'denied';
     ids?: string[];
     result?: unknown;
+    projectScope?: string;
   } = {}) {
     const assembler = makeAssembler();
     const defaultResult = Object.freeze({
@@ -350,14 +351,16 @@ describe('RET-002C2 authenticated planner wiring', () => {
     });
     const resolve = vi.fn().mockResolvedValue(options.result ?? defaultResult);
     const resolverFactory = vi.fn((_authority: ScopedEntityTrustedAuthorityV1) => ({ resolve }));
+    const resolveProjectScope = vi.fn().mockResolvedValue(options.projectScope);
     const container = createRetrievalContainer({
       assembler,
       tenantId: 'tenant-a',
       authenticated: options.authenticated ?? true,
       queryPlannerEnabled: options.enabled ?? true,
+      projectScopeResolver: { resolve: resolveProjectScope },
       resolverFactory,
     });
-    return { assembler, resolve, resolverFactory, container };
+    return { assembler, resolve, resolveProjectScope, resolverFactory, container };
   }
 
   it('keeps the flag-off ordinary, traced, and ask calls exact and never touches the resolver', async () => {
@@ -412,6 +415,19 @@ describe('RET-002C2 authenticated planner wiring', () => {
     expect(assembler.renderMarkdown).not.toHaveBeenCalled();
   });
 
+  it('keeps oversized display-derived scopes on the planner invalid-request path', async () => {
+    const { assembler, resolveProjectScope, resolverFactory, container } = plannerContainer();
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+
+    await expect(handlers.get('berry_context')!({
+      task: 'blocked', project_name: 'A'.repeat(129), entity_scope: ['Resolver'],
+    })).rejects.toThrowError('runtime_query_planner:invalid_request');
+    expect(resolveProjectScope).not.toHaveBeenCalled();
+    expect(resolverFactory).not.toHaveBeenCalled();
+    expect(assembler.assemble).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['berry_context', 'Guardrail Control Plane'],
     ['berry_ask', 'project:Guardrail Control Plane'],
@@ -444,6 +460,38 @@ describe('RET-002C2 authenticated planner wiring', () => {
     expect(downstream).toHaveBeenCalledWith('safe', expect.objectContaining({
       project_name: expectedScope, resolvedEntityIds: ['entity-stable'],
     }));
+  });
+
+  it('uses the bootstrap-owned scope for DealerBot3.0 instead of the display-derived guess', async () => {
+    const { assembler, resolveProjectScope, resolverFactory, container } = plannerContainer({
+      projectScope: 'project:dealerbot',
+    });
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+
+    await handlers.get('berry_context')!({
+      task: 'Implement DealerBot3.0 UI-04B Campaign Policies and Approvals',
+      project_name: 'DealerBot3.0',
+      entity_scope: ['ent-YOX6g9puSeht'],
+      tag_scope: ['project:dealerbot', 'guardrail-parity', 'ui-catch-up'],
+      strategy: 'deterministic',
+      include_arch: true,
+      include_code: true,
+      include_memory: true,
+      max_tokens: 5000,
+    });
+
+    expect(resolveProjectScope).toHaveBeenCalledWith('project:dealerbot3-0');
+    expect(resolverFactory).toHaveBeenCalledWith({
+      tenantId: 'tenant-a', projectScopes: ['project:dealerbot'],
+    });
+    expect(assembler.assemble).toHaveBeenCalledWith(
+      'Implement DealerBot3.0 UI-04B Campaign Policies and Approvals',
+      expect.objectContaining({
+        project_name: 'project:dealerbot',
+        resolvedEntityIds: ['entity-stable'],
+      }),
+    );
   });
 
   it.each([

@@ -11,6 +11,7 @@ import { types as nodeUtilTypes } from 'node:util';
 import type { RetrievalTraceV1 } from './trace.js';
 import type { QueryPlanV1 } from './query-plan.js';
 import {
+  ProjectScopeResolver,
   ScopedEntityResolver,
   type ScopedEntityResolutionResultV1,
   type ScopedEntityTrustedAuthorityV1,
@@ -159,6 +160,8 @@ export interface RetrievalServiceContainer {
   authenticated: boolean;
   /** Process-captured, exact default-off RET-002C2 feature switch. */
   queryPlannerEnabled: boolean;
+  /** Tenant-bound display-name to canonical project-scope lookup. */
+  projectScopeResolver: RuntimeProjectScopeResolver | null;
   resolverFactory: RuntimeScopedEntityResolverFactory | null;
   /** Process-captured exact-default-off RET-003B switch. */
   candidateChannelEnabled: boolean;
@@ -173,6 +176,10 @@ export interface RuntimeScopedEntityResolver {
   resolve(plan: QueryPlanV1): Promise<ScopedEntityResolutionResultV1>;
 }
 
+export interface RuntimeProjectScopeResolver {
+  resolve(projectHint: string): Promise<string | undefined>;
+}
+
 export type RuntimeScopedEntityResolverFactory = (
   authority: ScopedEntityTrustedAuthorityV1,
 ) => RuntimeScopedEntityResolver;
@@ -185,6 +192,7 @@ export function createRetrievalContainer(partial: Partial<RetrievalServiceContai
     tenantId: partial.tenantId ?? DEFAULT_TENANT,
     authenticated: partial.authenticated ?? false,
     queryPlannerEnabled: partial.queryPlannerEnabled ?? false,
+    projectScopeResolver: partial.projectScopeResolver ?? null,
     resolverFactory: partial.resolverFactory ?? null,
     candidateChannelEnabled: partial.candidateChannelEnabled ?? false,
     candidateRuntime: partial.candidateRuntime ?? null,
@@ -197,6 +205,7 @@ export function createRetrievalContainer(partial: Partial<RetrievalServiceContai
 const defaultContainer: RetrievalServiceContainer = createRetrievalContainer();
 const tenantCandidateRuntimes = new Map<string, IRuntimeCandidateChannelService>();
 const tenantResolverFactories = new Map<string, RuntimeScopedEntityResolverFactory>();
+const tenantProjectScopeResolvers = new Map<string, RuntimeProjectScopeResolver>();
 
 /** A retrieval container bound to a tenant, reusing the shared assembler. */
 export function retrievalContainerForTenant(tenantId: string, authenticated = false): RetrievalServiceContainer {
@@ -205,6 +214,7 @@ export function retrievalContainerForTenant(tenantId: string, authenticated = fa
     tenantId,
     authenticated,
     candidateRuntime: tenantCandidateRuntimes.get(tenantId) ?? defaultContainer.candidateRuntime,
+    projectScopeResolver: tenantProjectScopeResolvers.get(tenantId) ?? defaultContainer.projectScopeResolver,
     resolverFactory: tenantResolverFactories.get(tenantId) ?? defaultContainer.resolverFactory,
   };
 }
@@ -212,6 +222,7 @@ export function retrievalContainerForTenant(tenantId: string, authenticated = fa
 /** Bind a physically isolated tenant's candidate reads and resolver to one driver. */
 function setRetrievalTenantCandidateDriver(tenantId: string, driver: Driver & RuntimeCandidateDriver): void {
   tenantCandidateRuntimes.set(tenantId, new RuntimeCandidateChannelService(driver));
+  tenantProjectScopeResolvers.set(tenantId, new ProjectScopeResolver(driver, tenantId));
   tenantResolverFactories.set(tenantId, (authority) => {
     const resolver = new ScopedEntityResolver(driver, authority);
     return { resolve: (plan) => resolver.resolve(plan) };
@@ -222,11 +233,13 @@ export function setRetrievalServiceInstances(services: {
   assembler: IUnifiedAssembler;
   feedbackTracker: IFeedbackTracker;
   queryPlannerEnabled?: boolean;
+  projectScopeResolver?: RuntimeProjectScopeResolver;
   resolverFactory?: RuntimeScopedEntityResolverFactory;
   candidateChannelEnabled?: boolean;
   candidateRuntime?: IRuntimeCandidateChannelService;
   rerankerShadowCoordinator?: RerankerShadowCoordinatorPortV1 | null;
   candidateDriver?: RuntimeCandidateDriver;
+  projectScopeDriver?: Driver;
   tenantCandidateDrivers?: ReadonlyMap<string, Driver & RuntimeCandidateDriver>;
   multihopExpansionEnabled?: boolean;
 }): void {
@@ -235,6 +248,8 @@ export function setRetrievalServiceInstances(services: {
   defaultContainer.assembler = services.assembler ?? null;
   defaultContainer.feedbackTracker = services.feedbackTracker ?? null;
   defaultContainer.queryPlannerEnabled = services.queryPlannerEnabled ?? false;
+  defaultContainer.projectScopeResolver = services.projectScopeResolver
+    ?? (services.projectScopeDriver ? new ProjectScopeResolver(services.projectScopeDriver, DEFAULT_TENANT) : null);
   defaultContainer.resolverFactory = services.resolverFactory ?? null;
   defaultContainer.candidateChannelEnabled = services.candidateChannelEnabled ?? false;
   defaultContainer.candidateRuntime = services.candidateRuntime
@@ -243,6 +258,7 @@ export function setRetrievalServiceInstances(services: {
   defaultContainer.multihopExpansionEnabled = services.multihopExpansionEnabled ?? false;
   tenantCandidateRuntimes.clear();
   tenantResolverFactories.clear();
+  tenantProjectScopeResolvers.clear();
   if (services.tenantCandidateDrivers) {
     for (const [tenantId, driver] of services.tenantCandidateDrivers) {
       setRetrievalTenantCandidateDriver(tenantId, driver);
@@ -381,6 +397,31 @@ function canonicalPlannerProjectScope(projectName: unknown): unknown {
     : projectName;
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9._ -]*[A-Za-z0-9])?$/.test(name)) return projectName;
   return `project:${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+}
+
+const MAX_PLANNER_PROJECT_SCOPE_LENGTH = 136;
+
+async function resolvePlannerProjectScope(
+  projectName: unknown,
+  resolver: RuntimeProjectScopeResolver | null,
+): Promise<unknown> {
+  const candidate = canonicalPlannerProjectScope(projectName);
+  if (typeof candidate !== 'string'
+    || candidate.length > MAX_PLANNER_PROJECT_SCOPE_LENGTH
+    || !/^project:[a-z0-9][a-z0-9._-]*$/.test(candidate)
+    || resolver === null) return candidate;
+  try {
+    const resolved = await resolver.resolve(candidate);
+    if (resolved === undefined) return candidate;
+    if (resolved.length > MAX_PLANNER_PROJECT_SCOPE_LENGTH
+      || !/^project:[a-z0-9][a-z0-9._-]*$/.test(resolved)) {
+      throw fixedPlannerFailure('resolution_failed');
+    }
+    return resolved;
+  } catch (error) {
+    if (error instanceof RuntimeQueryPlannerError) throw error;
+    throw fixedPlannerFailure('resolution_failed');
+  }
 }
 
 function retrievalRoutingShape(
@@ -554,7 +595,8 @@ export function registerRetrievalTools(
   // the same names they used as module globals, so their bodies are unchanged —
   // but each call to registerRetrievalTools can now be bound to a different container.
   const {
-    assembler, feedbackTracker, tenantId, authenticated, queryPlannerEnabled, resolverFactory,
+    assembler, feedbackTracker, tenantId, authenticated, queryPlannerEnabled,
+    projectScopeResolver, resolverFactory,
     candidateChannelEnabled, candidateRuntime,
     rerankerShadowCoordinator, multihopExpansionEnabled,
   } = container;
@@ -621,14 +663,14 @@ export function registerRetrievalTools(
         throw new Error('Retrieval trace summary does not support explain');
       }
       const anchored = plannerAnchored(args);
-      const projectName = candidateChannelEnabled || queryPlannerEnabled
-        ? canonicalPlannerProjectScope(args.project_name)
-        : args.project_name;
       recordRetrievalCallV1(
         'berry_context',
         retrievalRoutingShape(anchored, candidateChannelEnabled || queryPlannerEnabled),
       );
       assertPlannerAuthenticationObserved(candidateChannelEnabled, queryPlannerEnabled, authenticated);
+      const projectName = candidateChannelEnabled || queryPlannerEnabled
+        ? await resolvePlannerProjectScope(args.project_name, projectScopeResolver)
+        : args.project_name;
       // RL-018: an unanchored request cannot enter the candidate channel — it is pinned to one
       // resolved entity by construction. Fall through to the task-text path rather than reject.
       if (candidateChannelEnabled && anchored) {
@@ -810,14 +852,14 @@ export function registerRetrievalTools(
     async (args) => {
       if (!assembler) throw new Error('Retrieval services not initialised');
       const anchored = plannerAnchored(args);
-      const projectName = candidateChannelEnabled || queryPlannerEnabled
-        ? canonicalPlannerProjectScope(args.project_name)
-        : args.project_name;
       recordRetrievalCallV1(
         'berry_ask',
         retrievalRoutingShape(anchored, candidateChannelEnabled || queryPlannerEnabled),
       );
       assertPlannerAuthenticationObserved(candidateChannelEnabled, queryPlannerEnabled, authenticated);
+      const projectName = candidateChannelEnabled || queryPlannerEnabled
+        ? await resolvePlannerProjectScope(args.project_name, projectScopeResolver)
+        : args.project_name;
       // RL-018: same routing as berry_context — berry_ask shares the constraint verbatim.
       if (candidateChannelEnabled && anchored) {
         const servedCandidate = assembler.servedRerankerEnabled === true;

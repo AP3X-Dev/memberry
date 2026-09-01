@@ -169,6 +169,7 @@ export {
   SCOPED_ENTITY_RESOLVER_MAX_CONTAINMENT_DEPTH,
   SCOPED_ENTITY_RESOLVER_MAX_AUTHORITATIVE_DEPTH,
   SCOPED_ENTITY_RESOLVER_TIMEOUT_MS,
+  ProjectScopeResolver,
   ScopedEntityResolver,
   ScopedEntityResolverError,
 } from './scoped-entity-resolver.js';
@@ -298,6 +299,7 @@ export type {
   IFeedbackTracker,
   RetrievalRegisteredTools,
   RetrievalServiceContainer,
+  RuntimeProjectScopeResolver,
   RuntimeScopedEntityResolver,
   RuntimeScopedEntityResolverFactory,
 } from './tools.js';

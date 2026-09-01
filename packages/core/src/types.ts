@@ -62,6 +62,8 @@ export interface EntityNode {
   name: string;
   type: string;
   aliases: string[];
+  /** Bootstrap-owned canonical retrieval scope for project roots. */
+  project_scope?: string;
   created_at: string;
 }
 

@@ -225,6 +225,7 @@ describe('ScopedEntityResolver', () => {
       expect(query).not.toMatch(/\bLIMIT\s+1\b/i);
     }
     expect(calls[0]![0]).toContain('lowerProjectName = substring(projectScope, 8)');
+    expect(calls[0]![0]).toContain('project.project_scope = projectScope');
     expect(calls[0]![0]).toContain("character =~ '[a-z0-9]'");
     expect(calls[0]![0]).toContain('projectSlug = substring(projectScope, 8)');
     expect(calls[2]![0]).toContain('idCandidate:Entity {id: hint}');

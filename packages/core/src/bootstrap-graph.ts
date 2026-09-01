@@ -65,6 +65,23 @@ export interface BootstrapResult {
   project_entity_id: string;
 }
 
+const CANONICAL_PROJECT_SCOPE = /^project:[a-z0-9][a-z0-9._-]*$/;
+const MAX_CANONICAL_PROJECT_SCOPE_LENGTH = 136;
+
+/**
+ * Bootstrap owns the durable mapping between a human project name and the
+ * canonical scope used by memory/code retrieval. Keep already-canonical dots
+ * and underscores intact; only case is normalized here.
+ */
+function canonicalBootstrapProjectScope(projectTag: string): string {
+  const scope = projectTag.toLowerCase();
+  if (scope.length > MAX_CANONICAL_PROJECT_SCOPE_LENGTH
+    || !CANONICAL_PROJECT_SCOPE.test(scope)) {
+    throw new Error('bootstrap: project_tag must be a canonical project scope');
+  }
+  return scope;
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 export class BootstrapGraphService {
@@ -80,6 +97,7 @@ export class BootstrapGraphService {
    * Idempotent — MERGE prevents duplicates. Safe to run multiple times.
    */
   async bootstrap(input: BootstrapInput): Promise<BootstrapResult> {
+    const projectScope = canonicalBootstrapProjectScope(input.project_tag);
     const result: BootstrapResult = {
       entities_created: 0,
       entities_existing: 0,
@@ -97,7 +115,7 @@ export class BootstrapGraphService {
         name: input.project_name,
         type: 'project',
         description: input.description,
-      }, result);
+      }, result, projectScope);
       result.project_entity_id = projectId;
 
       // 2. Create all entities FIRST (parent-linking is a separate pass below).
@@ -189,7 +207,7 @@ export class BootstrapGraphService {
       //    so we lowercase here too. `input.project_tag` may arrive mixed-case
       //    (berry_bootstrap passes it through un-normalized), hence the explicit
       //    fold. The task fallback uses a BRACKETED token, never a bare substring.
-      const canonTag = `project:${input.project_tag.replace(/^project:/i, '').toLowerCase()}`;
+      const canonTag = projectScope;
       const taskTag = `[project:${input.project_name}]`;
       const orphanResult = await session.run(
         `MATCH (ep:Episodic)
@@ -285,21 +303,33 @@ export class BootstrapGraphService {
     session: ReturnType<Driver['session']>,
     entity: BootstrapEntity,
     result: BootstrapResult,
+    projectScope?: string,
   ): Promise<string> {
     const res = await session.run(
       `MERGE (e:Entity {name: $name})
-       ON CREATE SET e.id = $id, e.type = $type, e.description = $description, e.created_at = $now
+       ON CREATE SET e.id = $id, e.type = $type, e.description = $description,
+                     e.created_at = $now, e.project_scope = $projectScope
        ON MATCH SET e.description = CASE WHEN $description IS NOT NULL THEN $description ELSE e.description END,
-                    e.type = CASE WHEN $type = 'project' THEN 'project' ELSE e.type END
-       RETURN e.id AS id, e.created_at = $now AS isNew`,
+                    e.type = CASE WHEN $type = 'project' THEN 'project' ELSE e.type END,
+                    e.project_scope = CASE
+                      WHEN $projectScope IS NOT NULL AND e.project_scope IS NULL THEN $projectScope
+                      ELSE e.project_scope
+                    END
+       RETURN e.id AS id, e.created_at = $now AS isNew,
+              e.project_scope AS storedProjectScope`,
       {
         name: entity.name,
         id: nanoid(),
         type: entity.type,
         description: entity.description ?? null,
+        projectScope: projectScope ?? null,
         now: new Date().toISOString(),
       },
     );
+    const storedProjectScope = res.records[0].get('storedProjectScope') as unknown;
+    if (projectScope !== undefined && storedProjectScope !== projectScope) {
+      throw new Error('bootstrap: project scope conflicts with existing project authority');
+    }
     const isNew = res.records[0].get('isNew') as boolean;
     if (isNew) result.entities_created++;
     else result.entities_existing++;

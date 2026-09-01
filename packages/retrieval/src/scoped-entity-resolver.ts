@@ -180,7 +180,8 @@ CALL {
          THEN left(projectSlugWithPossibleTrailingDash, size(projectSlugWithPossibleTrailingDash) - 1)
          ELSE projectSlugWithPossibleTrailingDash
        END AS projectSlug
-  WHERE lowerProjectName = substring(projectScope, 8)
+  WHERE project.project_scope = projectScope
+     OR lowerProjectName = substring(projectScope, 8)
      OR projectSlug = substring(projectScope, 8)
   WITH project
   LIMIT 2
@@ -206,6 +207,47 @@ RETURN projectScope,
        END AS projectId
 ORDER BY projectScope
 LIMIT $projectCap`;
+
+/*
+ * Resolve a safe display-derived project hint to the canonical scope persisted
+ * by bootstrap. This is a read-only naming bridge, not an ACL: tenant ownership
+ * is applied before matching, aliases are ignored, and ambiguity fails closed.
+ * Legacy project roots without project_scope retain the historical name/slug
+ * derivation until they are re-bootstrapped.
+ */
+const PROJECT_SCOPE_LOOKUP_QUERY = `
+CALL {
+  MATCH (tenantProject:Entity {tenant_id: $tenantId})
+  WHERE tenantProject.type = 'project'
+  RETURN tenantProject AS project
+  UNION ALL
+  MATCH (legacyProject:Entity)
+  WHERE $tenantId = $defaultTenant
+    AND legacyProject.tenant_id IS NULL
+    AND legacyProject.type = 'project'
+  RETURN legacyProject AS project
+}
+WITH project,
+     toLower(project.name) AS lowerProjectName,
+     ${PROJECT_DISPLAY_NAME_SLUG} AS projectSlugWithPossibleTrailingDash
+WITH project, lowerProjectName,
+     CASE
+       WHEN right(projectSlugWithPossibleTrailingDash, 1) = '-'
+       THEN left(projectSlugWithPossibleTrailingDash, size(projectSlugWithPossibleTrailingDash) - 1)
+       ELSE projectSlugWithPossibleTrailingDash
+     END AS projectSlug
+WHERE project.project_scope = $projectHint
+   OR lowerProjectName = substring($projectHint, 8)
+   OR projectSlug = substring($projectHint, 8)
+WITH project, lowerProjectName, projectSlug,
+     CASE
+       WHEN project.project_scope IS NOT NULL THEN project.project_scope
+       WHEN lowerProjectName =~ '^[a-z0-9][a-z0-9._-]*$' THEN 'project:' + lowerProjectName
+       ELSE 'project:' + projectSlug
+     END AS canonicalProjectScope
+RETURN project.id AS projectId, canonicalProjectScope
+ORDER BY project.id
+LIMIT 2`;
 
 /*
  * Explicit stable IDs are matched only below already-authorized roots. Missing,
@@ -706,6 +748,68 @@ function mapExplicit(record: SnapshotRecord): ExplicitStatus {
     containmentCycle: booleanField(record, 'containmentCycle'),
     candidateId: optionalCanonicalId(record, 'candidateId'),
   };
+}
+
+/**
+ * Tenant-bound lookup for the canonical project scope recorded by bootstrap.
+ * A missing legacy mapping returns undefined so callers may preserve their
+ * existing exact-scope behavior; duplicate or malformed authority is rejected.
+ */
+export class ProjectScopeResolver {
+  private readonly tenantId: string;
+
+  constructor(private readonly driver: Driver, tenantId: string) {
+    if (typeof tenantId !== 'string' || tenantId.length < 1
+      || tenantId.length > MAX_TENANT_ID_LENGTH || !SAFE_TENANT_ID.test(tenantId)) {
+      throw new ScopedEntityResolverError('invalid_authority');
+    }
+    this.tenantId = tenantId;
+  }
+
+  async resolve(projectHint: string): Promise<string | undefined> {
+    if (typeof projectHint !== 'string' || projectHint.length < 1
+      || projectHint.length > MAX_PROJECT_SCOPE_LENGTH
+      || !CANONICAL_PROJECT_SCOPE.test(projectHint)) {
+      throw new ScopedEntityResolverError('invalid_authority');
+    }
+    const deadline = Date.now() + SCOPED_ENTITY_RESOLVER_TIMEOUT_MS;
+    let session: ReturnType<Driver['session']>;
+    try {
+      session = this.driver.session({ defaultAccessMode: neo4j.session.READ });
+    } catch {
+      throw new ScopedEntityResolverError('query_failed');
+    }
+    try {
+      const result = await withinDeadline(
+        () => session.run(PROJECT_SCOPE_LOOKUP_QUERY, {
+          projectHint,
+          tenantId: this.tenantId,
+          defaultTenant: DEFAULT_TENANT,
+        }, { timeout: SCOPED_ENTITY_RESOLVER_TIMEOUT_MS }),
+        deadline,
+      );
+      const records = snapshotRecords(result, 2, ['projectId', 'canonicalProjectScope']);
+      if (records.length === 0) return undefined;
+      if (records.length !== 1) throw new ScopedEntityResolverError('invalid_record');
+      const projectId = requiredString(records[0], 'projectId');
+      const canonicalProjectScope = requiredString(records[0], 'canonicalProjectScope');
+      if (projectId.length > MAX_CANONICAL_ID_LENGTH || !SAFE_CANONICAL_ID.test(projectId)
+        || canonicalProjectScope.length > MAX_PROJECT_SCOPE_LENGTH
+        || !CANONICAL_PROJECT_SCOPE.test(canonicalProjectScope)) {
+        throw new ScopedEntityResolverError('invalid_record');
+      }
+      return canonicalProjectScope;
+    } catch (error) {
+      if (error instanceof ScopedEntityResolverError) throw error;
+      throw new ScopedEntityResolverError('query_failed');
+    } finally {
+      try {
+        await withinDeadline(() => session.close(), deadline);
+      } catch {
+        // A completed result remains authoritative; the driver owns final cleanup.
+      }
+    }
+  }
 }
 
 /**

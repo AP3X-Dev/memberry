@@ -107,11 +107,12 @@ describe('BootstrapGraphService gap-14 (promote to project, never demote)', () =
     try {
       // The existing node was promoted, not re-created.
       const typeRes = await verifySession.run(
-        `MATCH (e:Entity {name: $name}) RETURN e.type AS type`,
+        `MATCH (e:Entity {name: $name}) RETURN e.type AS type, e.project_scope AS projectScope`,
         { name: projectName },
       );
       expect(typeRes.records).toHaveLength(1);
       expect(typeRes.records[0].get('type')).toBe('project');
+      expect(typeRes.records[0].get('projectScope')).toBe(`project:${TEST_PREFIX}`);
 
       // It is now discoverable via the type='project' filter wiki/lint use.
       const discoverRes = await verifySession.run(
@@ -488,7 +489,11 @@ describe('BootstrapGraphService OPT-8 (one bad seed must not abort bootstrap)', 
       }
       // mergeEntity MERGE.
       if (query.includes('MERGE (e:Entity')) {
-        return { records: [rec({ id: `ent-${++idCounter}`, isNew: true })] };
+        return { records: [rec({
+          id: `ent-${++idCounter}`,
+          isNew: true,
+          storedProjectScope: params?.projectScope ?? null,
+        })] };
       }
       // mergeAgent MERGE.
       if (query.includes('MERGE (a:Agent')) {

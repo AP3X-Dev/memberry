@@ -736,6 +736,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     rerankerShadowCoordinator,
     multihopExpansionEnabled,
     candidateDriver: driver,
+    projectScopeDriver: driver,
     tenantCandidateDrivers: dedicatedTenantCandidateDrivers,
     resolverFactory: (authority) => {
       const resolver = new ScopedEntityResolver(driver, authority);
