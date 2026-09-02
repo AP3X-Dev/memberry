@@ -6,7 +6,7 @@ import { DistributedLock, ProposalStore } from '@memberry/redis';
 import { runMigrations, checkVectorIndexDimensions, checkVectorIndexCoverage, ProvenanceTraversal } from '@memberry/neo4j';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT, resolveLifecycleConfig, runLifecyclePass, parseBoolFlag, getAllowedBaseDir } from '@memberry/core';
+import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT, resolveLifecycleConfig, runLifecyclePass, parseBoolFlag, getAllowedBaseDir, warnUnknownMemberryEnv } from '@memberry/core';
 import type { CoreServices, LifecyclePassResult } from '@memberry/core';
 import { setServiceInstances, setTenantContainer } from './tools.js';
 import {
@@ -341,6 +341,8 @@ export async function startCodeWatchOnBoot(deps: CodeWatchOnBootDeps): Promise<v
 }
 
 export async function bootstrap(): Promise<BootstrapHandles> {
+  // Item 20a (audit C10): one warning per MEMBERRY_* env not in MEMBERRY_FLAGS. Never throws.
+  warnUnknownMemberryEnv(process.env, (line) => console.error(line));
   const queryPlannerEnabled = process.env['MEMBERRY_QUERY_PLANNER_V1'] === '1';
   const candidateChannelEnabled = process.env['MEMBERRY_CANDIDATE_CHANNEL_V1'] === '1';
   // RET-007 v4: default-off second retrieval pass over the memory channel.
