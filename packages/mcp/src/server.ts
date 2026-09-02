@@ -96,6 +96,8 @@ export interface LifecycleReadiness {
   last_result: 'ok' | 'failed' | 'skipped' | 'never';
   last_error_class?: string;
   hebbian_drained?: number;
+  /** 13c: extraction-queue stats + failure count from the last pass's anti-entropy section. */
+  anti_entropy?: { pending: number; inflight: number; dead_lettered: number; failures: number };
 }
 
 export const DEFAULT_READYZ_PROBE_TIMEOUT_MS = 1_500;

@@ -97,6 +97,22 @@ describe('startLifecycleScheduler', () => {
     handle.stop();
   });
 
+  // Item 13c: anti-entropy extraction stats + failure count from the pass result.
+  it('status() carries anti_entropy mapped from the pass result, and omits it when the section is absent', async () => {
+    const run = vi.fn()
+      .mockResolvedValueOnce({
+        ...summary(),
+        anti_entropy: { extraction: { pending: 4, inflight: 1, dead_lettered: 2 }, failures: [{ class: 'signals', error: 'x' }] },
+      })
+      .mockResolvedValue(summary());
+    const handle = startLifecycleScheduler({ run, intervalMs: HOUR, log: () => {} });
+    await vi.advanceTimersByTimeAsync(5 * MIN);
+    expect(handle.status().anti_entropy).toEqual({ pending: 4, inflight: 1, dead_lettered: 2, failures: 1 });
+    await vi.advanceTimersByTimeAsync(HOUR);
+    expect(handle.status()).not.toHaveProperty('anti_entropy');
+    handle.stop();
+  });
+
   it('status() reports failed with the error class (never the message) when the pass throws', async () => {
     const run = vi.fn().mockRejectedValue(new RangeError('secret-bearing message'));
     const handle = startLifecycleScheduler({ run, intervalMs: HOUR, log: () => {} });

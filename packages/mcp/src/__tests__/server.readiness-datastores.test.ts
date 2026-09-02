@@ -134,6 +134,25 @@ describe('/readyz datastore probes', () => {
     );
   });
 
+  it('echoes lifecycle.anti_entropy from the accessor (13c)', async () => {
+    await withReadyz(
+      {
+        neo4j: okNeo4j, redis: okRedis, embeddings: 'ok', degraded: [],
+        lifecycle: () => ({
+          mode: 'live', last_run_at: '2026-09-02T00:00:00.000Z', last_result: 'ok',
+          anti_entropy: { pending: 4, inflight: 1, dead_lettered: 2, failures: 0 },
+        }),
+      },
+      async (fetchReadyz) => {
+        const res = await fetchReadyz();
+        expect(res.status).toBe(200);
+        const body = await res.json() as { lifecycle: { anti_entropy: Record<string, number> } };
+        expect(body.lifecycle.anti_entropy.dead_lettered).toBe(2);
+        expect(body.lifecycle.anti_entropy).toEqual({ pending: 4, inflight: 1, dead_lettered: 2, failures: 0 });
+      },
+    );
+  });
+
   it('omits retrieval when no accessor is registered', async () => {
     await withReadyz(
       { neo4j: okNeo4j, redis: okRedis, embeddings: 'ok', degraded: [] },

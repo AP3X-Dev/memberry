@@ -222,6 +222,7 @@ export function startLifecycleScheduler(deps: LifecycleSchedulerDeps): { stop():
       status = {
         mode: 'live', last_run_at: startedAt, last_result: 'ok',
         ...(pass.hebbian ? { hebbian_drained: pass.hebbian.tenants.reduce((n, t) => n + t.drained, 0) } : {}),
+        ...(pass.anti_entropy ? { anti_entropy: { ...pass.anti_entropy.extraction, failures: pass.anti_entropy.failures.length } } : {}),
       };
     } catch (err) {
       // Class only: a lifecycle error message can carry scope names/ids.
