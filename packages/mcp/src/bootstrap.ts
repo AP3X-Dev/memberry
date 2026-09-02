@@ -4,7 +4,9 @@
 import { z } from 'zod';
 import { DistributedLock, ProposalStore } from '@memberry/redis';
 import { runMigrations, checkVectorIndexDimensions, checkVectorIndexCoverage, ProvenanceTraversal } from '@memberry/neo4j';
-import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT, resolveLifecycleConfig, runLifecyclePass } from '@memberry/core';
+import fs from 'node:fs';
+import path from 'node:path';
+import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT, resolveLifecycleConfig, runLifecyclePass, parseBoolFlag, getAllowedBaseDir } from '@memberry/core';
 import type { CoreServices, LifecyclePassResult } from '@memberry/core';
 import { setServiceInstances, setTenantContainer } from './tools.js';
 import {
@@ -270,6 +272,72 @@ export function parseLifecycleIntervalMs(
     return MIN_LIFECYCLE_INTERVAL_MS;
   }
   return parsed;
+}
+
+// ─── Code watch on boot (item 14b, audit A3) ─────────────────────────────────
+// The CodeWatcher was constructed at boot but only berry_code_watch ever armed
+// it, so after a restart the code index went stale until an agent asked. Roots
+// are the root_path persisted on project entities by ingest (item 14a); each is
+// re-confined against the allowed base and checked on disk before watching.
+// Logs carry the project NAME only, never the path.
+
+/** Structural subset of neo4j-driver's Driver (mcp has no direct driver dependency). */
+interface ProjectRootReader {
+  session(): {
+    run(query: string): Promise<{ records: Array<{ get(key: string): unknown }> }>;
+    close(): Promise<unknown>;
+  };
+}
+
+export interface CodeWatchOnBootDeps {
+  driver: ProjectRootReader;
+  watcher: { watch(root: string): unknown };
+  allowedBaseDir: string;
+  /** Resolves true when `p` exists and is a directory. */
+  exists?: (p: string) => Promise<boolean>;
+  log?: (line: string) => void;
+}
+
+async function isDirectory(p: string): Promise<boolean> {
+  try { return (await fs.promises.stat(p)).isDirectory(); } catch { return false; }
+}
+
+export async function startCodeWatchOnBoot(deps: CodeWatchOnBootDeps): Promise<void> {
+  const log = deps.log ?? ((line) => console.error(line));
+  const exists = deps.exists ?? isDirectory;
+  const base = path.resolve(deps.allowedBaseDir);
+  let roots: Array<{ name: string; root: string }>;
+  try {
+    const session = deps.driver.session();
+    try {
+      const result = await session.run(
+        `MATCH (e:Entity {type: 'project'}) WHERE e.root_path IS NOT NULL RETURN e.name AS name, e.root_path AS root`,
+      );
+      roots = result.records.map((r) => ({ name: String(r.get('name')), root: String(r.get('root')) }));
+    } finally {
+      await session.close();
+    }
+  } catch (err) {
+    log(`[code-watch] boot watch failed: ${err instanceof Error ? err.constructor.name : typeof err}`);
+    return;
+  }
+  for (const { name, root } of roots) {
+    const abs = path.resolve(root);
+    if (!abs.startsWith(base + path.sep) && abs !== base) {
+      log(`[code-watch] root outside allowed base, skipped: ${name}`);
+      continue;
+    }
+    if (!(await exists(abs))) {
+      log(`[code-watch] root missing on disk, skipped: ${name}`);
+      continue;
+    }
+    try {
+      deps.watcher.watch(abs);
+      log(`[code-watch] watching ${name}`);
+    } catch (err) {
+      log(`[code-watch] watch failed: ${err instanceof Error ? err.constructor.name : typeof err}, skipped: ${name}`);
+    }
+  }
 }
 
 export async function bootstrap(): Promise<BootstrapHandles> {
@@ -860,6 +928,18 @@ export async function bootstrap(): Promise<BootstrapHandles> {
       })
     : null;
   if (lifecycleScheduler) console.error('[memberry-mcp] Lifecycle scheduler started (first pass in 5 min)');
+
+  // Item 14b: re-arm the code watcher for persisted project roots. Fire-and-
+  // forget: never awaited, errors are logged inside the helper, flag unset =>
+  // the query never runs. shutdown() already calls codeWatcherService.stopAll().
+  // MEMBERRY_CODE_WATCH_ON_BOOT — watch persisted project root_paths at boot; loose bool, default off (flag inventory: item 20a).
+  if (parseBoolFlag(readEnv('MEMBERRY_CODE_WATCH_ON_BOOT'), false)) {
+    void startCodeWatchOnBoot({
+      driver,
+      watcher: codeWatcherService,
+      allowedBaseDir: getAllowedBaseDir(),
+    });
+  }
 
   if (status.degraded.length > 0) {
     console.error(`[memberry-mcp] DEGRADED MODE — ${status.degraded.length} issue(s):`);
