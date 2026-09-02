@@ -61,7 +61,7 @@ export interface IBootstrapGraphService {
     project_tag: string;
     description: string;
     domain: string;
-    entities: Array<{ name: string; type: string; description?: string; parent?: string }>;
+    entities: Array<{ name: string; type: string; description?: string; parent?: string; root_path?: string }>;
     semantic_seeds: Array<{ claim: string; domain: string; confidence?: number; about?: string[]; tags?: string[] }>;
     agents: Array<{ id: string; name: string; type: string }>;
   }): Promise<{
@@ -1114,7 +1114,8 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
       const domain = args.domain ?? scan.domain;
 
       // Phase 2: Bootstrap the graph
-      const projectEntity = { name: projectName, type: 'project' as const, description };
+      // Item 14a: persist the confined ingest root so the watcher can be restarted at boot.
+      const projectEntity = { name: projectName, type: 'project' as const, description, root_path: absPath };
       const moduleEntities = scan.modules.map((m) => ({
         name: m.name,
         type: m.type,
