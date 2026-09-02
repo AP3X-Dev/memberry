@@ -4,8 +4,8 @@
 import { z } from 'zod';
 import { DistributedLock, ProposalStore } from '@memberry/redis';
 import { runMigrations, checkVectorIndexDimensions, checkVectorIndexCoverage, ProvenanceTraversal } from '@memberry/neo4j';
-import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT } from '@memberry/core';
-import type { CoreServices } from '@memberry/core';
+import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT, resolveLifecycleConfig, runLifecyclePass } from '@memberry/core';
+import type { CoreServices, LifecyclePassResult } from '@memberry/core';
 import { setServiceInstances, setTenantContainer } from './tools.js';
 import {
   initResearchSchema,
@@ -186,6 +186,58 @@ export function parseTenantDatastores(
     throw new Error(`MEMBERRY_TENANT_DATASTORES is malformed: ${detail}`);
   }
   return result.data;
+}
+
+// ─── MEM-006 in-process scheduler (item 13a) ─────────────────────────────────
+// Under Docker nothing installs the systemd timer, so the CLI-only lifecycle
+// pass never ran: memory never decayed/archived and the hebbian feedback ring
+// grew unbounded. The server now runs the SAME `runLifecyclePass` on a timer.
+
+export interface LifecycleSchedulerDeps {
+  run: () => Promise<LifecyclePassResult>;
+  intervalMs: number;
+  log?: (line: string) => void;
+}
+
+export function startLifecycleScheduler(deps: LifecycleSchedulerDeps): { stop(): void } {
+  const log = deps.log ?? ((line) => console.error(line));
+  let running = false;
+  const tick = async (): Promise<void> => {
+    if (running) { log('[lifecycle] skipped: previous pass still running'); return; }
+    running = true;
+    try {
+      const pass = await deps.run();
+      log(
+        `[lifecycle] pass complete: scopes=${pass.scopes.length} failures=${pass.failures.length}`
+        + (pass.hebbian ? ` hebbian_tenants=${pass.hebbian.tenants.length} hebbian_failures=${pass.hebbian.failures.length}` : '')
+        + (pass.anti_entropy ? ` anti_entropy_failures=${pass.anti_entropy.failures.length}` : ''),
+      );
+    } catch (err) {
+      // Class only: a lifecycle error message can carry scope names/ids.
+      log(`[lifecycle] pass failed: ${err instanceof Error ? err.constructor.name : typeof err}`);
+    } finally {
+      running = false;
+    }
+  };
+  const unref = (t: ReturnType<typeof setTimeout>) => { if (typeof t.unref === 'function') t.unref(); };
+  let interval: ReturnType<typeof setInterval> | undefined;
+  const initial = setTimeout(() => {
+    void tick();
+    interval = setInterval(() => { void tick(); }, deps.intervalMs);
+    unref(interval);
+  }, 5 * 60_000);
+  unref(initial);
+  return {
+    stop() {
+      clearTimeout(initial);
+      if (interval) clearInterval(interval);
+    },
+  };
+}
+
+function positiveInt(name: string, fallback: number, minimum: number): number {
+  const parsed = Number.parseInt(readEnv(name) ?? '', 10);
+  return Number.isFinite(parsed) && parsed >= minimum ? parsed : fallback;
 }
 
 export async function bootstrap(): Promise<BootstrapHandles> {
@@ -765,6 +817,18 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   consolidationCoordinator.start();
   for (const coordinator of dedicatedTenantCoordinators) coordinator.start();
 
+  // MEM-006 retention/archive pass, in-process, behind the existing flag.
+  // Flag not live => nothing is constructed (CLI/systemd path unchanged).
+  const lifecycleConfig = resolveLifecycleConfig(defaultExportPath());
+  const lifecycleScheduler = lifecycleConfig.mode === 'live'
+    ? startLifecycleScheduler({
+        run: () => runLifecyclePass(core, { config: lifecycleConfig }),
+        // MEMBERRY_LIFECYCLE_INTERVAL_MS — pass cadence in ms; default 24h, minimum 1h (flag inventory: item 20a).
+        intervalMs: positiveInt('MEMBERRY_LIFECYCLE_INTERVAL_MS', 24 * 3_600_000, 3_600_000),
+      })
+    : null;
+  if (lifecycleScheduler) console.error('[memberry-mcp] Lifecycle scheduler started (first pass in 5 min)');
+
   if (status.degraded.length > 0) {
     console.error(`[memberry-mcp] DEGRADED MODE — ${status.degraded.length} issue(s):`);
     for (const issue of status.degraded) {
@@ -811,6 +875,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
       if (rerankerShadowCoordinator) {
         try { await rerankerShadowCoordinator.shutdown(); } catch { /* best-effort */ }
       }
+      lifecycleScheduler?.stop();
       try { await consolidationCoordinator.stop(); } catch { /* best-effort */ }
       for (const coordinator of dedicatedTenantCoordinators) {
         try { await coordinator.stop(); } catch { /* best-effort */ }

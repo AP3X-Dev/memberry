@@ -99,6 +99,8 @@ export type {
   UsageInput,
 } from './lifecycle.js';
 export { HebbianEngine, HEBBIAN_DRAIN_CAP_RECORDS } from './hebbian.js';
+export { runLifecyclePass } from './lifecycle-pass.js';
+export type { LifecyclePassOptions, LifecyclePassResult } from './lifecycle-pass.js';
 export type {
   HebbianEngineDeps,
   HebbianGraphPort,
