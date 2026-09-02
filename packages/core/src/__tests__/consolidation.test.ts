@@ -967,6 +967,82 @@ describe('ConsolidationEngine tenant propagation', () => {
   });
 });
 
+describe('C5: tenant derivation fails closed on read errors', () => {
+  function promoteProposal(after: Record<string, unknown>): ConsolidationProposal {
+    return {
+      id: 'prop-c5',
+      type: 'promote',
+      scope: 'test',
+      affected_ids: ['ep-1', 'ep-2'],
+      before: {},
+      after,
+      score: 10,
+      created_at: new Date().toISOString(),
+    };
+  }
+
+  function setup(after: Record<string, unknown>, episodic: Record<string, unknown>) {
+    const promoteFromEpisodic = vi.fn().mockResolvedValue('new-id');
+    const redis = makeRedis({
+      proposals: {
+        save: vi.fn().mockResolvedValue(undefined),
+        get: vi.fn().mockResolvedValue(promoteProposal(after)),
+        listPending: vi.fn().mockResolvedValue(['prop-c5']),
+        remove: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+    const neo4j = makeNeo4j({
+      semantic: {
+        getById: vi.fn().mockResolvedValue(null),
+        updateConfidence: vi.fn().mockResolvedValue(undefined),
+        supersede: vi.fn().mockResolvedValue('x'),
+        promoteFromEpisodic,
+      },
+      episodic,
+    });
+    return { engine: new ConsolidationEngine(redis, neo4j, makeConfig()), promoteFromEpisodic };
+  }
+
+  it('per-id getById rejection with no preferred tenant → batch fails, zero Semantics', async () => {
+    const { engine, promoteFromEpisodic } = setup(
+      { content: 'x', confidence: 0.7 },
+      { getById: vi.fn().mockRejectedValue(new Error('neo4j transient')) },
+    );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(engine.reviewProposal('prop-c5', 'approve')).rejects.toThrow('Failed to apply proposal prop-c5');
+    expect(promoteFromEpisodic).not.toHaveBeenCalled();
+    expect(errorSpy.mock.calls.some((c) => String(c[0]).includes('tenant_unresolved'))).toBe(true);
+    errorSpy.mockRestore();
+  });
+
+  it('batched getTenantsByIds rejection with no preferred tenant → batch fails, zero Semantics', async () => {
+    const { engine, promoteFromEpisodic } = setup(
+      { content: 'x', confidence: 0.7 },
+      { getById: vi.fn(), getTenantsByIds: vi.fn().mockRejectedValue(new Error('neo4j transient')) },
+    );
+    await expect(engine.reviewProposal('prop-c5', 'approve')).rejects.toThrow('Failed to apply proposal prop-c5');
+    expect(promoteFromEpisodic).not.toHaveBeenCalled();
+  });
+
+  it('read rejection with a preferred tenant still fails closed (existing behaviour)', async () => {
+    const { engine, promoteFromEpisodic } = setup(
+      { content: 'x', confidence: 0.7, tenant_id: 'acme' },
+      { getById: vi.fn(), getTenantsByIds: vi.fn().mockRejectedValue(new Error('neo4j transient')) },
+    );
+    await expect(engine.reviewProposal('prop-c5', 'approve')).rejects.toThrow('Failed to apply proposal prop-c5');
+    expect(promoteFromEpisodic).not.toHaveBeenCalled();
+  });
+
+  it('happy path unchanged: a single resolved tenant promotes into that tenant', async () => {
+    const { engine, promoteFromEpisodic } = setup(
+      { content: 'x', confidence: 0.7 },
+      { getById: vi.fn(), getTenantsByIds: vi.fn().mockResolvedValue(['acme', 'acme']) },
+    );
+    await engine.reviewProposal('prop-c5', 'approve');
+    expect(promoteFromEpisodic).toHaveBeenCalledWith(['ep-1', 'ep-2'], expect.objectContaining({ tenant_id: 'acme' }), 'acme');
+  });
+});
+
 describe('ConsolidationEngine.status', () => {
   it('returns list of pending proposal IDs', async () => {
     const redis = makeRedis({
