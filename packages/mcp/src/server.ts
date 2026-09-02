@@ -54,9 +54,70 @@ export interface SSEHandle {
   sessionIdentity: Map<string, { tenant: string; actor: string }>;
 }
 
-/** Pure status selector kept separate so degraded readiness policy is testable. */
-export function readinessStatusCode(automation: { unhealthy?: boolean }): 200 | 503 {
-  return automation.unhealthy === true ? 503 : 200;
+/** Pure status selector kept separate so degraded readiness policy is testable.
+ *  An unreachable datastore is an outage; embeddings disabled/degraded is a
+ *  documented mode and is only reported. */
+export function readinessStatusCode(
+  automation: { unhealthy?: boolean },
+  datastores?: DatastoreReadiness,
+): 200 | 503 {
+  if (automation.unhealthy === true) return 503;
+  if (datastores && (datastores.neo4j === 'unreachable' || datastores.redis === 'unreachable')) return 503;
+  return 200;
+}
+
+// ─── Datastore readiness probes (D1/A6) ──────────────────────────────────────
+
+export type DatastoreReadiness = { neo4j: 'ok' | 'unreachable'; redis: 'ok' | 'unreachable' };
+
+/** Registered by bootstrap once the datastores are connected (same process-global
+ *  pattern as the consolidation and admission-shadow status sources). */
+export interface ReadinessProbeSource {
+  neo4j: { getServerInfo(): Promise<unknown> };
+  redis: { ping(): Promise<unknown> };
+  embeddings: 'ok' | 'disabled' | 'degraded';
+  degraded: readonly string[];
+  /** Per-probe bound; default DEFAULT_READYZ_PROBE_TIMEOUT_MS. */
+  probeTimeoutMs?: number;
+}
+
+export const DEFAULT_READYZ_PROBE_TIMEOUT_MS = 1_500;
+
+let readinessProbeSource: ReadinessProbeSource | null = null;
+
+export function registerReadinessProbeSource(source: ReadinessProbeSource): () => void {
+  readinessProbeSource = source;
+  return () => { if (readinessProbeSource === source) readinessProbeSource = null; };
+}
+
+async function probe(run: () => Promise<unknown>, timeoutMs: number): Promise<'ok' | 'unreachable'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      run(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('probe timed out')), timeoutMs); }),
+    ]);
+    return 'ok';
+  } catch {
+    return 'unreachable';
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Live Neo4j + Redis reachability plus the bootstrap-computed embedding state.
+ *  Returns undefined when no source is registered (embedded/test servers). */
+export async function getDatastoreReadiness(): Promise<
+  { datastores: DatastoreReadiness; embeddings: ReadinessProbeSource['embeddings']; degraded: string[] } | undefined
+> {
+  const src = readinessProbeSource;
+  if (!src) return undefined;
+  const timeoutMs = src.probeTimeoutMs ?? DEFAULT_READYZ_PROBE_TIMEOUT_MS;
+  const [neo4j, redis] = await Promise.all([
+    probe(() => src.neo4j.getServerInfo(), timeoutMs),
+    probe(() => src.redis.ping(), timeoutMs),
+  ]);
+  return { datastores: { neo4j, redis }, embeddings: src.embeddings, degraded: [...src.degraded] };
 }
 
 export interface AMPMCPServer {
@@ -684,17 +745,19 @@ export function createAMPServer(): AMPMCPServer {
 
           // ── Authenticated readiness check ────────────────────────────────
           if (req.method === 'GET' && pathname === '/readyz') {
+            const readiness = await getDatastoreReadiness();
             const body: Record<string, unknown> = {
               ...statusPayload('ready'),
               admission_shadow: getAdmissionShadowProcessStatus(),
               retrieval_resolution: getRetrievalResolutionProcessStatusV1(),
+              ...readiness,
             };
             const automation = body['consolidation_automation'] as { unhealthy?: boolean };
             // During startup grace and while bounded retries are pending the
             // service remains ready. Only stale/exhausted enabled automation is
             // genuinely unhealthy; disabled/read-only modes are explicit but
-            // do not create a false outage.
-            sendJson(res, readinessStatusCode(automation), body);
+            // do not create a false outage. An unreachable datastore does.
+            sendJson(res, readinessStatusCode(automation, readiness?.datastores), body);
             return;
           }
 

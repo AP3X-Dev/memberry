@@ -82,6 +82,7 @@ import {
   setGraphServiceInstances,
 } from '@memberry/graph';
 import { registerAdmissionShadowStatusSources } from './admission-shadow-status.js';
+import { registerReadinessProbeSource } from './server.js';
 
 export interface BootstrapHandles {
   /** Call to disconnect Redis and Neo4j cleanly. */
@@ -779,6 +780,16 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     core.admissionShadow,
     ...dedicatedTenantCores.map((tenantCore) => tenantCore.admissionShadow),
   ]);
+  // D1/A6: /readyz probes the live datastores per request and echoes the
+  // degraded list computed above; embeddings state is reported, not fatal.
+  const unregisterReadinessProbe = registerReadinessProbeSource({
+    neo4j: driver,
+    redis,
+    embeddings: !openaiKey
+      ? 'disabled'
+      : (dimDrift.length > 0 || underCoveredVectorIndexes.length > 0) ? 'degraded' : 'ok',
+    degraded: status.degraded,
+  });
 
   return {
     ...(rerankerShadowCoordinator
@@ -800,6 +811,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
       // best-effort shutdown behavior.
       try { await core.close(); } catch { /* already closed */ }
       unregisterAdmissionShadowStatus();
+      unregisterReadinessProbe();
     },
   };
 }
