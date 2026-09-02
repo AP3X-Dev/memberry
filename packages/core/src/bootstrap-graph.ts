@@ -82,6 +82,11 @@ function canonicalBootstrapProjectScope(projectTag: string): string {
   return scope;
 }
 
+// Relationship types cannot be Cypher parameters, so mergeRelationship
+// interpolates them (audit C7). bootstrap() only ever emits CONTAINS; anything
+// else is rejected before a query string is built.
+const BOOTSTRAP_RELATION_TYPES: ReadonlySet<string> = new Set(['CONTAINS']);
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 export class BootstrapGraphService {
@@ -427,7 +432,11 @@ export class BootstrapGraphService {
     relType: string,
     result: BootstrapResult,
   ): Promise<void> {
-    // Relationship types can't be parameterized in Cypher
+    // Relationship types can't be parameterized in Cypher; the allowlist check
+    // is what makes interpolating one safe. Value-free error on purpose.
+    if (!BOOTSTRAP_RELATION_TYPES.has(relType)) {
+      throw new Error('invalid_relationship_type');
+    }
     await session.run(
       `MATCH (a:Entity {id: $fromId}), (b:Entity {id: $toId})
        MERGE (a)-[:${relType}]->(b)`,
