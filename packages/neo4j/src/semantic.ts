@@ -77,6 +77,7 @@ export class SemanticStore {
           tags: $tags,
           scope: $scope,
           tenant_id: $tenant_id,
+          status: 'active',
           valid_at: $created_at
         })
         ${embedding ? 'SET s.embedding = $embedding' : ''}
@@ -267,6 +268,7 @@ export class SemanticStore {
           new.tags = $tags,
           new.scope = $scope,
           new.tenant_id = $tenant_id,
+          new.status = 'active',
           new.valid_at = $now
         ${embedding ? 'SET new.embedding = $embedding' : ''}
         MERGE (new)-[:SUPERSEDES]->(old)
@@ -373,6 +375,7 @@ export class SemanticStore {
                       s.tags = $tags,
                       s.scope = $scope,
                       s.tenant_id = $tenant_id,
+                      s.status = 'active',
                       s.valid_at = coalesce(reduce(latest = null, ep IN episodes |
                         CASE WHEN latest IS NULL OR ep.created_at > latest
                              THEN ep.created_at ELSE latest END), $created_at)

@@ -568,3 +568,45 @@ it('maps valid_at/invalid_at through getById, dropping legacy absence and driver
   expect(junk?.valid_at).toBeUndefined();
   expect(junk?.invalid_at).toBeUndefined();
 });
+
+// Item 12a (RL-014): every Semantic writer stamps status = 'active' on create.
+// Asserted on the emitted Cypher — the only surface the mock harness observes.
+describe('SemanticStore status stamping (RL-014)', () => {
+  function makeCapturingStore(): { store: SemanticStore; queries: string[] } {
+    const queries: string[] = [];
+    const run = vi.fn(async (query: string) => {
+      queries.push(query);
+      return { records: [{ get: () => 'sem-status' }] };
+    });
+    const executeWrite = vi.fn(async (work: (tx: { run: typeof run }) => Promise<unknown>) =>
+      work({ run }));
+    const close = vi.fn(async () => undefined);
+    const store = new SemanticStore({ session: () => ({ run, executeWrite, close }) } as never);
+    return { store, queries };
+  }
+  const onCreateOf = (cypher: string): string => {
+    const start = cypher.indexOf('ON CREATE SET');
+    expect(start).toBeGreaterThan(-1);
+    const rest = cypher.slice(start);
+    const end = rest.search(/\n\s*(WITH|SET|MERGE|RETURN)\b/);
+    return end === -1 ? rest : rest.slice(0, end);
+  };
+
+  it('create stamps status active in the CREATE map', async () => {
+    const { store, queries } = makeCapturingStore();
+    await store.create(makeSemanticNode('status-create'));
+    expect(queries[0]).toMatch(/status:\s*'active'/);
+  });
+
+  it('promoteFromEpisodic stamps status active inside ON CREATE SET only', async () => {
+    const { store, queries } = makeCapturingStore();
+    await store.promoteFromEpisodic(['ep-a'], makeSemanticNode('status-promote'));
+    expect(onCreateOf(queries[0])).toMatch(/s\.status\s*=\s*'active'/);
+  });
+
+  it('supersede stamps status active on the successor inside ON CREATE SET only', async () => {
+    const { store, queries } = makeCapturingStore();
+    await store.supersede('sem-old', makeSemanticNode('status-supersede'));
+    expect(onCreateOf(queries[0])).toMatch(/new\.status\s*=\s*'active'/);
+  });
+});
