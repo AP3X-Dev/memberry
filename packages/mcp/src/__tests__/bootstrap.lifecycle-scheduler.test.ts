@@ -9,7 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { startLifecycleScheduler } from '../bootstrap.js';
+import { startLifecycleScheduler, parseLifecycleIntervalMs } from '../bootstrap.js';
 
 const BOOTSTRAP_SOURCE = fs.readFileSync(path.resolve(__dirname, '../bootstrap.ts'), 'utf-8');
 const MIN = 60_000;
@@ -82,6 +82,52 @@ describe('startLifecycleScheduler', () => {
     await vi.advanceTimersByTimeAsync(HOUR);
     expect(run).toHaveBeenCalledTimes(2);
   });
+
+  // Item 13b: readiness visibility of the last pass.
+  it('status() moves never -> ok with last_run_at and the hebbian drained count from the pass result', async () => {
+    const run = vi.fn(async () => ({
+      ...summary(),
+      hebbian: { run_id: 'hb', started_at: 't', dry_run: false, failures: [], tenants: [{ drained: 3 }, { drained: 4 }] },
+    }));
+    const handle = startLifecycleScheduler({ run, intervalMs: HOUR, log: () => {} });
+    expect(handle.status()).toEqual({ mode: 'live', last_run_at: null, last_result: 'never' });
+    await vi.advanceTimersByTimeAsync(5 * MIN);
+    expect(handle.status()).toEqual({ mode: 'live', last_run_at: expect.any(String), last_result: 'ok', hebbian_drained: 7 });
+    expect(Number.isNaN(Date.parse(handle.status().last_run_at as string))).toBe(false);
+    handle.stop();
+  });
+
+  it('status() reports failed with the error class (never the message) when the pass throws', async () => {
+    const run = vi.fn().mockRejectedValue(new RangeError('secret-bearing message'));
+    const handle = startLifecycleScheduler({ run, intervalMs: HOUR, log: () => {} });
+    await vi.advanceTimersByTimeAsync(5 * MIN);
+    expect(handle.status()).toEqual({ mode: 'live', last_run_at: expect.any(String), last_result: 'failed', last_error_class: 'RangeError' });
+    expect(JSON.stringify(handle.status())).not.toContain('secret-bearing');
+    handle.stop();
+  });
+});
+
+describe('parseLifecycleIntervalMs', () => {
+  it('below the 1h minimum clamps to the minimum and warns once', () => {
+    const log = vi.fn();
+    expect(parseLifecycleIntervalMs('1000', log)).toBe(HOUR);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith('[lifecycle] MEMBERRY_LIFECYCLE_INTERVAL_MS below minimum, using 3600000');
+  });
+
+  it('non-numeric falls back to the 24h default and warns once', () => {
+    const log = vi.fn();
+    expect(parseLifecycleIntervalMs('soon', log)).toBe(24 * HOUR);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith('[lifecycle] MEMBERRY_LIFECYCLE_INTERVAL_MS invalid, using default 86400000');
+  });
+
+  it('valid is returned as given; unset is the default, silently', () => {
+    const log = vi.fn();
+    expect(parseLifecycleIntervalMs(String(2 * HOUR), log)).toBe(2 * HOUR);
+    expect(parseLifecycleIntervalMs(undefined, log)).toBe(24 * HOUR);
+    expect(log).not.toHaveBeenCalled();
+  });
 });
 
 describe('bootstrap.ts lifecycle wiring', () => {
@@ -94,5 +140,7 @@ describe('bootstrap.ts lifecycle wiring', () => {
     expect(BOOTSTRAP_SOURCE).toContain('runLifecyclePass(core, { config: lifecycleConfig })');
     expect(BOOTSTRAP_SOURCE).toContain("'MEMBERRY_LIFECYCLE_INTERVAL_MS'");
     expect(BOOTSTRAP_SOURCE).toContain('lifecycleScheduler?.stop()');
+    // 13b: the readiness accessor is registered and degrades to disabled/never without a scheduler.
+    expect(BOOTSTRAP_SOURCE).toContain("lifecycle: () => lifecycleScheduler?.status() ?? { mode: 'disabled', last_run_at: null, last_result: 'never' }");
   });
 });

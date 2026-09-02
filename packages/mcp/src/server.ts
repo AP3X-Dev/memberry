@@ -82,10 +82,20 @@ export interface ReadinessProbeSource {
   /** C4: last collection-size probe window from the retrieval assembler. Reported
    *  only — a stale/absent collection size never flips readiness to 503. */
   retrieval?: () => RetrievalReadiness;
+  /** 13b: last in-process lifecycle pass. Reported only — a failed pass never flips readiness to 503. */
+  lifecycle?: () => LifecycleReadiness;
 }
 
 export interface RetrievalReadiness {
   collection_size: { state: string; cached_at: number; last_error_class?: string };
+}
+
+export interface LifecycleReadiness {
+  mode: 'disabled' | 'live';
+  last_run_at: string | null;
+  last_result: 'ok' | 'failed' | 'skipped' | 'never';
+  last_error_class?: string;
+  hebbian_drained?: number;
 }
 
 export const DEFAULT_READYZ_PROBE_TIMEOUT_MS = 1_500;
@@ -120,6 +130,7 @@ export async function getDatastoreReadiness(): Promise<
     embeddings: ReadinessProbeSource['embeddings'];
     degraded: string[];
     retrieval?: RetrievalReadiness;
+    lifecycle?: LifecycleReadiness;
   } | undefined
 > {
   const src = readinessProbeSource;
@@ -134,6 +145,7 @@ export async function getDatastoreReadiness(): Promise<
     embeddings: src.embeddings,
     degraded: [...src.degraded],
     ...(src.retrieval ? { retrieval: src.retrieval() } : {}),
+    ...(src.lifecycle ? { lifecycle: src.lifecycle() } : {}),
   };
 }
 

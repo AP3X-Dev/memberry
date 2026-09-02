@@ -82,7 +82,7 @@ import {
   setGraphServiceInstances,
 } from '@memberry/graph';
 import { registerAdmissionShadowStatusSources } from './admission-shadow-status.js';
-import { registerReadinessProbeSource } from './server.js';
+import { registerReadinessProbeSource, type LifecycleReadiness } from './server.js';
 
 export interface BootstrapHandles {
   /** Call to disconnect Redis and Neo4j cleanly. */
@@ -199,12 +199,19 @@ export interface LifecycleSchedulerDeps {
   log?: (line: string) => void;
 }
 
-export function startLifecycleScheduler(deps: LifecycleSchedulerDeps): { stop(): void } {
+export function startLifecycleScheduler(deps: LifecycleSchedulerDeps): { stop(): void; status(): LifecycleReadiness } {
   const log = deps.log ?? ((line) => console.error(line));
   let running = false;
+  // 13b: last-pass record surfaced on /readyz `lifecycle`.
+  let status: LifecycleReadiness = { mode: 'live', last_run_at: null, last_result: 'never' };
   const tick = async (): Promise<void> => {
-    if (running) { log('[lifecycle] skipped: previous pass still running'); return; }
+    if (running) {
+      log('[lifecycle] skipped: previous pass still running');
+      status = { ...status, last_result: 'skipped' };
+      return;
+    }
     running = true;
+    const startedAt = new Date().toISOString();
     try {
       const pass = await deps.run();
       log(
@@ -212,9 +219,15 @@ export function startLifecycleScheduler(deps: LifecycleSchedulerDeps): { stop():
         + (pass.hebbian ? ` hebbian_tenants=${pass.hebbian.tenants.length} hebbian_failures=${pass.hebbian.failures.length}` : '')
         + (pass.anti_entropy ? ` anti_entropy_failures=${pass.anti_entropy.failures.length}` : ''),
       );
+      status = {
+        mode: 'live', last_run_at: startedAt, last_result: 'ok',
+        ...(pass.hebbian ? { hebbian_drained: pass.hebbian.tenants.reduce((n, t) => n + t.drained, 0) } : {}),
+      };
     } catch (err) {
       // Class only: a lifecycle error message can carry scope names/ids.
-      log(`[lifecycle] pass failed: ${err instanceof Error ? err.constructor.name : typeof err}`);
+      const errorClass = err instanceof Error ? err.constructor.name : typeof err;
+      log(`[lifecycle] pass failed: ${errorClass}`);
+      status = { mode: 'live', last_run_at: startedAt, last_result: 'failed', last_error_class: errorClass };
     } finally {
       running = false;
     }
@@ -232,12 +245,30 @@ export function startLifecycleScheduler(deps: LifecycleSchedulerDeps): { stop():
       clearTimeout(initial);
       if (interval) clearInterval(interval);
     },
+    status: () => status,
   };
 }
 
-function positiveInt(name: string, fallback: number, minimum: number): number {
-  const parsed = Number.parseInt(readEnv(name) ?? '', 10);
-  return Number.isFinite(parsed) && parsed >= minimum ? parsed : fallback;
+export const DEFAULT_LIFECYCLE_INTERVAL_MS = 24 * 3_600_000;
+export const MIN_LIFECYCLE_INTERVAL_MS = 3_600_000;
+
+/** MEMBERRY_LIFECYCLE_INTERVAL_MS: unset → default silently; non-numeric → default,
+ *  below minimum → minimum; both substitutions warn once at boot (13b). */
+export function parseLifecycleIntervalMs(
+  raw: string | undefined,
+  log: (line: string) => void = (line) => console.error(line),
+): number {
+  if (raw === undefined) return DEFAULT_LIFECYCLE_INTERVAL_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) {
+    log(`[lifecycle] MEMBERRY_LIFECYCLE_INTERVAL_MS invalid, using default ${DEFAULT_LIFECYCLE_INTERVAL_MS}`);
+    return DEFAULT_LIFECYCLE_INTERVAL_MS;
+  }
+  if (parsed < MIN_LIFECYCLE_INTERVAL_MS) {
+    log(`[lifecycle] MEMBERRY_LIFECYCLE_INTERVAL_MS below minimum, using ${MIN_LIFECYCLE_INTERVAL_MS}`);
+    return MIN_LIFECYCLE_INTERVAL_MS;
+  }
+  return parsed;
 }
 
 export async function bootstrap(): Promise<BootstrapHandles> {
@@ -824,7 +855,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     ? startLifecycleScheduler({
         run: () => runLifecyclePass(core, { config: lifecycleConfig }),
         // MEMBERRY_LIFECYCLE_INTERVAL_MS — pass cadence in ms; default 24h, minimum 1h (flag inventory: item 20a).
-        intervalMs: positiveInt('MEMBERRY_LIFECYCLE_INTERVAL_MS', 24 * 3_600_000, 3_600_000),
+        intervalMs: parseLifecycleIntervalMs(readEnv('MEMBERRY_LIFECYCLE_INTERVAL_MS')),
       })
     : null;
   if (lifecycleScheduler) console.error('[memberry-mcp] Lifecycle scheduler started (first pass in 5 min)');
@@ -865,6 +896,8 @@ export async function bootstrap(): Promise<BootstrapHandles> {
         },
       };
     },
+    // 13b: last in-process lifecycle pass; no scheduler => disabled/never.
+    lifecycle: () => lifecycleScheduler?.status() ?? { mode: 'disabled', last_run_at: null, last_result: 'never' },
   });
 
   return {

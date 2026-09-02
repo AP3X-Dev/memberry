@@ -118,6 +118,22 @@ describe('/readyz datastore probes', () => {
     );
   });
 
+  it('echoes lifecycle from the accessor (13b) and never flips readiness on a failed pass', async () => {
+    await withReadyz(
+      {
+        neo4j: okNeo4j, redis: okRedis, embeddings: 'ok', degraded: [],
+        lifecycle: () => ({ mode: 'live', last_run_at: '2026-09-02T00:00:00.000Z', last_result: 'failed', last_error_class: 'RangeError' }),
+      },
+      async (fetchReadyz) => {
+        const res = await fetchReadyz();
+        expect(res.status).toBe(200);
+        const body = await res.json() as { lifecycle: Record<string, unknown> };
+        expect(body.lifecycle.last_result).toBe('failed');
+        expect(body.lifecycle).toEqual({ mode: 'live', last_run_at: '2026-09-02T00:00:00.000Z', last_result: 'failed', last_error_class: 'RangeError' });
+      },
+    );
+  });
+
   it('omits retrieval when no accessor is registered', async () => {
     await withReadyz(
       { neo4j: okNeo4j, redis: okRedis, embeddings: 'ok', degraded: [] },
