@@ -373,7 +373,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   // own isolated coordinator below.
   // Configure the compiler before evaluating enablement so the guard checks the
   // actual env-resolved output directory (not its /app/wiki initial default).
-  const rawWikiCompiler = new WikiCompiler(driver);
+  const rawWikiCompiler = new WikiCompiler(driver, { tenantId: DEFAULT_TENANT });
   configureWikiAutorefresh({
     recompile: (outputDir: string) => rawWikiCompiler.compile(outputDir),
     outputDir: resolveWikiOutputDir(),

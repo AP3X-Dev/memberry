@@ -11,11 +11,11 @@ import { slugify } from './compile.js';
 
 /** Same predicate shape as core/export.ts and @memberry/neo4j reads (params: $tenantId, $defaultTenant).
  *  Entity nodes carry no tenant_id, so only Semantic/Episodic aliases are guarded. */
-function tenantWhere(alias: string): string {
+export function tenantWhere(alias: string): string {
   return `(${alias}.tenant_id = $tenantId OR (${alias}.tenant_id IS NULL AND $tenantId = $defaultTenant))`;
 }
 
-function tenantParams(tenantId: string): { tenantId: string; defaultTenant: string } {
+export function tenantParams(tenantId: string): { tenantId: string; defaultTenant: string } {
   return { tenantId: tenantId.trim() || DEFAULT_TENANT, defaultTenant: DEFAULT_TENANT };
 }
 
