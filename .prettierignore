@@ -7,6 +7,7 @@
 /**
 
 !/eslint.config.mjs
+!/LIMITATIONS.md
 !/.prettierrc
 !/packages/core/src/__tests__/test-files.inventory.test.ts
 # test-files.manifest.txt is deliberately absent: prettier has no parser for .txt and
