@@ -11,6 +11,7 @@ import type {
 } from './types.js';
 import { SIGNAL_WEIGHTS, DEFAULT_TENANT } from './types.js';
 import { extractFacts } from './extract.js';
+import { semanticDedupeKey } from './bootstrap-graph.js';
 import { readEnv } from './config/settings.js';
 import type { LlmClient } from './llm.js';
 import { clusterHasIndependentCorroborationV1 } from './evidence-diversity.js';
@@ -308,6 +309,8 @@ export interface ConsolidationNeo4jLayer {
       episodicIds: string[],
       newNode: SemanticNode,
       tenantId?: string,
+      /** Content-derived `dedupe_key` set ON CREATE; a collision links onto the existing Semantic. */
+      dedupeKey?: string,
     ): Promise<string>;
   };
   /**
@@ -1000,7 +1003,14 @@ export class ConsolidationEngine {
     // The persistence layer creates the Semantic, every PROMOTED_FROM edge, and
     // inherited ABOUT links in one transaction. Passing the complete cluster is
     // essential: findPromotable excludes episodes by this provenance edge.
-    const newId = await this.neo4j.semantic.promoteFromEpisodic(sourceEpisodeIds, newNode, tenantId);
+    // D10: content-keyed dedupe_key so the semantic_dedupe_unique constraint
+    // covers promoted Semantics. Normalization: trim, collapse whitespace runs
+    // to one space, lowercase. Tenant is folded into the scope so two tenants
+    // never share a key; the `promoted:` prefix keeps it out of the seed/ingest
+    // key space.
+    const normalizedContent = newNode.content.trim().replace(/\s+/g, ' ').toLowerCase();
+    const dedupeKey = `promoted:${semanticDedupeKey(`${tenantId}/${proposal.scope}`, undefined, normalizedContent)}`;
+    const newId = await this.neo4j.semantic.promoteFromEpisodic(sourceEpisodeIds, newNode, tenantId, dedupeKey);
     await this._invalidateCacheBestEffort(newId);
 
     // Extract facts from the promoted content for traceability.

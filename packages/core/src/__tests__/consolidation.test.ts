@@ -865,6 +865,7 @@ describe('ConsolidationEngine tenant propagation', () => {
       ['ep-1', 'ep-2'],
       expect.objectContaining({ tenant_id: 'acme', content: 'Distilled knowledge' }),
       'acme',
+      expect.stringMatching(/^promoted:/),
     );
   });
 
@@ -963,6 +964,7 @@ describe('ConsolidationEngine tenant propagation', () => {
       ['ep-1', 'ep-2'],
       expect.objectContaining({ tenant_id: 'acme' }),
       'acme',
+      expect.stringMatching(/^promoted:/),
     );
   });
 });
@@ -1039,7 +1041,26 @@ describe('C5: tenant derivation fails closed on read errors', () => {
       { getById: vi.fn(), getTenantsByIds: vi.fn().mockResolvedValue(['acme', 'acme']) },
     );
     await engine.reviewProposal('prop-c5', 'approve');
-    expect(promoteFromEpisodic).toHaveBeenCalledWith(['ep-1', 'ep-2'], expect.objectContaining({ tenant_id: 'acme' }), 'acme');
+    expect(promoteFromEpisodic).toHaveBeenCalledWith(['ep-1', 'ep-2'], expect.objectContaining({ tenant_id: 'acme' }), 'acme', expect.stringMatching(/^promoted:/));
+  });
+
+  // Item 12b (D10): the promote path passes a content-keyed dedupeKey so the
+  // semantic_dedupe_unique constraint covers promoted Semantics. Whitespace and
+  // case are normalized so a re-synthesized claim maps to the same key.
+  it('passes a promoted: dedupeKey that is stable across whitespace/case variants of the content', async () => {
+    const tenants = { getById: vi.fn(), getTenantsByIds: vi.fn().mockResolvedValue(['acme', 'acme']) };
+    const a = setup({ content: 'The  Engine owns\nValidation. ', confidence: 0.7 }, tenants);
+    const b = setup({ content: 'the engine owns validation.', confidence: 0.7 }, tenants);
+    await a.engine.reviewProposal('prop-c5', 'approve');
+    await b.engine.reviewProposal('prop-c5', 'approve');
+    const keyA = a.promoteFromEpisodic.mock.calls[0]![3] as string;
+    const keyB = b.promoteFromEpisodic.mock.calls[0]![3] as string;
+    expect(keyA).toMatch(/^promoted:[0-9a-f]{40}$/);
+    expect(keyB).toBe(keyA);
+
+    const c = setup({ content: 'a different claim', confidence: 0.7 }, tenants);
+    await c.engine.reviewProposal('prop-c5', 'approve');
+    expect(c.promoteFromEpisodic.mock.calls[0]![3]).not.toBe(keyA);
   });
 });
 

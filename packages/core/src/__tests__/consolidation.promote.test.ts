@@ -280,6 +280,7 @@ describe('ConsolidationEngine promote path', () => {
       ['decision-1'],
       expect.objectContaining({ memory_type: 'decision', confidence: 0.9 }),
       'default',
+      expect.stringMatching(/^promoted:/),
     );
   });
 
