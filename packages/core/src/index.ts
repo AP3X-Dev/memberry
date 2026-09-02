@@ -29,7 +29,7 @@ export { redactSecrets, redactValue } from './redact.js';
 export { renderToMarkdown, parseFromMarkdown, diffEntries } from './markdown.js';
 export type { DiffResult, MarkdownEntry } from './markdown.js';
 export { exportAll, exportFiltered } from './export.js';
-export type { ExportResult, ExportFilter } from './export.js';
+export type { ExportResult, ExportFilter, ExportOptions } from './export.js';
 export { importFromPath } from './import.js';
 export type { ImportOptions, ImportResult, ImportStrategy } from './import.js';
 export { BootstrapGraphService, semanticDedupeKey } from './bootstrap-graph.js';

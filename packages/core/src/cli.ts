@@ -79,16 +79,19 @@ async function runExport(flags: Record<string, string | boolean>): Promise<void>
   const exportPath = String(flags['path'] ?? defaultExportPath());
   const entities = flags['entity'] ? [String(flags['entity'])] : [];
   const tags = flags['tag'] ? [String(flags['tag'])] : [];
+  const tenantId = String(flags['tenant'] ?? DEFAULT_TENANT);
+  const includeEmbeddings = flags['include-embeddings'] === true;
 
   const { neo4jUri, neo4jUser, neo4jPassword } = loadEnv();
   const driver = createNeo4jDriver(neo4jUri, neo4jUser, neo4jPassword);
 
   try {
-    console.log(`Exporting to ${exportPath}...`);
+    console.log(`Exporting tenant ${tenantId} to ${exportPath}...`);
     const hasFilter = entities.length > 0 || tags.length > 0;
+    const opts = { tenantId, includeEmbeddings };
     const result = hasFilter
-      ? await exportFiltered(driver, exportPath, { entities, tags })
-      : await exportAll(driver, exportPath);
+      ? await exportFiltered(driver, exportPath, { entities, tags }, opts)
+      : await exportAll(driver, exportPath, opts);
 
     console.log(`Export complete: ${result.exported} exported, ${result.skipped} skipped`);
     if (result.errors.length > 0) {
@@ -132,7 +135,11 @@ async function runSnapshot(flags: Record<string, string | boolean>): Promise<voi
     );
   }
 
-  await runExport({ path: snapshotPath });
+  await runExport({
+    path: snapshotPath,
+    tenant: String(flags['tenant'] ?? DEFAULT_TENANT),
+    'include-embeddings': flags['include-embeddings'] === true,
+  });
 }
 
 async function runDream(flags: Record<string, string | boolean>): Promise<void> {
@@ -562,9 +569,9 @@ async function main(): Promise<void> {
       console.error('  doctor                      (diagnose a MemBerry install)');
       console.error('');
       console.error('Memory snapshot commands:');
-      console.error('  export    [--path ./.memberry] [--entity Name] [--tag tag]');
+      console.error('  export    [--path ./.memberry] [--tenant default] [--entity Name] [--tag tag] [--include-embeddings]');
       console.error('  import    [--path ./.memberry] [--strategy confidence-weighted|overwrite] [--dry-run]');
-      console.error('  snapshot  [--path ./.memberry]   (local export only; never stages or commits files)');
+      console.error('  snapshot  [--path ./.memberry] [--tenant default] [--include-embeddings]   (local export only; never stages or commits files)');
       console.error('');
       console.error('Background memory commands:');
       console.error('  dream      [--scope project:x] [--max-entities N] [--no-cards]');
