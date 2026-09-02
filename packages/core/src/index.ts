@@ -78,6 +78,7 @@ export {
 } from './config/settings.js';
 export type { AmpSettings, HookSettings, ResolvedNumber, SettingSource } from './config/settings.js';
 export { getConfigStatus } from './config/status.js';
+export { parseBoolFlag } from './config/bool-flag.js';
 export type { ConfigStatus } from './config/status.js';
 export {
   DECAY_HALF_LIVES_DAYS,

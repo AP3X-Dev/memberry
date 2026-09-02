@@ -8,7 +8,7 @@ import { basename, extname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import type { ExtractionProvider } from '@memberry/core';
-import { readEnv, redactSecrets, semanticDedupeKey } from '@memberry/core';
+import { parseBoolFlag, readEnv, redactSecrets, semanticDedupeKey } from '@memberry/core';
 import type { IngestInput, IngestResult } from './types.js';
 import { needsConversion, type DocumentConverter } from './document-converter.js';
 
@@ -58,7 +58,7 @@ export class IngestionService {
     redactOnIngest?: boolean,
   ) {
     this.redactOnIngest =
-      redactOnIngest ?? readEnv('MEMBERRY_REDACT_ON_INGEST') === 'true';
+      redactOnIngest ?? parseBoolFlag(readEnv('MEMBERRY_REDACT_ON_INGEST'), false);
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {

@@ -20,7 +20,7 @@ import {
 } from '@memberry/retrieval';
 import { registerWikiTools, WIKI_TOOL_NAMES } from '@memberry/wiki';
 import { registerGraphTools, GRAPH_TOOL_NAMES } from '@memberry/graph';
-import { readEnv, resolvePort } from '@memberry/core';
+import { parseBoolFlag, readEnv, resolvePort } from '@memberry/core';
 import { getConsolidationAutomationHealth } from './consolidation-coordinator.js';
 import { getAdmissionShadowProcessStatus } from './admission-shadow-status.js';
 import {
@@ -456,8 +456,8 @@ export function createAMPServer(): AMPMCPServer {
 
     // ── Auth token resolution ────────────────────────────────────────────
     // Priority: MEMBERRY_API_TOKEN env var → unauthenticated opt-out → generated session token
-    const allowUnauthenticated =
-      (readEnv('MEMBERRY_ALLOW_UNAUTHENTICATED') ?? '').toLowerCase() === 'true';
+    // Safety-relaxing flag: strict parse, only the exact string `true` opens it.
+    const allowUnauthenticated = parseBoolFlag(readEnv('MEMBERRY_ALLOW_UNAUTHENTICATED'), false, { strict: true });
     if (capabilityPolicyLookup !== undefined && allowUnauthenticated) {
       throw new CapabilityRuntimeConfigError();
     }
@@ -487,8 +487,8 @@ export function createAMPServer(): AMPMCPServer {
     // feedback/cache into the shared default bucket (the residual flagged by the
     // OPT-26/27 reviews). Such non-tenant tokens are rejected unless the operator
     // explicitly opts back into the legacy default-tenant fallback.
-    const allowDefaultTenant =
-      (readEnv('MEMBERRY_ALLOW_DEFAULT_TENANT') ?? '').toLowerCase() === 'true';
+    // Safety-relaxing flag: strict parse, only the exact string `true` opens it.
+    const allowDefaultTenant = parseBoolFlag(readEnv('MEMBERRY_ALLOW_DEFAULT_TENANT'), false, { strict: true });
 
     // effectiveToken is the single-token / "is auth on?" sentinel kept for the
     // status payload; actual validation goes through tokenToActor.
