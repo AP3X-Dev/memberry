@@ -103,6 +103,31 @@ describe('/readyz datastore probes', () => {
     );
   });
 
+  it('echoes retrieval.collection_size from the accessor and never flips readiness on it', async () => {
+    await withReadyz(
+      {
+        neo4j: okNeo4j, redis: okRedis, embeddings: 'ok', degraded: [],
+        retrieval: () => ({ collection_size: { state: 'timeout', cached_at: 1234, last_error_class: 'Error' } }),
+      },
+      async (fetchReadyz) => {
+        const res = await fetchReadyz();
+        expect(res.status).toBe(200);
+        const body = await res.json() as { retrieval: { collection_size: Record<string, unknown> } };
+        expect(body.retrieval.collection_size).toEqual({ state: 'timeout', cached_at: 1234, last_error_class: 'Error' });
+      },
+    );
+  });
+
+  it('omits retrieval when no accessor is registered', async () => {
+    await withReadyz(
+      { neo4j: okNeo4j, redis: okRedis, embeddings: 'ok', degraded: [] },
+      async (fetchReadyz) => {
+        const body = await (await fetchReadyz()).json() as Record<string, unknown>;
+        expect(body).not.toHaveProperty('retrieval');
+      },
+    );
+  });
+
   it('readinessStatusCode flips to 503 only for unhealthy automation or an unreachable datastore', () => {
     const ok = { neo4j: 'ok', redis: 'ok' } as const;
     expect(readinessStatusCode({ unhealthy: false }, ok)).toBe(200);

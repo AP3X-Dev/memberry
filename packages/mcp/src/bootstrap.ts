@@ -789,6 +789,18 @@ export async function bootstrap(): Promise<BootstrapHandles> {
       ? 'disabled'
       : (dimDrift.length > 0 || underCoveredVectorIndexes.length > 0) ? 'degraded' : 'ok',
     degraded: status.degraded,
+    // C4: expose the collection-size probe window so an operator can see when
+    // RRF fusion is running on a stale or absent collection size.
+    retrieval: () => {
+      const probe = unifiedAssembler.collectionSizeStatus();
+      return {
+        collection_size: {
+          state: probe.state,
+          cached_at: probe.cachedAt,
+          ...(probe.lastErrorClass !== undefined ? { last_error_class: probe.lastErrorClass } : {}),
+        },
+      };
+    },
   });
 
   return {

@@ -79,6 +79,13 @@ export interface ReadinessProbeSource {
   degraded: readonly string[];
   /** Per-probe bound; default DEFAULT_READYZ_PROBE_TIMEOUT_MS. */
   probeTimeoutMs?: number;
+  /** C4: last collection-size probe window from the retrieval assembler. Reported
+   *  only — a stale/absent collection size never flips readiness to 503. */
+  retrieval?: () => RetrievalReadiness;
+}
+
+export interface RetrievalReadiness {
+  collection_size: { state: string; cached_at: number; last_error_class?: string };
 }
 
 export const DEFAULT_READYZ_PROBE_TIMEOUT_MS = 1_500;
@@ -108,7 +115,12 @@ async function probe(run: () => Promise<unknown>, timeoutMs: number): Promise<'o
 /** Live Neo4j + Redis reachability plus the bootstrap-computed embedding state.
  *  Returns undefined when no source is registered (embedded/test servers). */
 export async function getDatastoreReadiness(): Promise<
-  { datastores: DatastoreReadiness; embeddings: ReadinessProbeSource['embeddings']; degraded: string[] } | undefined
+  {
+    datastores: DatastoreReadiness;
+    embeddings: ReadinessProbeSource['embeddings'];
+    degraded: string[];
+    retrieval?: RetrievalReadiness;
+  } | undefined
 > {
   const src = readinessProbeSource;
   if (!src) return undefined;
@@ -117,7 +129,12 @@ export async function getDatastoreReadiness(): Promise<
     probe(() => src.neo4j.getServerInfo(), timeoutMs),
     probe(() => src.redis.ping(), timeoutMs),
   ]);
-  return { datastores: { neo4j, redis }, embeddings: src.embeddings, degraded: [...src.degraded] };
+  return {
+    datastores: { neo4j, redis },
+    embeddings: src.embeddings,
+    degraded: [...src.degraded],
+    ...(src.retrieval ? { retrieval: src.retrieval() } : {}),
+  };
 }
 
 export interface AMPMCPServer {
