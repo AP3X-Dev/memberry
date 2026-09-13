@@ -4,8 +4,18 @@
 
 import { Integer as Neo4jInteger, Record as Neo4jRecord, type Driver } from 'neo4j-driver';
 import { isProxy } from 'node:util/types';
-import { activeRelationshipFilter, tenantWhere, resolveTenant, TENANT_PARAM, archivedWhere } from '@memberry/neo4j';
+import {
+  activeRelationshipFilter,
+  tenantWhere,
+  resolveTenant,
+  TENANT_PARAM,
+  semanticEligibilityWhere,
+} from '@memberry/neo4j';
 import type { ContextSection, ContextItem } from './types.js';
+import {
+  filterSemanticEvidence,
+  type SemanticEligibilityAuthority,
+} from './semantic-eligibility-adapter.js';
 import { DeterministicRuntimeTraceAdapter } from './runtime-trace.js';
 import { assertBoundedQueryInput } from './query-input.js';
 import type {
@@ -41,7 +51,10 @@ import type {
  * entirely by the tools.ts strategy guard; this is the data-layer backstop.
  */
 export class DeterministicAssembler {
-  constructor(private driver: Driver) {}
+  constructor(
+    private driver: Driver,
+    private readonly semanticEligibility?: SemanticEligibilityAuthority,
+  ) {}
 
   async assemble(
     task: string,
@@ -190,7 +203,11 @@ export class DeterministicAssembler {
           id: m.id,
           content: m.content,
           score: m.confidence,
-          metadata: { confidence: m.confidence, tags: m.tags },
+          metadata: {
+            confidence: m.confidence,
+            tags: m.tags,
+            ...(asOf ? { temporalStatus: 'historical', asOf } : {}),
+          },
         });
       }
     }
@@ -379,7 +396,11 @@ export class DeterministicAssembler {
           id: memory.id,
           content: memory.content,
           score: memory.confidence,
-          metadata: { confidence: memory.confidence, tags: memory.tags },
+          metadata: {
+            confidence: memory.confidence,
+            tags: memory.tags,
+            ...(asOf ? { temporalStatus: 'historical', asOf } : {}),
+          },
         });
       }
     }
@@ -691,13 +712,15 @@ export class DeterministicAssembler {
   ): Promise<Map<string, Array<{ id: string; content: string; confidence: number; tags: string[] }>>> {
     const session = this.driver.session();
     try {
-      // When as_of is provided, filter to semantics created before that timestamp.
       // The per-target LIMIT 10 is preserved via a subquery scoped to each target.
       // Semantic is a tenant-scoped node, so AND tenantWhere('s', tenantId): for the
       // default tenant this matches legacy/null-tenant nodes (output-identical in
       // single-tenant), and bars a named tenant's semantics in multi-tenant. The
       // $tenantId value is a bound parameter (injection-safe).
-      const temporalFilter = asOf ? ' AND s.created_at <= $asOf' : '';
+      // Lifecycle eligibility is inside each per-target subquery, before LIMIT,
+      // so obsolete high-confidence predecessors cannot consume the final cap.
+      const semanticAsOf = asOf ?? new Date().toISOString();
+      const semanticEligibility = semanticEligibilityWhere('s', tenantId, 'semanticAsOf');
       const projectScope = normalizeProjectTag(projectNameOption);
       const result = await session.run(
         stableIds ? `UNWIND range(0, size($ids) - 1) AS ordinal
@@ -706,8 +729,8 @@ export class DeterministicAssembler {
            WITH targetId
            MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {id: targetId})
            WHERE ${activeRelationshipFilter('r', asOf ? 'asOf' : undefined)}
-             AND ${tenantWhere('s', tenantId)}${temporalFilter}
-             AND ${archivedWhere('s')}
+             AND ${tenantWhere('s', tenantId)}
+             AND ${semanticEligibility}
              AND $projectScope IS NOT NULL
              AND (toLower(COALESCE(s.scope, '')) = $projectScope
                OR (s.scope IS NULL AND ANY(tag IN COALESCE(s.tags, []) WHERE toLower(tag) = $projectScope)))
@@ -722,18 +745,23 @@ export class DeterministicAssembler {
          CALL {
            WITH targetName
            MATCH (s:Semantic)-[:ABOUT]->(e:Entity {name: targetName})
-           WHERE ${tenantWhere('s', tenantId)}${temporalFilter}
-             AND ${archivedWhere('s')}
+           WHERE ${tenantWhere('s', tenantId)}
+             AND ${semanticEligibility}
+             AND ($projectScope IS NULL
+               OR toLower(COALESCE(s.scope, '')) = $projectScope
+               OR (s.scope IS NULL AND ANY(tag IN COALESCE(s.tags, []) WHERE toLower(tag) = $projectScope)))
            RETURN s.id AS id, s.content AS content, s.confidence AS confidence, s.tags AS tags
            ORDER BY s.confidence DESC
            LIMIT 10
          }
          RETURN targetName AS targetName, id, content, confidence, tags`,
         stableIds
-          ? { ids: names, [TENANT_PARAM]: tenantId, projectScope, ...(asOf ? { asOf } : {}) }
-          : { names, [TENANT_PARAM]: tenantId, ...(asOf ? { asOf } : {}) },
+          ? { ids: names, [TENANT_PARAM]: tenantId, projectScope, semanticAsOf, ...(asOf ? { asOf } : {}) }
+          : { names, [TENANT_PARAM]: tenantId, projectScope, semanticAsOf, ...(asOf ? { asOf } : {}) },
       );
-      if (stableIds) return parseStableSemanticRecords(result, names, tenantId, projectScope);
+      let parsed: Map<string, Array<{ id: string; content: string; confidence: number; tags: string[] }>>;
+      if (stableIds) parsed = parseStableSemanticRecords(result, names, tenantId, projectScope);
+      else {
       const budget = createDynamicDeterministicBudget();
       const rows = snapshotDynamicDeterministicRecords(
         result,
@@ -741,15 +769,33 @@ export class DeterministicAssembler {
         Math.min(MAX_DYNAMIC_DETERMINISTIC_RECORDS, names.length * 10),
         budget,
       );
-      return this.groupByTarget(rows, (row) => ({
-        target: dynamicDeterministicString(row[0], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
-        value: {
-          id: dynamicDeterministicString(row[1], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
-          content: dynamicDeterministicString(row[2], budget),
-          confidence: dynamicDeterministicConfidence(row[3]),
-          tags: snapshotDynamicDeterministicStringArray(row[4] ?? [], budget),
-        },
-      }));
+        parsed = this.groupByTarget(rows, (row) => ({
+          target: dynamicDeterministicString(row[0], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
+          value: {
+            id: dynamicDeterministicString(row[1], budget, MAX_DYNAMIC_DETERMINISTIC_ID_BYTES, true),
+            content: dynamicDeterministicString(row[2], budget),
+            confidence: dynamicDeterministicConfidence(row[3]),
+            tags: snapshotDynamicDeterministicStringArray(row[4] ?? [], budget),
+          },
+        }));
+      }
+      if (!this.semanticEligibility) return parsed;
+      const flattened = [...parsed].flatMap(([target, memories]) =>
+        memories.map((memory) => ({ target, memory })));
+      const eligible = await filterSemanticEvidence(
+        flattened,
+        this.semanticEligibility,
+        { tenantId, projectScope: projectScope ?? undefined, asOf },
+        () => 'semantic',
+        (candidate) => candidate.memory.id,
+      );
+      const filtered = new Map<string, Array<{ id: string; content: string; confidence: number; tags: string[] }>>();
+      for (const { target, memory } of eligible) {
+        const memories = filtered.get(target) ?? [];
+        memories.push(memory);
+        filtered.set(target, memories);
+      }
+      return filtered;
     } finally {
       await session.close();
     }

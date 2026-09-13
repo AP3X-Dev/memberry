@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/neo4j/src/__tests__/query.tenant.opt114.test.ts
 //
 // OPT-114: byEntity, byTag, and the Semantic+Episodic halves of byEntityWithFacts
@@ -23,7 +24,7 @@ async function reachable(driver: ReturnType<typeof createNeo4jDriver>): Promise<
 
 describe('OPT-114: byEntity/byTag/byEntityWithFacts tenant isolation (adversarial)', () => {
   const driver = createNeo4jDriver(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
-  const query = new ScopedQuery(driver);
+  const query = new ScopedQuery(driver, { legacyUnqualified: true });
   let ok = false;
 
   beforeAll(async () => {
@@ -38,19 +39,21 @@ describe('OPT-114: byEntity/byTag/byEntityWithFacts tenant isolation (adversaria
     const s = driver.session();
     try {
       await s.run(
-        `CREATE (e:Entity {name:$ename, tags:[$tag]})
+        `CREATE (eA:Entity {name:$ename, tags:[$tag], tenant_id:'tenantA'})
+         CREATE (eB:Entity {name:$ename, tags:[$tag], tenant_id:'tenantB'})
+         CREATE (eL:Entity {name:$ename, tags:[$tag]})
          CREATE (sA:Semantic ${sem(`${TAG}-semA`, 0.9, 'tenantA')})
          CREATE (sB:Semantic ${sem(`${TAG}-semB`, 0.8, 'tenantB')})
          CREATE (sL:Semantic ${sem(`${TAG}-semL`, 0.7)})
-         CREATE (sA)-[:ABOUT]->(e)
-         CREATE (sB)-[:ABOUT]->(e)
-         CREATE (sL)-[:ABOUT]->(e)
+         CREATE (sA)-[:ABOUT]->(eA)
+         CREATE (sB)-[:ABOUT]->(eB)
+         CREATE (sL)-[:ABOUT]->(eL)
          CREATE (epA:Episodic ${ep(`${TAG}-epA`, 'tenantA')})
          CREATE (epB:Episodic ${ep(`${TAG}-epB`, 'tenantB')})
          CREATE (epL:Episodic ${ep(`${TAG}-epL`)})
-         CREATE (epA)-[:REFERENCES]->(e)
-         CREATE (epB)-[:REFERENCES]->(e)
-         CREATE (epL)-[:REFERENCES]->(e)`,
+         CREATE (epA)-[:REFERENCES]->(eA)
+         CREATE (epB)-[:REFERENCES]->(eB)
+         CREATE (epL)-[:REFERENCES]->(eL)`,
         { ename: ENTITY, tag: TAG },
       );
     } finally { await s.close(); }

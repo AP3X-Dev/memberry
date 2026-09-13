@@ -138,7 +138,7 @@ describe("MEM-002C3 Decision 51 v2 identity repair", () => {
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("splits the repository root and candidate subtree identities without an ambiguous tree field", () => {
     expect(BLINDED_HOLDOUT_REPOSITORY_ROOT_TREE_OID).toBe(

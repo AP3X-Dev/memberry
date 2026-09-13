@@ -53,12 +53,17 @@ function makeExportDriver() {
 
 function makeImportDriver() {
   const writes: Array<{ cypher: string; params: Record<string, unknown> }> = [];
+  const run = vi.fn(async (cypher: string, params: Record<string, unknown> = {}) => {
+    if (cypher.includes('MATCH (s:Semantic)') && cypher.includes('RETURN s')) return { records: [] }; // fresh graph
+    if (cypher.includes('KnowledgeEpoch')) {
+      return { records: [{ get: (key: string) => key === 'knowledgeEpoch' ? '1' : null }] };
+    }
+    writes.push({ cypher, params });
+    return { records: [] };
+  });
   const session = {
-    run: vi.fn(async (cypher: string, params: Record<string, unknown> = {}) => {
-      if (cypher.trim().startsWith('MATCH (s:Semantic) RETURN s')) return { records: [] }; // fresh graph
-      writes.push({ cypher, params });
-      return { records: [] };
-    }),
+    run,
+    executeWrite: vi.fn(async (work: (tx: { run: typeof run }) => unknown) => work({ run })),
     close: vi.fn(),
   };
   return { driver: { session: vi.fn(() => session) } as any, writes };

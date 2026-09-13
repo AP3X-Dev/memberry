@@ -37,6 +37,9 @@ function createDriver(graph: Map<string, GraphNode>): { driver: Driver; calls: (
   const session = {
     run: vi.fn(async (q: string, p: Record<string, unknown> = {}) => {
       queries.push(q);
+      if (q.includes('AS foreignCount')) return { records: [{ get: () => 0 }] };
+      if (q.includes('AS knowledgeEpoch')) return { records: [{ get: () => '1' }] };
+      if (q.includes('AS tenantId')) return { records: [{ get: (key: string) => key === 'tenantId' ? 'default' : key === 'projectScope' ? 'project:user-personal' : p.id }] };
       if (q.includes('MATCH (s:Semantic {id: $id})') && q.includes('RETURN s')) {
         const node = graph.get(p.id as string);
         if (!node) return { records: [] };

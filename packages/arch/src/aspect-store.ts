@@ -1,3 +1,4 @@
+import { runArchMutation } from './knowledge-mutation.js';
 // packages/arch/src/aspect-store.ts
 // CRUD for Aspect nodes + APPLIES_TO / IMPLIES relationships.
 
@@ -20,7 +21,7 @@ export class AspectStore {
       const id = `aspect-${nanoid(10)}`;
       const now = new Date().toISOString();
 
-      const result = await session.run(
+      const result = await runArchMutation(session,
         `MERGE (a:Aspect {name: $name})
          ON CREATE SET a.id = $id, a.description = $description,
                        a.stability_tier = $stability_tier,
@@ -46,7 +47,7 @@ export class AspectStore {
 
       // Create IMPLIES edges for implied aspects
       for (const impliedName of input.implies ?? []) {
-        await session.run(
+        await runArchMutation(session,
           `MATCH (a:Aspect {name: $name})
            MERGE (b:Aspect {name: $implied})
            ON CREATE SET b.id = $impliedId, b.description = '', b.stability_tier = 'implementation',
@@ -65,7 +66,7 @@ export class AspectStore {
   async applyTo(aspectName: string, entityName: string, projectName?: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await runArchMutation(session,
         `MATCH (a:Aspect {name: $aspect}), (e:Entity {name: $entity})
          WHERE ${entityProjectFilter('e')}
          MERGE (a)-[:APPLIES_TO]->(e)`,
@@ -79,7 +80,7 @@ export class AspectStore {
   async removeFrom(aspectName: string, entityName: string, projectName?: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await runArchMutation(session,
         `MATCH (a:Aspect {name: $aspect})-[r:APPLIES_TO]->(e:Entity {name: $entity})
          WHERE ${entityProjectFilter('e')}
          DELETE r`,

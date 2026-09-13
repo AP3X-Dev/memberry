@@ -1,3 +1,4 @@
+import { runResearchMutation } from './knowledge-mutation.js';
 // packages/research/src/consolidation.ts
 // Research-specific consolidation: detects patterns in experiment history
 // and promotes them to semantic nodes.
@@ -94,7 +95,8 @@ export class ResearchConsolidation {
     try {
       const result = await session.run(
         `MATCH (e:Experiment {campaign_id: $campaignId})-[:MODIFIED]->(c:Component)
-         WHERE e.status IN ['keep', 'keep*']
+         WHERE coalesce(e.tenant_id, 'default') = 'default' AND e.status IN ['keep', 'keep*']
+         WITH c, e WHERE coalesce(c.tenant_id, 'default') = 'default'
          WITH c, collect(e.id) AS expIds, count(e) AS keepCount,
               collect(e.description) AS descriptions
          WHERE keepCount >= 2
@@ -122,7 +124,8 @@ export class ResearchConsolidation {
     try {
       const result = await session.run(
         `MATCH (e:Experiment {campaign_id: $campaignId})-[:MODIFIED]->(c:Component)
-         WHERE e.status = 'discard'
+         WHERE coalesce(e.tenant_id, 'default') = 'default' AND e.status = 'discard'
+         WITH c, e WHERE coalesce(c.tenant_id, 'default') = 'default'
          WITH c, collect(e.id) AS expIds, count(e) AS discardCount,
               collect(e.description) AS descriptions
          WHERE discardCount >= 3
@@ -150,7 +153,8 @@ export class ResearchConsolidation {
     try {
       const result = await session.run(
         `MATCH (e:Experiment {campaign_id: $campaignId})-[:MODIFIED]->(c:Component)
-         WHERE e.status IN ['crash', 'timeout']
+         WHERE coalesce(e.tenant_id, 'default') = 'default' AND e.status IN ['crash', 'timeout']
+         WITH c, e WHERE coalesce(c.tenant_id, 'default') = 'default'
          WITH c, collect(e.id) AS expIds, count(e) AS crashCount,
               collect(e.description) AS descriptions
          WHERE crashCount >= 2
@@ -179,7 +183,7 @@ export class ResearchConsolidation {
       const result = await session.run(
         `MATCH (e:Experiment {campaign_id: $campaignId})-[:MODIFIED]->(c1:Component)
          MATCH (e)-[:MODIFIED]->(c2:Component)
-         WHERE e.status IN ['keep', 'keep*'] AND c1.path < c2.path
+         WHERE coalesce(e.tenant_id, 'default') = 'default' AND e.status IN ['keep', 'keep*'] AND coalesce(c1.tenant_id, 'default') = 'default' AND coalesce(c2.tenant_id, 'default') = 'default' AND c1.path < c2.path
          WITH c1, c2, collect(e.id) AS expIds, count(e) AS comboCount
          WHERE comboCount >= 2
          RETURN c1.path AS path1, c2.path AS path2, comboCount, expIds`,
@@ -207,13 +211,13 @@ export class ResearchConsolidation {
       // Find semantic nodes that recent experiments relate to
       const result = await session.run(
         `MATCH (s:Semantic)
-         WHERE ANY(t IN s.tags WHERE t = $campaignTag OR t = 'research')
+         WHERE coalesce(s.tenant_id, 'default') = 'default' AND ANY(t IN s.tags WHERE t = $campaignTag OR t = 'research')
            AND coalesce(s.archived, false) = false
          OPTIONAL MATCH (keep:Experiment {campaign_id: $campaignId, status: 'keep'})-[:MODIFIED]->(c:Component)
-         WHERE c.domain IN [t IN s.tags WHERE t <> $campaignTag AND t <> 'research']
+         WHERE coalesce(keep.tenant_id, 'default') = 'default' AND coalesce(c.tenant_id, 'default') = 'default' AND c.domain IN [t IN s.tags WHERE t <> $campaignTag AND t <> 'research']
          WITH s, count(keep) AS keepCount
          OPTIONAL MATCH (discard:Experiment {campaign_id: $campaignId, status: 'discard'})-[:MODIFIED]->(c2:Component)
-         WHERE c2.domain IN [t IN s.tags WHERE t <> $campaignTag AND t <> 'research']
+         WHERE coalesce(discard.tenant_id, 'default') = 'default' AND coalesce(c2.tenant_id, 'default') = 'default' AND c2.domain IN [t IN s.tags WHERE t <> $campaignTag AND t <> 'research']
          WITH s, keepCount, count(discard) AS discardCount
          WHERE keepCount > 0 OR discardCount > 0
          RETURN s.id AS id, s.content AS claim, s.confidence AS confidence,
@@ -265,9 +269,9 @@ export class ResearchConsolidation {
       const id = `sem-research-${nanoid(10)}`;
       const now = new Date().toISOString();
 
-      await session.run(
+      await runResearchMutation(session,
         `CREATE (s:Semantic {
-          id: $id,
+          id: $id, tenant_id: 'default',
           content: $content,
           confidence: $confidence,
           signal_count: $signalCount,
@@ -289,8 +293,9 @@ export class ResearchConsolidation {
 
       // Link to source experiments
       for (const expId of pattern.evidence_ids) {
-        await session.run(
+        await runResearchMutation(session,
           `MATCH (s:Semantic {id: $semId}), (e:Experiment {id: $expId})
+           WHERE coalesce(s.tenant_id, 'default') = 'default' AND coalesce(e.tenant_id, 'default') = 'default'
            CREATE (s)-[:DERIVED_FROM {via: 'consolidation'}]->(e)`,
           { semId: id, expId },
         );
@@ -316,8 +321,9 @@ export class ResearchConsolidation {
 
     const session = this.driver.session();
     try {
-      const result = await session.run(
+      const result = await runResearchMutation(session,
         `MATCH (s:Semantic {id: $id})
+         WHERE coalesce(s.tenant_id, 'default') = 'default'
          WITH s, s.confidence AS oldConf
          SET s.confidence = CASE WHEN s.confidence + 0.1 > 0.95 THEN 0.95 ELSE s.confidence + 0.1 END,
              s.signal_count = s.signal_count + 1,
@@ -349,8 +355,9 @@ export class ResearchConsolidation {
 
     const session = this.driver.session();
     try {
-      const result = await session.run(
+      const result = await runResearchMutation(session,
         `MATCH (s:Semantic {id: $id})
+         WHERE coalesce(s.tenant_id, 'default') = 'default'
          WITH s, s.confidence AS oldConf
          SET s.confidence = CASE WHEN s.confidence - 0.15 < 0.05 THEN 0.05 ELSE s.confidence - 0.15 END,
              s.signal_count = s.signal_count + 1,

@@ -6,6 +6,7 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { LoadScope, MemoryContext, EpisodeInput, MemoryTier, FactTimeline, FactDiff, TemporalOptions } from '@memberry/core';
 import { DEFAULT_TENANT, getAllowedBaseDir } from '@memberry/core';
 import { resolveProjectTag } from '@memberry/code';
+import { semanticEligibilityWhere } from '@memberry/neo4j';
 import { parseAmpUri, uriToLoadScope } from './uri.js';
 import { scanCodebase, type CodebaseScan } from './codebase-scanner.js';
 import { assertSafeRegex, capScanText, UnsafeRegexError } from './safe-regex.js';
@@ -31,6 +32,13 @@ export interface IConsolidationEngine {
 
 export interface IScopedQuery {
   rawCypher(cypher: string, limit: number, params?: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>[]>;
+  /** Authoritative, bounded Semantic lifecycle check owned by the graph query layer. */
+  evaluateActiveEligibility?(read: {
+    semanticIds: readonly string[];
+    tenantId?: string;
+    projectScope?: string;
+    asOf?: string;
+  }): Promise<ReadonlyArray<{ id: string; status: 'eligible' | 'ineligible' | 'unknown' }>>;
 }
 
 /**
@@ -664,6 +672,8 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         grepRegex: caseSensitive ? `.*${pattern}.*` : `(?i).*${pattern}.*`,
         grepScope: args.scope ?? '',
         grepTenant: tenantId,
+        tenantId,
+        semanticAsOf: new Date().toISOString(),
       };
 
       // SECURITY (OPT-07): only the regex path builds `=~ $grepRegex` Cypher,
@@ -712,6 +722,7 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
         const code = (err as { code?: string })?.code ?? '';
         const msg = err instanceof Error ? err.message : String(err);
         const reason = /TimedOut|timeout/i.test(code + msg) ? 'timeout'
+          : /eligibility/i.test(msg) ? 'eligibility-unavailable'
           : /regex|regular expression|pattern/i.test(msg) ? 'invalid-regex'
           : 'query-failed';
         failed.push({ type, reason });
@@ -814,11 +825,59 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
 
       if (nodeTypes.includes('semantic')) {
         const scopeFilter = args.scope ? ' AND (s.scope = $grepScope OR $grepScope IN s.tags)' : '';
-        const cypher = `MATCH (s:Semantic) WHERE ${matchExpr('s.content')}${scopeFilter} AND ${tFilter('s')} AND coalesce(s.archived, false) = false RETURN s ORDER BY s.confidence DESC`;
+        const cypher = `MATCH (s:Semantic) WHERE ${matchExpr('s.content')}${scopeFilter} AND ${tFilter('s')} AND ${semanticEligibilityWhere('s', tenantId)} RETURN s ORDER BY s.confidence DESC`;
         try {
           const rows = await scopedQuery.rawCypher(cypher, perTypeLimit, grepParams, grepTimeoutMs);
-          for (const row of rows) {
+          const semanticRows = rows.filter((row) => {
+            const semantic = row.s;
+            return semantic !== null && typeof semantic === 'object'
+              && typeof (semantic as Record<string, unknown>).id === 'string';
+          });
+          const semanticIds = [...new Set(semanticRows.map((row) =>
+            (row.s as Record<string, unknown>).id as string))];
+          // `scope` accepts generic retrieval tags too. Only a canonical
+          // project:* value may be forwarded to the structural project gate.
+          const projectScope = typeof args.scope === 'string' && /^project:/i.test(args.scope)
+            ? args.scope.toLowerCase()
+            : undefined;
+          let eligibleIds = new Set<string>();
+          if (semanticIds.length > 0) {
+            // perTypeLimit is normalized to <=50 above, below the graph gate's
+            // explicit 128-ID batch ceiling.
+            if (!scopedQuery.evaluateActiveEligibility) {
+              recordFailure('semantic', 'eligibility unavailable');
+            } else {
+              try {
+                const evaluations = await scopedQuery.evaluateActiveEligibility({
+                  semanticIds,
+                  tenantId,
+                  ...(projectScope ? { projectScope } : {}),
+                });
+                if (!Array.isArray(evaluations) || evaluations.length !== semanticIds.length) {
+                  throw new Error('eligibility malformed');
+                }
+                const requested = new Set(semanticIds);
+                const decided = new Set<string>();
+                for (const evaluation of evaluations) {
+                  if (evaluation === null || typeof evaluation !== 'object'
+                    || typeof evaluation.id !== 'string' || !requested.has(evaluation.id)
+                    || decided.has(evaluation.id)
+                    || (evaluation.status !== 'eligible' && evaluation.status !== 'ineligible'
+                      && evaluation.status !== 'unknown')) {
+                    throw new Error('eligibility malformed');
+                  }
+                  decided.add(evaluation.id);
+                  if (evaluation.status === 'eligible') eligibleIds.add(evaluation.id);
+                }
+              } catch {
+                eligibleIds = new Set();
+                recordFailure('semantic', 'eligibility unavailable');
+              }
+            }
+          }
+          for (const row of semanticRows) {
             const s = row.s as Record<string, unknown>;
+            if (!eligibleIds.has(s.id as string)) continue;
             addResult(
               s.id as string, 'semantic', 'content', (s.content as string) ?? '', 2,
               { confidence: s.confidence },
@@ -965,6 +1024,8 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
     },
 
     async berry_query(args) {
+      // Explicit admin/audit surface: arbitrary read-only Cypher is not an
+      // active-memory serving channel and is withheld from tenant-safe tools.
       if (!scopedQuery) throw new Error('ScopedQuery not initialised');
 
       const limit = args.limit ?? 10;
@@ -973,6 +1034,9 @@ export function buildToolHandlers(container: ServiceContainer = defaultContainer
     },
 
     async berry_provenance(args) {
+      // Explicit admin/audit surface: superseded lineage is the intended
+      // historical result, so active-serving eligibility must not erase it.
+      // This tool is likewise withheld from TENANT_SAFE_TOOLS.
       if (!provenanceTraversal) throw new Error('ProvenanceTraversal not initialised');
       const [origin, supersessions] = await Promise.all([
         provenanceTraversal.traceOrigin(args.semantic_id),

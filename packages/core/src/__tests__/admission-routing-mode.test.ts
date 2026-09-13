@@ -22,6 +22,7 @@ vi.mock('@memberry/neo4j', () => ({
   EpisodicStore: vi.fn(),
   SemanticStore: vi.fn(),
   ScopedQuery: vi.fn(),
+  EmbeddingGenerationStore: vi.fn(),
   FactStore: vi.fn(),
   AuditLogStore: vi.fn(),
   AdmissionObservationStore: vi.fn(),

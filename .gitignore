@@ -59,6 +59,9 @@ Thumbs.db
 __pycache__/
 .venv/
 *.log
+/.release-gate-status
+/.release-gate-runs/
+/release-candidate-manifest.json
 *.tmp
 *.swp
 

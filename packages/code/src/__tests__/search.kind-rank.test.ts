@@ -165,7 +165,7 @@ describe('IDX-002A kind-aware ranking (spec §5.1)', () => {
           available: false,
           embed: vi.fn(async () => [0.1]),
           embedBatch: vi.fn(),
-        });
+        }, undefined, undefined, { legacyUnqualified: true });
         const out = await search.search('unified assembler', { limit: 10, include_semantics: false });
         return names(out);
       } finally {

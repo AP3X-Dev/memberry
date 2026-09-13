@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/consolidation.scheduling.test.ts
 //
 // MEM-005: the dual-window promotion fetch. A backlog of eligible-but-never-
@@ -85,7 +86,7 @@ function neo4jWith(findPromotable: unknown, findPromotableKeyset?: unknown) {
 }
 
 function engineWith(redis: unknown, neo4j: unknown) {
-  return new ConsolidationEngine(redis as never, neo4j as never, CONFIG, undefined, 'tenant-a');
+  return new ConsolidationEngine(redis as never, neo4j as never, CONFIG, undefined, 'tenant-a', { legacyUnqualified: true });
 }
 
 // Eligible-but-never-promotable backlog: embedded, unclassified, no LLM wired,

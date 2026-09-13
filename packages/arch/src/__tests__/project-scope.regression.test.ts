@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // packages/arch/src/__tests__/project-scope.regression.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { ArchEntityStore } from '../entity-store.js';
@@ -15,7 +16,7 @@ function makeDriver() {
   };
 
   return {
-    driver: { session: () => session } as never,
+    driver: { session: () => withKnowledgeTransactions(session) } as never,
     runs,
   };
 }

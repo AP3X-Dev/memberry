@@ -1,3 +1,4 @@
+import { runCodeMutation } from './knowledge-mutation.js';
 // packages/code/src/indexer.ts
 // Project and file indexing pipeline.
 
@@ -8,7 +9,7 @@ import { parseFile } from './parser.js';
 import { ImportResolver } from './resolver.js';
 import { SymbolStore } from './symbol-store.js';
 import { generateLexicalVector } from './vectors.js';
-import type { EmbeddingProvider } from '@memberry/core';
+import { DEFAULT_TENANT, type EmbeddingProvider } from '@memberry/core';
 import type { SupportedLanguage, SymbolKind, SymbolNode, IndexResult } from './types.js';
 import { detectLanguage, isMcpConfigBasename, isTestPath } from './types.js';
 
@@ -73,11 +74,15 @@ export class CodeIndexer {
    * must degrade retrieval to the lexical channels, never fail the index write,
    * so a throw here is logged and swallowed and the symbols still get stored.
    */
-  private async embedSymbols(symbols: SymbolNode[]): Promise<void> {
+  private async embedSymbols(symbols: SymbolNode[], projectTag?: string): Promise<void> {
     if (symbols.length === 0) return;
     if (!this.embedding || this.embedding.available === false) return;
     try {
-      const vectors = await this.embedding.embedBatch(symbols.map(symbolVectorText));
+      // An absent watcher tag preserves database scope; it cannot mean tenant-wide.
+      const texts = symbols.map(symbolVectorText);
+      const vectors = projectTag !== undefined
+        ? await this.embedding.embedBatch(texts, { tenantId: DEFAULT_TENANT, projectScope: projectTag })
+        : await this.embedding.embedBatch(texts);
       symbols.forEach((symbol, i) => {
         const vector = vectors[i];
         // A short/empty vector is a provider contract violation, not a symbol we
@@ -232,7 +237,7 @@ export class CodeIndexer {
     // Dense vectors in ONE batched provider call per file, AFTER the changed set
     // is known — embedding is the expensive step and unchanged symbols are
     // skipped by content_hash, so a no-op reindex costs nothing.
-    await this.embedSymbols(changed);
+    await this.embedSymbols(changed, projectTag);
 
     // Single batched UNWIND MERGE: identical composite-key identity, property set,
     // and create-vs-update outcome as the prior per-symbol loop.
@@ -264,7 +269,7 @@ export class CodeIndexer {
     if (toDelete.length > 0) {
       const session = this.driver.session();
       try {
-        await session.run(
+        await runCodeMutation(session,
           'MATCH (s:Symbol) WHERE s.id IN $ids DETACH DELETE s',
           { ids: toDelete.map((s) => s.id) },
         );
@@ -290,7 +295,7 @@ export class CodeIndexer {
   private async ensureFileEntities(filePaths: string[], projectTag?: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await runCodeMutation(session,
         `UNWIND $paths AS path
          MERGE (e:Entity:Component {path: path})
          ON CREATE SET e.id = randomUUID(), e.name = last(split(path, '/')),
@@ -363,7 +368,7 @@ export class CodeIndexer {
       // overwrites a bootstrap 'module'); project.type is a safety-net ON CREATE.
       // All edges are MERGE → re-ingest can't fork edges.
       if (moduleLinks.length > 0) {
-        await session.run(
+        await runCodeMutation(session,
           `MERGE (project:Entity {name: $projectName})
              ON CREATE SET project.id = randomUUID(), project.type = 'project',
                            project.created_at = $now
@@ -383,7 +388,7 @@ export class CodeIndexer {
 
       // Root-level files: link directly to the project (no module hop, no self-loop).
       if (rootLinks.length > 0) {
-        await session.run(
+        await runCodeMutation(session,
           `MERGE (project:Entity {name: $projectName})
              ON CREATE SET project.id = randomUUID(), project.type = 'project',
                            project.created_at = $now
@@ -441,7 +446,7 @@ export class CodeIndexer {
         // batch runs in one round-trip. A row whose from/to can't be resolved is
         // dropped by its subquery (no edge), exactly as the old OPTIONAL-MATCH +
         // `WHERE … IS NOT NULL` did.
-        const result = await session.run(
+        const result = await runCodeMutation(session,
           `UNWIND $rows AS row
            CALL {
              WITH row

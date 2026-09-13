@@ -2,8 +2,9 @@
 
 import { calibGateKey } from '../../adapters/memberry-retrieval-core-funnel-multihop.js';
 import { execFileSync } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import type { AdapterRunReport } from '../../contracts/report.js';
@@ -18,6 +19,7 @@ import {
   RET007V4_DEV_EXACT_BASE_COMMIT,
   RET007V4_TWIN_WORDING,
   assertDevSourceChangedPaths,
+  assertSourcePreflight,
   closedEvaluationFailureReceipt,
   computeArmSplitAggregate,
   computeCalibGatePrecision,
@@ -26,6 +28,18 @@ import {
 } from '../evaluate-dev-v4.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
+// Preserved D5 implementation source, not a claim that today's adapters reproduce its results.
+const HISTORICAL_D5_SOURCE = '1975dadde9442d03ba9ae1ae59b811324253e8c0';
+function git(root: string, args: readonly string[], input?: string): string {
+  return execFileSync('git', [...args], {
+    cwd: root, encoding: 'utf8', windowsHide: true, input,
+    env: {
+      ...process.env, GIT_TERMINAL_PROMPT: '0',
+      GIT_AUTHOR_NAME: 'MemBerry fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'MemBerry fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+    },
+  }).trim();
+}
 const ZERO_STATS = { memories: 0, queries: 0, feedbackEvents: 0 };
 const SIZES = { calib: 45, dev: 60, twin: 30 } as const;
 const DENSITY_COUNTS = {
@@ -86,7 +100,7 @@ function report(adapterId: string, fixtures: readonly LabScenario[], succeed: (i
 const CLOSED_LEAK = /scenarioId|probeId|"query"|resultIds|required|relevant|oracle|bridge:|perCase|seed/;
 
 describe('RET-007 v4 dev-evaluation apparatus', () => {
-  it('pins the D5 base, an envelope that is NOT the qualification envelope, and the six blobs against the working tree', () => {
+  it('preserves the historical D5 source, exact envelope, and six approved blobs', () => {
     expect(RET007V4_DEV_EXACT_BASE_COMMIT).toBe('36e4c0050c8651b81bf9119fd68083adc12c7b31');
     expect([...RET007V4_DEV_ALLOWED_SOURCE_PATHS]).toEqual([...RET007V4_DEV_ALLOWED_SOURCE_PATHS].sort());
     expect(RET007V4_DEV_ALLOWED_SOURCE_PATHS).not.toEqual(RET007V4_ALLOWED_SOURCE_PATHS);
@@ -99,11 +113,54 @@ describe('RET-007 v4 dev-evaluation apparatus', () => {
     expect(RET007V4_DEV_APPROVED_GIT_BLOBS['bench/lab/runner.ts']).toBe(MULTIHOP_V4_FREEZE.controlSourceIdentity.runnerGitBlob);
     expect(RET007V4_DEV_APPROVED_GIT_BLOBS['bench/lab/registry/experiments.json']).toBe(MULTIHOP_V4_FREEZE.controlSourceIdentity.experimentsRegistryGitBlob);
     expect(RET007V4_DEV_APPROVED_GIT_BLOBS['bench/lab/registered-adapters.ts']).not.toBe(MULTIHOP_V4_FREEZE.controlSourceIdentity.registeredAdaptersGitBlob);
+    git(REPO_ROOT, ['merge-base', '--is-ancestor', RET007V4_DEV_EXACT_BASE_COMMIT, HISTORICAL_D5_SOURCE]);
+    const historicalPaths = git(REPO_ROOT, ['diff', '--name-only', RET007V4_DEV_EXACT_BASE_COMMIT, HISTORICAL_D5_SOURCE]).split(/\r?\n/);
+    expect(historicalPaths).toEqual(RET007V4_DEV_ALLOWED_SOURCE_PATHS);
     for (const [path, blob] of Object.entries(RET007V4_DEV_APPROVED_GIT_BLOBS)) {
-      const actual = execFileSync('git', ['hash-object', path], { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
+      const actual = git(REPO_ROOT, ['rev-parse', `${HISTORICAL_D5_SOURCE}:${path}`]);
       expect(`${path}:${actual}`).toBe(`${path}:${blob}`);
     }
   });
+
+  it('executes source custody checks against an isolated historical checkout and rejects drift', async () => {
+    const temporaryRoot = await mkdtemp(join(resolve(tmpdir()), 'memberry-ret007-custody-'));
+    const clone = join(temporaryRoot, 'source');
+    try {
+      git(temporaryRoot, ['clone', '--shared', '--no-checkout', '--quiet', REPO_ROOT, clone]);
+      git(clone, ['config', 'core.autocrlf', 'false']);
+      git(clone, ['config', 'core.hooksPath', join(temporaryRoot, 'no-hooks')]);
+      const reset = () => git(clone, ['checkout', '--quiet', '--detach', '--force', HISTORICAL_D5_SOURCE]);
+      const commit = () => {
+        const tree = git(clone, ['write-tree']);
+        const sha = git(clone, ['commit-tree', tree, '-p', HISTORICAL_D5_SOURCE], 'Synthetic custody mutation\n');
+        git(clone, ['checkout', '--quiet', '--detach', '--force', sha]);
+        return sha;
+      };
+      reset();
+      await expect(assertSourcePreflight(clone, HISTORICAL_D5_SOURCE)).resolves.toBeUndefined();
+      await expect(assertSourcePreflight(clone, RET007V4_DEV_EXACT_BASE_COMMIT)).rejects.toThrow('source-preflight-failed');
+
+      for (const path of Object.keys(RET007V4_DEV_APPROVED_GIT_BLOBS)) {
+        reset();
+        await writeFile(join(clone, path), `${await readFile(join(clone, path), 'utf8')}\nCustody mutation\n`);
+        git(clone, ['add', '--', path]);
+        await expect(assertSourcePreflight(clone, commit()), path).rejects.toThrow('source-preflight-failed');
+      }
+
+      reset();
+      git(clone, ['restore', '--source', RET007V4_DEV_EXACT_BASE_COMMIT, '--staged', '--worktree', '--', '.env.example']);
+      await expect(assertSourcePreflight(clone, commit())).rejects.toThrow('source-preflight-failed');
+      reset();
+      await writeFile(join(clone, 'custody-extra.txt'), 'Unexpected source\n');
+      git(clone, ['add', '--', 'custody-extra.txt']);
+      await expect(assertSourcePreflight(clone, commit())).rejects.toThrow('source-preflight-failed');
+    } finally {
+      const fromTemporary = relative(resolve(tmpdir()), resolve(temporaryRoot));
+      if (!fromTemporary || fromTemporary.startsWith('..') || isAbsolute(fromTemporary)
+        || !basename(temporaryRoot).startsWith('memberry-ret007-custody-')) throw new Error('unsafe fixture cleanup');
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('never references the holdout loader and mirrors the workflow pins (difference (c))', async () => {
     const source = await readFile(resolve(REPO_ROOT, 'bench/lab/multihop/evaluate-dev-v4.ts'), 'utf8');

@@ -3,7 +3,8 @@
 // Routes queries to the optimal retrieval strategy.
 // Ported from Context-Engine scripts/intent_classifier.py
 
-import type { EmbeddingProvider } from '@memberry/core';
+import type { EmbeddingProvider, EmbeddingRequest } from '@memberry/core';
+import { embeddingDescriptorFingerprint } from '@memberry/core';
 import { MAX_QUERY_INPUT_CODE_UNITS, queryInputCodeUnits } from './query-input.js';
 
 // ─── Intent types ────────────────────────────────────────────────────────────
@@ -133,18 +134,24 @@ interface ExemplarVec {
   readonly norm: number;
 }
 
-const exemplarCache = new WeakMap<EmbeddingProvider, Map<QueryIntent, ExemplarVec[]>>();
+const exemplarCache = new WeakMap<EmbeddingProvider, { fingerprint: string | undefined; values: Map<QueryIntent, ExemplarVec[]> }>();
+
+function providerFingerprint(embedding: EmbeddingProvider): string | undefined {
+  return embedding.descriptor && embeddingDescriptorFingerprint(embedding.descriptor);
+}
 
 async function getExemplarEmbeddings(embedding: EmbeddingProvider): Promise<Map<QueryIntent, ExemplarVec[]>> {
+  const fingerprint = providerFingerprint(embedding);
   const cached = exemplarCache.get(embedding);
-  if (cached) return cached;
+  if (cached && cached.fingerprint === fingerprint) return cached.values;
 
   const computed = new Map<QueryIntent, ExemplarVec[]>();
   for (const [intent, texts] of Object.entries(EXEMPLARS)) {
     const embeddings = await embedding.embedBatch(texts);
+    if (providerFingerprint(embedding) !== fingerprint) throw new Error('embedding_descriptor:provider_changed');
     computed.set(intent as QueryIntent, embeddings.map((vec) => ({ vec, norm: l2Norm(vec) })));
   }
-  exemplarCache.set(embedding, computed);
+  exemplarCache.set(embedding, { fingerprint, values: computed });
   return computed;
 }
 
@@ -162,6 +169,8 @@ export async function classifyIntent(
   // issuing its own embed(). Invoked lazily — only when the embedding path is
   // actually reached (rules miss), so rules-matched / GRAPH queries never embed.
   getQueryVec?: () => Promise<number[] | undefined>,
+  request?: EmbeddingRequest,
+  queryDescriptorFingerprint?: string,
 ): Promise<IntentResult> {
   // Keep the historical oversized-query fallback, but select it before any
   // trimming, regex scan, embedding provider, or caller-supplied thunk.
@@ -183,7 +192,7 @@ export async function classifyIntent(
   // similarity to 0, so we skip straight to the deterministic fallback).
   if (embedding && embedding.available !== false) {
     try {
-      const embResult = await classifyByEmbedding(query, embedding, getQueryVec);
+      const embResult = await classifyByEmbedding(query, embedding, getQueryVec, request, queryDescriptorFingerprint);
       if (embResult) return embResult;
     } catch (err: unknown) {
       // Embedding failed — fall through
@@ -235,11 +244,15 @@ async function classifyByEmbedding(
   query: string,
   embedding: EmbeddingProvider,
   getQueryVec?: () => Promise<number[] | undefined>,
+  request?: EmbeddingRequest,
+  queryDescriptorFingerprint?: string,
 ): Promise<IntentResult | null> {
+  const fingerprint = providerFingerprint(embedding);
   const exemplars = await getExemplarEmbeddings(embedding);
   // Reuse the caller's shared query vector when supplied; otherwise embed here.
   // Deterministic embedding ⇒ identical similarity either way.
-  const queryVec = (getQueryVec ? await getQueryVec() : undefined) ?? await embedding.embed(query);
+  const queryVec = (getQueryVec && (fingerprint === undefined || queryDescriptorFingerprint === fingerprint) ? await getQueryVec() : undefined) ?? await (request ? embedding.embed(query, request) : embedding.embed(query));
+  if (providerFingerprint(embedding) !== fingerprint) throw new Error('embedding_descriptor:provider_changed');
   const queryNorm = l2Norm(queryVec);
 
   let bestIntent: QueryIntent = 'HYBRID';

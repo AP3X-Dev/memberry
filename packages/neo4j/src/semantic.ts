@@ -1,9 +1,11 @@
 // packages/neo4j/src/semantic.ts
+import { createHash } from 'node:crypto';
 import { type Driver } from 'neo4j-driver';
-import { type SemanticNode, type EmbeddingProvider, DEFAULT_TENANT } from '@memberry/core';
+import { type SemanticNode, type EmbeddingProvider, type EmbeddingRequest, DEFAULT_TENANT } from '@memberry/core';
 import { temporalSetClause } from './temporal-edges.js';
 import { normalizeSemanticSignalCount } from './semantic-signal-count.js';
-import { archivedWhere } from './query.js';
+import { archivedWhere, endpointProjectScopeWhere, semanticTimestampValidWhere } from './query.js';
+import { bumpKnowledgeEpoch, projectKnowledgeScope } from './knowledge-epoch.js';
 
 /**
  * Canonical project scope for a semantic node: the explicit scope when set,
@@ -24,6 +26,71 @@ function semanticScope(node: Pick<SemanticNode, 'scope' | 'tags'>): string | nul
  */
 function canonicalTags(tags: string[] | undefined): string[] {
   return (tags ?? []).map((t) => (/^project:/i.test(t) ? t.toLowerCase() : t));
+}
+
+type SupersessionInput = {
+  tenantId: string;
+  requestedScope: string | null;
+  nonProjectTags: string[];
+};
+
+/**
+ * Fail closed before opening a transaction when the caller presents an
+ * ambiguous project identity. The predecessor remains authoritative for the
+ * final scope; this only validates the caller's optional assertion.
+ */
+function prepareSupersessionInput(node: SemanticNode): SupersessionInput {
+  const tenantId = (node.tenant_id ?? DEFAULT_TENANT).trim();
+  if (!tenantId || tenantId.includes('*')) {
+    throw new Error('Semantic supersession requires one concrete tenant');
+  }
+
+  const tags = canonicalTags(node.tags);
+  const projectTags = tags.filter((tag) => /^project:/i.test(tag));
+  if (projectTags.length > 1) {
+    throw new Error('Semantic supersession accepts at most one project tag');
+  }
+  const explicitScope = node.scope?.toLowerCase() ?? null;
+  const tagScope = projectTags[0] ?? null;
+  for (const scope of [explicitScope, tagScope]) {
+    if (scope !== null && (!/^project:[^*\s]+$/.test(scope) || scope.includes('*'))) {
+      throw new Error('Semantic supersession requires one concrete project scope');
+    }
+  }
+  if (explicitScope !== null && tagScope !== null && explicitScope !== tagScope) {
+    throw new Error('Semantic supersession scope conflicts with its project tag');
+  }
+
+  return {
+    tenantId,
+    requestedScope: explicitScope ?? tagScope,
+    nonProjectTags: tags.filter((tag) => !/^project:/i.test(tag)),
+  };
+}
+
+function supersessionOperationDigest(
+  oldId: string,
+  node: SemanticNode,
+  input: SupersessionInput,
+  embedding: number[] | undefined,
+): string {
+  const immutablePayload = [
+    'semantic-supersession-v1',
+    oldId,
+    node.id,
+    node.content,
+    node.confidence,
+    node.signal_count,
+    node.created_at,
+    node.updated_at,
+    node.decay_class,
+    node.memory_type ?? null,
+    input.nonProjectTags,
+    input.requestedScope,
+    input.tenantId,
+    embedding ?? null,
+  ];
+  return `sha256:${createHash('sha256').update(JSON.stringify(immutablePayload)).digest('hex')}`;
 }
 
 /** Driver error code raised when a MERGE violates a uniqueness constraint. */
@@ -48,11 +115,14 @@ export class SemanticStore {
    */
   private async resolveEmbedding(
     node: { embedding?: number[]; content: string },
+    request?: EmbeddingRequest,
   ): Promise<number[] | undefined> {
     if (node.embedding && node.embedding.length > 0) return node.embedding;
     if (this.embedding && this.embedding.available !== false && node.content) {
       try {
-        return await this.embedding.embed(node.content);
+        return request
+          ? await this.embedding.embed(node.content, request)
+          : await this.embedding.embed(node.content);
       } catch (err: unknown) {
         console.error(
           '[semantic-store] embedding failed; semantic will not be vector-recallable:',
@@ -66,7 +136,12 @@ export class SemanticStore {
   async create(node: SemanticNode & { embedding?: number[] }): Promise<string> {
     const session = this.driver.session();
     try {
-      const embedding = await this.resolveEmbedding(node);
+      const scope = semanticScope(node);
+      const projectTags = (node.tags ?? []).filter((tag) => /^project:/i.test(tag)).map((tag) => tag.toLowerCase());
+      const unambiguous = new Set([...(scope ? [scope] : []), ...projectTags]).size <= 1;
+      const embedding = await this.resolveEmbedding(node, unambiguous && scope !== null
+        ? { tenantId: node.tenant_id ?? DEFAULT_TENANT, projectScope: scope }
+        : undefined);
       const query = `
         CREATE (s:Semantic {
           id: $id,
@@ -102,7 +177,14 @@ export class SemanticStore {
       if (embedding) {
         params.embedding = embedding;
       }
-      const result = await session.run(query, params);
+      const result = await session.executeWrite(async (tx) => {
+        const created = await tx.run(query, params);
+        await bumpKnowledgeEpoch(tx, {
+          tenantId: params.tenant_id as string,
+          projectScope: projectKnowledgeScope(params.scope as string | null),
+        });
+        return created;
+      });
       return result.records[0].get('id') as string;
     } finally {
       await session.close();
@@ -195,7 +277,8 @@ export class SemanticStore {
     const session = this.driver.session();
     try {
       const now = new Date().toISOString();
-      await session.executeWrite((tx) => tx.run(
+      await session.executeWrite(async (tx) => {
+        const result = await tx.run(
         `MATCH (s:Semantic {id: $id})
          // Force a write lock before checking the idempotency ledger so two
          // concurrent retries on the same Semantic serialize safely.
@@ -209,9 +292,24 @@ export class SemanticStore {
                WHEN $application_key IS NULL THEN applied
                ELSE applied + $application_key
              END
-         RETURN s.id AS id`,
-        { id, confidence, now, application_key: applicationKey ?? null },
-      ));
+         RETURN s.id AS id, coalesce(s.tenant_id, $defaultTenant) AS tenantId,
+                s.scope AS projectScope`,
+        {
+          id,
+          confidence,
+          now,
+          application_key: applicationKey ?? null,
+          defaultTenant: DEFAULT_TENANT,
+        },
+        );
+        const record = result.records[0];
+        if (record) {
+          await bumpKnowledgeEpoch(tx, {
+            tenantId: record.get('tenantId') as string,
+            projectScope: projectKnowledgeScope(record.get('projectScope') as string | null),
+          });
+        }
+      });
     } finally {
       await session.close();
     }
@@ -230,7 +328,8 @@ export class SemanticStore {
   ): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.executeWrite((tx) => tx.run(
+      await session.executeWrite(async (tx) => {
+        const result = await tx.run(
         `MATCH (s:Semantic {id: $id})
          // Force a write lock before checking the idempotency ledger so two
          // concurrent retries on the same Semantic serialize safely.
@@ -243,22 +342,83 @@ export class SemanticStore {
                WHEN $application_key IS NULL THEN applied
                ELSE applied + $application_key
              END
-         RETURN s.id AS id`,
-        { id, decay_class: decayClass, application_key: applicationKey ?? null },
-      ));
+         RETURN s.id AS id, coalesce(s.tenant_id, $defaultTenant) AS tenantId,
+                s.scope AS projectScope`,
+        {
+          id,
+          decay_class: decayClass,
+          application_key: applicationKey ?? null,
+          defaultTenant: DEFAULT_TENANT,
+        },
+        );
+        const record = result.records[0];
+        if (record) {
+          await bumpKnowledgeEpoch(tx, {
+            tenantId: record.get('tenantId') as string,
+            projectScope: projectKnowledgeScope(record.get('projectScope') as string | null),
+          });
+        }
+      });
     } finally {
       await session.close();
     }
   }
 
   async supersede(oldId: string, newNode: SemanticNode & { embedding?: number[] }): Promise<string> {
+    const input = prepareSupersessionInput(newNode);
+    const embedding = await this.resolveEmbedding(newNode, input.requestedScope !== null
+      ? { tenantId: input.tenantId, projectScope: input.requestedScope }
+      : undefined);
+    const operationDigest = supersessionOperationDigest(oldId, newNode, input, embedding);
     const session = this.driver.session();
     try {
       const now = new Date().toISOString();
-      const embedding = await this.resolveEmbedding(newNode);
       const query = `
         MATCH (old:Semantic {id: $oldId})
+        // Claim before deriving authorization or scope; a waiter must not retain
+        // a pre-lock scope from a concurrently reassigned predecessor.
+        SET old.__supersede_lock = true
+        REMOVE old.__supersede_lock
+        WITH old
         WHERE coalesce(old.tenant_id, $default_tenant) = $tenant_id
+          AND trim(coalesce(old.tenant_id, $default_tenant)) <> ''
+        WITH old,
+          [tag IN coalesce(old.tags, [])
+           WHERE toLower(tag) STARTS WITH 'project:' | toLower(tag)] AS oldProjectTags
+        WITH old, oldProjectTags, coalesce(
+          toLower(old.scope),
+          head(oldProjectTags),
+          ''
+        ) AS oldProjectScope
+        // The predecessor must itself have one unambiguous, concrete canonical
+        // project identity. The caller may omit scope and inherit it.
+        WHERE oldProjectScope STARTS WITH 'project:'
+          AND oldProjectScope <> 'project:'
+          AND NOT oldProjectScope CONTAINS '*'
+          AND size(oldProjectTags) <= 1
+          AND all(tag IN oldProjectTags WHERE tag = oldProjectScope)
+          AND ($scope IS NULL OR oldProjectScope = $scope)
+        WITH old, oldProjectScope
+        OPTIONAL MATCH (successor:Semantic)-[:SUPERSEDES]->(old)
+        WITH old, oldProjectScope, collect(DISTINCT successor) AS successors
+        WHERE (
+          // First application: the predecessor is active, its proposed id is
+          // unclaimed from this predecessor, and no competing successor owns
+          // this chain. Global id ownership is checked after MERGE below.
+          (size(successors) = 0
+            AND CASE WHEN ${semanticTimestampValidWhere('coalesce(old.valid_at, old.created_at)')}
+              THEN datetime(coalesce(old.valid_at, old.created_at)) <= datetime($now) ELSE false END
+            AND old.invalid_at IS NULL
+            AND coalesce(old.archived, false) = false
+            AND coalesce(old.status, 'active') = 'active')
+          OR
+          // Potential ambiguous-commit replay. The successor's global id and
+          // immutable identity are checked only after claiming its node lock.
+          (size(successors) > 0
+            AND all(candidate IN successors WHERE candidate.id = $id)
+            AND coalesce(old.status, 'superseded') = 'superseded'
+            AND old.invalid_at IS NOT NULL)
+        )
         MERGE (new:Semantic {id: $id})
         ON CREATE SET
           new.content = $content,
@@ -267,35 +427,72 @@ export class SemanticStore {
           new.created_at = $created_at,
           new.updated_at = $updated_at,
           new.decay_class = $decay_class,
-          new.memory_type = $memory_type,
-          new.tags = $tags,
-          new.scope = $scope,
+          new.memory_type = coalesce($memory_type, old.memory_type),
+          new.tags = $non_project_tags + [oldProjectScope],
+          new.scope = oldProjectScope,
           new.tenant_id = $tenant_id,
           new.status = 'active',
-          new.valid_at = $now
-        ${embedding ? 'SET new.embedding = $embedding' : ''}
-        MERGE (new)-[:SUPERSEDES]->(old)
-        WITH new, old
-        // The successor inherits the project scope when the caller didn't set one
-        SET new.scope = coalesce(new.scope, old.scope),
-            new.memory_type = coalesce(new.memory_type, old.memory_type)
-        WITH new, old
+          new.valid_at = $now,
+          new.supersession_operation_digest = $operation_digest
+          ${embedding ? ', new.embedding = $embedding' : ''}
+        // MERGE plus this forced write lock serializes every claimant of the
+        // globally unique successor id, including different predecessors.
+        SET new.__supersession_claim_lock = true
+        REMOVE new.__supersession_claim_lock
+        WITH new, old, oldProjectScope, successors
+        OPTIONAL MATCH (new)-[:SUPERSEDES]->(claimedPredecessor:Semantic)
+        WITH new, old, oldProjectScope, successors,
+             collect(DISTINCT claimedPredecessor) AS claimedPredecessors
+        // Validate after the global claim. A concurrent loser can have observed
+        // the id as absent before MERGE; it must not reuse the winner's node.
+        WHERE coalesce(new.tenant_id, $default_tenant) = $tenant_id
+          AND coalesce(toLower(new.scope), '') = oldProjectScope
+          AND new.supersession_operation_digest = $operation_digest
+          AND CASE WHEN ${semanticTimestampValidWhere('coalesce(new.valid_at, new.created_at)')}
+            THEN datetime(coalesce(new.valid_at, new.created_at)) <= datetime($now) ELSE false END
+          AND new.invalid_at IS NULL
+          AND coalesce(new.archived, false) = false
+          AND coalesce(new.status, 'active') = 'active'
+          AND (
+            (size(successors) = 0 AND size(claimedPredecessors) = 0)
+            OR
+            (size(successors) > 0
+              AND size(claimedPredecessors) = 1
+              AND claimedPredecessors[0].id = old.id
+              AND old.invalid_at = new.valid_at)
+          )
+        // Exact replay is observation only: never reopen an ABOUT relationship
+        // revoked after the original transition or overwrite later metadata.
+        FOREACH (_ IN CASE WHEN size(successors) = 0 THEN [1] ELSE [] END |
+          MERGE (new)-[transition:SUPERSEDES]->(old)
+          SET transition.valid_at = new.valid_at,
+              old.invalid_at = new.valid_at,
+              old.status = 'superseded'
+        )
+        WITH new, old, size(successors) = 0 AS applied
         // Copy active entity associations to the successor before invalidating
-        // the predecessor's relationships. Both operations share this write.
+        // the predecessor's relationships. Node and edge intervals all use the
+        // successor's persisted valid_at, including exact replays.
         OPTIONAL MATCH (old)-[oldR:ABOUT]->(e:Entity)
-        WHERE oldR.invalid_at IS NULL
+        WHERE applied
+          AND coalesce(e.tenant_id, $default_tenant) = $tenant_id
+          AND ${endpointProjectScopeWhere('e', 'new.scope')}
+          AND CASE WHEN ${semanticTimestampValidWhere('coalesce(oldR.valid_at, old.valid_at, old.created_at)')}
+            THEN datetime(coalesce(oldR.valid_at, old.valid_at, old.created_at)) <= datetime(new.valid_at) ELSE false END
+          AND (oldR.invalid_at IS NULL OR CASE WHEN ${semanticTimestampValidWhere('oldR.invalid_at')}
+            THEN datetime(oldR.invalid_at) > datetime(new.valid_at) ELSE false END)
         WITH new, old,
              collect(oldR) AS oldRelationships,
              [entity IN collect(DISTINCT e) WHERE entity IS NOT NULL] AS entities
         FOREACH (entity IN entities |
           MERGE (new)-[newR:ABOUT]->(entity)
-          SET newR.valid_at = coalesce(newR.valid_at, $now),
+          SET newR.valid_at = new.valid_at,
               newR.invalid_at = null
         )
         FOREACH (oldR IN oldRelationships |
-          SET oldR.invalid_at = $now
+          SET oldR.invalid_at = new.valid_at
         )
-        RETURN new.id AS id
+        RETURN new.id AS id, new.tenant_id AS tenantId, new.scope AS projectScope
       `;
       const params: Record<string, unknown> = {
         id: newNode.id,
@@ -306,18 +503,31 @@ export class SemanticStore {
         updated_at: newNode.updated_at,
         decay_class: newNode.decay_class,
         memory_type: newNode.memory_type ?? null,
-        tags: canonicalTags(newNode.tags),
-        scope: semanticScope(newNode),
-        tenant_id: newNode.tenant_id ?? DEFAULT_TENANT,
+        non_project_tags: input.nonProjectTags,
+        scope: input.requestedScope,
+        tenant_id: input.tenantId,
         default_tenant: DEFAULT_TENANT,
         oldId,
         now,
+        operation_digest: operationDigest,
       };
       if (embedding) params.embedding = embedding;
-      const result = await session.executeWrite((tx) => tx.run(query, params));
-      if (result.records.length === 0) {
-        throw new Error(`Semantic ${oldId} not found in tenant ${params.tenant_id as string}`);
-      }
+      const result = await session.executeWrite(async (tx) => {
+        const writeResult = await tx.run(query, params);
+        if (writeResult.records.length === 0) {
+          // Throw before executeWrite can commit. This rolls back a losing
+          // post-MERGE id claim as well as every later mutation in the query.
+          throw new Error(
+            `Semantic ${oldId} was missing, outside tenant/project, inactive, or already has a conflicting successor`,
+          );
+        }
+        const record = writeResult.records[0]!;
+        await bumpKnowledgeEpoch(tx, {
+          tenantId: record.get('tenantId') as string,
+          projectScope: projectKnowledgeScope(record.get('projectScope') as string),
+        });
+        return writeResult;
+      });
       return result.records[0].get('id') as string;
     } finally {
       await session.close();
@@ -343,6 +553,8 @@ export class SemanticStore {
     }
     const session = this.driver.session();
     try {
+      // Promotion derives the authoritative scope from source episodes inside the
+      // transaction below. Keep this pre-transaction compatibility embed uncached.
       const embedding = await this.resolveEmbedding(newNode);
       const query = `
         MATCH (ep:Episodic)
@@ -411,7 +623,8 @@ export class SemanticStore {
           s.scope,
           head([ep IN episodes WHERE ep.scope IS NOT NULL | ep.scope])
         )
-        RETURN s.id AS id
+        RETURN s.id AS id, coalesce(s.tenant_id, $default_tenant) AS tenantId,
+               s.scope AS projectScope
       `;
       const params: Record<string, unknown> = {
         id: newNode.id,
@@ -433,14 +646,25 @@ export class SemanticStore {
       if (dedupeKey) params.dedupeKey = dedupeKey;
       let result;
       try {
-        result = await session.executeWrite((tx) => tx.run(query, params));
+        result = await session.executeWrite(async (tx) => {
+          const promoted = await tx.run(query, params);
+          const record = promoted.records[0];
+          if (record) {
+            await bumpKnowledgeEpoch(tx, {
+              tenantId: record.get('tenantId') as string,
+              projectScope: projectKnowledgeScope(record.get('projectScope') as string | null),
+            });
+          }
+          return promoted;
+        });
       } catch (err: unknown) {
         if (!dedupeKey || (err as { code?: unknown }).code !== CONSTRAINT_VIOLATION_CODE) throw err;
         // Another Semantic in this tenant already owns the dedupe_key: link the
         // source episodes onto it instead of creating a twin. Same provenance
         // guard as the create path — an episode already promoted elsewhere
         // still fails closed.
-        result = await session.executeWrite((tx) => tx.run(
+        result = await session.executeWrite(async (tx) => {
+          const promoted = await tx.run(
           `
         MATCH (existing:Semantic {dedupe_key: $dedupeKey})
         WHERE coalesce(existing.tenant_id, $default_tenant) = $tenant_id
@@ -455,7 +679,9 @@ export class SemanticStore {
           })
         UNWIND episodes AS ep
         MERGE (existing)-[:PROMOTED_FROM]->(ep)
-        RETURN DISTINCT existing.id AS id
+        RETURN DISTINCT existing.id AS id,
+               coalesce(existing.tenant_id, $default_tenant) AS tenantId,
+               existing.scope AS projectScope
           `,
           {
             dedupeKey,
@@ -463,10 +689,20 @@ export class SemanticStore {
             tenant_id: params.tenant_id,
             default_tenant: DEFAULT_TENANT,
           },
-        ));
+          );
+          const record = promoted.records[0];
+          if (record) {
+            await bumpKnowledgeEpoch(tx, {
+              tenantId: record.get('tenantId') as string,
+              projectScope: projectKnowledgeScope(record.get('projectScope') as string | null),
+            });
+          }
+          return promoted;
+        });
         if (result.records.length === 0) {
           throw new Error(
             `Promotion collided on dedupe_key but no matching Semantic in tenant ${params.tenant_id as string} accepted the sources`,
+            { cause: err },
           );
         }
       }
@@ -484,12 +720,23 @@ export class SemanticStore {
   async linkToEntity(semanticId: string, entityId: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
         `MATCH (s:Semantic {id: $semanticId}), (e:Entity {id: $entityId})
          MERGE (s)-[r:ABOUT]->(e)
-         ${temporalSetClause('r')}`,
-        { semanticId, entityId, now: new Date().toISOString() }
-      );
+         ${temporalSetClause('r')}
+         RETURN coalesce(s.tenant_id, $defaultTenant) AS tenantId,
+                s.scope AS projectScope`,
+        { semanticId, entityId, now: new Date().toISOString(), defaultTenant: DEFAULT_TENANT },
+        );
+        const record = changed.records[0];
+        if (record) {
+          await bumpKnowledgeEpoch(tx, {
+            tenantId: record.get('tenantId') as string,
+            projectScope: projectKnowledgeScope(record.get('projectScope') as string | null),
+          });
+        }
+      });
     } finally {
       await session.close();
     }

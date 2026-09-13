@@ -169,8 +169,11 @@ describe('LifecycleStore archive planner', () => {
     const session = {
       run: vi.fn(async (cypher: string, params: Record<string, unknown> = {}) => {
         queries.push({ cypher, params });
+        if (cypher.includes('UNWIND $ids AS id')) return { records: [] };
         return { records: [record({ c: 0 })] };
       }),
+      executeWrite: vi.fn(async (work: (tx: { run: (cypher: string, params?: Record<string, unknown>) => Promise<unknown> }) => Promise<unknown>) =>
+        work({ run: (cypher, params) => session.run(cypher, params) })),
       close: vi.fn(),
     };
     return { driver: { session: vi.fn(() => session) } as any, queries };
@@ -241,7 +244,7 @@ describe('LifecycleStore archive planner', () => {
     expect((stamp.cypher.match(/SET /g) ?? []).length).toBe(1);
     const archive = queries[0];
     expect(archive.cypher).toContain('SET n.archived = $archived');
-    expect(archive.cypher).toContain('IN TRANSACTIONS OF 1000 ROWS');
+    expect(archive.cypher).toContain('UNWIND $ids AS id');
   });
 });
 

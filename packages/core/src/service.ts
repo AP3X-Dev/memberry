@@ -2,6 +2,7 @@
 import { createHash } from 'crypto';
 import { isProxy } from 'node:util/types';
 import { nanoid } from 'nanoid';
+import { embeddingDescriptorFingerprint } from './embedding-descriptor.js';
 import type {
   LoadScope,
   MemoryContext,
@@ -18,10 +19,8 @@ import type {
   AuditSink,
 } from './types.js';
 import { rankMemories, rankNormalizeRelevance, boostByIdentifierOverlap, rankFacts, budgetTokens, estimateTokens } from './ranking.js';
-import type { RedisBlockLayer, Neo4jBlockLayer } from './blocks.js';
-import { MemoryBlockService } from './blocks.js';
 import { extractFacts, isTransientError } from './extract.js';
-import { normalizePredicate } from './predicates.js';
+import { isExclusiveFactPredicate, normalizePredicate } from './predicates.js';
 import { CARD_BLOCK_NAMES, DEFAULT_TENANT } from './types.js';
 import { redactSecrets } from './redact.js';
 import { readEnv } from './config/settings.js';
@@ -51,6 +50,7 @@ import {
  * neutral. An uncorroborated capture should assert nothing in either direction.
  */
 const EPISODE_NEUTRAL_CONFIDENCE = 0.5;
+const MAX_IN_FLIGHT_LOADS = 32;
 
 
 // ─── Dependency interfaces (injected, not concrete imports) ──────────────────
@@ -58,7 +58,10 @@ const EPISODE_NEUTRAL_CONFIDENCE = 0.5;
 export interface RedisLayer {
   cache: {
     get(scopeHash: string, tenantId?: string): Promise<MemoryContext | null>;
+    get(read: ContextCacheRead): Promise<MemoryContext | null>;
     set(scopeHash: string, ctx: MemoryContext, sources: string[], ttl?: number, scopeTags?: string[], tenantId?: string): Promise<void>;
+    set(write: ContextCacheWrite): Promise<boolean>;
+    advanceKnowledgeEpoch?(metadata: ContextCacheMetadata): Promise<boolean>;
     invalidateByScope(scope: string, tenantId?: string): Promise<number>;
     invalidateByNodeId(nodeId: string, tenantId?: string): Promise<number>;
   };
@@ -87,6 +90,32 @@ export interface RedisLayer {
   extraction?: {
     enqueue(job: { episodeId: string; content: string; tenantId?: string }): Promise<string>;
   };
+}
+
+export interface ContextCacheMetadata {
+  readonly schemaVersion: 2;
+  readonly tenantId: string;
+  readonly projectScope: string | null;
+  readonly readFrame: Readonly<{ mode: 'current' }> | Readonly<{ mode: 'historical'; asOf: string }>;
+  readonly policyVersion: string;
+  readonly embeddingGeneration: string;
+  readonly knowledgeEpoch: string;
+}
+export interface ContextCacheRead { readonly scopeHash: string; readonly metadata: ContextCacheMetadata }
+export interface ContextCacheWrite extends ContextCacheRead {
+  readonly context: MemoryContext;
+  readonly sourceNodeIds: readonly string[];
+  readonly ttl?: number;
+  readonly scopeTags?: readonly string[];
+}
+export interface KnowledgeEpochPort {
+  read(scope: {
+    tenantId: string;
+    projectScope: string | null;
+    /** Cooperative client deadline; graph adapters must also set a server transaction timeout. */
+    signal?: AbortSignal;
+    timeoutMs: number;
+  }): Promise<{ knowledgeEpoch: string }>;
 }
 
 export interface FactLayer {
@@ -118,6 +147,27 @@ export interface FactLayer {
   ): Promise<void>;
 }
 
+export type SemanticEligibilityStatus = 'eligible' | 'ineligible' | 'unknown';
+
+/** One authoritative lifecycle decision for a requested Semantic id. */
+export interface SemanticEligibilityEvaluation {
+  id: string;
+  status: SemanticEligibilityStatus;
+}
+
+/**
+ * Source-owned lifecycle port used by the final serving boundary. Implementations
+ * must evaluate the complete batch in the requested tenant/project/time frame.
+ */
+export interface SemanticEligibilityPort {
+  evaluateActiveEligibility(read: {
+    semanticIds: readonly string[];
+    tenantId?: string;
+    projectScope?: string;
+    asOf?: string;
+  }): Promise<readonly SemanticEligibilityEvaluation[]>;
+}
+
 export interface Neo4jLayer {
   episodic: {
     create(node: EpisodicNode): Promise<string>;
@@ -136,15 +186,15 @@ export interface Neo4jLayer {
   };
   query: {
     byScope(scope: { entities?: string[]; entityIds?: string[]; tags?: string[]; limit: number; asOf?: string; tenantId?: string; projectScope?: string }): Promise<SemanticNode[]>;
-    byVector(embedding: number[], limit: number, tenantId?: string, projectScope?: string): Promise<Array<SemanticNode & { score: number }>>;
+    byVector(embedding: number[], limit: number, tenantId?: string, projectScope?: string, queryDescriptorFingerprint?: string): Promise<Array<SemanticNode & { score: number }>>;
     /** @internal Vector search hard-filtered through ABOUT exact Entity IDs. */
     /** Vector similarity over raw EPISODIC memories (optional). Surfaces captured
      *  episodes directly so freshly stored knowledge is recallable before (or
      *  without) consolidation into a Semantic. */
-    byVectorEpisodic?(embedding: number[], limit: number, tenantId?: string, projectScope?: string): Promise<Array<EpisodicNode & { score: number }>>;
+    byVectorEpisodic?(embedding: number[], limit: number, tenantId?: string, projectScope?: string, queryDescriptorFingerprint?: string): Promise<Array<EpisodicNode & { score: number }>>;
     /** Graph-structural retrieval: expand from seed entities via ABOUT and SAME_EPISODE edges (optional) */
-    expandByGraph?(entityNames: string[], depth?: number, maxPerHop?: number, asOf?: string, tenantId?: string): Promise<SemanticNode[]>;
-  };
+    expandByGraph?(entityNames: string[], depth?: number, maxPerHop?: number, asOf?: string, tenantId?: string, projectScope?: string): Promise<SemanticNode[]>;
+  } & Partial<SemanticEligibilityPort>;
   fact?: FactLayer;
   /** Semantic-node existence check, used to validate signal targets at the
    *  store boundary. Optional — without it, signal targets are unvalidated
@@ -188,6 +238,17 @@ export function inProjectScope(
   return projectTags.includes(projectScope);
 }
 
+/** Fact.scope may be the legacy category `project`; project tags then carry
+ * the concrete identity. Every supplied concrete identity must agree. */
+function factInReadScope(fact: FactNode, tenantId: string, projectScope?: string): boolean {
+  if ((fact.tenant_id ?? DEFAULT_TENANT) !== tenantId) return false;
+  if (!projectScope) return true;
+  const identities = [fact.scope, ...fact.tags]
+    .filter(value => /^project:/i.test(value))
+    .map(value => value.toLowerCase());
+  return identities.length > 0 && identities.every(value => value === projectScope);
+}
+
 // ─── AMPService ──────────────────────────────────────────────────────────────
 
 export interface BlocksLayer {
@@ -202,6 +263,9 @@ export class AMPService {
   // one in-flight assembly instead of each re-running the full fan-out + re-embed.
   // Keyed by scopeHash (which already encodes the normalized tenant + scope).
   private readonly inFlightLoads = new Map<string, Promise<MemoryContext>>();
+  /** Authority calls remain charged until their underlying promise settles,
+   * even after the caller deadline has returned a safe empty result. */
+  private readonly outstandingEpochReads = new Set<Promise<unknown>>();
 
   constructor(
     private redis: RedisLayer,
@@ -211,6 +275,7 @@ export class AMPService {
     blocks?: BlocksLayer,
     private audit?: AuditSink,
     private admissionShadow?: AdmissionShadowHook,
+    private knowledgeEpoch?: KnowledgeEpochPort,
   ) {
     this.blocks = blocks;
   }
@@ -306,23 +371,101 @@ export class AMPService {
   async load(scope: LoadScope): Promise<MemoryContext> {
     scope = normalizeStableIdScope(scope);
     const scopeHash = hashScope(scope);
+    if (abortSignalAborted(scope.signal)) return degradedMemoryContext('request-aborted');
+    if (!this.inFlightLoads.has(scopeHash) && this.inFlightLoads.size >= MAX_IN_FLIGHT_LOADS) {
+      return degradedMemoryContext('load-capacity-exceeded');
+    }
 
-    // 1. Cache hit (tenant-scoped: A's cache must never satisfy B's load)
-    const cached = await this.redis.cache.get(scopeHash, scope.tenantId);
-    if (cached) return cached;
+    if (this.config.cache.renderedContextMode !== 'versioned') {
+      const inFlight = this.inFlightLoads.get(scopeHash);
+      if (inFlight) return inFlight;
+      const flight = this._assembleLoad(scope, scopeHash, { cacheResult: false })
+        .finally(() => this.inFlightLoads.delete(scopeHash));
+      this.inFlightLoads.set(scopeHash, flight);
+      return flight;
+    }
 
-    // 2. Cache miss → single-flight (OPT-47): coalesce concurrent identical
-    // misses onto ONE in-flight assembly so a thundering herd doesn't re-run the
-    // full fan-out + re-embed N times. scopeHash already encodes tenant + scope,
-    // so identical hashes are genuinely identical loads. The entry is cleared in
-    // finally, so a failed assembly never poisons the key — it rejects only the
-    // current waiters (who would each have failed identically anyway).
+    const advanceKnowledgeEpoch = this.redis.cache.advanceKnowledgeEpoch?.bind(this.redis.cache);
+    if (!this.knowledgeEpoch || !advanceKnowledgeEpoch) {
+      return degradedMemoryContext('knowledge-epoch-unavailable');
+    }
+
     const inFlight = this.inFlightLoads.get(scopeHash);
     if (inFlight) return inFlight;
-    const flight = this._assembleLoad(scope, scopeHash)
+    const flight = this.loadVersioned(scope, scopeHash, advanceKnowledgeEpoch)
       .finally(() => this.inFlightLoads.delete(scopeHash));
     this.inFlightLoads.set(scopeHash, flight);
     return flight;
+  }
+
+  private async loadVersioned(
+    scope: LoadScope,
+    scopeHash: string,
+    advanceKnowledgeEpoch: (metadata: ContextCacheMetadata) => Promise<boolean>,
+  ): Promise<MemoryContext> {
+    const tenantId = (scope.tenantId && scope.tenantId.trim()) || DEFAULT_TENANT;
+    const projectScope = requestedProjectScope(scope.tags) ?? null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      // Entity and code topology can be shared by projects. The tenant aggregate
+      // advances with every project mutation and safely invalidates all affected
+      // rendered entries; their keys and eligibility remain project-specific.
+      const first = await this.readKnowledgeEpoch(tenantId, null, scope.signal);
+      if (!first) return degradedMemoryContext('knowledge-epoch-unavailable');
+      const metadata = contextCacheMetadata(scope, tenantId, projectScope, first,
+        this.config.cache.embeddingGeneration ?? 'embedding-unversioned-v1');
+      let cached: MemoryContext | null;
+      try { cached = await this.redis.cache.get({ scopeHash, metadata }); }
+      catch { cached = null; }
+      if (cached) {
+        const finalEpoch = await this.readKnowledgeEpoch(tenantId, null, scope.signal);
+        if (!finalEpoch) return degradedMemoryContext('knowledge-epoch-unavailable');
+        if (finalEpoch === first) return cached;
+        continue;
+      }
+
+      const assembled = await this._assembleLoad(scope, scopeHash, { cacheResult: false });
+      if (abortSignalAborted(scope.signal)) return degradedMemoryContext('request-aborted');
+      const finalEpoch = await this.readKnowledgeEpoch(tenantId, null, scope.signal);
+      if (!finalEpoch) return degradedMemoryContext('knowledge-epoch-unavailable');
+      if (finalEpoch !== first) continue;
+      const finalMetadata = contextCacheMetadata(scope, tenantId, projectScope, finalEpoch,
+        this.config.cache.embeddingGeneration ?? 'embedding-unversioned-v1');
+      try {
+        if (abortSignalAborted(scope.signal)) return degradedMemoryContext('request-aborted');
+        if (!await advanceKnowledgeEpoch(finalMetadata)) {
+          return degradedMemoryContext('knowledge-epoch-changed');
+        }
+        const stored = await this.redis.cache.set({
+          scopeHash, metadata: finalMetadata, context: assembled,
+          sourceNodeIds: assembled.sources, ttl: this.config.cache.contextTTL,
+          scopeTags: cacheScopeKeysForLoad(scope),
+        });
+        if (!stored) return degradedMemoryContext('knowledge-epoch-changed');
+      } catch { return degradedMemoryContext('knowledge-epoch-unavailable'); }
+      // E2 above is the recorded linearization point. A graph commit after E2
+      // is outside this request's guarantee; its newer epoch makes this entry's
+      // metadata miss on the next authoritative E1 read.
+      return assembled;
+    }
+    return degradedMemoryContext('knowledge-epoch-changed');
+  }
+
+  private async readKnowledgeEpoch(
+    tenantId: string,
+    projectScope: string | null,
+    requestSignal?: AbortSignal,
+  ): Promise<string | null> {
+    if (!this.knowledgeEpoch) return null;
+    if (this.outstandingEpochReads.size >= MAX_IN_FLIGHT_LOADS) return null;
+    const timeoutSignal = AbortSignal.timeout(1_000);
+    const signal = requestSignal ? AbortSignal.any([requestSignal, timeoutSignal]) : timeoutSignal;
+    const operation = this.knowledgeEpoch.read({ tenantId, projectScope, signal, timeoutMs: 1_000 });
+    this.outstandingEpochReads.add(operation);
+    void operation.finally(() => this.outstandingEpochReads.delete(operation)).catch(() => undefined);
+    try {
+      const result = await boundedPromise(operation, 1_000);
+      return /^(0|[1-9][0-9]{0,19})$/.test(result.knowledgeEpoch) ? result.knowledgeEpoch : null;
+    } catch { return null; }
   }
 
   /**
@@ -346,7 +489,7 @@ export class AMPService {
   private async _assembleLoad(
     scope: LoadScope,
     scopeHash: string,
-    instrumentation?: { observation: InternalRetrievalObservation; cacheResult: boolean },
+    instrumentation?: { observation?: InternalRetrievalObservation; cacheResult: boolean },
   ): Promise<MemoryContext> {
     const maxTokens = scope.max_tokens ?? 4096;
     const observation = instrumentation?.observation;
@@ -376,6 +519,10 @@ export class AMPService {
     // (byScope/byVector) and again here as a guard over all merged candidates,
     // so no channel — present or future — can bleed another project in.
     const projectScope = requestedProjectScope(scope.tags);
+    // Legacy reads select the first project tag; multiple distinct assertions
+    // are not sufficiently precise to address an embedding cache entry.
+    const cacheScopeKnown = new Set((scope.tags ?? [])
+      .filter((tag) => /^project:/i.test(tag)).map((tag) => tag.toLowerCase())).size === 1;
     // Pass asOf from temporal options so semantic queries filter inactive ABOUT edges consistently
     const asOf = scope.temporal?.as_of;
     const resolvedEntityIds = scope.resolvedEntityIds as string[] | undefined;
@@ -413,10 +560,10 @@ export class AMPService {
       : rawScopedSemanticsPromise;
     const semanticVectorPromise = observation
       ? this._vectorSearch(
-          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, settle, resolvedEntityIds, asOf,
+          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, settle, resolvedEntityIds, asOf, cacheScopeKnown, scope.queryDescriptorFingerprint,
         )
       : this._vectorSearch(
-          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, undefined, resolvedEntityIds, asOf,
+          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, undefined, resolvedEntityIds, asOf, cacheScopeKnown, scope.queryDescriptorFingerprint,
         );
     // Preserve the ordinary nested aggregate (and therefore its failure timing)
     // only on the ordinary path. The observed path awaits both promises below.
@@ -430,10 +577,10 @@ export class AMPService {
     // channel, captured knowledge stays write-only until (if ever) consolidated.
     const episodicVectorPromise = observation
       ? this._vectorSearchEpisodic(
-          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, settle, resolvedEntityIds, asOf,
+          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, settle, resolvedEntityIds, asOf, cacheScopeKnown, scope.queryDescriptorFingerprint,
         )
       : this._vectorSearchEpisodic(
-          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, undefined, resolvedEntityIds, asOf,
+          scope.task, 20, scope.tenantId, projectScope, scope.queryVector, undefined, resolvedEntityIds, asOf, cacheScopeKnown, scope.queryDescriptorFingerprint,
         );
 
     // OPT-41: one batched fact fetch (UNWIND ids) instead of one getActive per
@@ -494,6 +641,8 @@ export class AMPService {
       ] as const);
     }
 
+    if (abortSignalAborted(scope.signal)) return degradedMemoryContext('request-aborted');
+
     // Slice 5 / MEMBERRY_MEMORY_RANK_V2: rank-normalise each vector channel's cosine
     // scores before they become relevanceScore (see ranking.ts for the measurement).
     byVector = rankNormalizeRelevance(byVector);
@@ -525,12 +674,18 @@ export class AMPService {
       const seenFactIds = new Set<string>();
       for (const entityFacts of factResults) {
         for (const fact of entityFacts) {
+          if (!factInReadScope(fact, scope.tenantId?.trim() || DEFAULT_TENANT, projectScope)) continue;
           if (!seenFactIds.has(fact.id)) {
             seenFactIds.add(fact.id);
             facts.push(fact);
           }
         }
       }
+      if (isCurrentFactFrame(scope.temporal)) {
+        facts = facts.filter((fact) => (fact.status === 'active' || fact.status === 'disputed')
+          && fact.invalid_at === null);
+      }
+      facts.sort(compareFactIdentity);
       facts = rankFacts(facts);
     }
 
@@ -548,6 +703,7 @@ export class AMPService {
     for (const node of byVector) vectorScoreById.set(node.id, node.score);
 
     const seen = new Set<string>();
+    const semanticCandidateIds = new Set<string>();
     const merged: Array<SemanticNode & { relevanceScore?: number }> = [];
     const sourceTypeById = observation ? new Map<string, 'semantic' | 'episodic'>() : undefined;
     const candidateChannels = observation
@@ -571,6 +727,7 @@ export class AMPService {
         seen.add(node.id);
         const vs = vectorScoreById.get(node.id);
         merged.push(vs !== undefined ? { ...node, relevanceScore: vs } : node);
+        semanticCandidateIds.add(node.id);
         sourceTypeById?.set(node.id, 'semantic');
       }
     }
@@ -578,6 +735,7 @@ export class AMPService {
       if (!seen.has(node.id) && inProjectScope(node, projectScope)) {
         seen.add(node.id);
         merged.push({ ...node, relevanceScore: node.score });
+        semanticCandidateIds.add(node.id);
         sourceTypeById?.set(node.id, 'semantic');
       }
     }
@@ -630,7 +788,9 @@ export class AMPService {
       const seedEntities = extractEntityNames(merged);
       if (seedEntities.length > 0) {
         try {
-          const expanded = await this.neo4j.query.expandByGraph(seedEntities, 1, 5, asOf, scope.tenantId);
+          const expanded = await this.neo4j.query.expandByGraph(
+            seedEntities, 1, 5, asOf, scope.tenantId, projectScope ?? undefined,
+          );
           settle?.({ channel: 'memory.graph', outcome: 'success' });
           for (const node of expanded) {
             if (candidateChannels) {
@@ -642,6 +802,7 @@ export class AMPService {
             if (!seen.has(node.id) && inProjectScope(node, projectScope)) {
               seen.add(node.id);
               merged.push({ ...node, relevanceScore: 0.3 });
+              semanticCandidateIds.add(node.id);
               sourceTypeById?.set(node.id, 'semantic');
             }
           }
@@ -652,10 +813,21 @@ export class AMPService {
       }
     }
 
-    // 4. Rank (MEMBERRY_MEMORY_LEXICAL_V1: identifier overlap with the task first; see ranking.ts)
-    const ranked = rankMemories(boostByIdentifierOverlap(scope.task, merged));
+    // 4. Final source-validity boundary. Every Semantic candidate, including
+    // graph expansion, is batch-checked against authoritative lifecycle state
+    // before it can influence ranking, budgeting, or rendering. An absent,
+    // failed, malformed, omitted, or explicitly unknown decision is not active
+    // evidence. Non-semantic lanes remain available as bounded degraded context.
+    const eligibleMerged = await this.filterEligibleSemantics(
+      merged,
+      semanticCandidateIds,
+      { tenantId: scope.tenantId, projectScope, asOf },
+    );
 
-    // 5. Budget tokens — per-tier allocation
+    // 5. Rank (MEMBERRY_MEMORY_LEXICAL_V1: identifier overlap with the task first; see ranking.ts)
+    const ranked = rankMemories(boostByIdentifierOverlap(scope.task, eligibleMerged));
+
+    // 6. Budget tokens — per-tier allocation
     const factBudget = Math.floor(maxTokens * FACT_BUDGET_RATIO);
     const blockTokensUsed = estimateTokens(renderBlocksMarkdown(coreBlocks, workingBlocks));
     const semanticBudget = maxTokens - factBudget - blockTokensUsed;
@@ -666,24 +838,25 @@ export class AMPService {
     }));
     const budgeted = budgetTokens(withTokens, semanticBudget);
 
-    // Budget facts: render each fact as a line, keep highest-ranked that fit
-    const factsWithTokens = facts.map((f) => ({
-      ...f,
-      tokens: estimateTokens(`${f.subject} ${f.predicate} ${f.object}`),
-    }));
-    const budgetedFacts = budgetTokens(factsWithTokens, factBudget);
+    // A current unresolved conflict is one atomic budget unit. Either every
+    // distinct side and its warning marker fit, or none of the group renders.
+    const budgetedFacts = budgetFactsAtomically(facts, factBudget, scope.temporal);
 
-    // 6. Render markdown with blocks and budgeted facts prepended
+    // 7. Render markdown with blocks and budgeted facts prepended
     const blocksMarkdown = renderBlocksMarkdown(coreBlocks, workingBlocks);
     const factsMarkdown = renderFactsMarkdown(budgetedFacts, scope.temporal);
     const archiveMarkdown = renderMarkdown(scope.task, budgeted);
 
-    const sections = [blocksMarkdown, factsMarkdown, archiveMarkdown]
+    const temporalMarkdown = scope.temporal?.as_of
+      ? `> Historical memory frame: ${scope.temporal.as_of} (valid_at inclusive, invalid_at exclusive).`
+      : '';
+    const sections = [temporalMarkdown, blocksMarkdown, factsMarkdown, archiveMarkdown]
       .filter((s) => s.length > 0);
     const markdown = sections.join('\n');
 
     const blockTokens = estimateTokens(blocksMarkdown);
     const factTokens = estimateTokens(factsMarkdown);
+    const temporalTokens = estimateTokens(temporalMarkdown);
     const archiveTokens = budgeted.reduce((sum, m) => sum + m.tokens, 0);
     const sources = [
       ...budgetedFacts.map((f) => f.id),
@@ -727,24 +900,10 @@ export class AMPService {
 
     const ctx: MemoryContext = {
       markdown,
-      tokens: blockTokens + factTokens + archiveTokens,
+      tokens: temporalTokens + blockTokens + factTokens + archiveTokens,
       sources,
       assembled_at: new Date().toISOString(),
     };
-
-    // 7. Cache (include scope tags for block-mutation invalidation).
-    // Tenant-scoped so the ctx key + dep sets live under this tenant's segment;
-    // another tenant's invalidate on the same shared tag can't evict it.
-    if (instrumentation?.cacheResult !== false) {
-      await this.redis.cache.set(
-        scopeHash,
-        ctx,
-        sources,
-        this.config.cache.contextTTL,
-        cacheScopeKeysForLoad(scope),
-        scope.tenantId,
-      );
-    }
 
     return ctx;
   }
@@ -903,6 +1062,8 @@ export class AMPService {
     // services-factory). A manual cache layer here was redundant — same sha256
     // key, same 86400s TTL — and bypassed the provider's graceful cache-error
     // fallback, so a transient Redis hiccup could break store().
+    // Project resolution follows embedding on this legacy admission/dedup path.
+    // Bypass caching until the authoritative scope is resolved below.
     const embedding: number[] = await this.embedding.embed(input.content);
 
     // 3. Resolve project tag (Bucket B enforcement) — required, canonicalize,
@@ -940,7 +1101,7 @@ export class AMPService {
         embeddings: await this.embedding.embedBatch([
           ...structuredIndex.facts,
           ...structuredIndex.aliases.flatMap(({ values }) => values),
-        ]),
+        ], { tenantId, projectScope: scope! }),
         source: 'agent',
         tenantId,
         projectScope: scope!,
@@ -1179,7 +1340,9 @@ export class AMPService {
           const existing = await factLayer.findBySubjectPredicate(
             fi.subject, normalizedPredicate, factTenant, { includeTentative: true },
           );
-          const conflicting = existing.find(f => f.object !== fi.object && f.status === 'active');
+          const conflicting = isExclusiveFactPredicate(normalizedPredicate)
+            ? existing.find(f => f.object !== fi.object && f.status === 'active')
+            : undefined;
           const reinforcing = existing.find(f => f.object === fi.object);
 
           if (reinforcing) {
@@ -1358,6 +1521,8 @@ export class AMPService {
     observe?: (entry: InternalRetrievalChannelObservation) => void,
     resolvedEntityIds?: string[],
     asOf?: string,
+    cacheScopeKnown = true,
+    queryDescriptorFingerprint?: string,
   ): Promise<Array<SemanticNode & { score: number }>> {
     // RET-002C: a global vector-index top-K is selected before any Entity.id
     // predicate, so foreign nearer neighbours can starve every authorized hit.
@@ -1379,8 +1544,10 @@ export class AMPService {
       // vector in via scope.queryVector so this channel doesn't re-embed the same
       // string. Deterministic embedding ⇒ identical to embedding it here. Direct
       // load() callers (no precomputed vector) fall back to embedding the text.
-      const emb = queryVector ?? await this._getEmbedding(text);
-      const value = await this.neo4j.query.byVector(emb, limit, tenantId, projectScope);
+      const descriptorFingerprint = this.embedding.descriptor ? embeddingDescriptorFingerprint(this.embedding.descriptor) : undefined;
+      const reusable = queryVector && (!descriptorFingerprint || queryDescriptorFingerprint === descriptorFingerprint);
+      const emb = reusable ? queryVector : await this._getEmbedding(text, tenantId, cacheScopeKnown ? projectScope : undefined);
+      const value = await this.neo4j.query.byVector(emb, limit, tenantId, projectScope, ...(descriptorFingerprint ? [descriptorFingerprint] : []));
       observe?.({ channel: 'memory.semantic-vector', outcome: 'success' });
       return value;
     } catch (err: unknown) {
@@ -1389,6 +1556,52 @@ export class AMPService {
       observe?.({ channel: 'memory.semantic-vector', outcome: 'safe-failure', code: 'query-failed' });
       return [];
     }
+  }
+
+  private async filterEligibleSemantics<T extends { id: string }>(
+    candidates: T[],
+    semanticIds: ReadonlySet<string>,
+    read: { tenantId?: string; projectScope?: string; asOf?: string },
+  ): Promise<T[]> {
+    if (semanticIds.size === 0) return candidates;
+
+    const query = this.neo4j.query;
+    if (!query.evaluateActiveEligibility) {
+      return candidates.filter((candidate) => !semanticIds.has(candidate.id));
+    }
+
+    let evaluations: readonly SemanticEligibilityEvaluation[];
+    try {
+      evaluations = await query.evaluateActiveEligibility({ semanticIds: [...semanticIds], ...read });
+    } catch {
+      return candidates.filter((candidate) => !semanticIds.has(candidate.id));
+    }
+    if (!Array.isArray(evaluations)) {
+      return candidates.filter((candidate) => !semanticIds.has(candidate.id));
+    }
+
+    const eligible = new Set<string>();
+    const decided = new Set<string>();
+    for (const evaluation of evaluations) {
+      if (
+        evaluation === null
+        || typeof evaluation !== 'object'
+        || typeof evaluation.id !== 'string'
+        || !semanticIds.has(evaluation.id)
+        || decided.has(evaluation.id)
+        || (evaluation.status !== 'eligible'
+          && evaluation.status !== 'ineligible'
+          && evaluation.status !== 'unknown')
+      ) {
+        return candidates.filter((candidate) => !semanticIds.has(candidate.id));
+      }
+      decided.add(evaluation.id);
+      if (evaluation.status === 'eligible') eligible.add(evaluation.id);
+    }
+
+    return candidates.filter(
+      (candidate) => !semanticIds.has(candidate.id) || eligible.has(candidate.id),
+    );
   }
 
   /**
@@ -1407,6 +1620,8 @@ export class AMPService {
     observe?: (entry: InternalRetrievalChannelObservation) => void,
     resolvedEntityIds?: string[],
     asOf?: string,
+    cacheScopeKnown = true,
+    queryDescriptorFingerprint?: string,
   ): Promise<Array<EpisodicNode & { score: number }>> {
     // See _vectorSearch: global top-K cannot safely implement the stable-ID lane.
     if (resolvedEntityIds !== undefined) {
@@ -1418,8 +1633,10 @@ export class AMPService {
       return [];
     }
     try {
-      const emb = queryVector ?? await this._getEmbedding(text);
-      const value = await this.neo4j.query.byVectorEpisodic!(emb, limit, tenantId, projectScope);
+      const descriptorFingerprint = this.embedding.descriptor ? embeddingDescriptorFingerprint(this.embedding.descriptor) : undefined;
+      const reusable = queryVector && (!descriptorFingerprint || queryDescriptorFingerprint === descriptorFingerprint);
+      const emb = reusable ? queryVector : await this._getEmbedding(text, tenantId, cacheScopeKnown ? projectScope : undefined);
+      const value = await this.neo4j.query.byVectorEpisodic!(emb, limit, tenantId, projectScope, ...(descriptorFingerprint ? [descriptorFingerprint] : []));
       observe?.({ channel: 'memory.episodic-vector', outcome: 'success' });
       return value;
     } catch (err: unknown) {
@@ -1430,11 +1647,13 @@ export class AMPService {
     }
   }
 
-  private async _getEmbedding(text: string): Promise<number[]> {
+  private async _getEmbedding(text: string, tenantId?: string, projectScope?: string): Promise<number[]> {
     // Caching is handled by the injected provider (CachingEmbeddingProvider over
     // the shared Redis EmbeddingCache). The previous manual cache layer here
     // duplicated that with the same key + TTL and swallowed its error fallback.
-    return this.embedding.embed(text);
+    return tenantId && projectScope
+      ? this.embedding.embed(text, { tenantId, projectScope })
+      : this.embedding.embed(text);
   }
 
   private async invalidateContextScopes(
@@ -1467,7 +1686,8 @@ const MAX_ENTITY_ID_LENGTH = 200;
 const SAFE_ENTITY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const LOAD_SCOPE_KEYS = new Set([
   'task', 'entities', 'resolvedEntityIds', 'tags', 'max_tokens', 'temporal',
-  'session_id', 'tenantId', 'queryVector',
+  'session_id', 'tenantId', 'queryVector', 'queryDescriptorFingerprint',
+  'signal',
 ]);
 
 function normalizeStableIdScope(scope: LoadScope): LoadScope {
@@ -1512,7 +1732,23 @@ function normalizeStableIdScope(scope: LoadScope): LoadScope {
     if (!seen.has(id)) { seen.add(id); ids.push(id); }
   }
   snapshot.resolvedEntityIds = Object.freeze(ids) as string[];
+  if (snapshot.signal !== undefined && !isGenuineAbortSignal(snapshot.signal)) {
+    throw new Error('load_scope_invalid');
+  }
   return snapshot as unknown as LoadScope;
+}
+
+const abortSignalGetter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get;
+
+function isGenuineAbortSignal(value: unknown): value is AbortSignal {
+  if (value === null || typeof value !== 'object' || isProxy(value) || !abortSignalGetter) return false;
+  try { abortSignalGetter.call(value); return true; } catch { return false; }
+}
+
+function abortSignalAborted(value: AbortSignal | undefined): boolean {
+  if (value === undefined) return false;
+  if (!isGenuineAbortSignal(value)) throw new Error('load_scope_invalid');
+  return Boolean(abortSignalGetter!.call(value));
 }
 
 function hashScope(scope: LoadScope): string {
@@ -1546,6 +1782,48 @@ function cacheScopeKeysForLoad(scope: LoadScope): string[] {
     keys.add(entityId);
   }
   return Array.from(keys);
+}
+
+function contextCacheMetadata(
+  scope: LoadScope,
+  tenantId: string,
+  projectScope: string | null,
+  knowledgeEpoch: string,
+  embeddingGeneration: string,
+): ContextCacheMetadata {
+  return {
+    schemaVersion: 2,
+    tenantId,
+    projectScope,
+    readFrame: scope.temporal?.as_of
+      ? { mode: 'historical', asOf: scope.temporal.as_of }
+      : { mode: 'current' },
+    policyVersion: 'semantic-active-v1',
+    embeddingGeneration,
+    knowledgeEpoch,
+  };
+}
+
+function degradedMemoryContext(code: NonNullable<MemoryContext['degraded']>['code']): MemoryContext {
+  return {
+    markdown: '',
+    tokens: 0,
+    sources: [],
+    assembled_at: new Date().toISOString(),
+    degraded: { code },
+  };
+}
+
+async function boundedPromise<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 // OPT-76: core/working blocks are injected into EVERY agent session via this
@@ -1605,38 +1883,149 @@ function renderBlocksMarkdown(coreBlocks: MemoryBlock[], workingBlocks: MemoryBl
   return lines.join('\n');
 }
 
-function renderFactsMarkdown(facts: FactNode[], temporal?: TemporalOptions): string {
-  if (facts.length === 0) return '';
+interface FactRenderGroup {
+  readonly facts: FactNode[];
+  readonly conflict: boolean;
+  readonly firstRank: number;
+  readonly key: string;
+}
 
-  const lines: string[] = [];
-  const isEvolution = temporal?.time_mode === 'evolution';
+function isCurrentFactFrame(temporal?: TemporalOptions): boolean {
+  return temporal?.as_of === undefined
+    && (temporal?.time_mode === undefined || temporal.time_mode === 'current');
+}
 
-  if (isEvolution) {
-    lines.push('## Fact Timeline');
-    lines.push('');
-    for (const f of facts) {
-      const status = f.status !== 'active' ? ` [${f.status}]` : '';
-      const inference = f.inference_type === 'abductive' ? ' [hypothesis]'
-        : f.inference_type === 'inductive' ? ' [inferred]'
-        : '';
-      const validRange = f.invalid_at
-        ? `${f.valid_at} → ${f.invalid_at}`
-        : `${f.valid_at} → present`;
-      lines.push(`- **${f.subject}** ${f.predicate} **${f.object}**${status}${inference} (${validRange})`);
-    }
-  } else {
-    lines.push('## Current Facts');
-    lines.push('');
-    for (const f of facts) {
-      const since = f.valid_at.split('T')[0];
-      const status = f.status === 'disputed' ? ' [disputed]'
-        : f.inference_type === 'abductive' ? ' [hypothesis]'
-        : f.inference_type === 'inductive' ? ' [inferred]'
-        : '';
-      lines.push(`- **${f.subject}** ${f.predicate} **${f.object}**${status} (confidence: ${f.confidence.toFixed(2)}, since: ${since})`);
+function normalizeFactPart(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+}
+
+function compareFactIdentity(a: FactNode, b: FactNode): number {
+  return normalizeFactPart(a.subject).localeCompare(normalizeFactPart(b.subject), 'en-US')
+    || normalizeFactPart(a.predicate).localeCompare(normalizeFactPart(b.predicate), 'en-US')
+    || normalizeFactPart(a.object).localeCompare(normalizeFactPart(b.object), 'en-US')
+    || a.id.localeCompare(b.id, 'en-US');
+}
+
+function factConflictKey(fact: FactNode): string {
+  return JSON.stringify([
+    fact.tenant_id ?? DEFAULT_TENANT,
+    fact.scope,
+    [...fact.tags].filter(tag => tag.toLowerCase().startsWith('project:')).sort(),
+    fact.entity_id ? ['entity', fact.entity_id] : ['subject', normalizeFactPart(fact.subject)],
+    normalizePredicate(fact.predicate),
+  ]);
+}
+
+function groupFactsForRendering(
+  facts: FactNode[],
+  temporal?: TemporalOptions,
+): FactRenderGroup[] {
+  if (!isCurrentFactFrame(temporal)) {
+    return facts.map((fact, index) => ({
+      facts: [fact], conflict: false, firstRank: index, key: `single:${index}`,
+    }));
+  }
+
+  const candidates = new Map<string, Array<{ fact: FactNode; rank: number }>>();
+  facts.forEach((fact, rank) => {
+    const key = factConflictKey(fact);
+    const entries = candidates.get(key) ?? [];
+    entries.push({ fact, rank });
+    candidates.set(key, entries);
+  });
+
+  const conflictKeys = new Set<string>();
+  for (const [key, entries] of candidates) {
+    if ((isExclusiveFactPredicate(entries[0]!.fact.predicate)
+      || entries.some(({ fact }) => fact.status === 'disputed'))
+      && new Set(entries.map(({ fact }) => normalizeFactPart(fact.object))).size > 1) {
+      conflictKeys.add(key);
     }
   }
 
+  const groups: FactRenderGroup[] = [];
+  const emittedConflicts = new Set<string>();
+  facts.forEach((fact, rank) => {
+    const key = factConflictKey(fact);
+    if (!conflictKeys.has(key)) {
+      groups.push({ facts: [fact], conflict: false, firstRank: rank, key: `single:${rank}` });
+      return;
+    }
+    if (emittedConflicts.has(key)) return;
+    emittedConflicts.add(key);
+
+    // One ranked representative per distinct object prevents duplicate evidence
+    // for one side from crowding out the other side of the unresolved conflict.
+    const byObject = new Map<string, { fact: FactNode; rank: number }>();
+    for (const entry of candidates.get(key) ?? []) {
+      const objectKey = normalizeFactPart(entry.fact.object);
+      if (!byObject.has(objectKey)) byObject.set(objectKey, entry);
+    }
+    const entries = [...byObject.values()].sort((a, b) => compareFactIdentity(a.fact, b.fact));
+    groups.push({
+      facts: entries.map(({ fact: member }) => member),
+      conflict: true,
+      firstRank: Math.min(...entries.map(({ rank: memberRank }) => memberRank)),
+      key,
+    });
+  });
+  return groups.sort((a, b) => a.firstRank - b.firstRank || a.key.localeCompare(b.key, 'en-US'));
+}
+
+function renderFactLine(fact: FactNode, temporal?: TemporalOptions): string {
+  if (temporal?.time_mode === 'evolution') {
+    const status = fact.status !== 'active' ? ` [${fact.status}]` : '';
+    const inference = fact.inference_type === 'abductive' ? ' [hypothesis]'
+      : fact.inference_type === 'inductive' ? ' [inferred]'
+      : '';
+    const validRange = fact.invalid_at
+      ? `${fact.valid_at} → ${fact.invalid_at}`
+      : `${fact.valid_at} → present`;
+    return `- **${fact.subject}** ${fact.predicate} **${fact.object}**${status}${inference} (${validRange})`;
+  }
+
+  const since = fact.valid_at.split('T')[0];
+  const status = fact.status === 'disputed' ? ' [disputed]'
+    : fact.inference_type === 'abductive' ? ' [hypothesis]'
+    : fact.inference_type === 'inductive' ? ' [inferred]'
+    : '';
+  return `- **${fact.subject}** ${fact.predicate} **${fact.object}**${status} (confidence: ${fact.confidence.toFixed(2)}, since: ${since})`;
+}
+
+function renderFactGroupLines(group: FactRenderGroup, temporal?: TemporalOptions): string[] {
+  const lines: string[] = [];
+  if (group.conflict) {
+    const first = group.facts[0];
+    lines.push(`> **Unresolved conflict:** current facts disagree about **${first.subject}** ${first.predicate}.`);
+  }
+  for (const fact of group.facts) lines.push(renderFactLine(fact, temporal));
+  return lines;
+}
+
+function budgetFactsAtomically(
+  facts: FactNode[],
+  maxTokens: number,
+  temporal?: TemporalOptions,
+): FactNode[] {
+  if (maxTokens <= 0) return [];
+  const selected: FactNode[] = [];
+  let used = 0;
+  for (const group of groupFactsForRendering(facts, temporal)) {
+    const tokens = estimateTokens(renderFactGroupLines(group, temporal).join('\n'));
+    if (tokens > maxTokens || used + tokens > maxTokens) continue;
+    selected.push(...group.facts);
+    used += tokens;
+  }
+  return selected;
+}
+
+function renderFactsMarkdown(facts: FactNode[], temporal?: TemporalOptions): string {
+  if (facts.length === 0) return '';
+
+  const lines = [temporal?.time_mode === 'evolution' ? '## Fact Timeline' : '## Current Facts', ''];
+  for (const group of groupFactsForRendering(facts, temporal)) {
+    lines.push(...renderFactGroupLines(group, temporal));
+  }
   lines.push('');
   return lines.join('\n');
 }

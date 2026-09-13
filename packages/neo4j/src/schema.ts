@@ -3,6 +3,11 @@ import { EMBEDDING_DIM } from "@memberry/core";
 import { type Driver } from 'neo4j-driver';
 
 const CONSTRAINTS: string[] = [
+  'CREATE CONSTRAINT embedding_generation_id IF NOT EXISTS FOR (n:EmbeddingGeneration) REQUIRE n.id IS UNIQUE',
+  'CREATE CONSTRAINT embedding_generation_pointer_scope IF NOT EXISTS FOR (n:EmbeddingGenerationPointer) REQUIRE n.scopeKey IS UNIQUE',
+  'CREATE CONSTRAINT embedding_projection_id IF NOT EXISTS FOR (n:EmbeddingProjection) REQUIRE n.id IS UNIQUE',
+  'CREATE CONSTRAINT embedding_backfill_failure_id IF NOT EXISTS FOR (n:EmbeddingBackfillFailure) REQUIRE n.id IS UNIQUE',
+  'CREATE CONSTRAINT embedding_generation_replay_id IF NOT EXISTS FOR (n:EmbeddingGenerationReplay) REQUIRE n.id IS UNIQUE',
   'CREATE CONSTRAINT episodic_id IF NOT EXISTS FOR (e:Episodic) REQUIRE e.id IS UNIQUE',
   'CREATE CONSTRAINT episodic_index_key_id IF NOT EXISTS FOR (k:EpisodicIndexKey) REQUIRE k.id IS UNIQUE',
   'CREATE CONSTRAINT episodic_index_outcome_id IF NOT EXISTS FOR (o:EpisodicIndexOutcome) REQUIRE o.id IS UNIQUE',
@@ -30,6 +35,7 @@ const CONSTRAINTS: string[] = [
   'CREATE CONSTRAINT evidence_authority_case_id IF NOT EXISTS FOR (n:EvidenceAuthorityCase) REQUIRE n.id IS UNIQUE',
   'CREATE CONSTRAINT evidence_authority_event_id IF NOT EXISTS FOR (n:EvidenceAuthorityEvent) REQUIRE n.id IS UNIQUE',
   'CREATE CONSTRAINT evidence_authority_outbox_id IF NOT EXISTS FOR (n:EvidenceAuthorityOutbox) REQUIRE n.id IS UNIQUE',
+  'CREATE CONSTRAINT knowledge_epoch_scope IF NOT EXISTS FOR (n:KnowledgeEpoch) REQUIRE (n.tenant_id, n.project_scope) IS UNIQUE',
 ];
 
 const INDEXES: string[] = [

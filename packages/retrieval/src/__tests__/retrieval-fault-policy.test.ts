@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // RET-009 — guards for the bounded-latency and degradation policy.
 //
 // A4/A5/A6 are characterization guards: they are green on unmodified master by
@@ -90,7 +91,7 @@ describe('RET-009 A4 declared hop bounds match the constants actually in force',
           beginTransaction: () => ({ run: () => hung(), commit: vi.fn(), rollback: () => hung() }),
           close: () => hung(),
         })),
-      } as unknown as RuntimeCandidateDriver);
+      } as unknown as RuntimeCandidateDriver, undefined, { legacyUnqualified: true });
       const queryHung = await settleElapsedMs(queryHangs.execute(
         await authorityReceipt(),
         { includeArchitecture: true, includeMemory: false },
@@ -107,7 +108,7 @@ describe('RET-009 A4 declared hop bounds match the constants actually in force',
           }),
           close: () => hung(),
         })),
-      } as unknown as RuntimeCandidateDriver);
+      } as unknown as RuntimeCandidateDriver, undefined, { legacyUnqualified: true });
       const commitHung = await settleElapsedMs(commitHangs.execute(
         await authorityReceipt(),
         { includeArchitecture: true, includeMemory: false },
@@ -138,7 +139,7 @@ describe('RET-009 A4 declared hop bounds match the constants actually in force',
           beginTransaction: () => ({ run: () => hung(), commit: vi.fn(), rollback: () => hung() }),
           close: () => hung(),
         })),
-      } as unknown as RuntimeCandidateDriver);
+      } as unknown as RuntimeCandidateDriver, undefined, { legacyUnqualified: true });
       const factHung = await settleElapsedMs(service.execute(
         await authorityReceipt(),
         { includeArchitecture: false, includeMemory: true },
@@ -167,7 +168,7 @@ describe('RET-009 A5 degradation reaches a rendered explanation', () => {
         }),
         close: async () => undefined,
       })),
-    } as unknown as RuntimeCandidateDriver);
+    } as unknown as RuntimeCandidateDriver, undefined, { legacyUnqualified: true });
     const execution = await service.execute(
       await authorityReceipt(),
       { includeArchitecture: true, includeMemory: false },

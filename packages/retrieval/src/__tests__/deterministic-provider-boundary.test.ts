@@ -3,6 +3,8 @@ import { Record as Neo4jRecord } from 'neo4j-driver';
 import { describe, expect, it, vi } from 'vitest';
 import { UnifiedAssembler, type TracedUnifiedContext } from '../assembler.js';
 import { DeterministicAssembler } from '../deterministic.js';
+import { allowAllSemanticEligibility } from './semantic-eligibility.fixture.js';
+import type { SemanticEligibilityAuthority } from '../semantic-eligibility-adapter.js';
 
 const MAX_STRING_BYTES = 65_536;
 const MAX_AGGREGATE_STRING_BYTES = 2 * 1024 * 1024;
@@ -66,7 +68,10 @@ function validResult(path: Path | 'other'): { records: Neo4jRecord[] } {
   }
 }
 
-function makeAssembler(overrides: Partial<Record<Path, unknown>> = {}) {
+function makeAssembler(
+  overrides: Partial<Record<Path, unknown>> = {},
+  semanticEligibility: SemanticEligibilityAuthority = allowAllSemanticEligibility,
+) {
   const run = vi.fn(async (cypher: string) => {
     const path = pathFor(cypher);
     return path !== 'other' && Object.hasOwn(overrides, path)
@@ -85,7 +90,10 @@ function makeAssembler(overrides: Partial<Record<Path, unknown>> = {}) {
   };
   const embedding = { available: false, embed: vi.fn(), embedBatch: vi.fn() };
   return {
-    assembler: new UnifiedAssembler({ session } as never, redis, null, null, embedding),
+    assembler: new UnifiedAssembler(
+      { session } as never, redis, null, null, embedding, null, null,
+      semanticEligibility,
+    ),
     run, closes, session,
   };
 }
@@ -132,6 +140,60 @@ function hostileValue(hooks: ReturnType<typeof vi.fn>): object {
 }
 
 describe('UnifiedAssembler non-stable deterministic provider-result boundaries', () => {
+  it.each(['ordinary', 'traced'] as const)(
+    '%s fails closed on unavailable lifecycle authority while preserving architecture lanes',
+    async (lane) => {
+      const deps = makeAssembler({}, {
+        evaluateActiveEligibility: vi.fn().mockRejectedValue(new Error('authority unavailable')),
+      });
+      const result = await invoke(lane, deps.assembler);
+      expect(contextIds(result)).not.toContain('sem-1');
+      expect(contextIds(result)).toEqual(expect.arrayContaining(['target-Target', 'dep-Target-Dependency']));
+    },
+  );
+
+  it.each(['ordinary', 'traced'] as const)(
+    '%s filters lifecycle eligibility before the per-target 10-row cap and marks historical semantics',
+    async (lane) => {
+      const asOf = '2026-01-15T00:00:00.000Z';
+      const corpus = [
+        ...Array.from({ length: 10 }, (_, index) => record(
+          ['targetName', 'id', 'content', 'confidence', 'tags'],
+          ['Target', `obsolete-${index}`, 'obsolete', 1, ['project:memberry']],
+        )),
+        record(
+          ['targetName', 'id', 'content', 'confidence', 'tags'],
+          ['Target', 'current-after-cap', 'current', 0.1, ['project:memberry']],
+        ),
+      ];
+      const deps = makeAssembler();
+      deps.run.mockImplementation(async (cypher: string) => {
+        const path = pathFor(cypher);
+        if (path !== 'semantics') return validResult(path);
+        const predicateBeforeLimit = cypher.indexOf('NOT EXISTS {') >= 0
+          && cypher.indexOf('NOT EXISTS {') < cypher.lastIndexOf('LIMIT 10');
+        return { records: predicateBeforeLimit ? [corpus.at(-1)!] : corpus.slice(0, 10) };
+      });
+
+      const options = {
+        strategy: 'deterministic' as const,
+        max_tokens: 1_000_000,
+        as_of: asOf,
+      };
+      const result = lane === 'traced'
+        ? await deps.assembler.assembleTraced('find Target', options)
+        : { context: await deps.assembler.assemble('find Target', options) };
+      const semantic = result.context.sections.flatMap((section) => section.items)
+        .find((item) => item.id === 'current-after-cap');
+      expect(semantic?.metadata).toMatchObject({ temporalStatus: 'historical', asOf });
+      expect(contextIds(result)).not.toContain('obsolete-0');
+      const semanticCall = deps.run.mock.calls.find(([query]) => pathFor(String(query)) === 'semantics')!;
+      expect(String(semanticCall[0]).indexOf('NOT EXISTS {'))
+        .toBeLessThan(String(semanticCall[0]).lastIndexOf('LIMIT 10'));
+      expect(semanticCall[1]).toMatchObject({ semanticAsOf: asOf });
+    },
+  );
+
   it.each(['ordinary', 'traced'] as const)('%s preserves valid discovery and every deterministic batch', async (lane) => {
     const deps = makeAssembler();
     const result = await invoke(lane, deps.assembler);

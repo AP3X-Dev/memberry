@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/consolidation-gds.test.ts
 //
 // Tests for GDS-enhanced consolidation: merge detection via cosine similarity,
@@ -126,7 +127,7 @@ describe('GDS-enhanced merge detection', () => {
 
     const session = makeMockSession({ records });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const pairs = await gds.findSimilarSemantics('TestEntity', 0.7);
 
@@ -144,7 +145,7 @@ describe('GDS-enhanced merge detection', () => {
 
     const session = makeMockSession({ records });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const pairs = await gds.findSimilarSemantics('TestEntity');
 
@@ -184,7 +185,7 @@ describe('GDS-enhanced merge detection', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('merge-scope');
 
     // Both targets should generate supersede proposals (corrections present)
@@ -207,7 +208,7 @@ describe('GDS-enhanced merge detection', () => {
     // No records returned when all nodes lack embeddings
     const session = makeMockSession({ records: [] });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const pairs = await gds.findSimilarSemantics('EmptyEntity', 0.5);
 
@@ -222,7 +223,7 @@ describe('GDS-enhanced merge detection', () => {
 
     const session = makeMockSession({ records });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const pairs = await gds.findSimilarSemantics('TestEntity', 0.0);
 
@@ -242,7 +243,7 @@ describe('Correction signal clustering', () => {
 
     const session = makeMockSession({ records });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const clusters = await gds.findCorrectionClusters('TestEntity');
 
@@ -262,7 +263,7 @@ describe('Correction signal clustering', () => {
 
     const session = makeMockSession({ records });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const clusters = await gds.findCorrectionClusters('TestEntity');
 
@@ -297,7 +298,7 @@ describe('Correction signal clustering', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('correction-cluster-scope');
 
     expect(result.proposals).toHaveLength(1);
@@ -339,7 +340,7 @@ describe('Correction signal clustering', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('mixed-signals-scope');
 
     // Both exceed threshold (3): A=10, B=4
@@ -357,7 +358,7 @@ describe('Correction signal clustering', () => {
   it('returns empty for entity with no corrections', async () => {
     const session = makeMockSession({ records: [] });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const clusters = await gds.findCorrectionClusters('CleanEntity');
 
@@ -382,7 +383,7 @@ describe('GDS graceful degradation', () => {
     );
     const session = makeMockSession(gdsError);
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     await expect(gds.findSimilarSemantics('TestEntity', 0.5)).rejects.toThrow('similarity_unavailable');
     await expect(gds.findSimilarSemantics('TestEntity', 0.5)).rejects.not.toThrow('gds.similarity.cosine');
@@ -393,7 +394,7 @@ describe('GDS graceful degradation', () => {
     const timeoutError = new Error('Connection timed out');
     const session = makeMockSession(timeoutError);
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     await expect(gds.findSimilarSemantics('TestEntity')).rejects.toThrow('similarity_unavailable');
     await expect(gds.findSimilarSemantics('TestEntity')).rejects.not.toThrow('Connection timed out');
@@ -404,7 +405,7 @@ describe('GDS graceful degradation', () => {
     const serviceError = new Error('ServiceUnavailable: Neo4j instance is not available');
     const session = makeMockSession(serviceError);
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     await expect(gds.findSimilarSemantics('TestEntity', 0.8)).rejects.toThrow('similarity_unavailable');
     await expect(gds.findSimilarSemantics('TestEntity', 0.8)).rejects.not.toThrow('ServiceUnavailable');
@@ -414,7 +415,7 @@ describe('GDS graceful degradation', () => {
     const dbError = new Error('Neo4j connection refused');
     const session = makeMockSession(dbError);
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     await expect(gds.pageRank('TestEntity')).rejects.toThrow('Neo4j connection refused');
     expect(session.close).toHaveBeenCalled();
@@ -424,7 +425,7 @@ describe('GDS graceful degradation', () => {
     const dbError = new Error('Authentication failure');
     const session = makeMockSession(dbError);
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     await expect(gds.communityDetection()).rejects.toThrow('Authentication failure');
     expect(session.close).toHaveBeenCalled();
@@ -434,7 +435,7 @@ describe('GDS graceful degradation', () => {
     const dbError = new Error('Database shutting down');
     const session = makeMockSession(dbError);
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     await expect(gds.findCorrectionClusters('TestEntity')).rejects.toThrow(
       'Database shutting down',
@@ -466,7 +467,7 @@ describe('GDS graceful degradation', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('no-gds-scope');
 
     // Engine should still produce proposals from signal data alone
@@ -479,7 +480,7 @@ describe('GDS graceful degradation', () => {
   it('session is always closed even when query throws', async () => {
     const session = makeMockSession(new Error('unexpected crash'));
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     // findSimilarSemantics throws similarity_unavailable -> session still closed via finally
     await expect(gds.findSimilarSemantics('TestEntity')).rejects.toThrow('similarity_unavailable');
@@ -504,7 +505,7 @@ describe('PageRank-based importance scoring', () => {
 
     const session = makeMockSession({ records });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const ranked = await gds.pageRank('TestEntity');
 
@@ -556,7 +557,7 @@ describe('PageRank-based importance scoring', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('pagerank-scope');
 
     expect(result.proposals).toHaveLength(0);
@@ -592,7 +593,7 @@ describe('PageRank-based importance scoring', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('boost-scope');
 
     expect(result.proposals).toHaveLength(0);
@@ -602,7 +603,7 @@ describe('PageRank-based importance scoring', () => {
   it('pageRank returns empty for entity with no semantic nodes', async () => {
     const session = makeMockSession({ records: [] });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const ranked = await gds.pageRank('EmptyEntity');
 
@@ -619,7 +620,7 @@ describe('PageRank-based importance scoring', () => {
 
     const session = makeMockSession({ records });
     const driver = makeMockDriver(session);
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
 
     const communities = await gds.communityDetection();
 
@@ -658,7 +659,7 @@ describe('PageRank-based importance scoring', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('decay-check-scope');
 
     expect(result.proposals).toHaveLength(0);

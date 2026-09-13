@@ -20,6 +20,8 @@ function createMockDriver(): { driver: Driver; calls: () => RunCall[] } {
   const session = {
     run: vi.fn(async (query: string, params: Record<string, unknown> = {}) => {
       calls.push({ query, params });
+      if (query.includes('AS foreignCount')) return mockResult([mockRecord({ foreignCount: 0 })]);
+      if (query.includes('AS knowledgeEpoch')) return mockResult([mockRecord({ knowledgeEpoch: '1' })]);
       if (query.includes('MERGE (e:Entity')) return mockResult([mockRecord({ id: 'ent-x', created: true })]);
       if (query.includes('RETURN e.id AS id')) return mockResult([mockRecord({ id: 'ent-x' })]);
       if (query.includes('MERGE (s:Semantic')) return mockResult([mockRecord({ id: 'sem-x', isNew: true })]);
@@ -27,6 +29,7 @@ function createMockDriver(): { driver: Driver; calls: () => RunCall[] } {
     }),
     close: vi.fn(async () => {}),
   } as unknown as Session;
+  (session as unknown as { executeWrite: (work: (tx: { run: Session['run'] }) => Promise<unknown>) => Promise<unknown> }).executeWrite = async (work) => work({ run: session.run.bind(session) });
   const driver = { session: vi.fn(() => session) } as unknown as Driver;
   return { driver, calls: () => calls };
 }

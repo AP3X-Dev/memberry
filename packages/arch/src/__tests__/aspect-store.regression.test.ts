@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // packages/arch/src/__tests__/aspect-store.regression.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { AspectStore } from '../aspect-store.js';
@@ -23,7 +24,7 @@ describe('AspectStore regression', () => {
       close: vi.fn().mockResolvedValue(undefined),
     };
     const mockDriver = {
-      session: vi.fn().mockReturnValue(mockSession),
+      session: vi.fn().mockReturnValue(withKnowledgeTransactions(mockSession)),
     };
 
     const store = new AspectStore(mockDriver as never);

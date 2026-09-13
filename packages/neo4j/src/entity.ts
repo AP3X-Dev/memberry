@@ -3,6 +3,8 @@
 // Kept narrow — broader entity manipulation lives in EntityResolver / arch package.
 
 import { type Driver } from 'neo4j-driver';
+import { DEFAULT_TENANT } from '@memberry/core';
+import { bumpKnowledgeEpoch, projectKnowledgeScope } from './knowledge-epoch.js';
 
 export class EntityStore {
   constructor(private driver: Driver) {}
@@ -33,7 +35,8 @@ export class EntityStore {
   async upsertProject(name: string, description?: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await session.executeWrite(async (tx) => {
+        await tx.run(
         `MERGE (e:Entity {name: $name})
          ON CREATE SET
            e.id = $id,
@@ -49,7 +52,12 @@ export class EntityStore {
           id: `auto-proj-${name.toLowerCase().replace(/[^\w-]/g, '-')}-${Date.now()}`,
           description: description ?? null,
         },
-      );
+        );
+        await bumpKnowledgeEpoch(tx, {
+          tenantId: DEFAULT_TENANT,
+          projectScope: projectKnowledgeScope(`project:${name.toLowerCase()}`),
+        });
+      });
     } finally {
       await session.close();
     }

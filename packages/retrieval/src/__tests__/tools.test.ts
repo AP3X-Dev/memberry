@@ -1,6 +1,7 @@
 // packages/retrieval/src/__tests__/tools.test.ts
 // Tenant-isolation wiring for the retrieval tool layer: the container carries a
 // tenantId and registerRetrievalTools threads it into every assemble()/ask().
+import { embeddingDescriptorFingerprint } from '@memberry/core';
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
@@ -23,9 +24,10 @@ import type { RetrievalTraceV1 } from '../trace.js';
 import type { UnifiedContext } from '../types.js';
 import type { QueryPlanV1 } from '../query-plan.js';
 import type { ScopedEntityTrustedAuthorityV1 } from '../scoped-entity-resolver.js';
-import { readRuntimeQueryPlannerAuthorityV1, RuntimeQueryPlannerError, RUNTIME_QUERY_PLANNER_DENIAL_REASONS_V1 } from '../runtime-query-planner.js';
+import { resolveRuntimeQueryPlannerAuthorityV1, readRuntimeQueryPlannerAuthorityV1, RuntimeQueryPlannerError, RUNTIME_QUERY_PLANNER_DENIAL_REASONS_V1 } from '../runtime-query-planner.js';
 import { UnifiedAssembler } from '../assembler.js';
 import { createServedRerankerProviderV1 } from '../served-reranker.js';
+import { allowAllSemanticEligibility } from './semantic-eligibility.fixture.js';
 
 const approvedTrace = JSON.parse(readFileSync(
   new URL('./fixtures/retrieval-trace-deterministic-v2.json', import.meta.url),
@@ -783,19 +785,31 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     expect(rerankerShadowCoordinator!.trySchedule).not.toHaveBeenCalled();
   });
 
+  it('binds berry_ask embeddings to sealed candidate authority', async () => {
+    const { assembler, container } = candidateContainer({ served: true });
+    assembler.candidateQueryVector = vi.fn().mockResolvedValue([0.25, 0.75]);
+    const { server, handlers } = makeServerStub();
+    registerRetrievalTools(server as never, container);
+    await handlers.get('berry_ask')!({
+      question: 'scoped question', project_name: 'memberry', entity_scope: ['Resolver'],
+    });
+    expect(assembler.candidateQueryVector).toHaveBeenCalledExactlyOnceWith('scoped question', { tenantId: 'tenant-a', projectScope: 'project:memberry' });
+  });
+
   it('passes the assembler query vector only to memory-enabled anchored candidate execution', async () => {
     const { assembler, candidateRuntime, container } = candidateContainer({ served: true });
     const queryVector = [0.25, 0.75];
     assembler.candidateQueryVector = vi.fn().mockResolvedValue(queryVector);
+    assembler.candidateQueryDescriptorFingerprint = () => 'f'.repeat(64);
     const { server, handlers } = makeServerStub();
     registerRetrievalTools(server as never, container);
     await handlers.get('berry_context')!({
       task: 'vector query', strategy: 'ranked', project_name: 'memberry', entity_scope: ['Resolver'],
       include_arch: false, include_memory: true,
     });
-    expect(assembler.candidateQueryVector).toHaveBeenCalledWith('vector query');
+    expect(assembler.candidateQueryVector).toHaveBeenCalledWith('vector query', { tenantId: 'tenant-a', projectScope: 'project:memberry' });
     expect(candidateRuntime.execute).toHaveBeenCalledWith(expect.anything(), {
-      includeArchitecture: false, includeMemory: true, queryText: 'vector query', queryVector,
+      includeArchitecture: false, includeMemory: true, queryText: 'vector query', queryVector, queryDescriptorFingerprint: 'f'.repeat(64),
     });
   });
 
@@ -853,6 +867,7 @@ describe('RET-003B candidate-channel runtime wiring', () => {
       { available: false, embed: vi.fn(), embedBatch: vi.fn() },
       { available: true, chat, modelFor: vi.fn(() => 'test-model') },
       createServedRerankerProviderV1(),
+      allowAllSemanticEligibility,
     );
     const execution = {
       contractId: 'memberry.candidate-channel' as const,
@@ -1077,4 +1092,40 @@ describe('RET-003B candidate-channel runtime wiring', () => {
     expect(trace.requestShape.plannedChannels).toEqual(RETRIEVAL_TRACE_CHANNEL_ORDER);
     expect(trace.complete).toBe(true);
   });
+});
+
+
+it('binds default and dedicated candidate generation stores without default-store fallback', async () => {
+  const assembler = makeAssembler();
+  const feedbackTracker = makeFeedback();
+  const descriptor = {
+    schemaVersion: 1 as const, provider: 'fixture', model: 'qualified', revision: '1',
+    dimensions: 1536, normalization: 'none' as const, preprocessingVersion: '1',
+  };
+  const defaultCompatible = vi.fn().mockResolvedValue(null);
+  const dedicatedCompatible = vi.fn().mockResolvedValue(null);
+  const driver = { session: vi.fn(() => { throw new Error('disabled channels must not query'); }) } as never;
+  setRetrievalServiceInstances({
+    assembler, feedbackTracker, candidateDriver: driver,
+    candidateGeneration: { descriptor, store: { compatible: defaultCompatible } as never },
+    tenantCandidateDrivers: new Map([['tenant-a', driver], ['tenant-b', driver]]),
+    tenantCandidateGenerations: new Map([['tenant-a', { descriptor, store: { compatible: dedicatedCompatible } as never }]]),
+  });
+  try {
+    for (const tenantId of ['default', 'tenant-a', 'tenant-b']) {
+      const receipt = await resolveRuntimeQueryPlannerAuthorityV1({
+        authenticated: true, plannerEnabled: true, tenantId, projectName: 'project:memberry', entityScope: ['Resolver'],
+        resolverFactory: () => ({ resolve: async () => ({
+          resolution: { state: 'resolved', canonicalEntityIds: ['entity-stable'] }, diagnostics: [],
+        }) }),
+      });
+      await retrievalContainerForTenant(tenantId, true).candidateRuntime!.execute(receipt, {
+        includeArchitecture: false, includeMemory: false, queryVector: new Array(1536).fill(0.1), queryDescriptorFingerprint: embeddingDescriptorFingerprint(descriptor),
+      });
+    }
+    expect(defaultCompatible).toHaveBeenCalledExactlyOnceWith({ tenantId: 'default', projectScope: 'project:memberry' }, expect.any(String));
+    expect(dedicatedCompatible).toHaveBeenCalledExactlyOnceWith({ tenantId: 'tenant-a', projectScope: 'project:memberry' }, expect.any(String));
+  } finally {
+    setRetrievalServiceInstances({ assembler, feedbackTracker });
+  }
 });

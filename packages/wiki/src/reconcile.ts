@@ -17,6 +17,7 @@ import neo4j, { type Driver } from 'neo4j-driver';
 import { nanoid } from 'nanoid';
 import { SemanticStore, EpisodicStore } from '@memberry/neo4j';
 import type { SemanticNode } from '@memberry/core';
+import { wikiMutationSession } from './ingest.js';
 import { CLAIM_ANCHOR_RE } from './renderers.js';
 
 // Section headings that are NOT domain claim sections — text typed under these is
@@ -256,7 +257,7 @@ export class WikiEditReconciler {
     await this.semantic.supersede(old.id, newNode);
     // supersede() invalidates the old node's ABOUT edges but does not carry them
     // forward — re-link the new node so the corrected claim stays on the article.
-    await this.linkAbout(newNode.id, aboutEntities);
+    await this.linkAbout(newNode.id, aboutEntities, projectTag);
     await this.recordSignal('correction', old.id, `Human edited claim via wiki: "${truncate(newText, 120)}"`, sessionId, projectTag);
     return newNode.id;
   }
@@ -280,7 +281,7 @@ export class WikiEditReconciler {
       tags: mergeTags(fmTags.filter((t) => !t.startsWith('project:')), projectTag),
     };
     await this.semantic.create(newNode);
-    if (entityId) await this.linkAbout(newNode.id, [entityId]);
+    if (entityId) await this.linkAbout(newNode.id, [entityId], projectTag);
     await this.recordEpisode(`Human added claim via wiki: "${truncate(text, 120)}"`, sessionId, projectTag);
     return newNode.id;
   }
@@ -307,16 +308,21 @@ export class WikiEditReconciler {
     }
   }
 
-  private async linkAbout(semanticId: string, entityIds: string[]): Promise<void> {
+  private async linkAbout(semanticId: string, entityIds: string[], projectTag: string): Promise<void> {
     if (entityIds.length === 0) return;
-    const session = this.driver.session();
+    const session = wikiMutationSession(this.driver, projectTag);
     try {
       await session.run(
         `MATCH (s:Semantic {id: $semanticId})
+         WHERE coalesce(s.tenant_id, 'default') = 'default'
+           AND coalesce(s.scope, $projectTag) = $projectTag
+           AND $projectTag IN coalesce(s.tags, [])
          UNWIND $entityIds AS eid
          MATCH (e:Entity {id: eid})
+         WHERE coalesce(e.tenant_id, 'default') = 'default'
+           AND coalesce(e.project_scope, $projectTag) = $projectTag
          MERGE (s)-[:ABOUT]->(e)`,
-        { semanticId, entityIds },
+        { semanticId, entityIds, projectTag: projectTag.toLowerCase() },
       );
     } finally {
       await session.close();

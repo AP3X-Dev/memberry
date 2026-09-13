@@ -24,11 +24,12 @@ import type { QueryIntent } from './intent.js';
 import { assertBoundedQueryInput } from './query-input.js';
 import type {
   EmbeddingProvider,
+  EmbeddingRequest,
   LlmClient,
   ChatMessage,
   TemporalOptions,
 } from '@memberry/core';
-import { readEnv } from '@memberry/core';
+import { readEnv, embeddingDescriptorFingerprint } from '@memberry/core';
 import { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from '@memberry/neo4j';
 import { canonicalProjectTag } from '@memberry/code';
 import {
@@ -41,6 +42,11 @@ import {
 } from './runtime-trace.js';
 import type { RetrievalTraceV1 } from './trace.js';
 import type { CandidateChannelExecutionResultV1 } from './candidate-channel.js';
+import {
+  filterSemanticEvidence,
+  neo4jSemanticEligibilityAuthority,
+  type SemanticEligibilityAuthority,
+} from './semantic-eligibility-adapter.js';
 import {
   expandMultihopV1,
   MULTIHOP_PASS1_BUDGET_MS,
@@ -104,21 +110,21 @@ function snapshotRetrievalOptions<T extends object | undefined>(options: T): T {
 // ─── Dependency interfaces ───────────────────────────────────────────────────
 
 export interface AssemblerCodeLayer {
-  search(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; project_tag?: string; queryVector?: number[] }): Promise<
+  search(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; project_tag?: string; queryVector?: number[]; queryDescriptorFingerprint?: string }): Promise<
     Array<{ id: string; source_type: string; name: string; kind: string; file_path: string; start_line: number; signature: string; doc_comment: string; score: number; language?: string; content?: string }>
   >;
   /** @internal RET-001B1 structural observation; ordinary callers use search(). */
-  searchObserved?(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; project_tag?: string; queryVector?: number[] }): Promise<RuntimeObserved<
+  searchObserved?(query: string, options?: { limit?: number; include_semantics?: boolean; expandedTokens?: string[]; file_path?: string; project_tag?: string; queryVector?: number[]; queryDescriptorFingerprint?: string }): Promise<RuntimeObserved<
     Array<{ id: string; source_type: string; name: string; kind: string; file_path: string; start_line: number; signature: string; doc_comment: string; score: number; language?: string; content?: string }>
   >>;
 }
 
 export interface AssemblerMemoryLayer {
-  load(scope: { task: string; entities?: string[]; resolvedEntityIds?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; temporal?: TemporalOptions }): Promise<{
+  load(scope: { task: string; entities?: string[]; resolvedEntityIds?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; queryDescriptorFingerprint?: string; temporal?: TemporalOptions }): Promise<{
     markdown: string; tokens: number; sources: string[]; assembled_at: string;
   }>;
   /** @internal RET-001B1 fresh path; bypasses memory cache and single-flight. */
-  loadFreshObserved?(scope: { task: string; entities?: string[]; resolvedEntityIds?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; temporal?: TemporalOptions }): Promise<RuntimeObserved<{
+  loadFreshObserved?(scope: { task: string; entities?: string[]; resolvedEntityIds?: string[]; tags?: string[]; max_tokens?: number; tenantId?: string; queryVector?: number[]; queryDescriptorFingerprint?: string; temporal?: TemporalOptions }): Promise<RuntimeObserved<{
     markdown: string; tokens: number; sources: string[]; assembled_at: string;
   }>>;
 }
@@ -370,6 +376,7 @@ export class UnifiedAssembler {
   private multihop: MultihopExpansionOptionsV1 | undefined;
   private episodicRecallV1 = false;
   private episodicIdentifierReserveV1 = false;
+  private readonly semanticEligibility: SemanticEligibilityAuthority;
 
   constructor(
     private driver: Driver,
@@ -379,8 +386,10 @@ export class UnifiedAssembler {
     private embedding: EmbeddingProvider,
     private llm: LlmClient | null = null,
     private readonly servedReranker: ServedRerankerConstructionV1 | null = null,
+    semanticEligibility?: SemanticEligibilityAuthority,
   ) {
-    this.deterministic = new DeterministicAssembler(driver);
+    this.semanticEligibility = semanticEligibility ?? neo4jSemanticEligibilityAuthority(driver);
+    this.deterministic = new DeterministicAssembler(driver, this.semanticEligibility);
     this.feedback = new FeedbackTracker(redis);
     this.servedRerankerEnabled = servedReranker !== null;
   }
@@ -405,9 +414,14 @@ export class UnifiedAssembler {
   /** @internal Query vector for the receipt-bound candidate runtime. The runtime snapshots and
    * validates the vector before using it, and every database reader authorizes its candidate set
    * before evaluating similarity. */
-  async candidateQueryVector(task: string): Promise<number[] | undefined> {
+  candidateQueryDescriptorFingerprint(): string | undefined {
+    try { return this.embedding.descriptor && embeddingDescriptorFingerprint(this.embedding.descriptor); }
+    catch { return undefined; }
+  }
+
+  async candidateQueryVector(task: string, request?: EmbeddingRequest): Promise<number[] | undefined> {
     assertBoundedQueryInput(task);
-    return this.makeSharedQueryVector(task)();
+    return this.makeSharedQueryVector(task, undefined, request)();
   }
 
   /**
@@ -793,6 +807,25 @@ export class UnifiedAssembler {
         ]);
       }
     }
+    for (const [channel, candidates] of listsByChannel) {
+      const eligible = await filterSemanticEvidence(
+        candidates,
+        this.semanticEligibility,
+        {
+          tenantId: execution.request.tenantId,
+          projectScope: execution.request.projectScope,
+          ...(execution.request.temporalFrame.mode === 'as-of'
+            ? { asOf: execution.request.temporalFrame.asOf }
+            : {}),
+        },
+        (candidate) => candidate.source_type,
+        (candidate) => String(candidate.metadata.evidenceId ?? candidate.id),
+      );
+      listsByChannel.set(channel, eligible.map((candidate) =>
+        markHistoricalSemantic(candidate, execution.request.temporalFrame.mode === 'as-of'
+          ? execution.request.temporalFrame.asOf
+          : undefined)));
+    }
     preferSemanticVectorRanking(listsByChannel);
     const lists = execution.request.plannedChannels
       .map((channel) => listsByChannel.get(channel))
@@ -957,7 +990,8 @@ export class UnifiedAssembler {
     // coalesce). Lazy + memoized: the deterministic / GRAPH route never invokes it,
     // so it pays nothing. Unavailable provider → undefined, so every consumer keeps
     // its existing skip/short-circuit behaviour.
-    const getQueryVector = this.makeSharedQueryVector(task);
+    const embeddingRequest = retrievalEmbeddingRequest(opts);
+    const getQueryVector = this.makeSharedQueryVector(task, undefined, embeddingRequest);
 
     // Authenticated stable-ID requests have already crossed project-qualified
     // resolution. Keep auto mode on direct bounded consumers without embedding
@@ -970,7 +1004,7 @@ export class UnifiedAssembler {
     if (opts.strategy === 'auto') {
       let intentResult: { intent: QueryIntent; confidence: number; method: string };
       try {
-        intentResult = await classifyIntent(task, this.embedding, getQueryVector);
+        intentResult = await classifyIntent(task, this.embedding, getQueryVector, embeddingRequest, this.candidateQueryDescriptorFingerprint());
       } catch (err) {
         console.error('[memberry-retrieval] Intent classification failed:', err instanceof Error ? err.message : err);
         intentResult = { intent: 'HYBRID', confidence: 0.4, method: 'fallback' };
@@ -1054,11 +1088,12 @@ export class UnifiedAssembler {
     }
 
     const stageFailures: Array<{ stage: RetrievalTraceFailureStage; code: RetrievalTraceFailureCode }> = [];
-    const getQueryVector = this.makeSharedQueryVector(task, (code) => stageFailures.push({ stage: 'embedding', code }));
+    const embeddingRequest = retrievalEmbeddingRequest(opts);
+    const getQueryVector = this.makeSharedQueryVector(task, (code) => stageFailures.push({ stage: 'embedding', code }), embeddingRequest);
     let intent: QueryIntent = 'HYBRID';
     if (strategy === 'auto') {
       try {
-        intent = (await classifyIntent(task, this.embedding, getQueryVector)).intent;
+        intent = (await classifyIntent(task, this.embedding, getQueryVector, embeddingRequest, this.candidateQueryDescriptorFingerprint())).intent;
       } catch {
         // Trace-path diagnostics are fixed and value-free: backend exception
         // strings can contain query text, identifiers, or credentials.
@@ -1080,6 +1115,7 @@ export class UnifiedAssembler {
   private makeSharedQueryVector(
     task: string,
     onFailure?: (code: RetrievalTraceFailureCode) => void,
+    request?: EmbeddingRequest,
   ): () => Promise<number[] | undefined> {
     if (this.embedding.available === false) {
       let reported = false;
@@ -1089,16 +1125,18 @@ export class UnifiedAssembler {
       };
     }
     let cached: Promise<number[] | undefined> | undefined;
+    let fingerprint: string | undefined;
     return () => {
       if (!cached) {
-        cached = this.embedding.embed(task).catch((err) => {
+        fingerprint = this.candidateQueryDescriptorFingerprint();
+        cached = (request ? this.embedding.embed(task, request) : this.embedding.embed(task)).catch((err) => {
           onFailure?.('query-failed');
           if (onFailure) console.error('[memberry-retrieval] Shared query embedding failed [query-failed]');
           else console.error('[memberry-retrieval] Shared query embedding failed:', err instanceof Error ? err.message : err);
           return undefined;
         });
       }
-      return cached;
+      return cached.then((vector) => this.candidateQueryDescriptorFingerprint() === fingerprint ? vector : undefined);
     };
   }
 
@@ -1252,7 +1290,9 @@ export class UnifiedAssembler {
       (opts.include_code && this.codeLayer != null && isDefaultTenant(tenant)) ||
       (opts.include_memory && this.memoryLayer != null)
     );
-    const queryVector = willUseSharedVector && getQueryVec ? await getQueryVec() : undefined;
+    const queryDescriptorFingerprint = this.candidateQueryDescriptorFingerprint();
+    const sharedVector = willUseSharedVector && getQueryVec ? await getQueryVec() : undefined;
+    const queryVector = this.candidateQueryDescriptorFingerprint() === queryDescriptorFingerprint ? sharedVector : undefined;
 
     // Tenant safety: the code-search channel queries Symbol nodes, which are NOT
     // tenant-stamped in the shared graph. For a non-default tenant this would leak
@@ -1266,7 +1306,7 @@ export class UnifiedAssembler {
         include_semantics: false,
         expandedTokens: expansion.tokens,
         ...(codePathScope ? { file_path: codePathScope } : {}),
-        ...(queryVector ? { queryVector } : {}),
+        ...(queryVector ? { queryVector, ...(queryDescriptorFingerprint !== undefined ? { queryDescriptorFingerprint } : {}) } : {}),
       };
       promises.push(
         (traced && this.codeLayer.searchObserved
@@ -1327,7 +1367,7 @@ export class UnifiedAssembler {
         tags: memoryTagScope,
         max_tokens: Math.floor(opts.max_tokens / 3),
         tenantId: tenant,
-        ...(queryVector ? { queryVector } : {}),
+        ...(queryVector ? { queryVector, ...(queryDescriptorFingerprint !== undefined ? { queryDescriptorFingerprint } : {}) } : {}),
         ...(opts.as_of ? { temporal: { as_of: opts.as_of } } : {}),
       };
       if (this.multihop && !stableIdLane) {
@@ -1336,7 +1376,8 @@ export class UnifiedAssembler {
           // C6: the pass-2 scope OMITS queryVector so AMPService embeds the
           // conditioned task; C5: its wrapper is normalized with that task.
           const pass2Scope = { ...memoryScope, task: conditionedTask };
-          delete (pass2Scope as { queryVector?: number[] }).queryVector;
+          delete (pass2Scope as { queryVector?: number[]; queryDescriptorFingerprint?: string }).queryVector;
+          delete (pass2Scope as { queryDescriptorFingerprint?: string }).queryDescriptorFingerprint;
           const observed = traced && memoryLayer.loadFreshObserved !== undefined;
           const result = observed
             ? await memoryLayer.loadFreshObserved!(pass2Scope)
@@ -1449,6 +1490,21 @@ export class UnifiedAssembler {
           };
         }
       }
+    }
+    if (settledLists.memory) {
+      settledLists.memory = await filterSemanticEvidence(
+        settledLists.memory,
+        this.semanticEligibility,
+        {
+          tenantId: tenant,
+          projectScope: memoryTagScope?.find((tag) => /^project:/i.test(tag)),
+          asOf: opts.as_of,
+        },
+        (candidate) => candidate.source_type,
+        (candidate) => candidate.id,
+      );
+      settledLists.memory = settledLists.memory.map((candidate) =>
+        markHistoricalSemantic(candidate, opts.as_of));
     }
     const observations: RuntimeStructuralObservation[] | undefined = traced ? [] : undefined;
     // Use one frozen channel order in both modes so score ties and duplicate
@@ -1573,7 +1629,7 @@ export class UnifiedAssembler {
     // Tenant is threaded into the DeterministicAssembler's semantic read
     // (Semantic is tenant-scoped); its Entity/Aspect reads stay shared by design.
     // Named tenants are also routed away from this path by the tools.ts guard.
-    const sections = await this.deterministic.assemble(task, {
+    let sections = await this.deterministic.assemble(task, {
       entity_scope: opts.entity_scope,
       project_name: opts.project_name,
       max_tokens: opts.max_tokens,
@@ -1581,6 +1637,29 @@ export class UnifiedAssembler {
       tenantId: opts.tenantId,
       ...(opts.resolvedEntityIds !== undefined ? { resolvedEntityIds: opts.resolvedEntityIds } : {}),
     });
+
+    const flattened = sections.flatMap((section) => section.items.map((item) => ({
+      sourceType: section.source_type,
+      item,
+    })));
+    const eligible = await filterSemanticEvidence(
+      flattened,
+      this.semanticEligibility,
+      {
+        tenantId: resolveTenant(opts.tenantId),
+        projectScope: normalizeProjectTag(opts.project_name),
+        asOf: opts.as_of,
+      },
+      (candidate) => candidate.sourceType,
+      (candidate) => candidate.item.id,
+    );
+    const eligibleItems = new Set(eligible.map((candidate) => candidate.item));
+    sections = sections
+      .map((section) => ({
+        ...section,
+        items: section.items.filter((item) => eligibleItems.has(item)),
+      }))
+      .filter((section) => section.items.length > 0);
 
     const tokenCount = sections.reduce(
       (sum, s) => sum + s.items.reduce((isum, i) => isum + Math.ceil(i.content.length / 4), 0),
@@ -1691,6 +1770,14 @@ export class UnifiedAssembler {
       await session.close();
     }
   }
+}
+
+function markHistoricalSemantic(result: RetrievalResult, asOf: string | undefined): RetrievalResult {
+  if (result.source_type !== 'semantic' || asOf === undefined) return result;
+  return {
+    ...result,
+    metadata: { ...result.metadata, temporalStatus: 'historical', asOf },
+  };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2221,6 +2308,17 @@ function buildMemoryTagScope(tagScope?: string[], projectName?: string): string[
   }
 
   return tags.length > 0 ? tags : undefined;
+}
+
+// Only one concrete existing project constraint can address the embedding cache.
+// Unscoped or conflicting legacy requests retain uncached compatibility.
+function retrievalEmbeddingRequest(opts: Partial<TenantRetrievalOptions>): EmbeddingRequest | undefined {
+  const projects = buildMemoryTagScope(opts.tag_scope, opts.project_name)
+    ?.filter((tag) => /^project:/i.test(tag)).map((tag) => tag.toLowerCase()) ?? [];
+  const scopes = [...new Set(projects)];
+  return opts.tenantId && scopes.length === 1
+    ? { tenantId: opts.tenantId, projectScope: scopes[0]! }
+    : undefined;
 }
 
 function normalizeProjectTag(projectName?: string): string | undefined {

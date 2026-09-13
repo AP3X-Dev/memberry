@@ -9,6 +9,7 @@ import type { RetrievalTraceV1 } from '../trace.js';
 import { RankedRuntimeTraceAdapter } from '../runtime-trace.js';
 import { applyServedRerankerV1, createServedRerankerProviderV1 } from '../served-reranker.js';
 import type { RetrievalResult } from '../types.js';
+import { allowAllSemanticEligibility } from './semantic-eligibility.fixture.js';
 
 const CANARY_ID = 'raw-private-sk_live_12345678901234567890';
 const ASSEMBLED_AT = '2026-08-18T00:00:00.000Z';
@@ -78,7 +79,14 @@ function makeAssembler(codeDelay: number, memoryDelay: number, malformed = false
   };
   const redis = { get: vi.fn(async () => null), set: vi.fn(async () => undefined) };
   const embedding = { available: false, embed: vi.fn(), embedBatch: vi.fn() };
-  return { assembler: new UnifiedAssembler(driver as never, redis, codeLayer, memoryLayer, embedding), codeLayer, memoryLayer };
+  return {
+    assembler: new UnifiedAssembler(
+      driver as never, redis, codeLayer, memoryLayer, embedding, null, null,
+      allowAllSemanticEligibility,
+    ),
+    codeLayer,
+    memoryLayer,
+  };
 }
 
 interface ParityAssemblerOptions {
@@ -169,7 +177,10 @@ function makeParityAssembler(options: ParityAssemblerOptions) {
   };
   const redis = { get: vi.fn(async () => null), set: vi.fn(async () => undefined) };
   const embedding = { available: false, embed: vi.fn(), embedBatch: vi.fn() };
-  return new UnifiedAssembler(driver as never, redis, codeLayer, memoryLayer, embedding);
+  return new UnifiedAssembler(
+    driver as never, redis, codeLayer, memoryLayer, embedding, null, null,
+    allowAllSemanticEligibility,
+  );
 }
 
 function orderedIds(context: Awaited<ReturnType<UnifiedAssembler['assemble']>>): string[] {
@@ -381,7 +392,10 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
     const driver = { session: () => ({ run: vi.fn(async () => ({ records: [] })), close: vi.fn() }) };
     const redis = { get: vi.fn(async () => null), set: vi.fn(async () => undefined) };
     const embedding = { available: false, embed: vi.fn(), embedBatch: vi.fn() };
-    const assembler = new UnifiedAssembler(driver as never, redis, codeLayer, memoryLayer, embedding);
+    const assembler = new UnifiedAssembler(
+      driver as never, redis, codeLayer, memoryLayer, embedding, null, null,
+      allowAllSemanticEligibility,
+    );
 
     const result = await assembler.assembleTraced('ordinary ports', { include_arch: false });
 
@@ -531,7 +545,10 @@ describe('UnifiedAssembler.assembleTraced ranked runtime', () => {
     };
     const redis = { get: vi.fn(async () => null), set: vi.fn(async () => undefined) };
     const embedding = { available: true, embed: vi.fn(async () => { throw new Error(canary); }), embedBatch: vi.fn() };
-    const assembler = new UnifiedAssembler(driver as never, redis, codeLayer, memoryLayer, embedding);
+    const assembler = new UnifiedAssembler(
+      driver as never, redis, codeLayer, memoryLayer, embedding, null, null,
+      allowAllSemanticEligibility,
+    );
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     const result = await assembler.assembleTraced('all failures');

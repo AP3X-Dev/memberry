@@ -7,7 +7,17 @@ import type { CodeSearchResult, CodeContext } from './types.js';
 import { isTestPath } from './types.js';
 import type {
   EmbeddingProvider,
+  EmbeddingDescriptor,
 } from '@memberry/core';
+import { DEFAULT_TENANT, parseEmbeddingDescriptor, embeddingDescriptorFingerprint, validateEmbeddingVector } from '@memberry/core';
+import {
+  ScopedQuery,
+  semanticEligibilityWhere,
+  tenantWhere,
+  type EmbeddingGenerationStore,
+  type SemanticEligibilityInput,
+  type SemanticEligibilityResult,
+} from '@memberry/neo4j';
 import { generateLexicalVector } from './vectors.js';
 
 type InternalRetrievalChannel = 'code.fulltext' | 'code.lexical-vector' | 'code.dense-vector' | 'code.semantic-vector';
@@ -88,12 +98,14 @@ export function noisePenalty(r: CodeSearchResult): number {
 /**
  * Process flag, read ONCE at module load. '1' = on; anything else = shipped behaviour.
  *
- * Two leaks, one switch, because they are the same defect on two channels:
+ * The original rollout covered two leaks on two channels:
  *   - the un-stamped-symbol fallback admits EVERY un-stamped symbol in the graph
  *     when no path hint narrows it (5,136 on the live box, none of them the
  *     scoped project's);
- *   - the semantic channel is not scoped at all.
- * Separate from KIND_RANK_V1 so either mechanism can be reverted alone.
+ *   - the semantic channel was not scoped at all. Lifecycle enforcement now
+ *     makes caller-provided semantic scope unconditional; this switch only
+ *     controls the legacy symbol fallback.
+ * Separate from KIND_RANK_V1 so symbol scoping can be reverted independently.
  */
 export const CODE_SCOPE_FLAG = 'MEMBERRY_CODE_SCOPE_V2';
 const CODE_SCOPE_V2 = process.env[CODE_SCOPE_FLAG] === '1';
@@ -141,17 +153,41 @@ export type CodeReranker = (
   rows: CodeSearchResult[],
 ) => Promise<CodeSearchResult[]>;
 
+/** Source-owned lifecycle authority used as the terminal semantic serving gate. */
+export interface CodeSemanticEligibilityAuthority {
+  evaluateActiveEligibility(input: SemanticEligibilityInput): Promise<SemanticEligibilityResult[]>;
+}
+
 /** Stable sort in place. Permutation of the input window; length and ids are invariant. */
 export function rankByNoise(rows: CodeSearchResult[]): CodeSearchResult[] {
   return rows.sort((a, b) => noisePenalty(a) - noisePenalty(b));
 }
 
+/** Production dense reads use only descriptor-qualified projection generations. */
+export interface CodeSearchGenerationContext {
+  readonly store: Pick<EmbeddingGenerationStore, 'search'>;
+  readonly descriptor: EmbeddingDescriptor;
+}
+
 export class CodeSearch {
+  private readonly semanticEligibility: CodeSemanticEligibilityAuthority;
+  private readonly generation?: CodeSearchGenerationContext;
+  private readonly legacyUnqualified: boolean;
+  readonly generationStatus = { symbol: 'not-read', semantic: 'not-read' };
+
   constructor(
     private driver: Driver,
     private embedding: EmbeddingProvider,
     private reranker?: CodeReranker,
-  ) {}
+    semanticEligibility?: CodeSemanticEligibilityAuthority,
+    generation?: CodeSearchGenerationContext | { readonly legacyUnqualified: true },
+  ) {
+    this.legacyUnqualified = generation !== undefined && !('store' in generation) && 'legacyUnqualified' in generation && generation.legacyUnqualified === true;
+    if (generation && 'store' in generation) {
+      this.generation = { store: generation.store, descriptor: parseEmbeddingDescriptor(generation.descriptor) };
+    }
+    this.semanticEligibility = semanticEligibility ?? new ScopedQuery(driver);
+  }
 
   /**
    * Hybrid search across Symbol nodes AND Semantic memories.
@@ -172,6 +208,7 @@ export class CodeSearch {
       expandedTokens?: string[];
       as_of?: string;
       queryVector?: number[];
+      queryDescriptorFingerprint?: string;
       /**
        * IDX-004 opt-in, required IN ADDITION to CODE_RERANK_FLAG. Only the berry_code_search
        * handler sets it; the assembler and buildContext deliberately do not, which is what keeps
@@ -196,6 +233,7 @@ export class CodeSearch {
       expandedTokens?: string[];
       as_of?: string;
       queryVector?: number[];
+      queryDescriptorFingerprint?: string;
       /**
        * IDX-004 opt-in, required IN ADDITION to CODE_RERANK_FLAG. Only the berry_code_search
        * handler sets it; the assembler and buildContext deliberately do not, which is what keeps
@@ -229,6 +267,7 @@ export class CodeSearch {
       expandedTokens?: string[];
       as_of?: string;
       queryVector?: number[];
+      queryDescriptorFingerprint?: string;
       /**
        * IDX-004 opt-in, required IN ADDITION to CODE_RERANK_FLAG. Only the berry_code_search
        * handler sets it; the assembler and buildContext deliberately do not, which is what keeps
@@ -262,10 +301,12 @@ export class CodeSearch {
     //
     // Shared query embedding: when the unified assembler already embedded the task
     // (options.queryVector), reuse it instead of embedding a third time here.
-    const queryVectorPromise: Promise<number[] | null> =
-      options?.queryVector !== undefined
-        ? Promise.resolve(options.queryVector)
-        : this.embedding.available === false ? Promise.resolve(null) : this.embedding.embed(query);
+    const denseUsable = this.embedding.available !== false && this.generationProviderMatches()
+      && (this.legacyUnqualified || (this.generation !== undefined && !!options?.project_tag));
+    const sharedCompatible = !this.generation || options?.queryDescriptorFingerprint === embeddingDescriptorFingerprint(this.generation.descriptor);
+    const queryVectorPromise: Promise<number[] | null> = !denseUsable ? Promise.resolve(null)
+      : options?.queryVector !== undefined && sharedCompatible ? Promise.resolve(options.queryVector)
+      : this.embedQuery(query, options?.project_tag);
 
     // 4-way parallel: fulltext + dense vector + lexical vector + semantic
     const fulltextPromise = this.fulltextSearch(options?.expandedTokens?.join(' ') ?? query, retrieveLimit, options);
@@ -345,6 +386,11 @@ export class CodeSearch {
     // read again below this point — every downstream use is `final`.
     if (KIND_RANK_V1 || rerankThisCall) rankByNoise(final);
     if (rerankThisCall) final = final.slice(0, limit);
+    if (options?.as_of) {
+      final = final.map((result) => result.source_type === 'semantic'
+        ? { ...result, temporal: { time_mode: 'historical' as const, as_of: options.as_of! } }
+        : result);
+    }
 
     if (!observed) return final;
 
@@ -417,7 +463,9 @@ export class CodeSearch {
       tokenCount += estimatedTokens;
     }
 
-    return { task, symbols, semantic_memories: semantics, token_count: tokenCount };
+    return { task, symbols, semantic_memories: semantics, token_count: tokenCount,
+      ...(as_of ? { semantic_temporal: { time_mode: 'historical' as const, as_of } } : {}),
+    };
   }
 
   /**
@@ -427,6 +475,9 @@ export class CodeSearch {
     const lines: string[] = [];
     lines.push(`# Code Context`);
     lines.push(`**Task:** ${ctx.task}`);
+    if (ctx.semantic_temporal) {
+      lines.push(`> Historical semantic memory frame: ${ctx.semantic_temporal.as_of} (valid_at inclusive, invalid_at exclusive). Code symbols reflect the current index.`);
+    }
     lines.push('');
 
     if (ctx.symbols.length > 0) {
@@ -522,6 +573,23 @@ export class CodeSearch {
     }
   }
 
+  private generationProviderMatches(): boolean {
+    if (!this.generation) return true;
+    try {
+      return this.embedding.descriptor !== undefined
+        && embeddingDescriptorFingerprint(this.embedding.descriptor) === embeddingDescriptorFingerprint(this.generation.descriptor);
+    } catch { return false; }
+  }
+
+  private async embedQuery(query: string, projectTag?: string): Promise<number[]> {
+    if (!this.generationProviderMatches()) throw new Error('embedding_query_descriptor_mismatch');
+    const vector = projectTag !== undefined
+      ? await this.embedding.embed(query, { tenantId: DEFAULT_TENANT, projectScope: projectTag })
+      : await this.embedding.embed(query);
+    if (!this.generationProviderMatches()) throw new Error('embedding_query_descriptor_mismatch');
+    return vector;
+  }
+
   private async vectorSearch(
     query: string,
     limit: number,
@@ -531,6 +599,11 @@ export class CodeSearch {
   ): Promise<CodeSearchResult[]> {
     // No usable embeddings → skip dense vector search; fulltext + deterministic
     // lexical-vector search still run and carry the fused result.
+    if (!this.generationProviderMatches() || (!this.legacyUnqualified && (!this.generation || !options?.project_tag))) {
+      this.generationStatus.symbol = 'embedding_generation_unavailable';
+      observe?.({ channel: 'code.dense-vector', outcome: 'safe-failure', code: 'unavailable' });
+      return [];
+    }
     if (this.embedding.available === false) {
       observe?.({ channel: 'code.dense-vector', outcome: 'safe-failure', code: 'unavailable' });
       return [];
@@ -538,9 +611,33 @@ export class CodeSearch {
     try {
       // OPT-49: reuse the query vector search() embedded once; fall back to
       // embedding here for any direct caller that didn't pass one.
-      const queryEmbedding = queryVectorPromise ? await queryVectorPromise : await this.embedding.embed(query);
+      const queryEmbedding = queryVectorPromise ? await queryVectorPromise : await this.embedQuery(query, options?.project_tag);
       if (!queryEmbedding) return [];
       const candidateLimit = candidateLimitForPostFilters(limit, options);
+      if (this.generation) {
+        const found = await this.generation.store.search({ tenantId: DEFAULT_TENANT, projectScope: options!.project_tag! }, {
+          descriptorFingerprint: embeddingDescriptorFingerprint(this.generation.descriptor),
+          vector: validateEmbeddingVector(queryEmbedding, this.generation.descriptor), kind: 'symbol',
+          limit: Math.min(100, Math.max(1, candidateLimit)),
+        });
+        this.generationStatus.symbol = found.degradedReason ?? (found.generationId ? 'ready' : 'embedding_generation_unavailable');
+        if (!found.generationId || found.degradedReason) {
+          observe?.({ channel: 'code.dense-vector', outcome: 'safe-failure', code: 'unavailable' });
+          return [];
+        }
+        let results = found.results.map(({ properties: props, score }) => ({
+          id: props.id as string, source_type: 'symbol' as const, name: props.name as string,
+          kind: props.kind as string, language: (props.language as string) ?? '',
+          file_path: props.file_path as string, start_line: toNum(props.start_line),
+          signature: (props.signature as string) ?? '', doc_comment: (props.doc_comment as string) ?? '',
+          score, project_tag: (props.project_tag as string) || undefined,
+        }));
+        results = applyScopePostFilter(results, options);
+        if (options?.language) results = results.filter((row) => row.language === options.language);
+        if (options?.kind) results = results.filter((row) => row.kind === options.kind);
+        observe?.({ channel: 'code.dense-vector', outcome: 'success' });
+        return results.slice(0, limit).map(stripScratch);
+      }
       const session = this.driver.session();
       try {
         const result = await session.run(
@@ -582,6 +679,7 @@ export class CodeSearch {
         await session.close();
       }
     } catch (err) {
+      this.generationStatus.symbol = 'embedding_generation_unavailable';
       if (observe) console.error('[memberry-code] Symbol vector search failed [query-failed]');
       else console.error('[memberry-code] Symbol vector search failed (falling back to fulltext):', err instanceof Error ? err.message : err);
       observe?.({ channel: 'code.dense-vector', outcome: 'safe-failure', code: 'query-failed' });
@@ -651,6 +749,11 @@ export class CodeSearch {
     queryVectorPromise?: Promise<number[] | null>,
     observe?: (entry: InternalRetrievalChannelObservation) => void,
   ): Promise<CodeSearchResult[]> {
+    if (!this.generationProviderMatches() || (!this.legacyUnqualified && (!this.generation || !projectTag || asOf !== undefined))) {
+      this.generationStatus.semantic = asOf !== undefined ? 'embedding_generation_historical_unavailable' : 'embedding_generation_unavailable';
+      observe?.({ channel: 'code.semantic-vector', outcome: 'safe-failure', code: 'unavailable' });
+      return [];
+    }
     if (this.embedding.available === false) {
       observe?.({ channel: 'code.semantic-vector', outcome: 'safe-failure', code: 'unavailable' });
       return [];
@@ -658,40 +761,61 @@ export class CodeSearch {
     try {
       // OPT-49: reuse the query vector search() embedded once (shared with the
       // symbol dense channel); fall back to embedding for direct callers.
-      const queryEmbedding = queryVectorPromise ? await queryVectorPromise : await this.embedding.embed(query);
+      const queryEmbedding = queryVectorPromise ? await queryVectorPromise : await this.embedQuery(query, projectTag);
       if (!queryEmbedding) return [];
       const semanticLimit = Math.min(limit, 10);
-      // IDX-002B: the memory channel was the ONLY channel with no project scope —
-      // a search scoped to one project drew memories from every project in the
-      // graph (on the live box, 101 of 192 project-tagged memories were the
-      // scoped project's; the rest were other people's). Filtering happens after
-      // the vector index returns, so overfetch for it exactly as as_of does.
-      const scopeTag = CODE_SCOPE_V2 ? projectTag?.trim() : undefined;
+      if (this.generation) {
+        const found = await this.generation.store.search({ tenantId: DEFAULT_TENANT, projectScope: projectTag! }, {
+          descriptorFingerprint: embeddingDescriptorFingerprint(this.generation.descriptor),
+          vector: validateEmbeddingVector(queryEmbedding, this.generation.descriptor), kind: 'semantic',
+          limit: Math.min(100, Math.max(1, semanticLimit * 5)),
+        });
+        this.generationStatus.semantic = found.degradedReason ?? (found.generationId ? 'ready' : 'embedding_generation_unavailable');
+        if (!found.generationId || found.degradedReason) {
+          observe?.({ channel: 'code.semantic-vector', outcome: 'safe-failure', code: 'unavailable' });
+          return [];
+        }
+        const candidates: CodeSearchResult[] = found.results.map(({ properties: props, score }) => ({
+          id: props.id as string, source_type: 'semantic', name: `[Semantic] ${(props.id as string).slice(0, 12)}`,
+          kind: 'semantic', file_path: '', start_line: 0, signature: (props.content as string) ?? '',
+          doc_comment: '', score: score * 0.8,
+        }));
+        const value = await this.filterEligibleSemantics(candidates.sort((a, b) => b.score - a.score).slice(0, semanticLimit), undefined, projectTag);
+        observe?.({ channel: 'code.semantic-vector', outcome: 'success' });
+        return value;
+      }
+      // Lifecycle authority is never rollout-gated: when the caller supplies a
+      // project scope it must constrain both source selection and the terminal
+      // check, otherwise another project's rows can consume the bounded window.
+      const scopeTag = projectTag?.trim() || undefined;
       const candidateLimit = candidateLimitForTemporalFilter(
         semanticLimit,
-        Boolean(asOf) || Boolean(scopeTag),
+        true,
       );
       const session = this.driver.session();
       try {
-        // When as_of is provided, post-filter semantic nodes to those created before the cutoff
-        const conditions: string[] = [];
-        if (asOf) conditions.push('s.created_at <= $asOf');
+        const semanticTimeParam = asOf ? 'asOf' : 'semanticAsOf';
+        const semanticAt = asOf ?? new Date().toISOString();
+        const conditions: string[] = [
+          tenantWhere('s', DEFAULT_TENANT),
+          semanticEligibilityWhere('s', DEFAULT_TENANT, semanticTimeParam),
+        ];
         if (scopeTag) conditions.push('$project_tag IN s.tags');
-        const temporalFilter = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
         const result = await session.run(
           `CALL db.index.vector.queryNodes('semantic_embedding', $limit, $embedding)
            YIELD node AS s, score
-           ${temporalFilter}
+           WHERE ${conditions.join(' AND ')}
            RETURN s, score`,
           {
             limit: neo4j.int(candidateLimit),
             embedding: queryEmbedding,
-            ...(asOf ? { asOf } : {}),
+            tenantId: DEFAULT_TENANT,
+            [semanticTimeParam]: semanticAt,
             ...(scopeTag ? { project_tag: scopeTag } : {}),
           },
         );
 
-        const value = result.records.map((r) => {
+        let candidates: CodeSearchResult[] = result.records.map((r) => {
           const props = r.get('s').properties as Record<string, unknown>;
           return {
             id: props.id as string,
@@ -704,18 +828,87 @@ export class CodeSearch {
             doc_comment: '',
             score: (r.get('score') as number) * 0.8, // Slightly discount semantics vs code matches
           };
-        }).slice(0, semanticLimit);
+        });
+
+        // Neo4j applies the vector procedure's top-k before its following WHERE.
+        // If obsolete high-score rows consumed that window, refill from a bounded
+        // eligibility-filtered pool so they cannot starve an active successor.
+        if (candidates.length < semanticLimit) {
+          const refill = await session.run(
+            `MATCH (s:Semantic)
+             WHERE ${conditions.join(' AND ')}
+               AND s.embedding IS NOT NULL
+             RETURN s, s.embedding AS embedding
+             ORDER BY s.id ASC
+             LIMIT $refillLimit`,
+            {
+              refillLimit: neo4j.int(SEMANTIC_REFILL_LIMIT),
+              tenantId: DEFAULT_TENANT,
+              [semanticTimeParam]: semanticAt,
+              ...(scopeTag ? { project_tag: scopeTag } : {}),
+            },
+          );
+          const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+          for (const record of refill.records) {
+            const props = record.get('s').properties as Record<string, unknown>;
+            const embedding = record.get('embedding');
+            const similarity = cosineSimilarity(queryEmbedding, embedding);
+            if (typeof props.id !== 'string' || similarity === null) continue;
+            const candidate: CodeSearchResult = {
+              id: props.id,
+              source_type: 'semantic',
+              name: `[Semantic] ${props.id.slice(0, 12)}`,
+              kind: 'semantic',
+              file_path: '',
+              start_line: 0,
+              signature: (props.content as string) ?? '',
+              doc_comment: '',
+              score: similarity * 0.8,
+            };
+            const current = byId.get(candidate.id);
+            if (!current || candidate.score > current.score) byId.set(candidate.id, candidate);
+          }
+          candidates = [...byId.values()];
+        }
+
+        const ranked = candidates.sort((a, b) => b.score - a.score).slice(0, semanticLimit);
+        const value = await this.filterEligibleSemantics(ranked, asOf, scopeTag);
         observe?.({ channel: 'code.semantic-vector', outcome: 'success' });
         return value;
       } finally {
         await session.close();
       }
     } catch (err) {
+      this.generationStatus.semantic = 'embedding_generation_unavailable';
       if (observe) console.error('[memberry-code] Semantic vector search failed [query-failed]');
       else console.error('[memberry-code] Semantic vector search failed:', err instanceof Error ? err.message : err);
       observe?.({ channel: 'code.semantic-vector', outcome: 'safe-failure', code: 'query-failed' });
       return [];
     }
+  }
+
+  private async filterEligibleSemantics(
+    candidates: CodeSearchResult[],
+    asOf?: string,
+    projectScope?: string,
+  ): Promise<CodeSearchResult[]> {
+    if (candidates.length === 0) return [];
+    const ids = candidates.map((candidate) => candidate.id);
+    const evaluations = await this.semanticEligibility.evaluateActiveEligibility({
+      semanticIds: ids,
+      tenantId: DEFAULT_TENANT,
+      ...(projectScope ? { projectScope } : {}),
+      ...(asOf ? { asOf } : {}),
+    });
+    if (!Array.isArray(evaluations) || evaluations.length !== ids.length) return [];
+    const statuses = new Map<string, SemanticEligibilityResult['status']>();
+    for (const evaluation of evaluations) {
+      if (!ids.includes(evaluation.id) || statuses.has(evaluation.id)
+        || !['eligible', 'ineligible', 'unknown'].includes(evaluation.status)) return [];
+      statuses.set(evaluation.id, evaluation.status);
+    }
+    if (statuses.size !== ids.length) return [];
+    return candidates.filter((candidate) => statuses.get(candidate.id) === 'eligible');
   }
 }
 
@@ -878,6 +1071,25 @@ function candidateLimitForTemporalFilter(limit: number, hasTemporalFilter: boole
 
 function boundedOverfetchLimit(limit: number): number {
   return Math.min(Math.max(limit * 5, 50), 200);
+}
+
+const SEMANTIC_REFILL_LIMIT = 512;
+
+function cosineSimilarity(left: number[], right: unknown): number | null {
+  if (!Array.isArray(right) || left.length === 0 || right.length !== left.length) return null;
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let i = 0; i < left.length; i++) {
+    const a = left[i];
+    const b = right[i];
+    if (typeof b !== 'number' || !Number.isFinite(a) || !Number.isFinite(b)) return null;
+    dot += a * b;
+    leftNorm += a * a;
+    rightNorm += b * b;
+  }
+  if (leftNorm === 0 || rightNorm === 0) return null;
+  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
 }
 
 function includesCaseInsensitive(value: string, search: string): boolean {

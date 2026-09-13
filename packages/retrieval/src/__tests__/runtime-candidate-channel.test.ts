@@ -1,6 +1,7 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 import { describe, expect, it, vi } from 'vitest';
 import neo4j, { Record as Neo4jRecord } from 'neo4j-driver';
-import { EMBEDDING_DIM } from '@memberry/core';
+import { EMBEDDING_DIM, embeddingDescriptorFingerprint } from '@memberry/core';
 
 import { assertRetrievalTraceConformant, canonicalTraceJson, replayRetrievalTrace, RETRIEVAL_TRACE_CHANNEL_ORDER } from '../trace.js';
 import { resolveRuntimeQueryPlannerAuthorityV1 } from '../runtime-query-planner.js';
@@ -20,6 +21,7 @@ import {
   parseSerializedRerankerProviderRequestV1,
   serializeRerankerProviderResponseV1,
 } from '../reranker.js';
+import { allowAllSemanticEligibility } from './semantic-eligibility.fixture.js';
 
 const project = 'project:memberry';
 const entityId = 'entity-memberry';
@@ -42,9 +44,17 @@ async function authorityReceipt(asOf?: string) {
   });
 }
 
-function driver(rows: Record<string, Neo4jRecord[]>): { driver: RuntimeCandidateDriver; calls: Array<[string, Record<string, unknown>]> } {
+function driver(
+  rows: Record<string, Neo4jRecord[]>,
+  eligibleSemanticIds?: ReadonlySet<string>,
+): { driver: RuntimeCandidateDriver; calls: Array<[string, Record<string, unknown>]> } {
   const calls: Array<[string, Record<string, unknown>]> = [];
   const run = async (query: string, params: Record<string, unknown>) => {
+    if (query.includes('UNWIND range(0, size($semanticIds) - 1)')) {
+      return {
+        records: (params.semanticIds as string[]).map((id) => record(['id', 'status'], [id, 'eligible'])),
+      };
+    }
     calls.push([query, params]);
     if (query.includes('UNWIND $ids AS eid')) {
       const facts = (rows.fact ?? []).map((source) => ({ properties: {
@@ -68,7 +78,17 @@ function driver(rows: Record<string, Neo4jRecord[]>): { driver: RuntimeCandidate
         : query.includes('MATCH (s:Semantic)')
           ? 'scope'
       : query.includes('MATCH (b:MemoryBlock') ? 'block' : 'arch';
-    return { records: rows[kind] ?? [] };
+    const sourceRows = rows[kind] ?? [];
+    if (eligibleSemanticIds && (kind === 'scope' || kind === 'semanticVector')) {
+      const predicateIsBeforeLimit = query.indexOf('NOT EXISTS {') >= 0
+        && query.indexOf('NOT EXISTS {') < query.lastIndexOf('LIMIT $rowLimit');
+      return {
+        records: (predicateIsBeforeLimit
+          ? sourceRows.filter((row) => eligibleSemanticIds.has(String(row.get('evidenceId'))))
+          : sourceRows).slice(0, 64),
+      };
+    }
+    return { records: sourceRows };
   };
   const session = {
     run,
@@ -100,7 +120,105 @@ function validRows(): Record<string, Neo4jRecord[]> {
 }
 
 describe('RET-003B runtime candidate channel service', () => {
-  function candidateAssembler(provider: ServedRerankerConstructionV1): UnifiedAssembler {
+  const generationDescriptor = { schemaVersion: 1 as const, provider: 'fixture', model: 'model-a', revision: 'r1', dimensions: 2, normalization: 'l2' as const, preprocessingVersion: 'v1' };
+
+  it.each([undefined, 'a'.repeat(64)])('rejects unknown or foreign reused vector identity %s', async queryDescriptorFingerprint => {
+    const mock = driver(validRows());
+    const compatible = vi.fn().mockResolvedValue({ id: 'a'.repeat(32) });
+    const service = new RuntimeCandidateChannelService(mock.driver, allowAllSemanticEligibility,
+      { descriptor: generationDescriptor, store: { compatible } as never });
+    await service.execute(await authorityReceipt(), { includeArchitecture: false, includeMemory: true,
+      queryVector: [1, 0], queryDescriptorFingerprint });
+    expect(compatible).not.toHaveBeenCalled();
+    expect(mock.calls.some(([query]) => query.includes('vector.similarity.cosine'))).toBe(false);
+    expect(service.generationStatus).toBe('embedding_query_descriptor_mismatch');
+  });
+
+  it('a stale legacy flag cannot override supplied candidate generation authority', async () => {
+    const mock = driver(validRows());
+    const compatible = vi.fn().mockResolvedValue(null);
+    const service = new RuntimeCandidateChannelService(mock.driver, allowAllSemanticEligibility,
+      { descriptor: generationDescriptor, store: { compatible }, legacyUnqualified: true } as never);
+    await service.execute(await authorityReceipt(), { includeArchitecture: false, includeMemory: true, queryVector: [1, 0], queryDescriptorFingerprint: embeddingDescriptorFingerprint(generationDescriptor) });
+    expect(compatible).toHaveBeenCalledOnce();
+    expect(mock.calls.some(([query]) => query.includes('vector.similarity.cosine'))).toBe(false);
+  });
+
+  it('requires an explicit generation context before dense serving', async () => {
+    const mock = driver(validRows());
+    const service = new RuntimeCandidateChannelService(mock.driver, allowAllSemanticEligibility);
+    await service.execute(await authorityReceipt(), { includeArchitecture: false, includeMemory: true,
+      queryVector: new Array(EMBEDDING_DIM).fill(0) });
+    expect(mock.calls.some(([query]) => query.includes('vector.similarity.cosine'))).toBe(false);
+    expect(service.generationStatus).toBe('embedding_generation_unavailable');
+  });
+
+  it.each([undefined, '1'])('qualifies every dense operand against the active scoped generation (structured=%s)', async (structured) => {
+    const previous = process.env[EPISODIC_STRUCTURED_INDEX_FLAG];
+    if (structured === undefined) delete process.env[EPISODIC_STRUCTURED_INDEX_FLAG];
+    else process.env[EPISODIC_STRUCTURED_INDEX_FLAG] = structured;
+    try {
+      const mock = driver(validRows());
+      const compatible = vi.fn().mockResolvedValue({ id: 'a'.repeat(32) });
+      const service = new RuntimeCandidateChannelService(mock.driver, allowAllSemanticEligibility,
+        { descriptor: generationDescriptor, store: { compatible } as never });
+      await service.execute(await authorityReceipt('2026-09-01T00:00:00.000Z'), {
+        includeArchitecture: false, includeMemory: true, queryVector: [1, 0], queryDescriptorFingerprint: embeddingDescriptorFingerprint(generationDescriptor),
+      });
+      expect(compatible).toHaveBeenCalledWith(expect.objectContaining({ tenantId: 'tenant-a', projectScope: project }), expect.stringMatching(/^[a-f0-9]{64}$/));
+      const dense = mock.calls.filter(([query]) => query.includes('vector.similarity.cosine'));
+      expect(dense).toHaveLength(2);
+      for (const [query, params] of dense) {
+        expect(query).not.toMatch(/\.embedding\b/);
+        // One hoisted active-pointer guard per query, in the same read snapshot as every projection join.
+        expect(query.split('MATCH (pointer:EmbeddingGenerationPointer')).toHaveLength(2);
+        expect(query.split('generation.qualificationDigest IS NOT NULL')).toHaveLength(2);
+        expect(query).not.toContain('EXISTS { MATCH (pointer');
+        expect(query.indexOf('EmbeddingGenerationPointer')).toBeLessThan(query.indexOf('EmbeddingProjection'));
+        expect(params.embeddingGenerationId).toBe('a'.repeat(32));
+        expect(params.asOf).toBe('2026-09-01T00:00:00.000Z');
+      }
+      const episodic = dense.find(([query]) => query.includes('MATCH (ep:Episodic)'))![0];
+      expect(episodic).toContain('episodeProjection.inputText = ep.content');
+      if (structured) {
+        for (const alias of ['keyProjection', 'neighborProjection', 'neighborKeyProjection']) {
+          expect(episodic).toContain(`${alias}.vector, $queryVector`);
+          expect(episodic).toContain(`${alias}.descriptorFingerprint = $embeddingDescriptorFingerprint`);
+        }
+        expect(episodic).toContain('OPTIONAL MATCH (keyProjection:EmbeddingProjection)');
+        expect(episodic).toContain('neighborKeyProjection.dependencyText = neighbor.content');
+      }
+      expect(service.generationStatus).toBe('ready');
+    } finally {
+      if (previous === undefined) delete process.env[EPISODIC_STRUCTURED_INDEX_FLAG];
+      else process.env[EPISODIC_STRUCTURED_INDEX_FLAG] = previous;
+    }
+  });
+
+  it('keeps scoped retrieval available but never legacy dense reads without a compatible generation', async () => {
+    const mock = driver(validRows());
+    const service = new RuntimeCandidateChannelService(mock.driver, allowAllSemanticEligibility,
+      { descriptor: generationDescriptor, store: { compatible: vi.fn().mockResolvedValue(null) } as never });
+    const result = await service.execute(await authorityReceipt(), { includeArchitecture: false, includeMemory: true, queryVector: [1, 0], queryDescriptorFingerprint: embeddingDescriptorFingerprint(generationDescriptor) });
+    expect(mock.calls.some(([query]) => query.includes('MATCH (s:Semantic)'))).toBe(true);
+    expect(mock.calls.some(([query]) => query.includes('vector.similarity.cosine'))).toBe(false);
+    expect(service.generationStatus).toBe('embedding_generation_unavailable');
+    expect(result).toBeDefined();
+  });
+
+  it('does not fall back to legacy dense reads after generation lookup errors', async () => {
+    const mock = driver(validRows());
+    const service = new RuntimeCandidateChannelService(mock.driver, allowAllSemanticEligibility,
+      { descriptor: generationDescriptor, store: { compatible: vi.fn().mockRejectedValue(new Error('offline')) } as never });
+    await service.execute(await authorityReceipt(), { includeArchitecture: false, includeMemory: true, queryVector: [1, 0], queryDescriptorFingerprint: embeddingDescriptorFingerprint(generationDescriptor) });
+    expect(mock.calls.some(([query]) => query.includes('vector.similarity.cosine'))).toBe(false);
+    expect(service.generationStatus).toBe('embedding_generation_unavailable');
+  });
+
+  function candidateAssembler(
+    provider: ServedRerankerConstructionV1,
+    semanticEligibility = allowAllSemanticEligibility,
+  ): UnifiedAssembler {
     return new UnifiedAssembler(
       {} as never,
       { zincrby: vi.fn(), zrevrangeWithScores: vi.fn(), lpush: vi.fn(), ltrim: vi.fn() },
@@ -109,12 +227,13 @@ describe('RET-003B runtime candidate channel service', () => {
       { embed: vi.fn(), embedBatch: vi.fn() },
       null,
       provider,
+      semanticEligibility,
     );
   }
 
   it('does not mint authority from a caller-controlled bare object', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     await expect(service.execute({ contract: 'memberry.runtime-query-planner-resolved-receipt.v1' } as never, {
       includeArchitecture: true, includeMemory: true,
     })).rejects.toThrow('candidate_runtime:invalid_receipt');
@@ -123,7 +242,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('binds a private receipt and runs only the four authorized channels in canonical order', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const result = await service.execute(receipt, { includeArchitecture: true, includeMemory: true });
 
@@ -143,6 +262,77 @@ describe('RET-003B runtime candidate channel service', () => {
     }
   });
 
+  it('filters lifecycle eligibility before the 64-row cap and preserves historical authority metadata', async () => {
+    const rows = validRows();
+    rows.scope = [
+      ...Array.from({ length: 64 }, (_, index) => record(
+        ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+        ['tenant-a', project, entityId, `semantic-obsolete-${index}`, 'Policy v1', 'obsolete policy', 1],
+      )),
+      record(
+        ['tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score'],
+        ['tenant-a', project, entityId, 'semantic-current', 'Policy v2', 'current policy', 0.1],
+      ),
+    ];
+    const evaluateActiveEligibility = vi.fn(async ({ semanticIds }: { semanticIds: readonly string[] }) =>
+      semanticIds.map((id) => ({ id, status: 'eligible' as const })));
+    const mock = driver(rows, new Set(['semantic-current']));
+    const execution = await new RuntimeCandidateChannelService(
+      mock.driver,
+      { evaluateActiveEligibility }, { legacyUnqualified: true },
+    ).execute(
+      await authorityReceipt('2026-01-15T00:00:00.000Z'),
+      { includeArchitecture: false, includeMemory: true },
+    );
+
+    expect(execution.candidates.filter((candidate) => candidate.sourceType === 'semantic')
+      .map((candidate) => candidate.evidenceId)).toEqual(['semantic-current']);
+    expect(evaluateActiveEligibility).toHaveBeenCalledWith({
+      semanticIds: ['semantic-current'],
+      tenantId: 'tenant-a', projectScope: project, asOf: '2026-01-15T00:00:00.000Z',
+    });
+    const scopeQuery = mock.calls.find(([query]) => query.includes('MATCH (s:Semantic)'))!;
+    expect(scopeQuery[0].indexOf('NOT EXISTS {')).toBeLessThan(scopeQuery[0].lastIndexOf('LIMIT $rowLimit'));
+    expect(scopeQuery[1]).toMatchObject({ semanticAsOf: '2026-01-15T00:00:00.000Z' });
+
+    const served = await candidateAssembler(createServedRerankerProviderV1())
+      .assembleCandidateExecutionServed('policy', execution, 8_000, false, true);
+    const historical = served.context.sections.flatMap((section) => section.items)
+      .find((item) => item.id === 'semantic-current');
+    expect(historical?.metadata).toMatchObject({
+      temporalStatus: 'historical', asOf: '2026-01-15T00:00:00.000Z',
+    });
+  });
+
+  it('fails closed for Semantics when authority is unavailable while preserving other source lanes', async () => {
+    const execution = await new RuntimeCandidateChannelService(driver(validRows()).driver, {
+      evaluateActiveEligibility: vi.fn().mockRejectedValue(new Error('authority unavailable')),
+    }, { legacyUnqualified: true }).execute(await authorityReceipt(), { includeArchitecture: true, includeMemory: true });
+
+    expect(execution.candidates.map((candidate) => candidate.evidenceId)).not.toContain('semantic-1');
+    expect(execution.candidates.map((candidate) => candidate.evidenceId))
+      .toEqual(expect.arrayContaining(['fact-1', '-project-state', entityId]));
+  });
+
+  it('revalidates Semantics at terminal assembly before ranking and serialization', async () => {
+    const execution = await new RuntimeCandidateChannelService(driver(validRows()).driver, {
+      evaluateActiveEligibility: async ({ semanticIds }) =>
+        semanticIds.map((id) => ({ id, status: 'eligible' as const })),
+    }, { legacyUnqualified: true }).execute(await authorityReceipt(), { includeArchitecture: false, includeMemory: true });
+    const assembler = candidateAssembler(createServedRerankerProviderV1(), {
+      evaluateActiveEligibility: vi.fn().mockRejectedValue(new Error('authority changed')),
+    });
+
+    const served = await assembler.assembleCandidateExecutionServed(
+      'policy', execution, 8_000, false, true, true,
+    );
+
+    expect(served.context.sections.flatMap((section) => section.items.map((item) => item.id)))
+      .toEqual(expect.arrayContaining(['fact-1', '-project-state']));
+    expect(served.context.sections.flatMap((section) => section.items.map((item) => item.id)))
+      .not.toContain('semantic-1');
+  });
+
   it('ranks semantic and episodic vectors only inside the receipt-authorized entity set', async () => {
     const rows = validRows();
     rows.semanticVector = [record(
@@ -156,7 +346,7 @@ describe('RET-003B runtime candidate channel service', () => {
     const mock = driver(rows);
     const queryVector = new Array(EMBEDDING_DIM).fill(0);
     queryVector[0] = 1;
-    const execution = await new RuntimeCandidateChannelService(mock.driver).execute(
+    const execution = await new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(),
       { includeArchitecture: false, includeMemory: true, queryVector },
     );
@@ -201,7 +391,7 @@ describe('RET-003B runtime candidate channel service', () => {
     try {
       const mock = driver(validRows());
       const queryVector = new Array(EMBEDDING_DIM).fill(0);
-      await new RuntimeCandidateChannelService(mock.driver).execute(
+      await new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true }).execute(
         await authorityReceipt(),
         { includeArchitecture: false, includeMemory: true, queryVector },
       );
@@ -221,7 +411,7 @@ describe('RET-003B runtime candidate channel service', () => {
     try {
       const mock = driver(validRows());
       const queryVector = new Array(EMBEDDING_DIM).fill(0);
-      await new RuntimeCandidateChannelService(mock.driver).execute(
+      await new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true }).execute(
         await authorityReceipt(),
         { includeArchitecture: false, includeMemory: true, queryVector },
       );
@@ -266,7 +456,7 @@ describe('RET-003B runtime candidate channel service', () => {
         ['tenant-a', project, entityId, 'fact-location', 'Fact', 'Neuri located at Desktop', 0.1, 'Neuri', 'located_at', 'Desktop', '2026-01-01T00:00:00.000Z'],
       ),
     ];
-    const execution = await new RuntimeCandidateChannelService(driver(rows).driver).execute(
+    const execution = await new RuntimeCandidateChannelService(driver(rows).driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(),
       {
         includeArchitecture: false,
@@ -281,7 +471,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('rejects malformed query vectors before opening a database session', async () => {
     const mock = driver(validRows());
-    await expect(new RuntimeCandidateChannelService(mock.driver).execute(
+    await expect(new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(),
       { includeArchitecture: false, includeMemory: true, queryVector: [1] },
     )).rejects.toThrow('candidate_runtime:invalid_query_vector');
@@ -290,7 +480,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('rejects an unissued or foreign-service receipt before opening a session', async () => {
     const first = driver(validRows());
-    const service = new RuntimeCandidateChannelService(first.driver);
+    const service = new RuntimeCandidateChannelService(first.driver, undefined, { legacyUnqualified: true });
     const foreign = Object.freeze({ contract: 'memberry.runtime-query-planner-resolved-receipt.v1' });
     await expect(service.execute(foreign as never, {
       includeArchitecture: true, includeMemory: true,
@@ -305,7 +495,7 @@ describe('RET-003B runtime candidate channel service', () => {
       ['tenant-foreign', project, entityId, 'foreign-secret', 'Secret', 'DO NOT RETURN', 1],
     );
     const mock = driver(rows);
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const result = await service.execute(receipt, { includeArchitecture: true, includeMemory: true });
     expect(result.settlements.find((item) => item.channel === 'memory.scope'))
@@ -317,7 +507,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('binds current and as-of temporal authority into every source query', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt('2026-08-16T10:20:30.000Z');
     await service.execute(receipt, { includeArchitecture: true, includeMemory: true });
     expect(mock.calls.find(([query]) => query.includes('MATCH (s:Semantic)'))?.[1].asOf)
@@ -330,7 +520,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('serves only project-scoped sessionless core blocks for the sealed tenant', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     await service.execute(await authorityReceipt(), { includeArchitecture: false, includeMemory: true });
     const blockQuery = mock.calls.find(([query]) => query.includes('MATCH (b:MemoryBlock'))?.[0] ?? '';
     expect(blockQuery).toContain('MATCH (b:MemoryBlock {scope: $projectScope})');
@@ -347,7 +537,7 @@ describe('RET-003B runtime candidate channel service', () => {
       ['tenant-a', project, entityId, `semantic-${String(index).padStart(2, '0')}`, 'Semantic', `Scoped memory ${index}`, 1 - index / 100],
     ));
     const mock = driver(rows);
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const result = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
     expect(result.settlements.find((item) => item.channel === 'memory.scope'))
@@ -357,7 +547,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('uses production FactScope semantics instead of treating the project tag as Fact.scope', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
     const factQuery = mock.calls.find(([query]) => query.includes('UNWIND $ids AS eid'))?.[0] ?? '';
@@ -375,7 +565,7 @@ describe('RET-003B runtime candidate channel service', () => {
       ['tenant-a', project, entityId, 'fact-high', 'Fact', 'y'.repeat(40), 1],
     );
     const mock = driver(rows);
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
@@ -385,7 +575,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('does not invoke excluded real sources and leaves all other channels unavailable', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const result = await service.execute(receipt, { includeArchitecture: false, includeMemory: false });
     expect(mock.driver.session).not.toHaveBeenCalled();
@@ -396,7 +586,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('rejects hostile or unissued receipt roots with zero hooks and zero sessions', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const hooks = vi.fn();
     const accessor = { contract: 'memberry.runtime-query-planner-resolved-receipt.v1' };
     Object.defineProperty(accessor, 'contract', { enumerable: true, get: () => { hooks(); return 'x'; } });
@@ -427,7 +617,7 @@ describe('RET-003B runtime candidate channel service', () => {
       beginTransaction: vi.fn(() => ({ run, commit: vi.fn(async () => undefined), rollback: vi.fn(async () => undefined) })),
       close: vi.fn(async () => undefined),
     };
-    const service = new RuntimeCandidateChannelService({ session: vi.fn(() => session) });
+    const service = new RuntimeCandidateChannelService({ session: vi.fn(() => session) }, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const result = await service.execute(receipt, { includeArchitecture: true, includeMemory: true });
     expect(hooks).not.toHaveBeenCalled();
@@ -454,7 +644,7 @@ describe('RET-003B runtime candidate channel service', () => {
       const run = vi.fn(() => new Promise((resolve) => { resolveLate = resolve; }));
       const service = new RuntimeCandidateChannelService({ session: vi.fn(() => ({
         run: vi.fn(), beginTransaction: () => ({ run, commit: vi.fn(), rollback }), close,
-      } as never)) });
+      } as never)) }, undefined, { legacyUnqualified: true });
       const receipt = await authorityReceipt();
       const pending = service.execute(receipt, { includeArchitecture: true, includeMemory: false });
       await vi.advanceTimersByTimeAsync(2_001);
@@ -481,7 +671,7 @@ describe('RET-003B runtime candidate channel service', () => {
       ['tenant-a', project, entityId, 'shared-id', 'Fact', 'z'.repeat(80), 0.5],
     );
     const mock = driver(rows);
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
@@ -498,7 +688,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('preserves fact provenance as a fact context section', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
@@ -509,7 +699,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('records exact-ID arch.entity authority as entity-pass while leaving temporal not-applicable', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const execution = await service.execute(receipt, { includeArchitecture: true, includeMemory: false });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
@@ -522,7 +712,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('emits arch.entity at score 0.5 so a 0.6-confidence Semantic outranks it after fusion', async () => {
     const probe = driver(validRows());
-    await new RuntimeCandidateChannelService(probe.driver)
+    await new RuntimeCandidateChannelService(probe.driver, undefined, { legacyUnqualified: true })
       .execute(await authorityReceipt(), { includeArchitecture: true, includeMemory: false });
     const archQuery = probe.calls.find(([query]) => query.includes('target.id AS evidenceId'))?.[0] ?? '';
     expect(archQuery).toContain('0.5 AS score');
@@ -542,7 +732,7 @@ describe('RET-003B runtime candidate channel service', () => {
       ['tenant-a', project, entityId, entityId, 'Entity', 'Architecture entity', archScore],
     )];
     const mock = driver(rows);
-    const execution = await new RuntimeCandidateChannelService(mock.driver)
+    const execution = await new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true })
       .execute(await authorityReceipt(), { includeArchitecture: true, includeMemory: true });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
     const items = assembler.assembleCandidateExecution('task', execution, 8_000, true, true).context
@@ -562,7 +752,7 @@ describe('RET-003B runtime candidate channel service', () => {
           beginTransaction: () => ({ run: vi.fn(() => new Promise(() => undefined)), commit: vi.fn(), rollback: vi.fn() }),
           close,
         })),
-      });
+      }, undefined, { legacyUnqualified: true });
       const receipt = await authorityReceipt();
       const pending = service.execute(receipt, { includeArchitecture: true, includeMemory: false });
       await vi.advanceTimersByTimeAsync(2_001);
@@ -577,7 +767,7 @@ describe('RET-003B runtime candidate channel service', () => {
 
   it('applies the token budget without changing canonical execution and traces the exclusion', async () => {
     const mock = driver(validRows());
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const execution = await service.execute(receipt, { includeArchitecture: true, includeMemory: true });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
@@ -604,7 +794,7 @@ describe('RET-003B runtime candidate channel service', () => {
       scopeRow('semantic-short-b', 'B'.repeat(40)),
     ];
     const mock = driver(rows);
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
@@ -638,7 +828,7 @@ describe('RET-003B runtime candidate channel service', () => {
       ['tenant-a', project, entityId, 'fact-dense', 'Fact', 'subject predicate object', 0],
     );
     const mock = driver(rows);
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
@@ -673,7 +863,7 @@ describe('RET-003B runtime candidate channel service', () => {
     ];
     rows.fact = [];
     const mock = driver(rows);
-    const service = new RuntimeCandidateChannelService(mock.driver);
+    const service = new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true });
     const receipt = await authorityReceipt();
     const execution = await service.execute(receipt, { includeArchitecture: false, includeMemory: true });
     const assembler = Object.create(UnifiedAssembler.prototype) as UnifiedAssembler;
@@ -701,7 +891,7 @@ describe('RET-003B runtime candidate channel service', () => {
     ];
     rows.fact = [];
     const mock = driver(rows);
-    const execution = await new RuntimeCandidateChannelService(mock.driver).execute(
+    const execution = await new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(), { includeArchitecture: false, includeMemory: true },
     );
     const real = createServedRerankerProviderV1();
@@ -747,7 +937,7 @@ describe('RET-003B runtime candidate channel service', () => {
   it('keeps the synchronous shadow seam provider-free and falls back inside ranked-v2 on invalid output', async () => {
     const rows = validRows();
     const mock = driver(rows);
-    const execution = await new RuntimeCandidateChannelService(mock.driver).execute(
+    const execution = await new RuntimeCandidateChannelService(mock.driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(), { includeArchitecture: false, includeMemory: true },
     );
     const real = createServedRerankerProviderV1();
@@ -785,7 +975,7 @@ describe('RET-003B runtime candidate channel service', () => {
     ));
     const queryVector = new Array(EMBEDDING_DIM).fill(0);
     queryVector[0] = 1;
-    const execution = await new RuntimeCandidateChannelService(driver(rows).driver).execute(
+    const execution = await new RuntimeCandidateChannelService(driver(rows).driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(), { includeArchitecture: false, includeMemory: true, queryVector },
     );
     const rerankScores = new Map([
@@ -837,7 +1027,7 @@ describe('RET-003B runtime candidate channel service', () => {
         0.99 - index * 0.01,
       ],
     ));
-    const typedExecution = await new RuntimeCandidateChannelService(driver(typedRows).driver).execute(
+    const typedExecution = await new RuntimeCandidateChannelService(driver(typedRows).driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(), { includeArchitecture: false, includeMemory: true, queryVector },
     );
     const typedAssembler = candidateAssembler(provider);
@@ -870,7 +1060,7 @@ describe('RET-003B runtime candidate channel service', () => {
     });
     const queryVector = new Array(EMBEDDING_DIM).fill(0);
     queryVector[0] = 1;
-    const execution = await new RuntimeCandidateChannelService(driver(rows).driver).execute(
+    const execution = await new RuntimeCandidateChannelService(driver(rows).driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(), { includeArchitecture: false, includeMemory: true, queryVector },
     );
     expect(execution.candidates.find((candidate) => candidate.evidenceId === 'episode-target'))
@@ -940,7 +1130,7 @@ describe('RET-003B runtime candidate channel service', () => {
     rows.fact = Array.from({ length: 12 }, (_, index) => row(`fact-${index + 1}`, 'Fact', `scheduler authority fact ${index + 1}`, 0.85 - index * 0.01));
     const queryVector = new Array(EMBEDDING_DIM).fill(0);
     queryVector[0] = 1;
-    const execution = await new RuntimeCandidateChannelService(driver(rows).driver).execute(
+    const execution = await new RuntimeCandidateChannelService(driver(rows).driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(), { includeArchitecture: false, includeMemory: true, queryVector },
     );
     expect(execution.candidates.length).toBeGreaterThan(100);
@@ -987,7 +1177,7 @@ describe('RET-003B runtime candidate channel service', () => {
     rows.block = fill('block', 'project_state');
     const queryVector = new Array(EMBEDDING_DIM).fill(0);
     queryVector[0] = 1;
-    const execution = await new RuntimeCandidateChannelService(driver(rows).driver).execute(
+    const execution = await new RuntimeCandidateChannelService(driver(rows).driver, undefined, { legacyUnqualified: true }).execute(
       await authorityReceipt(), { includeArchitecture: false, includeMemory: true, queryVector },
     );
     const assembler = candidateAssembler(createServedRerankerProviderV1());
@@ -1013,10 +1203,10 @@ describe('RET-003B runtime candidate channel service', () => {
       ['tenant-a', project, entityId, 'semantic-other', 'Semantic', 'other query material', 0.9],
     );
     const [firstExecution, secondExecution] = await Promise.all([
-      new RuntimeCandidateChannelService(driver(firstRows).driver).execute(
+      new RuntimeCandidateChannelService(driver(firstRows).driver, undefined, { legacyUnqualified: true }).execute(
         await authorityReceipt(), { includeArchitecture: false, includeMemory: true },
       ),
-      new RuntimeCandidateChannelService(driver(secondRows).driver).execute(
+      new RuntimeCandidateChannelService(driver(secondRows).driver, undefined, { legacyUnqualified: true }).execute(
         await authorityReceipt(), { includeArchitecture: false, includeMemory: true },
       ),
     ]);

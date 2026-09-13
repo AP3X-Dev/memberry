@@ -65,6 +65,7 @@ describe('IDX-001A backfill store', () => {
     const queries: string[] = [];
     const run = vi.fn(async (query: string) => {
       queries.push(query);
+      if (query.includes('KnowledgeEpoch')) return { records: [record({ knowledgeEpoch: '1' })] };
       return query.includes('RETURN count(ep)') || query.includes('RETURN count(outcome)')
         ? { records: [record({ count: 1 })] }
         : { records: [] };
@@ -87,6 +88,7 @@ describe('IDX-001A backfill store', () => {
     const calls: Array<[string, Record<string, unknown>]> = [];
     const run = vi.fn(async (query: string, params: Record<string, unknown>) => {
       calls.push([query, params]);
+      if (query.includes('KnowledgeEpoch')) return { records: [record({ knowledgeEpoch: '1' })] };
       return query.includes('RETURN count(ep)') || query.includes('RETURN count(outcome)')
         ? { records: [record({ count: 1 })] }
         : { records: [] };
@@ -106,9 +108,12 @@ describe('IDX-001A backfill store', () => {
   });
 
   it('rejects a colliding empty outcome whose stored authority does not match', async () => {
-    const run = vi.fn(async (query: string) => query.includes('RETURN count(ep)')
-      ? { records: [record({ count: 1 })] }
-      : { records: [record({ count: 0 })] });
+    const run = vi.fn(async (query: string) => {
+      if (query.includes('KnowledgeEpoch')) return { records: [record({ knowledgeEpoch: '1' })] };
+      return query.includes('RETURN count(ep)')
+        ? { records: [record({ count: 1 })] }
+        : { records: [record({ count: 0 })] };
+    });
     const close = vi.fn(async () => undefined);
     const driver = { session: () => ({
       executeWrite: (work: (tx: { run: typeof run }) => unknown) => work({ run }), close,
@@ -123,6 +128,7 @@ describe('IDX-001A backfill store', () => {
     const queries: string[] = [];
     const run = vi.fn(async (query: string) => {
       queries.push(query);
+      if (query.includes('KnowledgeEpoch')) return { records: [record({ knowledgeEpoch: '1' })] };
       return query.includes('RETURN count(ep)')
         ? { records: [record({ count: 1 })] }
         : { records: [] };
@@ -152,6 +158,7 @@ describe('IDX-001A backfill store', () => {
     const calls: Array<[string, unknown]> = [];
     const run = vi.fn(async (query: string, params: unknown) => {
       calls.push([query, params]);
+      if (query.includes('KnowledgeEpoch')) return { records: [record({ knowledgeEpoch: '1' })] };
       return query.includes('keyCount + outcomeCount AS count')
         ? { records: [record({ count: 3 })] }
         : { records: [] };
@@ -163,7 +170,7 @@ describe('IDX-001A backfill store', () => {
     await expect(new EpisodicIndexStore(driver).deleteDerived({
       tenantId: 'tenant-a', projectScope: 'project:memberry',
     })).resolves.toBe(3);
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(5);
     expect(calls[0]![0]).toContain('WITH keyCount, count(outcome) AS outcomeCount');
     expect(calls[1]![0]).toContain('DETACH DELETE key');
     expect(calls[1]![0]).not.toContain('DELETE ep');

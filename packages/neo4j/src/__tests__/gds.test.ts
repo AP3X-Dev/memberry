@@ -144,7 +144,7 @@ describe('GDSAlgorithms', () => {
       return;
     }
     await seedData(driver);
-    gds = new GDSAlgorithms(driver);
+    gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
   });
 
   afterAll(async () => {
@@ -349,7 +349,7 @@ describe('GDSAlgorithms.findSimilarSemantics (fake driver)', () => {
       const { driver, close } = fakeDriver(async () => {
         throw new Error('Could not connect to bolt://secret:7687 as user admin');
       });
-      const gds = new GDSAlgorithms(driver);
+      const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
       let caught: unknown;
       await gds.findSimilarSemantics('ent').catch((e) => { caught = e; });
       expect(caught).toBeInstanceOf(Error);
@@ -364,7 +364,7 @@ describe('GDSAlgorithms.findSimilarSemantics (fake driver)', () => {
 
   it('bounds the cross join and the result with $limit (default 200, Neo4j integer)', async () => {
     const { driver, run } = fakeDriver(async () => ({ records: [] }));
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
     await expect(gds.findSimilarSemantics('ent')).resolves.toEqual([]);
     const [cypher, params] = run.mock.calls[0]! as [string, Record<string, unknown>];
     expect(cypher).toMatch(/nodes\[0\.\.\$limit\]/);
@@ -375,7 +375,7 @@ describe('GDSAlgorithms.findSimilarSemantics (fake driver)', () => {
 
   it('accepts an explicit limit as the third argument', async () => {
     const { driver, run } = fakeDriver(async () => ({ records: [] }));
-    await new GDSAlgorithms(driver).findSimilarSemantics('ent', 0.7, 25);
+    await new GDSAlgorithms(driver, { legacyUnqualified: true }).findSimilarSemantics('ent', 0.7, 25);
     const params = run.mock.calls[0]![1] as Record<string, unknown>;
     expect(neo4j.integer.toNumber(params.limit as neo4j.Integer)).toBe(25);
   });
@@ -385,7 +385,19 @@ describe('GDSAlgorithms.findSimilarSemantics (fake driver)', () => {
       get: (k: string) => ({ nodeA, nodeB, similarity })[k],
     });
     const { driver } = fakeDriver(async () => ({ records: [rec('a', 'b', 0.9), rec('a', 'c', 0.5)] }));
-    const results = await new GDSAlgorithms(driver).findSimilarSemantics('ent', 0.7);
+    const results = await new GDSAlgorithms(driver, { legacyUnqualified: true }).findSimilarSemantics('ent', 0.7);
     expect(results).toEqual([{ nodeA: 'a', nodeB: 'b', similarity: 0.9 }]);
   });
+});
+
+
+it('disables unqualified cosine before opening a session while preserving graph ranking', async () => {
+  const run = vi.fn().mockResolvedValue({ records: [] });
+  const session = vi.fn(() => ({ run, close: vi.fn() }));
+  const gds = new GDSAlgorithms({ session } as unknown as Driver);
+  await expect(gds.findSimilarSemantics('untrusted-name')).rejects.toThrow('similarity_unavailable');
+  expect(session).not.toHaveBeenCalled();
+  await expect(gds.pageRank('graph-name')).resolves.toEqual([]);
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(run.mock.calls[0][0]).not.toContain('embedding');
 });

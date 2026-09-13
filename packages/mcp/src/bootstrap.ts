@@ -3,7 +3,7 @@
 
 import { z } from 'zod';
 import { DistributedLock, ProposalStore } from '@memberry/redis';
-import { runMigrations, checkVectorIndexDimensions, checkVectorIndexCoverage, ProvenanceTraversal } from '@memberry/neo4j';
+import { runMigrations, ProvenanceTraversal } from '@memberry/neo4j';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ConsolidationEngine, BootstrapGraphService, createCoreServices, buildDreamEngine, buildExtractionConsumer, readEnv, defaultExportPath, DEFAULT_TENANT, resolveLifecycleConfig, runLifecyclePass, parseBoolFlag, getAllowedBaseDir, warnUnknownMemberryEnv } from '@memberry/core';
@@ -420,42 +420,11 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     `[memberry-mcp] Neo4j schema verified (migrations: ${migration.version} applied` +
     `${migration.applied.length > 0 ? `, +${migration.applied.length} new: ${migration.applied.join(', ')}` : ''})`,
   );
-  // Drift guard: a vector index whose dimension no longer matches EMBEDDING_DIM
-  // would silently break similarity search. Surface it loudly with a remediation hint.
-  const dimDrift = await checkVectorIndexDimensions(driver);
-  if (dimDrift.length > 0) {
-    for (const d of dimDrift) {
-      console.error(
-        `[memberry-mcp] WARNING: vector index "${d.name}" has dimension ${d.actual} but ` +
-        `EMBEDDING_DIM is ${d.expected}. Drop and recreate it (DROP INDEX ${d.name}) ` +
-        `or set MEMBERRY_EMBEDDING_DIM=${d.actual} to match.`,
-      );
-    }
-    status.degraded.push(`schema: ${dimDrift.length} vector index dimension mismatch`);
-  }
-  // IDX-003: an index with the right shape and nothing in it is just as broken,
-  // and unlike a dimension mismatch it produces no error anywhere — the channel
-  // returns zero rows and reports success. Say so at boot.
-  const underCoveredVectorIndexes = await checkVectorIndexCoverage(driver);
-  for (const idx of underCoveredVectorIndexes) {
-    // State the RATIO, not just the fact. Saying "has no embeddings" about a label that has 63%
-    // of them sends the reader looking for a wiring bug that is not there.
-    const pct = (idx.ratio * 100).toFixed(1);
-    console.error(
-      `[memberry-mcp] WARNING: :${idx.label} embedding coverage is ${idx.embedded}/${idx.nodes} ` +
-      `(${pct}%). Vector search over ${idx.label} silently misses the un-embedded remainder on ` +
-      `every query while reporting success. Backfill with: ` +
-      `node scripts/backfill-symbol-embeddings.mjs (Symbol) ` +
-      `or node scripts/backfill-embeddings.mjs (Semantic).`,
-    );
-  }
-  if (underCoveredVectorIndexes.length > 0) {
-    status.degraded.push(
-      `vectors: ${underCoveredVectorIndexes
-        .map((i) => `${i.label} ${i.embedded}/${i.nodes} embedded`)
-        .join(', ')}`,
-    );
-  }
+  // Legacy label coverage and dimensions cannot prove embedding-space identity.
+  // Readiness is scoped; every dense request independently checks its active pointer.
+  status.degraded.push('embeddings: generation readiness is scope-dependent and not globally certified; see docs/embedding-generations.md');
+  console.error('[memberry-mcp] Dense serving requires a compatible qualified generation for each tenant/project. '
+    + 'Inspect with scripts/embedding-generation.mts; legacy vector indexes are unqualified.');
 
   // Services the MCP server needs beyond the core load/store kit.
   // Pass the shared embedding provider so consolidation-promoted and superseded
@@ -495,6 +464,8 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     // The promote path synthesizes clustered episodes into one durable claim;
     // without an LLM it stays inert and only signal-driven proposals are made.
     llm,
+    DEFAULT_TENANT,
+    core.consolidationGeneration,
   );
 
   // Build bootstrap service (embedding provider so seeded semantics are
@@ -656,9 +627,8 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   await initCodeSchema(driver);
   console.error('[memberry-mcp] Code schema verified');
 
-  // IDX-003: pass the shared embedding provider so indexed Symbols get a dense
-  // vector and land in the symbol_embedding index. Without it they were
-  // write-only and the code.dense-vector channel was inert on every query.
+  // Canonical indexing stays separate from qualified generation projections.
+  // Bounded generation backfill catches up new/changed sources for dense serving.
   const codeIndexerService = new CodeIndexer(driver, embedding);
   const symbolStoreService = new SymbolStore(driver);
   // IDX-004: the code plane borrows the BM25F reranker that has served the memory plane for
@@ -666,7 +636,8 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   // packages/retrieval already depends on packages/code so the import cannot run the other way.
   // Inert until BOTH MEMBERRY_CODE_RERANK_V1=1 and a caller passes `rerank: true` — only the
   // berry_code_search handler does, which is what keeps this off the assembler.
-  const codeSearchService = new CodeSearch(driver, embedding, createCodeRerankerV1());
+  const codeSearchService = new CodeSearch(driver, embedding, createCodeRerankerV1(), core.scopedQuery,
+    { store: core.embeddingGenerations, descriptor: core.embeddingDescriptor });
   const codeWatcherService = new CodeWatcher(codeIndexerService, symbolStoreService);
 
   // Wire post-store hook: re-index files mentioned in stored episode content.
@@ -764,6 +735,9 @@ export async function bootstrap(): Promise<BootstrapHandles> {
   if (episodicIdentifierReserveEnabled) unifiedAssembler.enableEpisodicIdentifierReserveV1();
   const feedbackTrackerService = new FeedbackTracker(feedbackRedis);
   const dedicatedTenantCandidateDrivers = new Map<string, typeof driver>();
+  const dedicatedTenantCandidateGenerations = new Map<string, {
+    store: CoreServices['embeddingGenerations']; descriptor: CoreServices['embeddingDescriptor'];
+  }>();
 
   // ─── Wiki services ─────────────────────────────────────────────────────────
   // WikiCompiler.compile() accepts outputDir plus an optional project tag; the
@@ -846,6 +820,8 @@ export async function bootstrap(): Promise<BootstrapHandles> {
         },
         tcore.config,
         tcore.llm,
+        tenant,
+        tcore.consolidationGeneration,
       );
       const tenantConsolidationAdapter = {
         run: (scope?: string) => tenantConsolidation.run(scope ?? 'global'),
@@ -881,6 +857,9 @@ export async function bootstrap(): Promise<BootstrapHandles> {
         factStore: tcore.factStore,
       });
       dedicatedTenantCandidateDrivers.set(tenant, tcore.driver);
+      dedicatedTenantCandidateGenerations.set(tenant, {
+        store: tcore.embeddingGenerations, descriptor: tcore.embeddingDescriptor,
+      });
       dedicatedTenantCores.push(tcore);
       dedicatedTenantCoordinators.push(tenantCoordinator);
       console.error(`[memberry-mcp] tenant "${tenant}" bound to a dedicated datastore`);
@@ -895,8 +874,10 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     rerankerShadowCoordinator,
     multihopExpansionEnabled,
     candidateDriver: driver,
+    candidateGeneration: { store: core.embeddingGenerations, descriptor: core.embeddingDescriptor },
     projectScopeDriver: driver,
     tenantCandidateDrivers: dedicatedTenantCandidateDrivers,
+    tenantCandidateGenerations: dedicatedTenantCandidateGenerations,
     resolverFactory: (authority) => {
       const resolver = new ScopedEntityResolver(driver, authority);
       return { resolve: (plan) => resolver.resolve(plan) };
@@ -977,7 +958,7 @@ export async function bootstrap(): Promise<BootstrapHandles> {
     redis,
     embeddings: !openaiKey
       ? 'disabled'
-      : (dimDrift.length > 0 || underCoveredVectorIndexes.length > 0) ? 'degraded' : 'ok',
+      : 'degraded',
     degraded: status.degraded,
     // C4: expose the collection-size probe window so an operator can see when
     // RRF fusion is running on a stale or absent collection size.

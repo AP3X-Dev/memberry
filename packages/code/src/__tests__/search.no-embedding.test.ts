@@ -65,7 +65,7 @@ describe('CodeSearch no-embedding mode', () => {
     const { driver, queries } = makeRecordingDriver();
     const embedding = disabledEmbedding();
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results = await search.search('find the parser', { limit: 10 });
 
@@ -84,7 +84,7 @@ describe('CodeSearch no-embedding mode', () => {
   it('produces identical results across repeated calls (deterministic, not random)', async () => {
     const { driver } = makeRecordingDriver();
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, disabledEmbedding());
+    const search = new CodeSearch(driver, disabledEmbedding(), undefined, undefined, { legacyUnqualified: true });
 
     const first = await search.search('find the parser', { limit: 10 });
     const second = await search.search('find the parser', { limit: 10 });
@@ -97,7 +97,7 @@ describe('CodeSearch no-embedding mode', () => {
     const { driver, queries } = makeRecordingDriver();
     const embedding = availableEmbedding();
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     await search.search('find the parser', { limit: 10 });
 

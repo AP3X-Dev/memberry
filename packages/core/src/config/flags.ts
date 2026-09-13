@@ -118,6 +118,8 @@ export const MEMBERRY_FLAGS: ReadonlyArray<MemberryFlag> = Object.freeze([
     'Relevance-first memory ranking in load(): recency floored at 0.95 and vector hits scored by in-channel rank; only the exact string "1" enables.'),
   f('MEMBERRY_EMBEDDING_DIM', 'int', '1536', 'core',
     'Vector index dimension, integer 8..12288; invalid values log and fall back (legacy AMP_EMBEDDING_DIM honoured).'),
+  f('MEMBERRY_EMBEDDING_DESCRIPTOR', 'string', '', 'core',
+    'Strict JSON embedding descriptor; unset uses the existing OpenAI small-model alias with explicit unversioned revision. Does not qualify an index generation.'),
   f('MEMBERRY_EXPORT_PATH', 'path', './.memberry', 'core',
     'On-disk memory export directory; default ./.memberry when present, else legacy ./.amp.'),
   f('MEMBERRY_MODEL_EXTRACTION', 'string', 'gpt-4o-mini', 'core',

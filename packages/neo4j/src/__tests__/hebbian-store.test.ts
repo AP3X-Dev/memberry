@@ -164,10 +164,12 @@ describe('reclass stamps and application writes', () => {
   });
 
   it('updateDecayClass mirrors the updateConfidence ledger but sets ONLY decay_class (no updated_at)', async () => {
-    const { driver, queries } = capture(() => ({ records: [record({ id: 'sem-1' })] }));
+    const { driver, queries } = capture((cypher) => cypher.includes('KnowledgeEpoch')
+      ? { records: [record({ knowledgeEpoch: '1' })] }
+      : { records: [record({ id: 'sem-1', tenantId: 'default', projectScope: null })] });
     const store = new SemanticStore(driver);
     await store.updateDecayClass('sem-1', 'stable', 'proposal-key-1');
-    const q = queries[0];
+    const q = queries.find((query) => query.cypher.includes('__confidence_application_lock'))!;
     // Same lock + applied_consolidation_keys idempotency ledger as updateConfidence.
     expect(q.cypher).toContain('__confidence_application_lock');
     expect(q.cypher).toContain('applied_consolidation_keys');

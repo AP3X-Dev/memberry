@@ -82,6 +82,8 @@ function makeNeo4j(query: Partial<Neo4jLayer['query']>): Neo4jLayer {
     query: {
       byScope: vi.fn().mockResolvedValue([]),
       byVector: vi.fn().mockResolvedValue([]),
+      evaluateActiveEligibility: vi.fn().mockImplementation(async ({ semanticIds }: { semanticIds: readonly string[] }) =>
+        semanticIds.map((id) => ({ id, status: 'eligible' as const }))),
       ...query,
     },
   };

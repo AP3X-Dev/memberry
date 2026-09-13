@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // packages/code/src/__tests__/resolver.import-batch.test.ts
 // resolveImportsBatch resolves every import's target path IN MEMORY against the
 // indexed-file set and creates all SYMBOL_IMPORTS edges in ONE UNWIND round-trip
@@ -17,7 +18,7 @@ describe('ImportResolver.resolveImportsBatch', () => {
       }),
       close: vi.fn(),
     };
-    const driver = { session: vi.fn(() => session) };
+    const driver = { session: vi.fn(() => withKnowledgeTransactions(session)) };
     const resolver = new ImportResolver(driver as never);
 
     // Target files exist only in the indexed set (NOT on disk) — so a created edge
@@ -47,7 +48,7 @@ describe('ImportResolver.resolveImportsBatch', () => {
 
   it('drops imports that resolve nowhere (no row, no edge)', async () => {
     const session = { run: vi.fn(), close: vi.fn() };
-    const driver = { session: vi.fn(() => session) };
+    const driver = { session: vi.fn(() => withKnowledgeTransactions(session)) };
     const resolver = new ImportResolver(driver as never);
 
     // bare module specifier (not ./ or /) → unresolvable → no rows → no query at all.

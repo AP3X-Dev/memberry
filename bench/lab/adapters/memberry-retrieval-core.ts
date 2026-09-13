@@ -32,6 +32,7 @@ import {
   type AssemblerCodeLayer,
   type AssemblerMemoryLayer,
 } from '../../../packages/retrieval/src/assembler.js';
+import type { SemanticEligibilityAuthority } from '../../../packages/retrieval/src/semantic-eligibility-adapter.js';
 import type { FeedbackRedisLayer } from '../../../packages/retrieval/src/feedback.js';
 import { createServedRerankerProviderV1 } from '../../../packages/retrieval/src/served-reranker.js';
 
@@ -71,6 +72,31 @@ const FIXTURE_DRIVER = {
     close: async () => undefined,
   }),
 };
+
+/** The lab corpus is the fixture's authority, not the deliberately empty graph.
+ * Bind eligibility to this query's namespace and temporal frame. Unknown IDs,
+ * foreign scope and expired records never receive an eligible receipt. The
+ * assembler uses its default tenant internally after this lab scope mapping. */
+export function fixtureSemanticAuthority(
+  memories: readonly LabMemory[],
+  request: QueryRequest,
+): SemanticEligibilityAuthority {
+  return {
+    async evaluateActiveEligibility(input) {
+      const frameMatches = (input.tenantId === undefined || input.tenantId === 'default')
+        && input.projectScope === undefined
+        && (input.asOf === undefined || input.asOf === request.asOf);
+      return input.semanticIds.map((id) => {
+        const matches = memories.filter((memory) => memory.id === id && memory.kind !== 'code');
+        const memory = matches.length === 1 ? matches[0] : undefined;
+        const status = !frameMatches || memory === undefined ? 'unknown'
+          : inRequestedScope(memory, request.namespace) && isCurrent(memory, request.asOf)
+            ? 'eligible' : 'ineligible';
+        return { id, status };
+      });
+    },
+  };
+}
 
 /** Empty feedback store: getBoosts returns no learned weights, on every run. */
 const FIXTURE_FEEDBACK_STORE: FeedbackRedisLayer = {
@@ -229,6 +255,7 @@ export class MemBerryRetrievalCoreAdapter extends InMemoryAdapter {
       FIXTURE_EMBEDDING,
       null,
       this.rerankerMode === 'served' ? createServedRerankerProviderV1() : null,
+      fixtureSemanticAuthority(scoped, request),
     );
     // 'ranked', never 'auto': 'auto' would route through classifyIntent, whose
     // decision depends on this fixture embedding provider and can select GRAPH,

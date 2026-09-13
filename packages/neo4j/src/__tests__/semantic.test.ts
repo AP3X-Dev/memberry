@@ -576,7 +576,16 @@ describe('SemanticStore status stamping (RL-014)', () => {
     const queries: string[] = [];
     const run = vi.fn(async (query: string) => {
       queries.push(query);
-      return { records: [{ get: () => 'sem-status' }] };
+      if (query.includes('KnowledgeEpoch')) return { records: [{ get: () => '1' }] };
+      return {
+        records: [{
+          get: (key: string) => {
+            if (key === 'tenantId') return 'default';
+            if (key === 'projectScope') return null;
+            return 'sem-status';
+          },
+        }],
+      };
     });
     const executeWrite = vi.fn(async (work: (tx: { run: typeof run }) => Promise<unknown>) =>
       work({ run }));
@@ -626,7 +635,16 @@ describe('SemanticStore promoteFromEpisodic dedupe_key (D10)', () => {
       const run = vi.fn(async (query: string, params: Record<string, unknown>) => {
         calls.push({ query, params });
         if (outcome instanceof Error) throw outcome;
-        return { records: [{ get: () => outcome }] };
+        if (query.includes('KnowledgeEpoch')) return { records: [{ get: () => '1' }] };
+        return {
+          records: [{
+            get: (key: string) => {
+              if (key === 'tenantId') return params.tenant_id ?? 'default';
+              if (key === 'projectScope') return null;
+              return outcome;
+            },
+          }],
+        };
       });
       return work({ run });
     });

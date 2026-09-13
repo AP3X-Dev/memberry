@@ -67,7 +67,7 @@
 # failures. Read any failure; do not budget for one in advance. And do not "fix" this by
 # filtering the test out — a gate you have taught to ignore its own output is the thing this
 # whole comment exists to prevent.
-set -eu
+set -u
 
 NODE_MAJOR="${1:?usage: gate.sh <node-major> <worktree>}"
 WORKTREE="${2:?usage: gate.sh <node-major> <worktree>}"
@@ -99,20 +99,76 @@ if [ -n "$DIRT" ]; then
   echo "$DIRT" | sed 's/^/gate:            /'
 fi
 
-docker run --rm --network host \
+STATUS_FILE="$WORKTREE/.release-gate-status"
+INITIAL_HEAD="$(git -C "$WORKTREE" rev-parse HEAD)"
+if [ -z "$DIRT" ]; then INITIAL_CLEAN=1; else INITIAL_CLEAN=0; fi
+rm -f "$STATUS_FILE" \
+  "$WORKTREE/install.log" "$WORKTREE/gate-contract.log" \
+  "$WORKTREE/format.log" "$WORKTREE/lint.log" "$WORKTREE/build.log" \
+  "$WORKTREE/guidance.log" "$WORKTREE/ws.log" "$WORKTREE/lab.log" \
+  "$WORKTREE/lab-typecheck.log" "$WORKTREE/lab-validate.log" \
+  "$WORKTREE/baseline.log" "$WORKTREE/lab-ci.log" "$WORKTREE/docker.log"
+
+GATE_CONTAINER_NAME="memberry-gate-node${NODE_MAJOR}-$$"
+
+docker run --name "$GATE_CONTAINER_NAME" \
+  --label memberry.release-gate=true \
   --user "${OWNER_UID}:${OWNER_GID}" \
   -e HOME=/tmp \
+  -e GATE_SOURCE_COMMIT="$INITIAL_HEAD" \
+  -e GATE_SOURCE_CLEAN="$INITIAL_CLEAN" \
   -v "$WORKTREE":/w -w /w "node:${NODE_MAJOR}" sh -c "
-  npm ci --no-audit --no-fund > /w/install.log 2>&1; echo INSTALL_EXIT=\$? >> /w/install.log;
-  npm test                    > /w/ws.log      2>&1; echo WS_EXIT=\$?      >> /w/ws.log;
-  npx vitest run bench/lab    > /w/lab.log     2>&1; echo LAB_EXIT=\$?     >> /w/lab.log;
-  npm run build               > /w/tsc.log     2>&1; echo TSC_EXIT=\$?     >> /w/tsc.log;
-" > "$WORKTREE"/docker.log 2>&1 || true
+  set +e
+  . /w/scripts/release-gate-runner.sh
+  run_release_gate_stage /w/.release-gate-status /w INSTALL install.log npm ci --no-audit --no-fund
+  run_release_gate_stage /w/.release-gate-status /w GATE_CONTRACT gate-contract.log npm run test:release-gate
+  run_release_gate_stage /w/.release-gate-status /w FORMAT format.log npm run format:check
+  run_release_gate_stage /w/.release-gate-status /w LINT lint.log npm run lint:ci
+  run_release_gate_stage /w/.release-gate-status /w BUILD build.log npm run build
+  run_release_gate_stage /w/.release-gate-status /w GUIDANCE guidance.log npm run validate:memberry-guidance
+  run_release_gate_stage /w/.release-gate-status /w WORKSPACE ws.log npm run test --workspaces --if-present
+  run_release_gate_stage /w/.release-gate-status /w LAB lab.log npm run bench:lab:test
+  run_release_gate_stage /w/.release-gate-status /w LAB_TYPECHECK lab-typecheck.log npm run bench:lab:typecheck
+  run_release_gate_stage /w/.release-gate-status /w LAB_VALIDATE lab-validate.log npm run bench:lab:validate
+  run_release_gate_stage /w/.release-gate-status /w BASELINE baseline.log npm run bench:lab:baseline:verify
+  run_release_gate_stage /w/.release-gate-status /w LAB_CI lab-ci.log npm run bench:lab:ci
+  run_release_gate_stage /w/.release-gate-status /w SOURCE_BINDING source-binding.log sh -c 'test \"\$GATE_SOURCE_CLEAN\" = 1 && test \"\$(git rev-parse HEAD)\" = \"\$GATE_SOURCE_COMMIT\" && test -z \"\$(git status --porcelain=v1 --untracked-files=all)\"'
+  node scripts/release-candidate-manifest.mjs \
+    /w /w/release-candidate-manifest.json /w/.release-gate-status
+" > "$WORKTREE/docker.log" 2>&1
+DOCKER_EXIT=$?
+
+# Keep daemon-side container removal outside the evidence-producing command.
+# Docker can leave an already-exited `--rm` container in `removing` indefinitely,
+# which used to prevent this wrapper from ever reporting otherwise-complete gate
+# results. Cleanup is exact-name and bounded; a timeout is observable but does
+# not rewrite the container's recorded exit code or any stage receipt.
+if ! timeout 30 docker rm "$GATE_CONTAINER_NAME" >/dev/null 2>&1; then
+  echo "gate: WARNING -- cleanup timed out for exited container $GATE_CONTAINER_NAME" >&2
+fi
 
 echo "--- exits ---"
-for f in install ws lab tsc; do
-  grep -oE '[A-Z]+_EXIT=[0-9]+' "$WORKTREE/$f.log" 2>/dev/null || echo "${f}: no log"
+if [ "$DOCKER_EXIT" -ne 0 ]; then
+  echo "DOCKER_EXIT=$DOCKER_EXIT"
+fi
+node "$WORKTREE/scripts/release-gate-status.mjs" "$STATUS_FILE"
+GATE_EXIT=$?
+if [ -f "$WORKTREE/release-candidate-manifest.json" ]; then MANIFEST_EXIT=0; else MANIFEST_EXIT=1; fi
+
+# Preserve each matrix arm before a subsequent invocation replaces root logs.
+# The source check above has already finished; this ignored evidence directory
+# cannot contaminate the repository snapshot being qualified.
+ARCHIVE_DIR="$WORKTREE/.release-gate-runs/${INITIAL_HEAD}/node${NODE_MAJOR}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+ARCHIVE_EXIT=0
+mkdir -p "$ARCHIVE_DIR" || ARCHIVE_EXIT=1
+for artifact in .release-gate-status release-candidate-manifest.json install.log \
+  gate-contract.log format.log lint.log build.log guidance.log ws.log lab.log \
+  lab-typecheck.log lab-validate.log baseline.log lab-ci.log source-binding.log docker.log; do
+  if [ -f "$WORKTREE/$artifact" ]; then
+    cp "$WORKTREE/$artifact" "$ARCHIVE_DIR/$artifact" || ARCHIVE_EXIT=1
+  fi
 done
+echo "gate: preserved evidence at $ARCHIVE_DIR"
 
 echo "--- workspace suite totals (summed across all workspaces) ---"
 grep -oE '^ *Tests +.*' "$WORKTREE/ws.log" 2>/dev/null \
@@ -121,3 +177,7 @@ grep -oE '^ *Tests +.*' "$WORKTREE/ws.log" 2>/dev/null \
 
 echo "--- lab failures (expected: ZERO on a clean tree with no competing run -- see the header) ---"
 grep -oE '^ *Tests +.*' "$WORKTREE/lab.log" 2>/dev/null | tail -1
+
+if [ "$DOCKER_EXIT" -ne 0 ] || [ "$GATE_EXIT" -ne 0 ] || [ "$MANIFEST_EXIT" -ne 0 ] || [ "$ARCHIVE_EXIT" -ne 0 ]; then
+  exit 1
+fi

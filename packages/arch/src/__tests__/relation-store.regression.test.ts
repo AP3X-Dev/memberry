@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // packages/arch/src/__tests__/relation-store.regression.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { StructuralRelationStore } from '../relation-store.js';
@@ -49,7 +50,7 @@ describe('StructuralRelationStore regression', () => {
       close: vi.fn().mockResolvedValue(undefined),
     };
     const mockDriver = {
-      session: vi.fn().mockReturnValue(mockSession),
+      session: vi.fn().mockReturnValue(withKnowledgeTransactions(mockSession)),
     };
     const store = new StructuralRelationStore(mockDriver as never);
 
@@ -70,7 +71,7 @@ describe('StructuralRelationStore regression', () => {
       close: vi.fn().mockResolvedValue(undefined),
     };
     const mockDriver = {
-      session: vi.fn().mockReturnValue(mockSession),
+      session: vi.fn().mockReturnValue(withKnowledgeTransactions(mockSession)),
     };
     const store = new StructuralRelationStore(mockDriver as never);
 

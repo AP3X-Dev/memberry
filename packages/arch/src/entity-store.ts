@@ -1,3 +1,4 @@
+import { runArchMutation } from './knowledge-mutation.js';
 // packages/arch/src/entity-store.ts
 // Enriches existing Entity nodes with architectural properties.
 
@@ -10,6 +11,8 @@ import type { ArchEntityProperties, EntityCategory } from './types.js';
  * Prevents Cypher injection via crafted property key names (OWASP A03:2021).
  */
 const SAFE_PROPERTY_KEY = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const ARCH_PROPERTY_KEYS = new Set(['category', 'depth', 'responsibility', 'interface_desc', 'internals',
+  'file_paths', 'file_hashes_json', 'last_indexed_at', 'stale']);
 
 export class ArchEntityStore {
   constructor(private driver: Driver) {}
@@ -29,7 +32,7 @@ export class ArchEntityStore {
 
       for (const [key, value] of Object.entries(props)) {
         if (value !== undefined) {
-          if (!SAFE_PROPERTY_KEY.test(key)) {
+          if (!SAFE_PROPERTY_KEY.test(key) || !ARCH_PROPERTY_KEYS.has(key)) {
             throw new Error(
               `Invalid property key "${key}": keys must match /^[a-zA-Z_][a-zA-Z0-9_]*$/`,
             );
@@ -41,7 +44,7 @@ export class ArchEntityStore {
 
       if (setClauses.length === 0) return false;
 
-      const result = await session.run(
+      const result = await runArchMutation(session,
         `MATCH (e:Entity {name: $name})
          SET ${setClauses.join(', ')}
          RETURN e.name AS name`,

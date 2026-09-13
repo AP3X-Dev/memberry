@@ -14,6 +14,7 @@ import { extractFacts } from './extract.js';
 import { semanticDedupeKey } from './bootstrap-graph.js';
 import { readEnv } from './config/settings.js';
 import type { LlmClient } from './llm.js';
+import { parseEmbeddingDescriptor, parseEmbeddingRequest, validateEmbeddingVector, type EmbeddingDescriptor } from './embedding-descriptor.js';
 import { clusterHasIndependentCorroborationV1 } from './evidence-diversity.js';
 import { attachAdvisorV1 } from './advisor.js';
 import {
@@ -366,8 +367,21 @@ export interface RunResult {
 
 // ─── ConsolidationEngine ──────────────────────────────────────────────────────
 
+export interface ConsolidationGenerationSource {
+  readonly descriptor: EmbeddingDescriptor;
+  readEpisodeVectors(input: {
+    tenantId: string;
+    projectScope: string | null;
+    sourceIds: readonly string[];
+  }): Promise<{ status: string; vectors: ReadonlyMap<string, readonly number[]> }>;
+}
+
 export class ConsolidationEngine {
   private readonly lockHolder: string;
+  /** Recurrence clustering fails closed without a qualified source or explicit legacy fixture opt-in. */
+  generationStatus = 'embedding_generation_unavailable';
+  private readonly generation?: ConsolidationGenerationSource;
+  private readonly legacyUnqualified: boolean;
 
   /**
    * @param llm Optional chat client used to synthesize a clustered set of
@@ -381,8 +395,16 @@ export class ConsolidationEngine {
     private config: AMPConfig,
     private llm?: LlmClient,
     private tenantId?: string,
+    generation?: ConsolidationGenerationSource | { legacyUnqualified: true },
   ) {
     this.lockHolder = `consolidation-engine-${nanoid(8)}`;
+    this.legacyUnqualified = !!generation && !('readEpisodeVectors' in generation) && !('descriptor' in generation)
+      && 'legacyUnqualified' in generation && generation.legacyUnqualified === true;
+    if (this.legacyUnqualified) this.generationStatus = 'unqualified-legacy';
+    if (generation && 'readEpisodeVectors' in generation) {
+      this.generation = generation;
+      this.generationStatus = 'not-read';
+    }
   }
 
   // ─── run ──────────────────────────────────────────────────────────────────
@@ -754,11 +776,36 @@ export class ConsolidationEngine {
 
     const remainingBudget = cfg.maxPerRun - proposals.length;
     if (remainingBudget <= 0 || !this.llm?.available) return proposals;
+    if (!this.generation && !this.legacyUnqualified) return proposals;
 
     // Decision semantics represent approved decisions only. Revised, rejected,
     // abandoned, and implicit decision episodes stay episodic; they do not get
     // a second chance to become decisions through recurrence synthesis.
-    const recurringCandidates = candidates.filter((episode) => episode.memory_type !== 'decision');
+    let recurringCandidates = candidates.filter((episode) => episode.memory_type !== 'decision');
+    if (this.generation) {
+      // Never use canonical legacy vectors in the qualified production path,
+      // including outages, missing descriptors and missing active projections.
+      try {
+        const descriptor = parseEmbeddingDescriptor(this.generation.descriptor);
+        const request = parseEmbeddingRequest({
+          tenantId: this.tenantId ?? DEFAULT_TENANT,
+          projectScope: scopeFilter ?? null,
+        });
+        const projected = await this.generation.readEpisodeVectors({
+          ...request, sourceIds: recurringCandidates.map((episode) => episode.id),
+        });
+        this.generationStatus = projected.status;
+        if (projected.status !== 'ready') return proposals;
+        recurringCandidates = recurringCandidates.flatMap((episode) => {
+          const vector = projected.vectors.get(episode.id);
+          if (!vector) return [];
+          return [{ ...episode, embedding: validateEmbeddingVector(vector, descriptor) }];
+        });
+      } catch {
+        this.generationStatus = 'unavailable';
+        return proposals;
+      }
+    }
     if (recurringCandidates.length < cfg.minClusterSize) return proposals;
 
     // A cluster whose members span projects must not become one semantic — its

@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // Regression test for BUG-0008: missing review() and apply() methods on ConsolidationEngine
 import { describe, it, expect, vi } from 'vitest';
 import { ConsolidationEngine } from '../consolidation.js';
@@ -65,7 +66,7 @@ describe('BUG-0008: review() and apply() methods must exist', () => {
     });
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
 
     // The bug was: review() did not exist, calling it would throw "is not a function"
     expect(typeof engine.review).toBe('function');
@@ -97,7 +98,7 @@ describe('BUG-0008: review() and apply() methods must exist', () => {
     });
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
 
     // The bug was: apply() did not exist, calling it would throw "is not a function"
     expect(typeof engine.apply).toBe('function');

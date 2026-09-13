@@ -1,7 +1,7 @@
 import { parseAdmissionObservationV1, type AdmissionObservationV1 } from '../../../packages/core/src/admission.js';
 import { AdmissionShadowRuntime, type AdmissionObservationSink } from '../../../packages/core/src/admission-shadow.js';
-import { AMPService, type Neo4jLayer, type RedisLayer } from '../../../packages/core/src/service.js';
-import type { AMPConfig, AuditSink, EpisodeInput, EpisodicNode } from '../../../packages/core/src/types.js';
+import { AMPService, type Neo4jLayer, type RedisLayer, type ContextCacheWrite } from '../../../packages/core/src/service.js';
+import type { AMPConfig, AuditSink, EpisodeInput, EpisodicNode, MemoryContext } from '../../../packages/core/src/types.js';
 import {
   ADMISSION_STRUCTURAL_CONTRACT_VERSION,
   ADMISSION_STRUCTURAL_FIDELITY,
@@ -107,6 +107,14 @@ interface FixtureLayers {
   currentOperation: { value: string };
 }
 
+// Admission fixtures do not implement rendered context persistence. Preserve the
+// legacy no-op signature and explicitly reject versioned cache publication.
+function fixtureCacheSet(scopeHash: string, context: MemoryContext, sources: string[], ttl?: number, scopeTags?: string[], tenantId?: string): Promise<void>;
+function fixtureCacheSet(write: ContextCacheWrite): Promise<boolean>;
+async function fixtureCacheSet(write: string | ContextCacheWrite): Promise<void | boolean> {
+  if (typeof write !== 'string') return false;
+}
+
 function fixtureLayers(input: AdmissionStructuralScenarioInput): FixtureLayers {
   const trace: unknown[] = [];
   const committed: EpisodicNode[] = [];
@@ -117,7 +125,7 @@ function fixtureLayers(input: AdmissionStructuralScenarioInput): FixtureLayers {
   const redis: RedisLayer = {
     cache: {
       get: async () => null,
-      set: async () => undefined,
+      set: fixtureCacheSet,
       invalidateByScope: async (scope, tenantId) => { trace.push({ kind: 'cache-scope', scope, tenantId }); return 0; },
       invalidateByNodeId: async (id, tenantId) => { trace.push({ kind: 'cache-node', id, tenantId }); return 0; },
     },

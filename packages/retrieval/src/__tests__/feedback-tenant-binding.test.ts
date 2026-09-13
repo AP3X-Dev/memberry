@@ -24,6 +24,7 @@
 //     cold-start emission would be 1.25 rather than 1.
 
 import { describe, expect, it } from 'vitest';
+import { allowAllSemanticEligibility } from './semantic-eligibility.fixture.js';
 
 import {
   UnifiedAssembler,
@@ -147,7 +148,10 @@ function makeAssembler(
   memoryLayer: AssemblerMemoryLayer | null = MEMORY_LAYER,
   codeLayer: AssemblerCodeLayer | null = null,
 ): UnifiedAssembler {
-  return new UnifiedAssembler(makeDriver() as never, store, codeLayer, memoryLayer, EMBEDDING);
+  return new UnifiedAssembler(
+    makeDriver() as never, store, codeLayer, memoryLayer, EMBEDDING, null, null,
+    allowAllSemanticEligibility,
+  );
 }
 
 const RANKED = { strategy: 'ranked' as const, include_arch: false };

@@ -1,3 +1,4 @@
+import { runCodeMutation } from './knowledge-mutation.js';
 // packages/code/src/resolver.ts
 // Cross-file import resolution: maps import paths to actual Symbol nodes.
 
@@ -27,7 +28,7 @@ export class ImportResolver {
 
         // Find symbols in the importing file that use this import
         // Create SYMBOL_IMPORTS edge from the importing file's module to the target file's module
-        const result = await session.run(
+        const result = await runCodeMutation(session,
           `MATCH (from:Symbol {file_path: $fromPath})
            WHERE from.kind IN ['function', 'class', 'module', 'variable']
            MATCH (to:Symbol {file_path: $toPath})
@@ -81,7 +82,7 @@ export class ImportResolver {
 
     const session = this.driver.session();
     try {
-      const result = await session.run(
+      const result = await runCodeMutation(session,
         `UNWIND $rows AS row
          MATCH (from:Symbol {file_path: row.fromPath})
          WHERE from.kind IN ['function', 'class', 'module', 'variable']
@@ -105,7 +106,7 @@ export class ImportResolver {
   async linkSymbolsToEntity(filePath: string): Promise<number> {
     const session = this.driver.session();
     try {
-      const result = await session.run(
+      const result = await runCodeMutation(session,
         `MATCH (s:Symbol {file_path: $path})
          MATCH (e:Entity:Component {path: $path})
          MERGE (s)-[:DEFINED_IN]->(e)
@@ -125,7 +126,7 @@ export class ImportResolver {
   async linkAllSymbolsToEntities(): Promise<number> {
     const session = this.driver.session();
     try {
-      const result = await session.run(
+      const result = await runCodeMutation(session,
         `MATCH (s:Symbol)
          MATCH (e:Entity:Component {path: s.file_path})
          WHERE NOT (s)-[:DEFINED_IN]->(e)

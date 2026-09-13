@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/neo4j/src/__tests__/tenant-isolation.regression.test.ts
 //
 // Adversarial cross-tenant isolation gate: tenant A must NEVER see tenant B's
@@ -45,7 +46,7 @@ function block(tenant: string, content: string): MemoryBlock {
 
 describe('Tenant isolation (adversarial)', () => {
   const driver = createNeo4jDriver(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
-  const query = new ScopedQuery(driver);
+  const query = new ScopedQuery(driver, { legacyUnqualified: true });
   const blocks = new BlockStore(driver);
   const facts = new FactStore(driver);
   let ok = false;

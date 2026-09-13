@@ -1,3 +1,4 @@
+import { runCodeMutation } from './knowledge-mutation.js';
 // packages/code/src/symbol-store.ts
 // CRUD for Symbol nodes + relationship edges in Neo4j.
 
@@ -36,7 +37,7 @@ export class SymbolStore {
   async create(node: SymbolNode): Promise<string> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await runCodeMutation(session,
         `CREATE (s:Symbol {
           id: $id, name: $name, kind: $kind, language: $language,
           file_path: $file_path, start_line: $start_line, end_line: $end_line,
@@ -73,7 +74,7 @@ export class SymbolStore {
       if (node.lexical_vector) vectorProps.lexical_vector = node.lexical_vector;
 
       if (Object.keys(vectorProps).length > 0) {
-        await session.run(
+        await runCodeMutation(session,
           'MATCH (s:Symbol {id: $id}) SET s += $props',
           { id: node.id, props: vectorProps },
         );
@@ -110,7 +111,7 @@ export class SymbolStore {
         params.end_line = neo4j.int(node.end_line);
       }
 
-      await session.run(
+      await runCodeMutation(session,
         `MATCH (s:Symbol {id: $id}) SET ${setClauses.join(', ')}`,
         params,
       );
@@ -122,7 +123,7 @@ export class SymbolStore {
   async delete(id: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run('MATCH (s:Symbol {id: $id}) DETACH DELETE s', { id });
+      await runCodeMutation(session, 'MATCH (s:Symbol {id: $id}) DETACH DELETE s', { id });
     } finally {
       await session.close();
     }
@@ -288,7 +289,7 @@ export class SymbolStore {
 
     const session = this.driver.session();
     try {
-      const result = await session.run(
+      const result = await runCodeMutation(session,
         `UNWIND $rows AS row
          // OPT-7: resolve a sibling's stored project_tag for this file BEFORE the
          // MERGE, so a NEW symbol created during a context-free reindex (row tag
@@ -499,7 +500,7 @@ export class SymbolStore {
   async deleteByFile(filePath: string): Promise<number> {
     const session = this.driver.session();
     try {
-      const result = await session.run(
+      const result = await runCodeMutation(session,
         'MATCH (s:Symbol {file_path: $path}) DETACH DELETE s RETURN count(s) AS deleted',
         { path: filePath },
       );

@@ -20,7 +20,7 @@ function makeResult(overrides: Partial<CodeSearchResult>): CodeSearchResult {
 
 describe('CodeSearch.buildContext token budgeting', () => {
   it('skips oversized results and keeps later results that fit the budget', async () => {
-    const search = new CodeSearch({} as never, {} as never);
+    const search = new CodeSearch({} as never, {} as never, undefined, undefined, { legacyUnqualified: true });
     vi.spyOn(search, 'search').mockResolvedValue([
       makeResult({
         id: 'oversized',
@@ -45,7 +45,7 @@ describe('CodeSearch.buildContext token budgeting', () => {
   });
 
   it('forwards code filters into the underlying search call', async () => {
-    const search = new CodeSearch({} as never, {} as never);
+    const search = new CodeSearch({} as never, {} as never, undefined, undefined, { legacyUnqualified: true });
     const spy = vi.spyOn(search, 'search').mockResolvedValue([
       makeResult({
         id: 'scoped',

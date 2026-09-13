@@ -146,13 +146,14 @@ describe('runMigrations', () => {
         '0009-semantic-lifecycle-backfill',
         '0010-prune-unserved-derived-indexes',
         '0011-episodic-structured-index',
+        '0012-knowledge-epoch-authority',
       ],
     });
     expect(schemaStatements.filter((statement) => statement.includes('admission_observation')))
       .toHaveLength(4);
     expect(schemaStatements.filter((statement) => statement.includes('evidence_authority')))
       .toHaveLength(13);
-    expect(schemaStatements).toHaveLength(31);
+    expect(schemaStatements).toHaveLength(32);
     expect(schemaStatements.filter((s) => /^\s*CREATE\s/i.test(s)).every((s) => s.includes('IF NOT EXISTS'))).toBe(true);
     expect(schemaStatements.filter((s) => /^\s*MATCH\s/i.test(s)).every((s) => /IS NULL/.test(s))).toBe(true);
     expect(schemaStatements.filter((s) => /^\s*DROP INDEX\s/i.test(s)).every((s) => /IF EXISTS/.test(s))).toBe(true);
@@ -231,10 +232,12 @@ describe('runMigrations', () => {
         '0009-semantic-lifecycle-backfill',
         '0010-prune-unserved-derived-indexes',
         '0011-episodic-structured-index',
+        '0012-knowledge-epoch-authority',
       ],
     });
     expect(schemaStatements.length).toBeGreaterThan(10);
-    expect(schemaStatements.length % 2).toBe(0);
+    expect(schemaStatements.filter((s) => s.includes('knowledge_epoch_scope'))).toHaveLength(1);
+    expect(schemaStatements.filter((s) => !s.includes('knowledge_epoch_scope')).length % 2).toBe(0);
     expect(schemaStatements.filter((s) => /^\s*CREATE\s/i.test(s)).every((s) => s.includes('IF NOT EXISTS'))).toBe(true);
     expect(schemaStatements.filter((s) => /^\s*MATCH\s/i.test(s)).every((s) => /IS NULL/.test(s))).toBe(true);
     expect(schemaStatements.filter((s) => /^\s*DROP INDEX\s/i.test(s)).every((s) => /IF EXISTS/.test(s))).toBe(true);

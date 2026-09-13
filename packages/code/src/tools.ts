@@ -5,7 +5,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { IndexResult, CodeSearchResult, SymbolNode, SymbolKind } from './types.js';
+import type { IndexResult, CodeSearchResult, CodeContext, SymbolNode, SymbolKind } from './types.js';
 import type { SymbolDependencyOptions, SymbolLookupOptions } from './symbol-store.js';
 import type { CodeWatcher } from './watcher.js';
 import { getReindexBaseDir } from './watcher.js';
@@ -29,8 +29,8 @@ export interface ICodeSearch {
   }): Promise<CodeSearchResult[]>;
   buildContext(task: string, maxTokens?: number, as_of?: string, filters?: {
     language?: string; file_path?: string; kind?: string; project_tag?: string;
-  }): Promise<{ task: string; symbols: CodeSearchResult[]; semantic_memories: Array<{ id: string; content: string; confidence: number }>; token_count: number }>;
-  renderContextMarkdown(ctx: { task: string; symbols: CodeSearchResult[]; semantic_memories: Array<{ id: string; content: string; confidence: number }>; token_count: number }): string;
+  }): Promise<CodeContext>;
+  renderContextMarkdown(ctx: CodeContext): string;
 }
 
 export interface ISymbolStore {
@@ -172,7 +172,7 @@ export function registerCodeTools(
       project_name: z.string().max(2000).optional().describe('Scope code symbols to project name using indexed file paths'),
       limit: z.number().int().positive().optional().default(20).describe('Max results'),
       include_semantics: z.boolean().optional().default(true).describe('Include semantic memory results alongside code'),
-      as_of: z.string().optional().describe('ISO 8601 timestamp for point-in-time queries. When set, semantic memories are filtered to those created before this time.'),
+      as_of: z.string().optional().describe('ISO 8601 timestamp for semantic memories valid at that historical time. Code symbols still reflect the current index.'),
     },
     { readOnlyHint: true } satisfies ToolAnnotations,
     async (args) => {
@@ -205,6 +205,7 @@ export function registerCodeTools(
         signature: r.signature,
         doc: r.doc_comment?.slice(0, 100) || undefined,
         score: r.score.toFixed(4),
+        ...(r.temporal ? { temporal: r.temporal } : {}),
       }));
       return textContent(JSON.stringify(formatted, null, 2));
     },
@@ -347,7 +348,7 @@ export function registerCodeTools(
     {
       task: z.string().max(5000).describe('Task description (natural language)'),
       max_tokens: z.number().int().positive().optional().default(6000).describe('Max tokens for the context package'),
-      as_of: z.string().optional().describe('ISO 8601 timestamp for point-in-time queries. When set, semantic memories are filtered to those created before this time.'),
+      as_of: z.string().optional().describe('ISO 8601 timestamp for semantic memories valid at that historical time. Code symbols still reflect the current index.'),
       language: z.string().max(2000).optional().describe('Filter by language'),
       file_path: z.string().max(2000).optional().describe('Filter by file path (substring match)'),
       kind: z.string().max(2000).optional().describe('Filter by symbol kind (function, class, method, interface, type, variable, enum)'),

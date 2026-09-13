@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // packages/arch/src/__tests__/drift.regression.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { DriftDetector } from '../drift.js';
@@ -23,7 +24,7 @@ describe('DriftDetector regression', () => {
       close: vi.fn().mockResolvedValue(undefined),
     };
     const mockDriver = {
-      session: vi.fn().mockReturnValue(mockSession),
+      session: vi.fn().mockReturnValue(withKnowledgeTransactions(mockSession)),
     };
 
     const detector = new DriftDetector(mockDriver as never, '/app/project');
@@ -43,7 +44,7 @@ describe('DriftDetector regression', () => {
       close: vi.fn().mockResolvedValue(undefined),
     };
     const mockDriver = {
-      session: vi.fn().mockReturnValue(mockSession),
+      session: vi.fn().mockReturnValue(withKnowledgeTransactions(mockSession)),
     };
     const detector = new DriftDetector(mockDriver as never, '/app/project');
 
@@ -73,7 +74,7 @@ describe('DriftDetector regression', () => {
       }),
       close: vi.fn().mockResolvedValue(undefined),
     };
-    const detector = new DriftDetector({ session: () => mockSession } as never, '/app/project');
+    const detector = new DriftDetector({ session: () => withKnowledgeTransactions(mockSession) } as never, '/app/project');
 
     const results = await detector.checkAll('project:AMP');
     expect(results[0].stale).toBe(true); // missing file → stale
@@ -94,7 +95,7 @@ describe('DriftDetector regression', () => {
       close: vi.fn().mockResolvedValue(undefined),
     };
     const mockDriver = {
-      session: vi.fn().mockReturnValue(mockSession),
+      session: vi.fn().mockReturnValue(withKnowledgeTransactions(mockSession)),
     };
     const detector = new DriftDetector(mockDriver as never, '/app/project');
 

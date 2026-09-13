@@ -26,6 +26,7 @@ import {
   EpisodicStore,
   SemanticStore,
   ScopedQuery,
+  EmbeddingGenerationStore,
   FactStore,
   AuditLogStore,
   AdmissionObservationStore,
@@ -34,13 +35,15 @@ import {
 } from '@memberry/neo4j';
 import { AMPService } from './service.js';
 import { MemoryBlockService } from './blocks.js';
-import { OpenAIEmbedding } from './embedding.js';
+import { OpenAIEmbedding, defaultEmbeddingDescriptor } from './embedding.js';
+import { embeddingDescriptorFingerprint, parseEmbeddingDescriptor, type EmbeddingDescriptor } from './embedding-descriptor.js';
+import type { ConsolidationGenerationSource } from './consolidation.js';
 import { CachingEmbeddingProvider } from './caching-embedding.js';
 import { OpenAiLlmClient, NullLlmClient, type LlmClient } from './llm.js';
 import { KeyedSerialQueue } from './serial-queue.js';
 import { DreamEngine, type DreamGraphLayer, type DreamBlockLayer } from './dream.js';
 import { ExtractionConsumer } from './extraction-consumer.js';
-import { EMBEDDING_DIM, type EmbeddingProvider, type AMPConfig } from './types.js';
+import { type EmbeddingProvider, type AMPConfig } from './types.js';
 import { readEnv, defaultExportPath } from './config/settings.js';
 import { parseBoolFlag } from './config/bool-flag.js';
 import { AdmissionShadowRuntime, resolveAdmissionShadowConfig } from './admission-shadow.js';
@@ -56,6 +59,7 @@ import {
 import { produceAdmissionFeatureEnvelopeV2 } from './admission-feature-producer.js';
 
 export interface CoreServicesEnv {
+  embeddingDescriptor?: EmbeddingDescriptor;
   neo4jUri?: string;
   neo4jUser?: string;
   neo4jPassword?: string;
@@ -84,6 +88,9 @@ export interface CoreServices {
    *  instance (and one embedding provider) rather than constructing their own. */
   semantic: SemanticStore;
   scopedQuery: ScopedQuery;
+  embeddingGenerations: EmbeddingGenerationStore;
+  embeddingDescriptor: EmbeddingDescriptor;
+  consolidationGeneration: ConsolidationGenerationSource;
   factStore: FactStore;
   /** Append-only mutation audit trail. */
   audit: AuditLogStore;
@@ -106,7 +113,7 @@ function nonBlank(value: string | undefined, fallback: string): string {
   return normalized ? normalized : fallback;
 }
 
-function resolveEnv(env: CoreServicesEnv = {}): Required<CoreServicesEnv> {
+function resolveEnv(env: CoreServicesEnv = {}): Required<Omit<CoreServicesEnv, 'embeddingDescriptor'>> {
   return {
     neo4jUri: nonBlank(env.neo4jUri ?? process.env['NEO4J_URI'], 'bolt://localhost:7687'),
     neo4jUser: nonBlank(env.neo4jUser ?? process.env['NEO4J_USER'], 'neo4j'),
@@ -126,11 +133,11 @@ function resolveEnv(env: CoreServicesEnv = {}): Required<CoreServicesEnv> {
  * between "no semantic search" (correct) and "semantic search over noise"
  * (the old behaviour, which silently returned random results).
  */
-function disabledEmbedding(): EmbeddingProvider {
+function disabledEmbedding(dimensions: number): EmbeddingProvider {
   return {
     available: false,
-    embed: async () => new Array(EMBEDDING_DIM).fill(0),
-    embedBatch: async (texts: string[]) => texts.map(() => new Array(EMBEDDING_DIM).fill(0)),
+    embed: async () => new Array(dimensions).fill(0),
+    embedBatch: async (texts: string[]) => texts.map(() => new Array(dimensions).fill(0)),
   };
 }
 
@@ -140,6 +147,10 @@ function disabledEmbedding(): EmbeddingProvider {
  */
 export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   const { neo4jUri, neo4jUser, neo4jPassword, redisUrl, openaiKey, exportPath } = resolveEnv(env);
+  const descriptorJson = readEnv('MEMBERRY_EMBEDDING_DESCRIPTOR');
+  const embeddingDescriptor = parseEmbeddingDescriptor(env.embeddingDescriptor
+    ?? (descriptorJson ? JSON.parse(descriptorJson) : defaultEmbeddingDescriptor()));
+  if (embeddingDescriptor.provider !== 'openai') throw new Error('embedding_provider:unsupported');
   // Strict shadow configuration is validated before allocating clients so a
   // malformed opt-in cannot leak partially constructed Redis/Neo4j handles.
   const admissionShadowConfig = resolveAdmissionShadowConfig();
@@ -164,7 +175,12 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   const redis = createRedisClient(redisUrl);
   const driver = createNeo4jDriver(neo4jUri, neo4jUser, neo4jPassword);
 
-  const cache = new ContextCache(redis);
+  // Rendered context bytes cannot be made safe by best-effort reverse-dependency
+  // invalidation. Keep production construction disabled until AMPService binds
+  // versioned entries to authoritative before/after knowledge-epoch reads.
+  // EmbeddingCache is separate and remains enabled.
+  const renderedContextMode = 'disabled' as const;
+  const cache = new ContextCache(redis, { mode: renderedContextMode });
   const embeddings = new EmbeddingCache(redis);
   const dedup = new DedupChecker(redis);
   const signals = new SignalStream(redis);
@@ -172,7 +188,27 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   const extractionQueue = new ExtractionQueue(redis);
 
   const episodic = new EpisodicStore(driver);
-  const scopedQuery = new ScopedQuery(driver);
+  const embeddingGenerations = new EmbeddingGenerationStore(driver);
+  const scopedQuery = new ScopedQuery(driver, { store: embeddingGenerations, descriptor: embeddingDescriptor });
+  const consolidationGeneration: ConsolidationGenerationSource = {
+    descriptor: embeddingDescriptor,
+    async readEpisodeVectors({ tenantId, projectScope, sourceIds }) {
+      const vectors = new Map<string, readonly number[]>();
+      let generationId: string | null = null;
+      for (let offset = 0; offset < sourceIds.length; offset += 100) {
+        const result = await embeddingGenerations.vectors({ tenantId, projectScope }, {
+          descriptorFingerprint: embeddingDescriptorFingerprint(embeddingDescriptor),
+          kind: 'episodic', sourceIds: [...sourceIds.slice(offset, offset + 100)],
+        });
+        if (result.degradedReason || !result.generationId || (generationId && generationId !== result.generationId)) {
+          return { status: 'embedding_generation_unavailable', vectors: new Map() };
+        }
+        generationId = result.generationId;
+        for (const row of result.rows) vectors.set(row.id, row.vector);
+      }
+      return { status: 'ready', vectors };
+    },
+  };
   const factStore = new FactStore(driver);
 
   // Read-through embedding cache: identical query strings (retrieval, code
@@ -186,8 +222,8 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   // meaningless zero vectors and stays unwrapped so it is never cached and its
   // `available: false` degraded signal is preserved.
   const embedding: EmbeddingProvider = openaiKey
-    ? new CachingEmbeddingProvider(new OpenAIEmbedding(openaiKey), embeddings)
-    : disabledEmbedding();
+    ? new CachingEmbeddingProvider(new OpenAIEmbedding(openaiKey, embeddingDescriptor), embeddings)
+    : disabledEmbedding(embeddingDescriptor.dimensions);
 
   // Constructed after `embedding` so promoted/superseded semantics get a
   // content embedding at write time (otherwise they are write-only — invisible
@@ -215,8 +251,14 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
   const config: AMPConfig = {
     redis: { url: redisUrl },
     neo4j: { uri: neo4jUri, user: neo4jUser, password: neo4jPassword },
-    embedding: { provider: 'openai', apiKey: openaiKey },
-    cache: { defaultTTL: 300, contextTTL: 300, embeddingTTL: 86400 },
+    embedding: { provider: 'openai', apiKey: openaiKey, descriptor: embeddingDescriptor },
+    cache: {
+      defaultTTL: 300,
+      contextTTL: 300,
+      embeddingTTL: 86400,
+      renderedContextMode,
+      embeddingGeneration: 'embedding-unversioned-v1',
+    },
     consolidation: { autoApply: autoApplyConsolidation, signalThreshold: 3 },
     exportPath,
     readonly: readonlyMode,
@@ -275,6 +317,9 @@ export function createCoreServices(env: CoreServicesEnv = {}): CoreServices {
     episodic,
     semantic: semanticStore,
     scopedQuery,
+    embeddingGenerations,
+    embeddingDescriptor,
+    consolidationGeneration,
     factStore,
     audit,
     embedding,

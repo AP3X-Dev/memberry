@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/consolidation.promote.test.ts
 //
 // Covers the episodic->semantic promote path, which was unreachable: the engine
@@ -128,7 +129,7 @@ describe('ConsolidationEngine promote path', () => {
   it('proposes a promote from a qualifying cluster of episodes', async () => {
     const neo4j = neo4jWith(vi.fn().mockResolvedValue(promotable));
     const llm = llmReturning({ content: 'The engine owns validation.', confidence: 0.8, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('project:test');
 
@@ -143,10 +144,76 @@ describe('ConsolidationEngine promote path', () => {
     expect(p.after.tags).toEqual(['project:test']);
   });
 
+  const generationDescriptor = {
+    schemaVersion: 1 as const, provider: 'fixture', model: 'fixture-model', revision: 'r1',
+    dimensions: 2, normalization: 'l2' as const, preprocessingVersion: 'v1',
+  };
+
+  it('a stale legacy flag cannot override supplied consolidation generation authority', async () => {
+    const neo4j = neo4jWith(vi.fn().mockResolvedValue(promotable));
+    const llm = llmReturning({ content: 'Must not synthesize.', confidence: 0.8, decay_class: 'stable' });
+    const readEpisodeVectors = vi.fn().mockResolvedValue({ status: 'unavailable', vectors: new Map() });
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never,
+      undefined, { descriptor: generationDescriptor, readEpisodeVectors, legacyUnqualified: true } as never);
+    expect((await engine.run('project:test')).proposals).toHaveLength(0);
+    expect(readEpisodeVectors).toHaveBeenCalledOnce();
+    expect(llm.chat).not.toHaveBeenCalled();
+  });
+
+  it('requires an explicit generation source before recurrence clustering', async () => {
+    const neo4j = neo4jWith(vi.fn().mockResolvedValue(promotable));
+    const llm = llmReturning({ content: 'Must not synthesize.', confidence: 0.8, decay_class: 'stable' });
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    expect((await engine.run('project:test')).proposals).toHaveLength(0);
+    expect(llm.chat).not.toHaveBeenCalled();
+    expect(engine.generationStatus).toBe('embedding_generation_unavailable');
+  });
+
+  it('uses only compatible generation vectors for recurrence clustering', async () => {
+    const neo4j = neo4jWith(vi.fn().mockResolvedValue(promotable.map((episode, i) => ({
+      ...episode, embedding: vecAt(i * 90),
+    }))));
+    const llm = llmReturning({ content: 'Qualified recurrence.', confidence: 0.8, decay_class: 'stable' });
+    const readEpisodeVectors = vi.fn().mockResolvedValue({
+      status: 'ready', vectors: new Map(promotable.map((episode) => [episode.id, [1, 0]])),
+    });
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never,
+      'tenant-qualified', { descriptor: generationDescriptor, readEpisodeVectors });
+    const result = await engine.run('project:test');
+    expect(result.proposals).toHaveLength(1);
+    expect(readEpisodeVectors).toHaveBeenCalledWith({ tenantId: 'tenant-qualified', projectScope: 'project:test', sourceIds: ['e1', 'e2', 'e3'] });
+    expect(engine.generationStatus).toBe('ready');
+  });
+
+  it.each(['no-compatible-generation', 'unavailable', 'retired'])('does not cluster legacy vectors when generation is %s', async (status) => {
+    const neo4j = neo4jWith(vi.fn().mockResolvedValue(promotable));
+    const llm = llmReturning({ content: 'Must not synthesize.', confidence: 0.8, decay_class: 'stable' });
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never,
+      undefined, { descriptor: generationDescriptor, readEpisodeVectors: vi.fn().mockResolvedValue({ status, vectors: new Map() }) });
+    expect((await engine.run('project:test')).proposals).toHaveLength(0);
+    expect(llm.chat).not.toHaveBeenCalled();
+    expect(engine.generationStatus).toBe(status);
+  });
+
+  it('fails recurrence closed on malformed generation vectors or read errors', async () => {
+    for (const readEpisodeVectors of [
+      vi.fn().mockRejectedValue(new Error('offline')),
+      vi.fn().mockResolvedValue({ status: 'ready', vectors: new Map(promotable.map((episode) => [episode.id, [2, 0]])) }),
+    ]) {
+      const neo4j = neo4jWith(vi.fn().mockResolvedValue(promotable));
+      const llm = llmReturning({ content: 'Must not synthesize.', confidence: 0.8, decay_class: 'stable' });
+      const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never,
+        undefined, { descriptor: generationDescriptor, readEpisodeVectors });
+      expect((await engine.run('project:test')).proposals).toHaveLength(0);
+      expect(llm.chat).not.toHaveBeenCalled();
+      expect(engine.generationStatus).toBe('unavailable');
+    }
+  });
+
   it('clamps an out-of-range model confidence into [0,1]', async () => {
     const neo4j = neo4jWith(vi.fn().mockResolvedValue(promotable));
     const llm = llmReturning({ content: 'A claim.', confidence: 4.2, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('project:test');
 
@@ -156,7 +223,7 @@ describe('ConsolidationEngine promote path', () => {
   it('proposes nothing when the model declines with empty content', async () => {
     const neo4j = neo4jWith(vi.fn().mockResolvedValue(promotable));
     const llm = llmReturning({ content: '   ', confidence: 0.9, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true });
 
     expect((await engine.run('project:test')).proposals).toHaveLength(0);
   });
@@ -169,7 +236,7 @@ describe('ConsolidationEngine promote path', () => {
     ];
     const neo4j = neo4jWith(vi.fn().mockResolvedValue(mixed));
     const llm = llmReturning({ content: 'Should never be proposed.', confidence: 0.9, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true });
 
     expect((await engine.run('global')).proposals).toHaveLength(0);
     expect(llm.chat).not.toHaveBeenCalled();
@@ -183,7 +250,7 @@ describe('ConsolidationEngine promote path', () => {
     ];
     const neo4j = neo4jWith(vi.fn().mockResolvedValue(sameSession));
     const llm = llmReturning({ content: 'Uncorroborated.', confidence: 0.95, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('project:test');
 
@@ -200,7 +267,7 @@ describe('ConsolidationEngine promote path', () => {
       emptyRedis() as never,
       neo4j as never,
       CONFIG,
-      llm as never,
+      llm as never, undefined, { legacyUnqualified: true },
     ).run('project:test');
 
     expect(result.proposals).toHaveLength(0);
@@ -217,7 +284,7 @@ describe('ConsolidationEngine promote path', () => {
       redis as never,
       neo4j as never,
       config,
-      llm as never,
+      llm as never, undefined, { legacyUnqualified: true },
     ).run('project:test');
 
     expect(result.applied).toHaveLength(0);
@@ -239,7 +306,7 @@ describe('ConsolidationEngine promote path', () => {
       redis as never,
       neo4j as never,
       config,
-      llm as never,
+      llm as never, undefined, { legacyUnqualified: true },
     ).run('project:test');
 
     expect(result.skipped).toBe(false);
@@ -251,7 +318,7 @@ describe('ConsolidationEngine promote path', () => {
 
   it('still scans without an LLM but leaves ordinary recurrence candidates inert', async () => {
     const findPromotable = vi.fn().mockResolvedValue(promotable);
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4jWith(findPromotable) as never, CONFIG);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4jWith(findPromotable) as never, CONFIG, undefined, undefined, { legacyUnqualified: true });
 
     expect((await engine.run('project:test')).proposals).toHaveLength(0);
     expect(findPromotable).toHaveBeenCalledOnce();
@@ -265,7 +332,7 @@ describe('ConsolidationEngine promote path', () => {
       tags: ['project:test', 'wiki-publication'],
     });
     const neo4j = neo4jWith(vi.fn().mockResolvedValue([decision]));
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, undefined, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('project:test');
 
@@ -292,7 +359,7 @@ describe('ConsolidationEngine promote path', () => {
         memory_type: 'decision',
       });
       const neo4j = neo4jWith(vi.fn().mockResolvedValue([candidate]));
-      const result = await new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG).run('project:test');
+      const result = await new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, undefined, undefined, { legacyUnqualified: true }).run('project:test');
 
       expect(result.proposals).toEqual([]);
       expect(neo4j.semantic.promoteFromEpisodic).not.toHaveBeenCalled();
@@ -308,7 +375,7 @@ describe('ConsolidationEngine promote path', () => {
     const neo4j = neo4jWith(vi.fn().mockResolvedValue(patterns));
     const llm = llmReturning({ content: 'Validate external inputs.', confidence: 0.85, decay_class: 'stable' });
 
-    const result = await new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never).run('project:test');
+    const result = await new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true }).run('project:test');
 
     expect(result.proposals[0]?.after).toMatchObject({
       memory_type: 'pattern',
@@ -319,7 +386,7 @@ describe('ConsolidationEngine promote path', () => {
   it('is inert on a layer without findPromotable (backward compatibility)', async () => {
     const neo4j = neo4jWith(undefined);
     const llm = llmReturning({ content: 'x', confidence: 0.5, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true });
 
     expect((await engine.run('project:test')).proposals).toHaveLength(0);
   });
@@ -327,7 +394,7 @@ describe('ConsolidationEngine promote path', () => {
   it('survives a findPromotable failure without losing the run', async () => {
     const neo4j = neo4jWith(vi.fn().mockRejectedValue(new Error('neo4j down')));
     const llm = llmReturning({ content: 'x', confidence: 0.5, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('project:test');
     expect(result.skipped).toBe(false);
@@ -342,7 +409,7 @@ describe('ConsolidationEngine promote path', () => {
       neo4jWith(findPromotable) as never,
       CONFIG,
       llm as never,
-      'tenant-a',
+      'tenant-a', { legacyUnqualified: true },
     );
 
     await engine.run('global');

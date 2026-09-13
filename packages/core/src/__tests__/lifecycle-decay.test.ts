@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/lifecycle-decay.test.ts
 //
 // MEM-006 decay producer: formula/floor/materiality, the per-scope cap,
@@ -103,7 +104,7 @@ function makeHarness(nodes: FakeNode[], overrides: Partial<LifecycleConfig> = {}
       cache: { invalidateByNodeId: async () => 0 },
     },
     { semantic: graph as unknown as { getById(id: string): Promise<null>; updateConfidence(id: string, c: number, k?: string): Promise<void>; supersede(): Promise<string> } } as never,
-    { consolidation: { autoApply: false, signalThreshold: 3 } } as unknown as AMPConfig,
+    { consolidation: { autoApply: false, signalThreshold: 3 } } as unknown as AMPConfig, undefined, undefined, { legacyUnqualified: true },
   );
   return {
     graph, proposals, engine, consolidation, artifacts,

@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import neo4j, { Record as Neo4jRecord } from 'neo4j-driver';
 import { ScopedQuery } from '../query.js';
@@ -32,7 +33,7 @@ afterEach(() => vi.useRealTimers());
 describe('RET-002C stable Entity.id consumers', () => {
   it('scopes semantics by exact stable IDs even when legacy names are also present', async () => {
     const run = vi.fn(async () => ({ records: [] }));
-    const query = new ScopedQuery(driverWith(run) as never);
+    const query = new ScopedQuery(driverWith(run) as never, { legacyUnqualified: true });
 
     await query.byScope({
       entityIds: ['entity-b', 'entity-a'],
@@ -50,7 +51,7 @@ describe('RET-002C stable Entity.id consumers', () => {
 
   it('returns no semantics for an explicit empty stable-ID lane without a global query', async () => {
     const run = vi.fn(async () => ({ records: [] }));
-    const query = new ScopedQuery(driverWith(run) as never);
+    const query = new ScopedQuery(driverWith(run) as never, { legacyUnqualified: true });
 
     await expect(query.byScope({ entityIds: [], limit: 50 })).resolves.toEqual([]);
     expect(run).not.toHaveBeenCalled();
@@ -102,7 +103,7 @@ describe('RET-002C stable Entity.id consumers', () => {
       record({ entityId: 'entity-foreign', s: { id: 'foreign-secret' } })],
   ])('rejects substituted official %s stable-result records', async (_label, invoke, foreignRecord) => {
     const run = vi.fn(async () => ({ records: [foreignRecord] }));
-    await expect(invoke(new ScopedQuery(driverWith(run) as never)))
+    await expect(invoke(new ScopedQuery(driverWith(run) as never, { legacyUnqualified: true })))
       .rejects.toThrow('stable_query_result_invalid');
   });
 
@@ -115,7 +116,7 @@ describe('RET-002C stable Entity.id consumers', () => {
     const oversized = new Array(11).fill(record({ entityId: 'entity-a', s: { id: 'safe' } }));
     for (const records of [proxied, oversized]) {
       const run = vi.fn(async () => ({ records }));
-      await expect(new ScopedQuery(driverWith(run) as never).byScope({ entityIds: ['entity-a'], limit: 10 }))
+      await expect(new ScopedQuery(driverWith(run) as never, { legacyUnqualified: true }).byScope({ entityIds: ['entity-a'], limit: 10 }))
         .rejects.toThrow('stable_query_result_invalid');
     }
     expect(hooks).not.toHaveBeenCalled();
@@ -142,7 +143,7 @@ describe('RET-002C stable Entity.id consumers', () => {
     ];
     for (const result of results) {
       const run = vi.fn(async () => result);
-      await expect(invoke(new ScopedQuery(driverWith(run) as never)))
+      await expect(invoke(new ScopedQuery(driverWith(run) as never, { legacyUnqualified: true })))
         .rejects.toThrow('stable_query_result_invalid');
     }
     expect(hooks).not.toHaveBeenCalled();
@@ -166,7 +167,7 @@ describe('RET-002C stable Entity.id consumers', () => {
       for (const invoke of [(query: ScopedQuery) => query.byScope({ entityIds: value as never, limit: 10 })]) {
         const run = vi.fn(async () => ({ records: [] }));
         const driver = driverWith(run);
-        await expect(invoke(new ScopedQuery(driver as never))).rejects.toThrow('resolved_entity_ids_invalid');
+        await expect(invoke(new ScopedQuery(driver as never, { legacyUnqualified: true }))).rejects.toThrow('resolved_entity_ids_invalid');
         expect(driver.session).not.toHaveBeenCalled();
       }
     }
@@ -187,7 +188,7 @@ describe('RET-002C stable Entity.id consumers', () => {
     for (const scope of [proxy, revoked.proxy, accessor, customProto, extra]) {
       const run = vi.fn(async () => ({ records: [] }));
       const driver = driverWith(run);
-      await expect(new ScopedQuery(driver as never).byScope(scope as never))
+      await expect(new ScopedQuery(driver as never, { legacyUnqualified: true }).byScope(scope as never))
         .rejects.toThrow('query_scope_invalid');
       expect(driver.session).not.toHaveBeenCalled();
     }
@@ -369,14 +370,14 @@ describe('RET-002C stable Entity.id consumers', () => {
     }), record({ entityId: 'entity-a', s: semanticProjection({ tenant_id: 'tenant-b', content: 'FOREIGN-SECRET' }) })],
   ])('rejects allowed-ID %s rows with foreign tenant or project authority', async (_label, invoke, hostile) => {
     const run = vi.fn(async () => ({ records: [hostile] }));
-    await expect(invoke(new ScopedQuery(driverWith(run) as never)))
+    await expect(invoke(new ScopedQuery(driverWith(run) as never, { legacyUnqualified: true })))
       .rejects.toThrow('stable_query_result_invalid');
   });
 
   it('accepts legacy-null tenant data only for the default tenant stable lane', async () => {
     const projection = semanticProjection({ tenant_id: undefined });
     const run = vi.fn(async () => ({ records: [record({ entityId: 'entity-a', s: projection })] }));
-    await expect(new ScopedQuery(driverWith(run) as never).byScope({
+    await expect(new ScopedQuery(driverWith(run) as never, { legacyUnqualified: true }).byScope({
       entityIds: ['entity-a'], limit: 10, projectScope: 'project:alpha',
     })).resolves.toHaveLength(1);
   });
@@ -384,7 +385,7 @@ describe('RET-002C stable Entity.id consumers', () => {
   it('normalizes only official safe nonnegative Neo4j Integer semantic signal counts', async () => {
     const invoke = (signalCount: unknown) => new ScopedQuery(driverWith(vi.fn(async () => ({ records: [
       record({ entityId: 'entity-a', s: semanticProjection({ signal_count: signalCount }) }),
-    ] }))) as never).byScope({
+    ] }))) as never, { legacyUnqualified: true }).byScope({
       entityIds: ['entity-a'], limit: 10, tenantId: 'tenant-a', projectScope: 'project:alpha',
     });
 
@@ -409,7 +410,7 @@ describe('RET-002C stable Entity.id consumers', () => {
   it('accepts code-unit ordered mixed-case and punctuation ties in stable query results', async () => {
     const ids = ['semantic-A', 'semantic-a', 'semantic.a', 'semantic:a'];
     const rows = ids.map((id) => record({ entityId: 'entity-a', s: semanticProjection({ id }) }));
-    await expect(new ScopedQuery(driverWith(vi.fn(async () => ({ records: rows }))) as never).byScope({
+    await expect(new ScopedQuery(driverWith(vi.fn(async () => ({ records: rows }))) as never, { legacyUnqualified: true }).byScope({
       entityIds: ['entity-a'], limit: 10, tenantId: 'tenant-a', projectScope: 'project:alpha',
     })).resolves.toHaveLength(4);
   });
@@ -419,7 +420,7 @@ describe('RET-002C stable Entity.id consumers', () => {
       record({ entityId: 'entity-a', s: semanticProjection({ id: 'semantic-b', confidence: 0.8 }) }),
       record({ entityId: 'entity-a', s: semanticProjection({ id: 'semantic-a', confidence: 0.9 }) }),
     ];
-    await expect(new ScopedQuery(driverWith(vi.fn(async () => ({ records: scopeRows }))) as never)
+    await expect(new ScopedQuery(driverWith(vi.fn(async () => ({ records: scopeRows }))) as never, { legacyUnqualified: true })
       .byScope({ entityIds: ['entity-a'], limit: 10, tenantId: 'tenant-a', projectScope: 'project:alpha' }))
       .rejects.toThrow('stable_query_result_invalid');
 
@@ -434,7 +435,7 @@ describe('RET-002C stable Entity.id consumers', () => {
     ];
     for (const projection of cases) {
       const run = vi.fn(async () => ({ records: [record({ entityId: 'entity-a', s: projection })] }));
-      await expect(new ScopedQuery(driverWith(run) as never).byScope({
+      await expect(new ScopedQuery(driverWith(run) as never, { legacyUnqualified: true }).byScope({
         entityIds: ['entity-a'], limit: 10, tenantId: 'tenant-a', projectScope: 'project:alpha',
       })).rejects.toThrow('stable_query_result_invalid');
     }

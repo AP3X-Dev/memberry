@@ -1,5 +1,6 @@
 // packages/core/src/index.ts
 export * from './types.js';
+export * from './embedding-descriptor.js';
 export * from './structured-index.js';
 export * from './structured-index-extractor.js';
 export { OpenAIEmbedding } from './embedding.js';

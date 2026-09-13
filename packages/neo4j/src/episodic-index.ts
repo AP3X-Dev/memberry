@@ -5,6 +5,7 @@ import {
   type EpisodeGraphBackfillFactV1,
   type EpisodeIndexKeyNodeV1,
 } from '@memberry/core';
+import { bumpKnowledgeEpoch, projectKnowledgeScope } from './knowledge-epoch.js';
 
 export interface EpisodicIndexCursorV1 { createdAt: string; id: string }
 export interface EpisodicIndexBackfillEpisodeV1 extends EpisodicIndexCursorV1 {
@@ -201,6 +202,10 @@ export class EpisodicIndexStore {
         if (Number(outcome.records[0]?.get('count') ?? 0) !== 1) {
           throw new Error('structured_index_backfill:outcome_authority_mismatch');
         }
+        await bumpKnowledgeEpoch(tx, {
+          tenantId: episode.tenantId,
+          projectScope: projectKnowledgeScope(episode.projectScope),
+        });
       });
     } finally {
       await session.close();
@@ -246,6 +251,10 @@ export class EpisodicIndexStore {
             { episodeId: episode.id, keys },
           );
         }
+        await bumpKnowledgeEpoch(tx, {
+          tenantId: episode.tenantId,
+          projectScope: projectKnowledgeScope(episode.projectScope),
+        });
       });
     } finally {
       await session.close();
@@ -275,6 +284,12 @@ export class EpisodicIndexStore {
            DETACH DELETE outcome`,
           input,
         );
+        if (count > 0) {
+          await bumpKnowledgeEpoch(tx, {
+            tenantId: input.tenantId,
+            projectScope: projectKnowledgeScope(input.projectScope),
+          });
+        }
         return count;
       });
     } finally {

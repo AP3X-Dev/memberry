@@ -1,3 +1,4 @@
+import { runArchMutation } from './knowledge-mutation.js';
 // packages/arch/src/drift.ts
 // SHA-256 file hash tracking for drift detection.
 
@@ -89,7 +90,7 @@ export class DriftDetector {
 
       // Update stale flag in graph
       if (stale) {
-        await session.run(
+        await runArchMutation(session,
           `MATCH (e:Entity {name: $name})
            WHERE ${entityProjectFilter('e')}
            SET e.stale = true`,
@@ -143,7 +144,7 @@ export class DriftDetector {
         }
       }
 
-      await session.run(
+      await runArchMutation(session,
         `MATCH (e:Entity {name: $name})
          WHERE ${entityProjectFilter('e')}
          SET e.file_hashes_json = $hashes, e.stale = false, e.last_indexed_at = $now`,
@@ -222,7 +223,7 @@ export class DriftDetector {
       // Batch update stale flags by ID — names are NOT unique across projects, so
       // matching by name would mark same-named entities in OTHER projects stale.
       if (staleIds.length > 0) {
-        await session.run(
+        await runArchMutation(session,
           'MATCH (e:Entity) WHERE e.id IN $ids SET e.stale = true',
           { ids: staleIds },
         );
