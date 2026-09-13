@@ -183,8 +183,6 @@ jobs:
       fail-fast: false
       matrix:
         node-version: [20, 22]
-    env:
-      PR0102_EVIDENCE: ${{ runner.temp }}/memberry-pr0102-live
     services:
       redis:
         image: redis:7-alpine
@@ -210,6 +208,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      # The runner context is unavailable in job-level env, so the evidence
+      # directory is exported from a step; it stays outside the source tree.
+      - name: Locate disposable evidence directory
+        shell: bash
+        run: echo "PR0102_EVIDENCE=$RUNNER_TEMP/memberry-pr0102-live" >> "$GITHUB_ENV"
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
