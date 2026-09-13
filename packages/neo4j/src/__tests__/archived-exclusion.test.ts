@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/neo4j/src/__tests__/archived-exclusion.test.ts
 //
 // MEM-006 §2.5.1: every memory-serving read in this package excludes
@@ -39,7 +40,7 @@ describe('archivedWhere helper', () => {
 describe('ScopedQuery excludes archived memory', () => {
   it('byEntity / byTag / byScope (all branches) / byVector / byVectorEpisodic / byEntityWithFacts / expandByGraph', async () => {
     const { driver, cyphers } = captureDriver();
-    const query = new ScopedQuery(driver);
+    const query = new ScopedQuery(driver, { legacyUnqualified: true });
 
     await query.byEntity('E', 5);
     await query.byTag('t', 5);
@@ -99,7 +100,7 @@ describe('SemanticStore', () => {
 describe('GDSAlgorithms exclude archived semantics', () => {
   it('all four analytics queries carry the predicate', async () => {
     const { driver, cyphers } = captureDriver();
-    const gds = new GDSAlgorithms(driver);
+    const gds = new GDSAlgorithms(driver, { legacyUnqualified: true });
     await gds.findSimilarSemantics('E');
     await gds.pageRank('E');
     await gds.communityDetection();

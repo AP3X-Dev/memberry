@@ -72,6 +72,13 @@ export function normalizePredicate(predicate: string): string {
   return canonical;
 }
 
+/** Only predicates whose contract has one current value imply a conflict from
+ * different objects alone. Dependencies, capabilities, locations and unknown
+ * predicates may legitimately have several values. */
+export function isExclusiveFactPredicate(predicate: string): boolean {
+  return normalizePredicate(predicate) === 'version_is';
+}
+
 /**
  * Returns a copy of the current predicate synonym map.
  * Useful for debugging and inspection via berry_query.

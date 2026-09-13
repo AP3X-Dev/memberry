@@ -1,11 +1,20 @@
 // packages/neo4j/src/fact.ts
 import neo4j, { Record as Neo4jRecord, type Driver } from 'neo4j-driver';
 import { isProxy } from 'node:util/types';
-import { nanoid } from 'nanoid';
-import type { FactNode, FactTimeline, FactDiff, TemporalOptions } from '@memberry/core';
+import { DEFAULT_TENANT, type FactNode, type FactTimeline, type FactDiff, type TemporalOptions } from '@memberry/core';
 import { EntityResolver } from './entity-resolver.js';
 import { temporalSetClause } from './temporal-edges.js';
 import { tenantWhere, resolveTenant, TENANT_PARAM } from './tenant.js';
+import { bumpKnowledgeEpoch } from './knowledge-epoch.js';
+
+function factProjectScope(tags: readonly string[] | null | undefined): string | null {
+  const scopes = (tags ?? []).filter((tag) => /^project:/i.test(tag)).map((tag) => tag.toLowerCase());
+  if (scopes.length === 0) return null;
+  if (scopes.length !== 1 || !/^project:[a-z0-9][a-z0-9._-]{0,127}$/.test(scopes[0]!)) {
+    throw new Error('knowledge_epoch:ambiguous_fact_project_scope');
+  }
+  return scopes[0]!;
+}
 
 export class FactStore {
   private resolver: EntityResolver;
@@ -102,6 +111,11 @@ export class FactStore {
         );
       }
 
+      await bumpKnowledgeEpoch(tx, {
+        tenantId: resolveTenant(fact.tenant_id),
+        projectScope: factProjectScope(fact.tags),
+      });
+
       await tx.commit();
       return fact.id;
     } catch (err) {
@@ -144,7 +158,7 @@ export class FactStore {
         case 'current':
           cypher = `
             MATCH (f:Fact) WHERE f.entity_id = $entityId
-              AND f.status = 'active' AND f.invalid_at IS NULL
+              AND f.status IN ['active', 'disputed'] AND f.invalid_at IS NULL
               AND ${tFilter}
             RETURN f ORDER BY f.valid_at DESC`;
           break;
@@ -228,7 +242,7 @@ export class FactStore {
     let order: 'ASC' | 'DESC';
     switch (timeMode) {
       case 'current':
-        factFilter = `f.status = 'active' AND f.invalid_at IS NULL`;
+        factFilter = `f.status IN ['active', 'disputed'] AND f.invalid_at IS NULL`;
         order = 'DESC';
         break;
       case 'historical':
@@ -299,7 +313,7 @@ export class FactStore {
     let order: 'ASC' | 'DESC';
     switch (timeMode) {
       case 'current':
-        factFilter = `f.status = 'active' AND f.invalid_at IS NULL`;
+        factFilter = `f.status IN ['active', 'disputed'] AND f.invalid_at IS NULL`;
         order = 'DESC';
         break;
       case 'historical':
@@ -409,19 +423,29 @@ export class FactStore {
     const session = this.driver.session();
     try {
       const now = new Date().toISOString();
-      await session.run(
-        `MATCH (f:Fact {id: $id})
-         SET f.status = 'invalidated', f.invalid_at = $invalidAt, f.updated_at = $now`,
-        { id, invalidAt, now },
-      );
-
-      if (supersededById) {
-        await session.run(
-          `MATCH (newF:Fact {id: $newId}), (oldF:Fact {id: $oldId})
-           MERGE (newF)-[:SUPERSEDES_FACT]->(oldF)`,
-          { newId: supersededById, oldId: id },
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
+          `MATCH (f:Fact {id: $id})
+           SET f.status = 'invalidated', f.invalid_at = $invalidAt, f.updated_at = $now
+           RETURN coalesce(f.tenant_id, $defaultTenant) AS tenantId, f.tags AS tags`,
+          { id, invalidAt, now, defaultTenant: DEFAULT_TENANT },
         );
-      }
+
+        if (supersededById) {
+          await tx.run(
+            `MATCH (newF:Fact {id: $newId}), (oldF:Fact {id: $oldId})
+             MERGE (newF)-[:SUPERSEDES_FACT]->(oldF)`,
+            { newId: supersededById, oldId: id },
+          );
+        }
+        const record = changed.records[0];
+        if (record) {
+          await bumpKnowledgeEpoch(tx, {
+            tenantId: record.get('tenantId') as string,
+            projectScope: factProjectScope(record.get('tags') as string[] | null),
+          });
+        }
+      });
     } finally {
       await session.close();
     }
@@ -431,11 +455,21 @@ export class FactStore {
     const session = this.driver.session();
     try {
       const now = new Date().toISOString();
-      await session.run(
-        `MATCH (f:Fact {id: $id})
-         SET f.status = 'disputed', f.updated_at = $now`,
-        { id, now },
-      );
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
+          `MATCH (f:Fact {id: $id})
+           SET f.status = 'disputed', f.updated_at = $now
+           RETURN coalesce(f.tenant_id, $defaultTenant) AS tenantId, f.tags AS tags`,
+          { id, now, defaultTenant: DEFAULT_TENANT },
+        );
+        const record = changed.records[0];
+        if (record) {
+          await bumpKnowledgeEpoch(tx, {
+            tenantId: record.get('tenantId') as string,
+            projectScope: factProjectScope(record.get('tags') as string[] | null),
+          });
+        }
+      });
     } finally {
       await session.close();
     }
@@ -584,10 +618,18 @@ export class FactStore {
   async setEmbedding(id: string, embedding: number[]): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
-        `MATCH (f:Fact {id: $id}) SET f.embedding = $embedding`,
-        { id, embedding },
-      );
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
+          `MATCH (f:Fact {id: $id}) SET f.embedding = $embedding
+           RETURN coalesce(f.tenant_id, $defaultTenant) AS tenantId, f.tags AS tags`,
+          { id, embedding, defaultTenant: DEFAULT_TENANT },
+        );
+        const record = changed.records[0];
+        if (record) await bumpKnowledgeEpoch(tx, {
+          tenantId: record.get('tenantId') as string,
+          projectScope: factProjectScope(record.get('tags') as string[] | null),
+        });
+      });
     } finally {
       await session.close();
     }
@@ -600,12 +642,36 @@ export class FactStore {
   async linkCoExtracted(factId1: string, factId2: string, episodeId: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
-        `MATCH (f1:Fact {id: $id1}), (f2:Fact {id: $id2})
-         MERGE (f1)-[r:SAME_EPISODE]->(f2)
-         SET r.episode_id = $episodeId, r.created_at = COALESCE(r.created_at, $now)`,
-        { id1: factId1, id2: factId2, episodeId, now: new Date().toISOString() },
-      );
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
+          `MATCH (f1:Fact {id: $id1}), (f2:Fact {id: $id2})
+           MERGE (f1)-[r:SAME_EPISODE]->(f2)
+           SET r.episode_id = $episodeId, r.created_at = COALESCE(r.created_at, $now)
+           RETURN [
+             {tenantId: coalesce(f1.tenant_id, $defaultTenant), tags: f1.tags},
+             {tenantId: coalesce(f2.tenant_id, $defaultTenant), tags: f2.tags}
+           ] AS scopes`,
+          {
+            id1: factId1,
+            id2: factId2,
+            episodeId,
+            now: new Date().toISOString(),
+            defaultTenant: DEFAULT_TENANT,
+          },
+        );
+        const scopes = (changed.records[0]?.get('scopes') as Array<{
+          tenantId: string;
+          tags: string[] | null;
+        }> | undefined) ?? [];
+        const seen = new Set<string>();
+        for (const scope of scopes) {
+          const projectScope = factProjectScope(scope.tags);
+          const key = `${scope.tenantId}\u0000${projectScope ?? ''}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          await bumpKnowledgeEpoch(tx, { tenantId: scope.tenantId, projectScope });
+        }
+      });
     } finally {
       await session.close();
     }
@@ -618,10 +684,19 @@ export class FactStore {
   async updateConfidence(id: string, confidence: number): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
-        'MATCH (f:Fact {id: $id}) SET f.confidence = $confidence, f.updated_at = $now',
-        { id, confidence, now: new Date().toISOString() },
-      );
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
+          `MATCH (f:Fact {id: $id})
+           SET f.confidence = $confidence, f.updated_at = $now
+           RETURN coalesce(f.tenant_id, $defaultTenant) AS tenantId, f.tags AS tags`,
+          { id, confidence, now: new Date().toISOString(), defaultTenant: DEFAULT_TENANT },
+        );
+        const record = changed.records[0];
+        if (record) await bumpKnowledgeEpoch(tx, {
+          tenantId: record.get('tenantId') as string,
+          projectScope: factProjectScope(record.get('tags') as string[] | null),
+        });
+      });
     } finally {
       await session.close();
     }
@@ -637,12 +712,21 @@ export class FactStore {
     if (updates.length === 0) return;
     const session = this.driver.session();
     try {
-      await session.run(
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
         `UNWIND $updates AS u
          MATCH (f:Fact {id: u.id})
-         SET f.confidence = u.confidence, f.updated_at = $now`,
-        { updates, now: new Date().toISOString() },
-      );
+         SET f.confidence = u.confidence, f.updated_at = $now
+         RETURN DISTINCT coalesce(f.tenant_id, $defaultTenant) AS tenantId, f.tags AS tags`,
+        { updates, now: new Date().toISOString(), defaultTenant: DEFAULT_TENANT },
+        );
+        for (const record of changed.records) {
+          await bumpKnowledgeEpoch(tx, {
+            tenantId: record.get('tenantId') as string,
+            projectScope: factProjectScope(record.get('tags') as string[] | null),
+          });
+        }
+      });
     } finally {
       await session.close();
     }
@@ -674,12 +758,20 @@ export class FactStore {
   ): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
         `MATCH (f:Fact {id: $id})
          SET f.status = 'active', f.inference_type = $inferenceType,
-             f.confidence = $confidence, f.updated_at = $now`,
-        { id, confidence, inferenceType, now: new Date().toISOString() },
-      );
+             f.confidence = $confidence, f.updated_at = $now
+         RETURN coalesce(f.tenant_id, $defaultTenant) AS tenantId, f.tags AS tags`,
+        { id, confidence, inferenceType, now: new Date().toISOString(), defaultTenant: DEFAULT_TENANT },
+        );
+        const record = changed.records[0];
+        if (record) await bumpKnowledgeEpoch(tx, {
+          tenantId: record.get('tenantId') as string,
+          projectScope: factProjectScope(record.get('tags') as string[] | null),
+        });
+      });
     } finally {
       await session.close();
     }

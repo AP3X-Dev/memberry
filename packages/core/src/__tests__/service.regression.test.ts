@@ -74,6 +74,7 @@ describe('AMPService.store regression', () => {
     await service.store({
       session_id: 'sess-1',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'test content',
     });

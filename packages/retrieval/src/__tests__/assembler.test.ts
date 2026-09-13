@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { UnifiedAssembler, type AssemblerCodeLayer, type AssemblerMemoryLayer } from '../assembler.js';
 import type { FeedbackRedisLayer } from '../feedback.js';
+import { embeddingDescriptorFingerprint } from '@memberry/core';
 import type { EmbeddingProvider, LlmClient, ChatMessage } from '@memberry/core';
 import type { RetrievalResult } from '../types.js';
 import { replayRetrievalTrace } from '../trace.js';
@@ -12,6 +13,7 @@ import {
 } from '../served-reranker.js';
 import { createRerankerProviderV1 } from '../reranker.js';
 import { classifyIntent } from '../intent.js';
+import { allowAllSemanticEligibility } from './semantic-eligibility.fixture.js';
 
 // ─── Mock modules ────────────────────────────────────────────────────────────
 
@@ -215,6 +217,9 @@ describe('UnifiedAssembler', () => {
       codeLayer,
       memoryLayer,
       embedding,
+      undefined,
+      undefined,
+      allowAllSemanticEligibility,
     );
   });
 
@@ -426,24 +431,36 @@ describe('UnifiedAssembler', () => {
       );
     });
 
+    it('binds query embeddings to the named tenant and bypasses ambiguous project cache scope', async () => {
+      embedding.embed = vi.fn().mockResolvedValue([0.1, 0.2]);
+      await assembler.assemble('scoped retrieval', { strategy: 'ranked', tenantId: 'tenant-a', project_name: 'memberry' });
+      expect(embedding.embed).toHaveBeenCalledExactlyOnceWith('scoped retrieval', { tenantId: 'tenant-a', projectScope: 'project:memberry' });
+      vi.mocked(embedding.embed).mockClear();
+      await assembler.assemble('ambiguous retrieval', { strategy: 'ranked', tenantId: 'tenant-a', tag_scope: ['project:one', 'project:two'] });
+      expect(embedding.embed).toHaveBeenCalledExactlyOnceWith('ambiguous retrieval');
+    });
+
     it('embeds the query once and shares the vector with the code and memory layers', async () => {
       // Shared query embedding: the assembler embeds the task ONCE and threads the
       // vector into both dense channels instead of each re-embedding the same string.
       const vec = Array(384).fill(0.7);
       embedding.embed = vi.fn().mockResolvedValue(vec);
+      const descriptor = { schemaVersion: 1 as const, provider: 'fixture', model: 'shared', revision: '1', dimensions: 384, normalization: 'none' as const, preprocessingVersion: '1' };
+      Object.assign(embedding, { descriptor });
+      const queryDescriptorFingerprint = embeddingDescriptorFingerprint(descriptor);
 
-      await assembler.assemble('find auth code', { strategy: 'ranked', tenantId: 'default' });
+      await assembler.assemble('find auth code', { strategy: 'ranked', tenantId: 'default', project_name: 'memberry' });
 
       // Exactly one embed for the whole assemble() (not one per channel).
       expect(embedding.embed).toHaveBeenCalledTimes(1);
-      expect(embedding.embed).toHaveBeenCalledWith('find auth code');
+      expect(embedding.embed).toHaveBeenCalledWith('find auth code', { tenantId: 'default', projectScope: 'project:memberry' });
       // Both dense channels received the SAME shared vector.
       expect(codeLayer.search).toHaveBeenCalledWith(
         'find auth code',
-        expect.objectContaining({ queryVector: vec }),
+        expect.objectContaining({ queryVector: vec, queryDescriptorFingerprint }),
       );
       expect(memoryLayer.load).toHaveBeenCalledWith(
-        expect.objectContaining({ queryVector: vec }),
+        expect.objectContaining({ queryVector: vec, queryDescriptorFingerprint }),
       );
     });
 
@@ -930,6 +947,8 @@ describe('UnifiedAssembler', () => {
         memoryLayer,
         embedding,
         llm,
+        undefined,
+        allowAllSemanticEligibility,
       );
       return { asm, chatSpy: llm.chat };
     }

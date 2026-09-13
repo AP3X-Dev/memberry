@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCoreServices } from '../services-factory.js';
+import { defaultEmbeddingDescriptor } from '../embedding.js';
 
 const managedEnv = [
   'MEMBERRY_CONSOLIDATION_AUTO_APPLY',
@@ -10,6 +11,7 @@ const managedEnv = [
   'NEO4J_URI',
   'NEO4J_USER',
   'REDIS_URL',
+  'MEMBERRY_EMBEDDING_DESCRIPTOR',
 ] as const;
 const originalEnv = Object.fromEntries(managedEnv.map((name) => [name, process.env[name]]));
 
@@ -21,6 +23,39 @@ afterEach(() => {
   }
 });
 describe('createCoreServices consolidation policy config', () => {
+  it('binds generation serving even when the provider is disabled', async () => {
+    const descriptor = { ...defaultEmbeddingDescriptor(), dimensions: 3 };
+    const core = createCoreServices({ openaiKey: '', embeddingDescriptor: descriptor });
+    try {
+      expect(core.embedding.available).toBe(false);
+      expect(await core.embedding.embed('fixture')).toEqual([0, 0, 0]);
+      expect(core.embeddingDescriptor).toEqual(descriptor);
+      expect(core.scopedQuery.generationStatus).toBe('not-read');
+      expect(core.consolidationGeneration.descriptor).toEqual(descriptor);
+    } finally { await core.close(); }
+  });
+
+  it('rejects malformed or unsupported descriptor configuration before construction', () => {
+    process.env.MEMBERRY_EMBEDDING_DESCRIPTOR = '{"dimensions":3}';
+    expect(() => createCoreServices()).toThrow('embedding_descriptor:invalid');
+    expect(() => createCoreServices({ embeddingDescriptor: { ...defaultEmbeddingDescriptor(), provider: 'other' } }))
+      .toThrow('embedding_provider:unsupported');
+  });
+
+  it('discards consolidation vectors when the active generation changes between bounded batches', async () => {
+    const core = createCoreServices({ openaiKey: '' });
+    try {
+      const spy = vi.spyOn(core.embeddingGenerations, 'vectors')
+        .mockResolvedValueOnce({ generationId: 'a', rows: [{ id: 'episode-0', vector: [1], inputText: '', dependencyText: '' }] })
+        .mockResolvedValueOnce({ generationId: 'b', rows: [] });
+      const result = await core.consolidationGeneration.readEpisodeVectors({ tenantId: 'default', projectScope: 'project:a',
+        sourceIds: Array.from({ length: 101 }, (_, i) => `episode-${i}`) });
+      expect(result.status).toBe('embedding_generation_unavailable');
+      expect(result.vectors.size).toBe(0);
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(spy.mock.calls[0]?.[1].sourceIds).toHaveLength(100);
+    } finally { await core.close(); }
+  });
   it('keeps admission observation default-off with a 50ms bound', async () => {
     delete process.env.MEMBERRY_ADMISSION_SHADOW_ENABLED;
     delete process.env.MEMBERRY_ADMISSION_SHADOW_TIMEOUT_MS;

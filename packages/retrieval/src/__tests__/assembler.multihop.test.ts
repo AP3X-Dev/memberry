@@ -7,6 +7,7 @@ import type { CandidateChannelExecutionResultV1 } from '../candidate-channel.js'
 import type { MultihopProbeInput } from '../multihop-expansion.js';
 import { createServedRerankerProviderV1 } from '../served-reranker.js';
 import type { UnifiedContext } from '../types.js';
+import { allowAllSemanticEligibility } from './semantic-eligibility.fixture.js';
 
 const QUERY = 'For hive frame Alder, name its apiary shed and the endpoint beyond it.';
 // Decision 2b(3): the seam passes budgetSlots = |pass-1|, and a pass-2-only item only enters the
@@ -66,7 +67,10 @@ function makeLegacy(options: { preambleTask?: (scope: Scope) => string } = {}) {
   const driver = { session: () => ({ run: vi.fn(async () => ({ records: [{ get: () => 0 }] })), close: vi.fn(async () => undefined) }) };
   const redis = { zincrby: vi.fn(), zrevrangeWithScores: vi.fn(async () => []), lpush: vi.fn(), ltrim: vi.fn() };
   const embedding = { available: true, embed: vi.fn(async () => [0.1, 0.2, 0.3]), embedBatch: vi.fn(async () => [[0.1, 0.2, 0.3]]) };
-  const assembler = new UnifiedAssembler(driver as never, redis as never, null, memoryLayer, embedding as never);
+  const assembler = new UnifiedAssembler(
+    driver as never, redis as never, null, memoryLayer, embedding as never, null, null,
+    allowAllSemanticEligibility,
+  );
   return { assembler, memoryLayer, scopes };
 }
 
@@ -216,6 +220,7 @@ function makeServed() {
     {} as never,
     { zincrby: vi.fn(), zrevrangeWithScores: vi.fn(), lpush: vi.fn(), ltrim: vi.fn() },
     null, null, { embed: vi.fn(), embedBatch: vi.fn() }, null, createServedRerankerProviderV1(),
+    allowAllSemanticEligibility,
   );
 }
 

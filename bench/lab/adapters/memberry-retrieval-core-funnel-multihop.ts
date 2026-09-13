@@ -36,7 +36,7 @@ import type {
   QueryResponse,
 } from '../contracts/adapter.js';
 import { InMemoryAdapter, inRequestedScope, isCurrent, namespaceKey } from './in-memory.js';
-import { fixtureVector, projectAssemblyResults } from './memberry-retrieval-core.js';
+import { fixtureVector, projectAssemblyResults, fixtureSemanticAuthority } from './memberry-retrieval-core.js';
 import { FUNNEL_TOP_N, funnelSelect } from './memberry-retrieval-core-funnel.js';
 import {
   UnifiedAssembler,
@@ -194,6 +194,7 @@ abstract class MemBerryRetrievalCoreFunnelMultihopAdapter extends InMemoryAdapte
       FIXTURE_EMBEDDING,
       null,
       null,
+      fixtureSemanticAuthority(scoped, request),
     );
     const key = calibGateKey(request.namespace.project, request.query);
     // Gate diagnostic: the funnel is called once for pass 1 and once per probe.

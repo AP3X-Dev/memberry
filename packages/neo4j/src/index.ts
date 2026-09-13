@@ -52,10 +52,27 @@ export type {
   AdmissionRoutingRecommendationStoreErrorCode,
 } from './admission-routing-recommendation.js';
 export { SemanticStore } from './semantic.js';
+export {
+  KnowledgeEpochStore,
+  bumpKnowledgeEpoch,
+  projectKnowledgeScope,
+  KNOWLEDGE_EPOCH_INCREMENT_CYPHER,
+  UNSCOPED_KNOWLEDGE_PROJECT,
+} from './knowledge-epoch.js';
+export type { KnowledgeEpochScope } from './knowledge-epoch.js';
 export { ProvenanceTraversal } from './provenance.js';
 export type { ProvenanceNode } from './provenance.js';
-export { ScopedQuery, validateReadOnlyCypher, archivedWhere } from './query.js';
-export type { QueryScope } from './query.js';
+export {
+  ScopedQuery,
+  validateReadOnlyCypher,
+  archivedWhere,
+  semanticEligibilityWhere,
+} from './query.js';
+export type {
+  QueryScope,
+  SemanticEligibilityInput,
+  SemanticEligibilityResult,
+} from './query.js';
 export { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from './tenant.js';
 export { TenantAdmin } from './tenant-admin.js';
 export { LifecycleStore, SIDECAR_LABELS } from './lifecycle.js';
@@ -84,3 +101,4 @@ export {
   invalidateRelationship,
 } from './temporal-edges.js';
 export type { TemporalEdgeProperties } from './temporal-edges.js';
+export * from './embedding-generation.js';

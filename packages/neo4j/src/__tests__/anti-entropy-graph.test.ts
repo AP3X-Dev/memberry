@@ -73,7 +73,7 @@ function makeGraphDriver(entities: FakeEntity[], episodes: FakeEpisode[]) {
         const batch = Number(params.batch);
         const key = `${projectName}|project`;
         if (!entities.some((e) => e.name === projectName && e.type === 'project')) {
-          return { records: [record({ linked: 0, ids: [] })] };
+          return { records: [record({ linked: 0, ids: [], tenantIds: [] })] };
         }
         const candidates = episodes
           .filter((ep) =>
@@ -81,11 +81,22 @@ function makeGraphDriver(entities: FakeEntity[], episodes: FakeEpisode[]) {
             && !ep.linked.has(key))
           .slice(0, batch);
         for (const ep of candidates) ep.linked.add(key);
-        return { records: [record({ linked: candidates.length, ids: candidates.map((ep) => ep.id) })] };
+        return {
+          records: [record({
+            linked: candidates.length,
+            ids: candidates.map((ep) => ep.id),
+            tenantIds: candidates.map(() => 'default'),
+          })],
+        };
+      }
+
+      if (cypher.includes('KnowledgeEpoch')) {
+        return { records: [record({ knowledgeEpoch: '1' })] };
       }
 
       return { records: [] };
     }),
+    executeWrite: vi.fn(async (work: (tx: { run: typeof session.run }) => unknown) => work({ run: session.run })),
     close: vi.fn(),
   };
   return { driver: { session: vi.fn(() => session) } as any, queries };

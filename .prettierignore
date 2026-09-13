@@ -13,3 +13,8 @@
 # test-files.manifest.txt is deliberately absent: prettier has no parser for .txt and
 # --check errors on it. The manifest's format is enforced by the test above instead.
 !/bench/lab/contracts/readiness-probe-status.ts
+!/scripts/release-gate-status.mjs
+!/scripts/release-candidate-manifest.mjs
+!/scripts/release-gate-runner.sh
+!/scripts/__tests__/release-gate-status.test.mjs
+!/scripts/__tests__/release-candidate-manifest.test.mjs

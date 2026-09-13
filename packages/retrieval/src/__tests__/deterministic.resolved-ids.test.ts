@@ -103,7 +103,14 @@ describe('RET-002C deterministic stable-ID lane', () => {
     for (const run of runs) {
       const [cypher, params] = run.mock.calls[0] as [string, Record<string, unknown>];
       expect(cypher).toContain('targetName');
-      expect(params).toEqual({ names: ['DuplicateName'], ...(params.tenantId ? { tenantId: params.tenantId } : {}) });
+      expect(params).toEqual({
+        names: ['DuplicateName'],
+        ...(params.tenantId ? { tenantId: params.tenantId } : {}),
+        ...(cypher.includes('Semantic')
+          ? { projectScope: null, semanticAsOf: params.semanticAsOf }
+          : {}),
+      });
+      if (cypher.includes('Semantic')) expect(typeof params.semanticAsOf).toBe('string');
       expect(params).not.toHaveProperty('ids');
     }
   });

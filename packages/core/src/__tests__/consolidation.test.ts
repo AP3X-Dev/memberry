@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/consolidation.test.ts
 import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -100,7 +101,7 @@ describe('ConsolidationEngine.run', () => {
     });
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('test-scope');
 
     expect(result.skipped).toBe(true);
@@ -119,7 +120,7 @@ describe('ConsolidationEngine.run', () => {
     });
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
 
     await expect(engine.run('test-scope')).rejects.toThrow('stream error');
     expect(redis.lock.release).toHaveBeenCalledOnce();
@@ -141,7 +142,7 @@ describe('ConsolidationEngine.run', () => {
           ),
         },
       });
-      const run = new ConsolidationEngine(redis, makeNeo4j(), makeConfig()).run('slow-scope');
+      const run = new ConsolidationEngine(redis, makeNeo4j(), makeConfig(), undefined, undefined, { legacyUnqualified: true }).run('slow-scope');
 
       await vi.advanceTimersByTimeAsync(10_001);
       await run;
@@ -177,7 +178,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('test-scope');
 
     expect(result.skipped).toBe(false);
@@ -211,7 +212,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('reinforce-scope');
 
     const proposal = result.proposals.find((p) => p.affected_ids.includes('sem-reinforced'));
@@ -248,7 +249,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('batch-scope');
 
     expect(getByIds).toHaveBeenCalledTimes(1);
@@ -278,7 +279,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('fallback-scope');
 
     expect(getById).toHaveBeenCalledWith('sem-fallback');
@@ -307,7 +308,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(true));
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(true), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('auto-scope');
 
     expect(result.skipped).toBe(false);
@@ -333,7 +334,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(true)).run('auto-scope');
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(true), undefined, undefined, { legacyUnqualified: true }).run('auto-scope');
 
     expect(result.proposals[0]?.type).toBe('reinforce');
     expect(result.applied).toEqual([result.proposals[0]?.id]);
@@ -360,7 +361,7 @@ describe('ConsolidationEngine.run', () => {
         supersede: vi.fn().mockResolvedValue('unused'),
       },
     });
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(true));
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(true), undefined, undefined, { legacyUnqualified: true });
 
     await expect(engine.run('idempotent-scope')).rejects.toThrow('redis unavailable');
     await expect(engine.run('idempotent-scope')).resolves.toMatchObject({ skipped: false });
@@ -392,7 +393,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(true)).run('cache-scope');
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(true), undefined, undefined, { legacyUnqualified: true }).run('cache-scope');
 
     expect(result.applied).toHaveLength(1);
     expect(ack).toHaveBeenCalledOnce();
@@ -422,7 +423,7 @@ describe('ConsolidationEngine.run', () => {
         supersede: vi.fn().mockResolvedValue('unused'),
       },
     });
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true });
 
     expect((await engine.run('scope')).proposals).toHaveLength(0);
     expect((await engine.run('scope')).proposals).toHaveLength(0);
@@ -458,7 +459,7 @@ describe('ConsolidationEngine.run', () => {
         supersede: vi.fn().mockResolvedValue('unused'),
       },
     });
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false));
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true });
 
     await expect(engine.run('scope')).rejects.toThrow('proposal store unavailable');
     expect(ack).not.toHaveBeenCalled();
@@ -503,7 +504,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false)).run('project:a');
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true }).run('project:a');
 
     expect(result.proposals).toHaveLength(1);
     expect(result.proposals[0]?.affected_ids).toEqual([nodeA.id]);
@@ -537,7 +538,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false)).run('project:a');
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true }).run('project:a');
 
     expect(result.proposals).toHaveLength(1);
     expect(result.proposals[0]?.affected_ids).toEqual([nodeA.id]);
@@ -568,7 +569,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false)).run('project:a');
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true }).run('project:a');
 
     expect(result.proposals).toHaveLength(0);
     expect(ack).not.toHaveBeenCalled();
@@ -602,7 +603,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false)).run('global');
+    const result = await new ConsolidationEngine(redis, neo4j, makeConfig(false), undefined, undefined, { legacyUnqualified: true }).run('global');
 
     expect(result.proposals).toHaveLength(1);
     expect(result.proposals[0]?.scope).toBe('project:b');
@@ -622,7 +623,7 @@ describe('ConsolidationEngine.run', () => {
     });
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('below-threshold-scope');
 
     expect(result.proposals).toHaveLength(0);
@@ -649,7 +650,7 @@ describe('ConsolidationEngine.run', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const result = await engine.run('queue-scope');
 
     expect(result.proposals).toHaveLength(0);
@@ -670,7 +671,7 @@ describe('ConsolidationEngine.reviewProposal', () => {
     });
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
 
     await expect(engine.reviewProposal('nonexistent-id', 'approve')).rejects.toThrow(
       'Proposal nonexistent-id not found',
@@ -699,7 +700,7 @@ describe('ConsolidationEngine.reviewProposal', () => {
     });
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     await engine.reviewProposal('prop-1', 'reject');
 
     expect(redis.proposals.remove).toHaveBeenCalledWith('prop-1');
@@ -730,7 +731,7 @@ describe('ConsolidationEngine.reviewProposal', () => {
     });
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     await engine.reviewProposal('prop-decay', 'approve');
 
     expect(neo4j.semantic.updateConfidence).toHaveBeenCalledWith('sem-decay', 0.76, 'prop-decay');
@@ -767,7 +768,7 @@ describe('ConsolidationEngine.reviewProposal', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     await engine.reviewProposal('prop-supersede', 'approve');
 
     expect(neo4j.semantic.supersede).toHaveBeenCalledWith('sem-old', expect.objectContaining({
@@ -809,7 +810,7 @@ describe('ConsolidationEngine tenant propagation', () => {
       },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     await engine.reviewProposal('prop-supersede-tenant', 'approve');
 
     expect(supersede).toHaveBeenCalledWith('sem-tenant', expect.objectContaining({
@@ -858,7 +859,7 @@ describe('ConsolidationEngine tenant propagation', () => {
       episodic: { getById: episodicGetById },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     await engine.reviewProposal('prop-promote', 'approve');
 
     expect(promoteFromEpisodic).toHaveBeenCalledWith(
@@ -914,7 +915,7 @@ describe('ConsolidationEngine tenant propagation', () => {
       episodic: { getById: episodicGetById },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     await expect(engine.reviewProposal('prop-promote-mixed', 'approve')).rejects.toThrow(
       'Failed to apply proposal prop-promote-mixed',
     );
@@ -955,7 +956,7 @@ describe('ConsolidationEngine tenant propagation', () => {
       episodic: { getById, getTenantsByIds },
     });
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     await engine.reviewProposal('prop-promote-batch', 'approve');
 
     expect(getTenantsByIds).toHaveBeenCalledWith(['ep-1', 'ep-2']);
@@ -1002,7 +1003,7 @@ describe('C5: tenant derivation fails closed on read errors', () => {
       },
       episodic,
     });
-    return { engine: new ConsolidationEngine(redis, neo4j, makeConfig()), promoteFromEpisodic };
+    return { engine: new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true }), promoteFromEpisodic };
   }
 
   it('per-id getById rejection with no preferred tenant → batch fails, zero Semantics', async () => {
@@ -1076,7 +1077,7 @@ describe('ConsolidationEngine.status', () => {
     });
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const status = await engine.status();
 
     expect(status.pending).toEqual(['prop-a', 'prop-b', 'prop-c']);
@@ -1086,7 +1087,7 @@ describe('ConsolidationEngine.status', () => {
     const redis = makeRedis();
     const neo4j = makeNeo4j();
 
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
     const status = await engine.status();
 
     expect(status.pending).toHaveLength(0);
@@ -1133,7 +1134,7 @@ function makeLifecycleSupersedeHarness(after: Record<string, unknown>, before?: 
       supersede: vi.fn().mockResolvedValue('new-sem-id'),
     },
   });
-  return { node, redis, neo4j, engine: new ConsolidationEngine(redis, neo4j, makeConfig()) };
+  return { node, redis, neo4j, engine: new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true }) };
 }
 
 describe('consolidation lifecycle parsers (RET-005B-AUTH-001B6P)', () => {

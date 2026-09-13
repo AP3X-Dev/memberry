@@ -19,6 +19,7 @@ import { createServedRerankerProviderV1, type ServedRerankerConstructionV1 } fro
 import { RETRIEVAL_TRACE_CHANNEL_ORDER } from '../trace.js';
 import type { RetrievalTraceV1 } from '../trace.js';
 import type { UnifiedContext } from '../types.js';
+import { allowAllSemanticEligibility } from './semantic-eligibility.fixture.js';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -91,6 +92,7 @@ function makeAssembler(
     { embed: vi.fn(), embedBatch: vi.fn() } as never,
     null,
     reranker,
+    allowAllSemanticEligibility,
   );
 }
 

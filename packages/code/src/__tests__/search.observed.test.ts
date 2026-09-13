@@ -23,7 +23,7 @@ function fixture() {
     available: false,
     embed: vi.fn(async () => [0.1]),
     embedBatch: vi.fn(),
-  });
+  }, undefined, undefined, { legacyUnqualified: true });
   return { search, run };
 }
 
@@ -106,7 +106,7 @@ describe('CodeSearch.searchObserved', () => {
     };
     const search = new CodeSearch(driver as never, {
       available: false, embed: vi.fn(), embedBatch: vi.fn(),
-    });
+    }, undefined, undefined, { legacyUnqualified: true });
     const NativeMap = globalThis.Map;
     let directSearchMaps = 0;
     globalThis.Map = class<K, V> extends NativeMap<K, V> {

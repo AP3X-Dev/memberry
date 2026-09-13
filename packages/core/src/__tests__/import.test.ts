@@ -97,6 +97,7 @@ function makeGraphRecord(id: string, content: string) {
 
 type MockSession = {
   run: ReturnType<typeof vi.fn>;
+  executeWrite: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
 };
 
@@ -108,8 +109,14 @@ function makeDriver(sessions: MockSession[]) {
 }
 
 function makeSession(records: unknown[] = []): MockSession {
+  const run = vi.fn().mockImplementation(async (query: string) => ({
+    records: query.includes('KnowledgeEpoch')
+      ? [{ get: (key: string) => key === 'knowledgeEpoch' ? '1' : null }]
+      : records,
+  }));
   return {
-    run: vi.fn().mockResolvedValue({ records }),
+    run,
+    executeWrite: vi.fn(async (work: (tx: { run: typeof run }) => unknown) => work({ run })),
     close: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -342,6 +349,60 @@ describe('importFromPath', () => {
 
     expect(result.added).toBe(0);
     expect(result.unchanged).toBe(0);
+  });
+
+  it('rolls the Semantic write back when the same transaction cannot advance its epoch', async () => {
+    vi.mocked(fs.readdir).mockResolvedValue(['sem-new.md'] as never);
+    vi.mocked(fs.readFile).mockResolvedValue(SEMANTIC_MD_NEW as never);
+
+    const graphQuerySession = makeSession([]);
+    const writeSession = makeSession([]);
+    const committed: string[] = [];
+    writeSession.executeWrite.mockImplementation(async (work: (tx: { run: ReturnType<typeof vi.fn> }) => unknown) => {
+      const staged: string[] = [];
+      const run = vi.fn(async (query: string) => {
+        if (query.includes('KnowledgeEpoch')) throw new Error('epoch unavailable');
+        staged.push('semantic');
+        return { records: [] };
+      });
+      const value = await work({ run });
+      committed.push(...staged);
+      return value;
+    });
+    const driver = makeDriver([graphQuerySession, writeSession]) as never;
+    const redis = makeRedisMock() as never;
+
+    const { importFromPath } = await import('../import.js');
+    const result = await importFromPath(driver, redis, '/tmp/amp');
+
+    expect(result.errors).toBe(1);
+    expect(committed).toEqual([]);
+    expect(writeSession.executeWrite).toHaveBeenCalledOnce();
+  });
+
+  it('binds imported project-tagged Semantics and graph discovery to the default tenant', async () => {
+    vi.mocked(fs.readdir).mockResolvedValue(['sem-new.md'] as never);
+    vi.mocked(fs.readFile).mockResolvedValue(
+      SEMANTIC_MD_NEW.replace('tags: []', 'tags:\n  - project:alpha') as never,
+    );
+
+    const graphQuerySession = makeSession([]);
+    const createSession = makeSession([]);
+    const driver = makeDriver([graphQuerySession, createSession]) as never;
+    const redis = makeRedisMock() as never;
+
+    const { importFromPath } = await import('../import.js');
+    await importFromPath(driver, redis, '/tmp/amp');
+
+    expect(graphQuerySession.run.mock.calls[0]![0]).toContain('s.tenant_id = $tenantId OR s.tenant_id IS NULL');
+    expect(graphQuerySession.run.mock.calls[0]![1]).toEqual({ tenantId: 'default' });
+    const [query, params] = createSession.run.mock.calls[0] as [string, Record<string, unknown>];
+    expect(query).toContain('scope: $scope');
+    expect(query).toContain('tenant_id: $tenantId');
+    expect(params).toMatchObject({ scope: 'project:alpha', tenantId: 'default' });
+    const epochCalls = createSession.run.mock.calls.filter(([cypher]) => cypher.includes('KnowledgeEpoch'));
+    expect(epochCalls.map(([, epochParams]) => epochParams.epochProjectScope))
+      .toEqual(['project:alpha', '_unscoped']);
   });
 
   // ─── RET-005B-AUTH-001B6P: semantic lifecycle producer, sites 5-7 ─────────

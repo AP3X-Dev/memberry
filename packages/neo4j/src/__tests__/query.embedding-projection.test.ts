@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/neo4j/src/__tests__/query.embedding-projection.test.ts
 // Semantic read paths must NOT ship the 1536-float embedding over the wire.
 // byScope / byVector / byEntity / byTag / expandByGraph use map-projection cyphers
@@ -54,7 +55,7 @@ describe('semantic Integer mapping through ScopedQuery', () => {
     const run = vi.fn(async () => ({
       records: [{ get: () => props }],
     }));
-    const query = new ScopedQuery({ session: () => ({ run, close }) } as never);
+    const query = new ScopedQuery({ session: () => ({ run, close }) } as never, { legacyUnqualified: true });
 
     const [mapped] = await query.byScope({ limit: 1 });
 
@@ -71,7 +72,7 @@ describe('semantic Integer mapping through ScopedQuery', () => {
         get: (key: string) => key === 'score' ? 0.75 : props,
       }],
     }));
-    const query = new ScopedQuery({ session: () => ({ run, close }) } as never);
+    const query = new ScopedQuery({ session: () => ({ run, close }) } as never, { legacyUnqualified: true });
 
     const [mapped] = await query.byVector([0.1], 1);
 
@@ -117,7 +118,7 @@ describe('semantic reads project away the embedding vector', () => {
     } finally {
       await session.close();
     }
-    query = new ScopedQuery(driver);
+    query = new ScopedQuery(driver, { legacyUnqualified: true });
   });
 
   afterAll(async () => {

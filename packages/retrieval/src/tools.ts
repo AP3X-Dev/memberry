@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { Driver } from 'neo4j-driver';
-import { DEFAULT_TENANT } from '@memberry/core';
+import { DEFAULT_TENANT, type EmbeddingRequest } from '@memberry/core';
 import type { UnifiedContext, RetrievalStrategy } from './types.js';
 import { types as nodeUtilTypes } from 'node:util';
 import type { RetrievalTraceV1 } from './trace.js';
@@ -31,6 +31,7 @@ import {
 } from './trace.js';
 import {
   RuntimeCandidateChannelService,
+  type RuntimeCandidateGenerationContext,
   type RuntimeCandidateDriver,
   type RuntimeCandidateExecuteOptions,
 } from './runtime-candidate-channel.js';
@@ -57,7 +58,8 @@ import {
 
 export interface IUnifiedAssembler {
   readonly servedRerankerEnabled?: boolean;
-  candidateQueryVector?(task: string): Promise<number[] | undefined>;
+  candidateQueryDescriptorFingerprint?(): string | undefined;
+  candidateQueryVector?(task: string, request?: EmbeddingRequest): Promise<number[] | undefined>;
   assemble(task: string, options?: {
     strategy?: RetrievalStrategy;
     include_code?: boolean;
@@ -221,8 +223,8 @@ export function retrievalContainerForTenant(tenantId: string, authenticated = fa
 }
 
 /** Bind a physically isolated tenant's candidate reads and resolver to one driver. */
-function setRetrievalTenantCandidateDriver(tenantId: string, driver: Driver & RuntimeCandidateDriver): void {
-  tenantCandidateRuntimes.set(tenantId, new RuntimeCandidateChannelService(driver));
+function setRetrievalTenantCandidateDriver(tenantId: string, driver: Driver & RuntimeCandidateDriver, generation?: RuntimeCandidateGenerationContext): void {
+  tenantCandidateRuntimes.set(tenantId, new RuntimeCandidateChannelService(driver, undefined, generation));
   tenantProjectScopeResolvers.set(tenantId, new ProjectScopeResolver(driver, tenantId));
   tenantResolverFactories.set(tenantId, (authority) => {
     const resolver = new ScopedEntityResolver(driver, authority);
@@ -240,8 +242,10 @@ export function setRetrievalServiceInstances(services: {
   candidateRuntime?: IRuntimeCandidateChannelService;
   rerankerShadowCoordinator?: RerankerShadowCoordinatorPortV1 | null;
   candidateDriver?: RuntimeCandidateDriver;
+  candidateGeneration?: RuntimeCandidateGenerationContext;
   projectScopeDriver?: Driver;
   tenantCandidateDrivers?: ReadonlyMap<string, Driver & RuntimeCandidateDriver>;
+  tenantCandidateGenerations?: ReadonlyMap<string, RuntimeCandidateGenerationContext>;
   multihopExpansionEnabled?: boolean;
 }): void {
   // Full reset of the default container (a service omitted from `services` is
@@ -254,7 +258,7 @@ export function setRetrievalServiceInstances(services: {
   defaultContainer.resolverFactory = services.resolverFactory ?? null;
   defaultContainer.candidateChannelEnabled = services.candidateChannelEnabled ?? false;
   defaultContainer.candidateRuntime = services.candidateRuntime
-    ?? (services.candidateDriver ? new RuntimeCandidateChannelService(services.candidateDriver) : null);
+    ?? (services.candidateDriver ? new RuntimeCandidateChannelService(services.candidateDriver, undefined, services.candidateGeneration) : null);
   defaultContainer.rerankerShadowCoordinator = services.rerankerShadowCoordinator ?? null;
   defaultContainer.multihopExpansionEnabled = services.multihopExpansionEnabled ?? false;
   tenantCandidateRuntimes.clear();
@@ -262,7 +266,7 @@ export function setRetrievalServiceInstances(services: {
   tenantProjectScopeResolvers.clear();
   if (services.tenantCandidateDrivers) {
     for (const [tenantId, driver] of services.tenantCandidateDrivers) {
-      setRetrievalTenantCandidateDriver(tenantId, driver);
+      setRetrievalTenantCandidateDriver(tenantId, driver, services.tenantCandidateGenerations?.get(tenantId));
     }
   }
 }
@@ -703,9 +707,6 @@ export function registerRetrievalTools(
           || (servedCandidate && !assembler.assembleCandidateExecutionServed)) {
           throw new Error('candidate_runtime:unavailable');
         }
-        const queryVectorPromise = args.include_memory && assembler.candidateQueryVector
-          ? assembler.candidateQueryVector(args.task)
-          : Promise.resolve(undefined);
         const receipt = await entityNotFoundAsNull(() => observeRetrievalResolutionV1(() => resolveRuntimeQueryPlannerAuthorityV1({
           authenticated,
           plannerEnabled: queryPlannerEnabled,
@@ -715,6 +716,12 @@ export function registerRetrievalTools(
           entityScope: args.entity_scope,
           ...(args.as_of !== undefined ? { asOf: args.as_of } : {}),
         })));
+        // Cache scope comes from the sealed planner authority after resolution.
+        const authority = receipt === null ? undefined : readRuntimeQueryPlannerAuthorityV1(receipt);
+        const queryDescriptorFingerprint = assembler.candidateQueryDescriptorFingerprint?.();
+        const queryVectorPromise = authority && args.include_memory && assembler.candidateQueryVector
+          ? assembler.candidateQueryVector(args.task, { tenantId: authority.tenantId, projectScope: authority.projectScope })
+          : Promise.resolve(undefined);
         const queryVector = await queryVectorPromise;
         if (receipt === null) entityFallback = true;
         else {
@@ -722,7 +729,10 @@ export function registerRetrievalTools(
           includeArchitecture: args.include_arch,
           includeMemory: args.include_memory,
           queryText: args.task,
-          ...(queryVector !== undefined ? { queryVector } : {}),
+          ...(queryVector !== undefined ? { queryVector,
+            ...(queryDescriptorFingerprint !== undefined && queryDescriptorFingerprint === assembler.candidateQueryDescriptorFingerprint?.()
+              ? { queryDescriptorFingerprint } : {}),
+          } : {}),
         };
         const execution = await candidateRuntime.execute(receipt, executeOptions);
         const shadowObserver = servedCandidate || args.strategy === 'deterministic'
@@ -895,9 +905,6 @@ export function registerRetrievalTools(
           || (servedCandidate && !assembler.assembleCandidateExecutionServed)) {
           throw new Error('candidate_runtime:unavailable');
         }
-        const queryVectorPromise = assembler.candidateQueryVector
-          ? assembler.candidateQueryVector(args.question)
-          : Promise.resolve(undefined);
         const receipt = await entityNotFoundAsNull(() => observeRetrievalResolutionV1(() => resolveRuntimeQueryPlannerAuthorityV1({
           authenticated,
           plannerEnabled: queryPlannerEnabled,
@@ -907,6 +914,12 @@ export function registerRetrievalTools(
           entityScope: args.entity_scope,
           ...(args.as_of !== undefined ? { asOf: args.as_of } : {}),
         })));
+        // Cache scope comes from the sealed planner authority after resolution.
+        const authority = receipt === null ? undefined : readRuntimeQueryPlannerAuthorityV1(receipt);
+        const queryDescriptorFingerprint = assembler.candidateQueryDescriptorFingerprint?.();
+        const queryVectorPromise = authority && assembler.candidateQueryVector
+          ? assembler.candidateQueryVector(args.question, { tenantId: authority.tenantId, projectScope: authority.projectScope })
+          : Promise.resolve(undefined);
         const queryVector = await queryVectorPromise;
         if (receipt === null) entityFallback = true;
         else {
@@ -914,7 +927,10 @@ export function registerRetrievalTools(
           includeArchitecture: true,
           includeMemory: true,
           queryText: args.question,
-          ...(queryVector !== undefined ? { queryVector } : {}),
+          ...(queryVector !== undefined ? { queryVector,
+            ...(queryDescriptorFingerprint !== undefined && queryDescriptorFingerprint === assembler.candidateQueryDescriptorFingerprint?.()
+              ? { queryDescriptorFingerprint } : {}),
+          } : {}),
         };
         const execution = await candidateRuntime.execute(receipt, executeOptions);
         const shadowObserver = servedCandidate

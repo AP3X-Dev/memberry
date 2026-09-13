@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // packages/research/src/__tests__/consolidation.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ResearchConsolidation } from '../consolidation.js';
@@ -23,7 +24,7 @@ function mockDriverMultiSession() {
     session: vi.fn(() => {
       const s = mockSession();
       sessions.push(s);
-      return s;
+      return withKnowledgeTransactions(s);
     }),
     _sessions: sessions,
   };
@@ -108,7 +109,7 @@ describe('ResearchConsolidation', () => {
       driver.session.mockImplementation(() => {
         const s = mockSession();
         sessions.push(s);
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       // We can't easily control individual sessions from Promise.all,
@@ -130,7 +131,7 @@ describe('ResearchConsolidation', () => {
           });
         }
         // Other sessions return empty
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -155,7 +156,7 @@ describe('ResearchConsolidation', () => {
             ],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -176,7 +177,7 @@ describe('ResearchConsolidation', () => {
             ],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -199,7 +200,7 @@ describe('ResearchConsolidation', () => {
             ],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -220,7 +221,7 @@ describe('ResearchConsolidation', () => {
             records: [comboRecord('src/a.ts', 'src/b.ts', 3, ['e1', 'e2', 'e3'])],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -242,7 +243,7 @@ describe('ResearchConsolidation', () => {
             records: [semanticUpdateRecord('sem-1', 'Caching helps', 0.7, 5, 1)],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -263,7 +264,7 @@ describe('ResearchConsolidation', () => {
             records: [semanticUpdateRecord('sem-1', 'Very sure', 0.9, 10, 0)],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -281,7 +282,7 @@ describe('ResearchConsolidation', () => {
             records: [semanticUpdateRecord('sem-1', 'Bad idea', 0.6, 0, 4)],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -300,7 +301,7 @@ describe('ResearchConsolidation', () => {
             records: [semanticUpdateRecord('sem-1', 'Very wrong', 0.1, 0, 5)],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -318,7 +319,7 @@ describe('ResearchConsolidation', () => {
             records: [semanticUpdateRecord('sem-1', 'Ambiguous', 0.5, 3, 3)],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -338,7 +339,7 @@ describe('ResearchConsolidation', () => {
             records: [semanticUpdateRecord('sem-1', 'Borderline', 0.5, 1, 0)],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -372,7 +373,7 @@ describe('ResearchConsolidation', () => {
           });
         }
         // createSemanticFromPattern sessions return successfully
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const result = await consolidation.run('camp-001');
@@ -409,7 +410,7 @@ describe('ResearchConsolidation', () => {
             ],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const result = await consolidation.run('camp-001');
@@ -448,7 +449,7 @@ describe('ResearchConsolidation', () => {
             ],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const result = await consolidation.run('camp-001');
@@ -472,7 +473,7 @@ describe('ResearchConsolidation', () => {
         if (callCount > 5) {
           s.run.mockRejectedValue(new Error('write failed'));
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       // Should not throw — error is suppressed in createSemanticFromPattern
@@ -491,7 +492,7 @@ describe('ResearchConsolidation', () => {
           });
         }
         // reinforceSemantic returns no records (node deleted)
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const result = await consolidation.run('camp-001');
@@ -522,7 +523,7 @@ describe('ResearchConsolidation', () => {
             ],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       // The contradicted_principle will have evidence_ids: ['sem-1']
@@ -546,7 +547,7 @@ describe('ResearchConsolidation', () => {
             ],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       await consolidation.run('camp-001');
@@ -575,7 +576,7 @@ describe('ResearchConsolidation', () => {
             ],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -595,7 +596,7 @@ describe('ResearchConsolidation', () => {
             ],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -616,7 +617,7 @@ describe('ResearchConsolidation', () => {
             records: [comboRecord('a.ts', 'b.ts', 2, ['e1', 'e2'])],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -634,7 +635,7 @@ describe('ResearchConsolidation', () => {
             records: [comboRecord('a.ts', 'b.ts', 10, Array(10).fill('e'))],
           });
         }
-        return s;
+        return withKnowledgeTransactions(s);
       });
 
       const patterns = await consolidation.detectPatterns('camp-001');
@@ -664,7 +665,7 @@ describe('ResearchConsolidation semantic lifecycle stamping (RET-005B-AUTH-001B6
         });
       }
       sessions.push(s);
-      return s;
+      return withKnowledgeTransactions(s);
     });
 
     await new ResearchConsolidation(driver).run('camp-001');

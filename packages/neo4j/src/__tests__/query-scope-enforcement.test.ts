@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/neo4j/src/__tests__/query-scope-enforcement.test.ts
 //
 // Rebuild Phase 1 — structural tenancy at the Cypher layer. Asserts that
@@ -26,7 +27,7 @@ describe('ScopedQuery structural scope enforcement', () => {
 
   beforeEach(() => {
     mock = makeMockDriver();
-    query = new ScopedQuery(mock.driver);
+    query = new ScopedQuery(mock.driver, { legacyUnqualified: true });
   });
 
   it('byScope adds the scope predicate to the tags branch', async () => {
@@ -72,10 +73,10 @@ describe('ScopedQuery structural scope enforcement', () => {
     expect(Number(params.fetch)).toBeGreaterThan(Number(params.limit));
   });
 
-  it('byVector emits no scope predicate without projectScope', async () => {
+  it('byVector emits no scope predicate without projectScope but over-fetches for lifecycle filtering', async () => {
     await query.byVector(new Array(8).fill(0.1), 20);
     const [cypher, params] = mock.run.mock.calls[0];
     expect(cypher).not.toContain('$projectScope');
-    expect(Number(params.fetch)).toBe(20);
+    expect(Number(params.fetch)).toBeGreaterThan(Number(params.limit));
   });
 });

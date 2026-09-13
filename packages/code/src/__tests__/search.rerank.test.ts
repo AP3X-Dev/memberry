@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { CODE_RERANK_FLAG, KIND_RANK_FLAG, widenLimit } from '../search.js';
 import type { CodeSearchResult } from '../types.js';
+import { allowEligibleSemantics } from './semantic-eligibility.fixture.js';
 
 interface Row {
   name: string;
@@ -122,7 +123,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
       async ({ CodeSearch }) => {
         const { driver, calls } = driverFor({ symbols: rows });
         const reranker = vi.fn(async (_q: string, r: CodeSearchResult[]) => [...r].reverse());
-        const search = new CodeSearch(driver as never, embedding(), reranker);
+        const search = new CodeSearch(driver as never, embedding(), reranker, undefined, { legacyUnqualified: true });
         const out = await search.search('q', { limit: 10, include_semantics: false, rerank: true });
         return { first: out[0]?.name, length: out.length, widened: fulltextLimit(calls), reranker };
       },
@@ -143,7 +144,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
   it('S2 — flag ON + option widens the channel query to widenLimit(limit)', async () => {
     await withFlags({ [CODE_RERANK_FLAG]: '1' }, async ({ CodeSearch }) => {
       const { driver, calls } = driverFor({ symbols: manySymbols(60, (i) => ({ name: `s${i}` })) });
-      const search = new CodeSearch(driver as never, embedding());
+      const search = new CodeSearch(driver as never, embedding(), undefined, undefined, { legacyUnqualified: true });
       await search.search('q', { limit: 10, include_semantics: false, rerank: true });
       expect(fulltextLimit(calls)).toBe(50);
     });
@@ -152,7 +153,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
   it('S3 — widening never leaks a bigger result set to the caller', async () => {
     await withFlags({ [CODE_RERANK_FLAG]: '1' }, async ({ CodeSearch }) => {
       const { driver } = driverFor({ symbols: manySymbols(60, (i) => ({ name: `s${i}` })) });
-      const search = new CodeSearch(driver as never, embedding());
+      const search = new CodeSearch(driver as never, embedding(), undefined, undefined, { legacyUnqualified: true });
       const out = await search.search('q', { limit: 10, include_semantics: false, rerank: true });
       expect(out).toHaveLength(10);
     });
@@ -175,7 +176,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
         reranked.push([...out]);
         return out;
       });
-      const search = new CodeSearch(driver as never, embedding(), reranker);
+      const search = new CodeSearch(driver as never, embedding(), reranker, allowEligibleSemantics(), { legacyUnqualified: true });
       const out = await search.search('q', { limit: 10, rerank: true });
 
       expect(reranked[0][0].source_type).toBe('semantic');
@@ -199,7 +200,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
         reranked.push([...out]);
         return out;
       });
-      const search = new CodeSearch(driver as never, embedding(), reranker);
+      const search = new CodeSearch(driver as never, embedding(), reranker, allowEligibleSemantics(), { legacyUnqualified: true });
       const out = await search.search('q', { limit: 10, rerank: true });
 
       // Same precondition as S5: without it this passes whether or not the prior ran.
@@ -223,7 +224,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
       const order = rows.map((r) => r.name);
       const reranker = async (_q: string, got: CodeSearchResult[]) =>
         [...got].sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
-      const search = new CodeSearch(driver as never, embedding(), reranker);
+      const search = new CodeSearch(driver as never, embedding(), reranker, undefined, { legacyUnqualified: true });
       const out = await search.search('q', { limit: 20, include_semantics: false, rerank: true });
 
       expect(out).toHaveLength(20);
@@ -235,7 +236,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
     await withFlags({ [CODE_RERANK_FLAG]: '1' }, async ({ CodeSearch }) => {
       const { driver } = driverFor({ symbols: manySymbols(30, (i) => ({ name: `s${i}` })) });
       const reranker = vi.fn(async () => { throw new Error('provider exploded'); });
-      const search = new CodeSearch(driver as never, embedding(), reranker);
+      const search = new CodeSearch(driver as never, embedding(), reranker, undefined, { legacyUnqualified: true });
       const out = await search.search('q', { limit: 10, include_semantics: false, rerank: true });
       expect(reranker).toHaveBeenCalled();
       expect(out).toHaveLength(10);
@@ -248,7 +249,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
       const { driver } = driverFor({ symbols: manySymbols(30, (i) => ({ name: `s${i}` })) });
       // Reversed AND truncated. If the length guard is dropped, 's29' leads and length shrinks.
       const reranker = async (_q: string, rows: CodeSearchResult[]) => [...rows].reverse().slice(0, 3);
-      const search = new CodeSearch(driver as never, embedding(), reranker);
+      const search = new CodeSearch(driver as never, embedding(), reranker, undefined, { legacyUnqualified: true });
       const out = await search.search('q', { limit: 10, include_semantics: false, rerank: true });
       expect(out).toHaveLength(10);
       expect(out[0].name).toBe('s0');
@@ -263,7 +264,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
           { name: 'cleanFn', kind: 'function' },
         ],
       });
-      const search = new CodeSearch(driver as never, embedding()); // no third argument
+      const search = new CodeSearch(driver as never, embedding(), undefined, undefined, { legacyUnqualified: true }); // no third argument
       const out = await search.search('q', { limit: 5, include_semantics: false, rerank: true });
       expect(fulltextLimit(calls)).toBe(50);
       expect(out).toHaveLength(5);
@@ -278,7 +279,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
       // (a) the assembler's shape: a direct search with no `rerank` option.
       const a = driverFor({ symbols: rows });
       const rerankerA = vi.fn(async (_q: string, r: CodeSearchResult[]) => [...r].reverse());
-      const searchA = new CodeSearch(a.driver as never, embedding(), rerankerA);
+      const searchA = new CodeSearch(a.driver as never, embedding(), rerankerA, undefined, { legacyUnqualified: true });
       const outA = await searchA.search('q', { limit: 20, include_semantics: false });
       expect(fulltextLimit(a.calls)).toBe(20);
       expect(rerankerA).not.toHaveBeenCalled();
@@ -289,7 +290,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
       // cannot silently opt the memory-adjacent path in.
       const b = driverFor({ symbols: rows });
       const rerankerB = vi.fn(async (_q: string, r: CodeSearchResult[]) => [...r].reverse());
-      const searchB = new CodeSearch(b.driver as never, embedding(), rerankerB);
+      const searchB = new CodeSearch(b.driver as never, embedding(), rerankerB, undefined, { legacyUnqualified: true });
       await searchB.buildContext('q', 6000);
       expect(fulltextLimit(b.calls)).toBe(30);
       expect(rerankerB).not.toHaveBeenCalled();
@@ -300,7 +301,7 @@ describe('IDX-004 retrieve wide, rerank, prior last (spec §5)', () => {
     await withFlags({ [CODE_RERANK_FLAG]: '1' }, async ({ CodeSearch }) => {
       const { driver } = driverFor({ symbols: manySymbols(50, (i) => ({ name: `s${i}` })) });
       const reranker = async (_q: string, rows: CodeSearchResult[]) => [...rows].reverse();
-      const search = new CodeSearch(driver as never, embedding(), reranker);
+      const search = new CodeSearch(driver as never, embedding(), reranker, undefined, { legacyUnqualified: true });
       const { value, observation } = await (search as unknown as {
         searchObserved(q: string, o: Record<string, unknown>): Promise<{
           value: CodeSearchResult[];

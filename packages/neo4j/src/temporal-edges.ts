@@ -3,6 +3,9 @@
 // Relationships carry valid_at / invalid_at properties to support
 // point-in-time graph queries ("as of time T").
 
+import { DEFAULT_TENANT } from '@memberry/core';
+import { UNSCOPED_KNOWLEDGE_PROJECT } from './knowledge-epoch.js';
+
 export interface TemporalEdgeProperties {
   valid_at: string;       // ISO timestamp — when this relationship became active
   invalid_at?: string;    // ISO timestamp — when this relationship was superseded (null = active)
@@ -95,7 +98,28 @@ export async function invalidateRelationship(
   await session.run(
     `MATCH (a {id: $fromId})-[r:${relType}]->(b {id: $toId})
      WHERE r.invalid_at IS NULL
-     SET r.invalid_at = $now`,
-    { fromId, toId, now },
+     WITH r, coalesce(a.tenant_id, $defaultTenant) AS tenantId,
+          CASE
+            WHEN toLower(coalesce(a.scope, '')) =~ $projectPattern THEN toLower(a.scope)
+            WHEN toLower(coalesce(a.project_scope, '')) =~ $projectPattern THEN toLower(a.project_scope)
+            ELSE head([tag IN coalesce(a.tags, [])
+                       WHERE toLower(tag) =~ $projectPattern | toLower(tag)])
+          END AS projectScope
+     SET r.invalid_at = $now
+     WITH tenantId, coalesce(projectScope, $unscopedProject) AS projectScope
+     UNWIND CASE WHEN projectScope = $unscopedProject
+       THEN [projectScope] ELSE [projectScope, $unscopedProject] END AS epochScope
+     MERGE (epoch:KnowledgeEpoch {tenant_id: tenantId, project_scope: epochScope})
+     ON CREATE SET epoch.value = 0
+     SET epoch.value = epoch.value + 1
+     RETURN collect({projectScope: epochScope, knowledgeEpoch: toString(epoch.value)}) AS epochs`,
+    {
+      fromId,
+      toId,
+      now,
+      defaultTenant: DEFAULT_TENANT,
+      projectPattern: 'project:[a-z0-9][a-z0-9._-]{0,127}',
+      unscopedProject: UNSCOPED_KNOWLEDGE_PROJECT,
+    },
   );
 }

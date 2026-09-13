@@ -256,7 +256,7 @@ function exactStringSet(actual: readonly string[], expected: readonly string[]):
 }
 
 async function git(repoRoot: string, args: readonly string[]): Promise<string> {
-  const result = await execFileAsync('git', [...args], { cwd: repoRoot, encoding: 'utf8' });
+  const result = await execFileAsync('git', [...args], { cwd: repoRoot, encoding: 'utf8', windowsHide: true });
   return result.stdout.trim();
 }
 
@@ -265,11 +265,12 @@ export function assertDevSourceChangedPaths(paths: readonly string[]): void {
   if (!exactStringSet(normalized, RET007V4_DEV_ALLOWED_SOURCE_PATHS)) throw new ClosedEvaluationError('source-preflight-failed');
 }
 
-async function assertSourcePreflight(repoRoot: string, sourceSha: string): Promise<void> {
+/** Verify committed source identity; historical pins do not approve later adapter revisions. */
+export async function assertSourcePreflight(repoRoot: string, sourceSha: string): Promise<void> {
   try {
     if (!/^[0-9a-f]{40}$/.test(sourceSha)) throw new Error('invalid source SHA');
     if (await git(repoRoot, ['rev-parse', 'HEAD']) !== sourceSha) throw new Error('HEAD mismatch');
-    await execFileAsync('git', ['merge-base', '--is-ancestor', RET007V4_DEV_EXACT_BASE_COMMIT, sourceSha], { cwd: repoRoot });
+    await execFileAsync('git', ['merge-base', '--is-ancestor', RET007V4_DEV_EXACT_BASE_COMMIT, sourceSha], { cwd: repoRoot, windowsHide: true });
     assertDevSourceChangedPaths((await git(repoRoot, ['diff', '--name-only', RET007V4_DEV_EXACT_BASE_COMMIT, sourceSha])).split(/\r?\n/));
     for (const [path, expectedBlob] of Object.entries(RET007V4_DEV_APPROVED_GIT_BLOBS)) {
       if (await git(repoRoot, ['rev-parse', `${sourceSha}:${path}`]) !== expectedBlob) throw new Error('source drift');

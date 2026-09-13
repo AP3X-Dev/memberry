@@ -37,11 +37,12 @@ export async function safeLoad(
   timeoutMs: number = hookTimeoutMs(),
 ): Promise<MemoryContext | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
   try {
     const timeout = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), timeoutMs);
+      timer = setTimeout(() => { controller.abort(); resolve(null); }, timeoutMs);
     });
-    const result = await Promise.race([service.load(scope), timeout]);
+    const result = await Promise.race([service.load({ ...scope, signal: controller.signal }), timeout]);
     return result ?? null;
   } catch (err) {
     process.stderr.write(

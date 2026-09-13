@@ -8,6 +8,7 @@ import {
 } from '@memberry/core';
 import { temporalSetClause } from './temporal-edges.js';
 import { archivedWhere } from './query.js';
+import { bumpKnowledgeEpoch, projectKnowledgeScope } from './knowledge-epoch.js';
 
 export class EpisodicStore {
   constructor(private driver: Driver) {}
@@ -58,7 +59,14 @@ export class EpisodicStore {
     const session = this.driver.session();
     try {
       const { query, params } = this.buildCreate(node);
-      const result = await session.run(query, params);
+      const result = await session.executeWrite(async (tx) => {
+        const created = await tx.run(query, params);
+        await bumpKnowledgeEpoch(tx, {
+          tenantId: node.tenant_id ?? DEFAULT_TENANT,
+          projectScope: projectKnowledgeScope(node.scope),
+        });
+        return created;
+      });
       return result.records[0].get('id') as string;
     } finally {
       await session.close();
@@ -180,6 +188,10 @@ export class EpisodicStore {
             { episodicId: node.id, indexKeys },
           );
         }
+        await bumpKnowledgeEpoch(tx, {
+          tenantId: node.tenant_id ?? DEFAULT_TENANT,
+          projectScope: projectKnowledgeScope(node.scope),
+        });
         return node.id;
       });
     } finally {
@@ -347,11 +359,19 @@ export class EpisodicStore {
   async linkToAgent(episodicId: string, agentId: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
         `MATCH (e:Episodic {id: $episodicId}), (a:Agent {id: $agentId})
-         MERGE (e)-[:GENERATED_BY]->(a)`,
-        { episodicId, agentId },
-      );
+         MERGE (e)-[:GENERATED_BY]->(a)
+         RETURN coalesce(e.tenant_id, $defaultTenant) AS tenantId, e.scope AS projectScope`,
+        { episodicId, agentId, defaultTenant: DEFAULT_TENANT },
+        );
+        const record = changed.records[0];
+        if (record) await bumpKnowledgeEpoch(tx, {
+          tenantId: record.get('tenantId') as string,
+          projectScope: projectKnowledgeScope(record.get('projectScope') as string | null),
+        });
+      });
     } finally {
       await session.close();
     }
@@ -360,12 +380,20 @@ export class EpisodicStore {
   async linkToEntity(episodicId: string, entityId: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
         `MATCH (e:Episodic {id: $episodicId}), (ent:Entity {id: $entityId})
          MERGE (e)-[r:REFERENCES]->(ent)
-         ${temporalSetClause('r')}`,
-        { episodicId, entityId, now: new Date().toISOString() },
-      );
+         ${temporalSetClause('r')}
+         RETURN coalesce(e.tenant_id, $defaultTenant) AS tenantId, e.scope AS projectScope`,
+        { episodicId, entityId, now: new Date().toISOString(), defaultTenant: DEFAULT_TENANT },
+        );
+        const record = changed.records[0];
+        if (record) await bumpKnowledgeEpoch(tx, {
+          tenantId: record.get('tenantId') as string,
+          projectScope: projectKnowledgeScope(record.get('projectScope') as string | null),
+        });
+      });
     } finally {
       await session.close();
     }
@@ -374,11 +402,19 @@ export class EpisodicStore {
   async linkToModel(episodicId: string, modelId: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
         `MATCH (e:Episodic {id: $episodicId}), (m:Model {id: $modelId})
-         MERGE (e)-[:USED_MODEL]->(m)`,
-        { episodicId, modelId },
-      );
+         MERGE (e)-[:USED_MODEL]->(m)
+         RETURN coalesce(e.tenant_id, $defaultTenant) AS tenantId, e.scope AS projectScope`,
+        { episodicId, modelId, defaultTenant: DEFAULT_TENANT },
+        );
+        const record = changed.records[0];
+        if (record) await bumpKnowledgeEpoch(tx, {
+          tenantId: record.get('tenantId') as string,
+          projectScope: projectKnowledgeScope(record.get('projectScope') as string | null),
+        });
+      });
     } finally {
       await session.close();
     }
@@ -398,13 +434,15 @@ export class EpisodicStore {
     const session = this.driver.session();
     try {
       // Relationship types cannot be parameterized in Cypher, so build dynamically
-      await session.run(
+      await session.executeWrite(async (tx) => {
+        const changed = await tx.run(
         `MATCH (e:Episodic {id: $episodicId}), (s:Semantic {id: $targetId})
          WHERE coalesce(e.tenant_id, $defaultTenant) = $tenantId
            AND coalesce(s.tenant_id, $defaultTenant) = $tenantId
          MERGE (e)-[r:${relType}]->(s)
          SET r.detail = $detail
-         ${temporalSetClause('r')}`,
+         ${temporalSetClause('r')}
+         RETURN e.scope AS episodicScope, s.scope AS semanticScope`,
         {
           episodicId,
           targetId: signal.target_id,
@@ -413,7 +451,21 @@ export class EpisodicStore {
           defaultTenant: DEFAULT_TENANT,
           now: new Date().toISOString(),
         },
-      );
+        );
+        const record = changed.records[0];
+        if (record) {
+          const scopes = new Set([
+            (record.get('episodicScope') as string | null) ?? null,
+            (record.get('semanticScope') as string | null) ?? null,
+          ]);
+          for (const projectScope of scopes) {
+            await bumpKnowledgeEpoch(tx, {
+              tenantId,
+              projectScope: projectKnowledgeScope(projectScope),
+            });
+          }
+        }
+      });
     } finally {
       await session.close();
     }

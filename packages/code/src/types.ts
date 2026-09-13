@@ -186,6 +186,8 @@ export interface CodeSearchResult {
   doc_comment: string;
   score: number;
   content?: string;
+  /** Applies only to historical semantic evidence; code symbols remain current. */
+  temporal?: { time_mode: 'historical'; as_of: string };
 }
 
 export interface CodeContext {
@@ -193,4 +195,6 @@ export interface CodeContext {
   symbols: CodeSearchResult[];
   semantic_memories: Array<{ id: string; content: string; confidence: number }>;
   token_count: number;
+  /** The requested semantic read frame does not version the code-symbol index. */
+  semantic_temporal?: { time_mode: 'historical'; as_of: string };
 }

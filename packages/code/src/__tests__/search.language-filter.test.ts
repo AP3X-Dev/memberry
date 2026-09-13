@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { CodeSearchResult } from '../types.js';
+import { allowEligibleSemantics } from './semantic-eligibility.fixture.js';
 
 // ─── Mock helpers ───────────────────────────────────────────────────────────
 
@@ -106,7 +107,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     // Access private method via any cast
     const results: CodeSearchResult[] = await (search as any).vectorSearch(
@@ -133,7 +134,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).vectorSearch(
       'some query',
@@ -155,7 +156,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).vectorSearch(
       'some query',
@@ -179,7 +180,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).vectorSearch(
       'some query',
@@ -200,7 +201,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).vectorSearch(
       'some query',
@@ -225,7 +226,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).vectorSearch(
       'some query',
@@ -248,7 +249,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).vectorSearch(
       'snapshot cli',
@@ -291,7 +292,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).lexicalVectorSearch(
       'session auth',
@@ -313,7 +314,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).lexicalVectorSearch(
       'session auth',
@@ -337,7 +338,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, allowEligibleSemantics(), { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).semanticVectorSearch(
       'historical query',
@@ -360,7 +361,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).fulltextSearch(
       'some query',
@@ -379,7 +380,7 @@ describe('vectorSearch language filter', () => {
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     await (search as any).fulltextSearch('auth', 20, { file_path: 'AMP' });
 
@@ -403,7 +404,7 @@ describe('vectorSearch language filter — verifies the old bug is gone', () => 
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     // Old behavior would return [] because '/src/utils.ts'.includes('.typescript') is false
     const filePath = '/src/utils.ts';
@@ -432,7 +433,7 @@ describe('vectorSearch language filter — verifies the old bug is gone', () => 
     const embedding = makeEmbeddingProvider();
 
     const { CodeSearch } = await import('../search.js');
-    const search = new CodeSearch(driver, embedding);
+    const search = new CodeSearch(driver, embedding, undefined, undefined, { legacyUnqualified: true });
 
     const results: CodeSearchResult[] = await (search as any).vectorSearch(
       'some query',

@@ -347,6 +347,29 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    id: '0012-knowledge-epoch-authority',
+    description:
+      'Create the unique tenant/project KnowledgeEpoch authority used to fence rendered context.',
+    up: async (driver) => {
+      const session = driver.session();
+      try {
+        await session.run(
+          'CREATE CONSTRAINT knowledge_epoch_scope IF NOT EXISTS FOR (n:KnowledgeEpoch) REQUIRE (n.tenant_id, n.project_scope) IS UNIQUE',
+        );
+      } finally {
+        await session.close();
+      }
+    },
+    down: async (driver) => {
+      const session = driver.session();
+      try {
+        await session.run('DROP CONSTRAINT knowledge_epoch_scope IF EXISTS');
+      } finally {
+        await session.close();
+      }
+    },
+  },
 ];
 
 export interface MigrationResult {

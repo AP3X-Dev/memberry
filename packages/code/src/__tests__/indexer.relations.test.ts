@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SymbolNode } from '../types.js';
 
@@ -104,7 +105,7 @@ describe('CodeIndexer relation resolution', () => {
       }),
       close: vi.fn(),
     };
-    const driver = { session: vi.fn(() => session) };
+    const driver = { session: vi.fn(() => withKnowledgeTransactions(session)) };
 
     const indexer = new CodeIndexer(driver as never);
     const result = await indexer.indexFile('/repo/src/sample.ts', 'typescript');

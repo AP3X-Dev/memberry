@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { EMBEDDING_DIM } from '@memberry/core';
@@ -122,7 +123,7 @@ describeLive('IDX-001B-D graph-derived candidate reader live Neo4j gate', () => 
         }),
       }),
     });
-    return new RuntimeCandidateChannelService(driver as unknown as RuntimeCandidateDriver).execute(receipt, {
+    return new RuntimeCandidateChannelService(driver as unknown as RuntimeCandidateDriver, undefined, { legacyUnqualified: true }).execute(receipt, {
       includeArchitecture: false,
       includeMemory: true,
       queryText: 'graph neighbor',

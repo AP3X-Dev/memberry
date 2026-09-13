@@ -6,6 +6,8 @@ import { type Driver } from 'neo4j-driver';
 import type { Redis } from 'ioredis';
 import { parseFromMarkdown, diffEntries } from './markdown.js';
 import type { SemanticNode } from './types.js';
+import { bumpKnowledgeEpoch, projectKnowledgeScope } from '@memberry/neo4j';
+import { DEFAULT_TENANT } from './types.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -43,6 +45,16 @@ function mapSemanticProps(props: Record<string, unknown>): SemanticNode {
     // MEM-006: graph-side hashing must see the archived flag, or an archived
     // node and its exported file would never hash-match as unchanged.
     ...(props.archived === true ? { archived: true } : {}),
+    ...(typeof props.scope === 'string' ? { scope: props.scope } : {}),
+    ...(typeof props.tenant_id === 'string' ? { tenant_id: props.tenant_id } : {}),
+  };
+}
+
+function semanticEpochScope(node: SemanticNode) {
+  const projectTag = node.scope ?? node.tags.find((tag) => /^project:/i.test(tag));
+  return {
+    tenantId: node.tenant_id ?? DEFAULT_TENANT,
+    projectScope: projectKnowledgeScope(projectTag),
   };
 }
 
@@ -99,7 +111,12 @@ export async function importFromPath(
   {
     const session = driver.session();
     try {
-      const result = await session.run('MATCH (s:Semantic) RETURN s');
+      const result = await session.run(
+        `MATCH (s:Semantic)
+         WHERE s.tenant_id = $tenantId OR s.tenant_id IS NULL
+         RETURN s`,
+        { tenantId: DEFAULT_TENANT },
+      );
       for (const record of result.records) {
         const props = record.get('s').properties as Record<string, unknown>;
         const node = mapSemanticProps(props);
@@ -143,10 +160,11 @@ export async function importFromPath(
 
     const confidence =
       strategy === 'confidence-weighted' ? Math.min(node.confidence, 0.8) : node.confidence;
-
     const session = driver.session();
     try {
-      await session.run(
+      const authority = semanticEpochScope(node);
+      await session.executeWrite(async (tx) => {
+        await tx.run(
         `CREATE (s:Semantic {
           id: $id,
           content: $content,
@@ -156,6 +174,8 @@ export async function importFromPath(
           updated_at: $updated_at,
           decay_class: $decay_class,
           tags: $tags,
+          scope: $scope,
+          tenant_id: $tenantId,
           archived: $archived,
           valid_at: $created_at
         })
@@ -171,6 +191,8 @@ export async function importFromPath(
           updated_at: now,
           decay_class: node.decay_class,
           tags: node.tags,
+          scope: authority.projectScope,
+          tenantId: authority.tenantId,
           // null keeps the property absent for non-archived nodes (a Cypher
           // CREATE map drops null-valued keys), matching pre-MEM-006 shape.
           archived: node.archived === true ? true : null,
@@ -178,7 +200,9 @@ export async function importFromPath(
           strategy,
           action: 'add',
         },
-      );
+        );
+        await bumpKnowledgeEpoch(tx, authority);
+      });
     } catch (err) {
       errorCount++;
       console.error(`[import] Neo4j write error during ADD for node "${id}":`, err instanceof Error ? err.message : err);
@@ -208,17 +232,21 @@ export async function importFromPath(
 
     const confidence =
       strategy === 'confidence-weighted' ? Math.min(node.confidence, 0.8) : node.confidence;
-
     const session = driver.session();
     try {
-      await session.run(
+      const authority = semanticEpochScope(node);
+      await session.executeWrite(async (tx) => {
+        await tx.run(
         `MATCH (s:Semantic {id: $id})
+         WHERE s.tenant_id = $tenantId OR s.tenant_id IS NULL
          SET s.content = $content,
              s.confidence = $confidence,
              s.signal_count = $signal_count,
              s.updated_at = $now,
              s.decay_class = $decay_class,
              s.tags = $tags,
+             s.scope = coalesce($scope, s.scope),
+             s.tenant_id = coalesce(s.tenant_id, $tenantId),
              s.archived = $archived
          WITH s
          CREATE (h:HumanEdit { action: $action, imported_at: $now, strategy: $strategy, target_id: s.id })
@@ -231,13 +259,17 @@ export async function importFromPath(
           now,
           decay_class: node.decay_class,
           tags: node.tags,
+          scope: authority.projectScope,
+          tenantId: authority.tenantId,
           // SET to null clears the flag when the file no longer carries it —
           // a human removing `archived: true` from the export unarchives.
           archived: node.archived === true ? true : null,
           strategy,
           action: 'modify',
         },
-      );
+        );
+        await bumpKnowledgeEpoch(tx, authority);
+      });
     } catch (err) {
       errorCount++;
       console.error(`[import] Neo4j write error during MODIFY for node "${id}":`, err instanceof Error ? err.message : err);
@@ -262,14 +294,21 @@ export async function importFromPath(
 
   // ── 7. Apply: deleted nodes — mark as archived (no hard delete) ────────────
   for (const id of diff.deleted) {
+    const previous = graphNodes.get(id);
+    if (!previous) continue;
     const session = driver.session();
     try {
-      await session.run(
+      const authority = semanticEpochScope(previous);
+      await session.executeWrite(async (tx) => {
+        await tx.run(
         `MATCH (s:Semantic {id: $id})
+         WHERE s.tenant_id = $tenantId OR s.tenant_id IS NULL
          SET s.invalid_at = CASE WHEN s.valid_at IS NOT NULL AND s.invalid_at IS NULL THEN $now ELSE s.invalid_at END
          SET s.archived = true, s.archived_at = $now`,
-        { id, now },
-      );
+        { id, now, tenantId: authority.tenantId },
+        );
+        await bumpKnowledgeEpoch(tx, authority);
+      });
     } catch (err) {
       errorCount++;
       console.error(`[import] Neo4j write error during DELETE (archive) for node "${id}":`, err instanceof Error ? err.message : err);

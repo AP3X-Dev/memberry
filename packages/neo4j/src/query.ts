@@ -6,6 +6,8 @@ import { readEnv, DEFAULT_TENANT } from '@memberry/core';
 import { activeRelationshipFilter } from './temporal-edges.js';
 import { tenantWhere, resolveTenant, isDefaultTenant, TENANT_PARAM } from './tenant.js';
 import { normalizeSemanticSignalCount } from './semantic-signal-count.js';
+import { embeddingDescriptorFingerprint, parseEmbeddingDescriptor, validateEmbeddingVector, type EmbeddingDescriptor } from '@memberry/core';
+import type { EmbeddingGenerationStore } from './embedding-generation.js';
 
 /**
  * OPT-72: default bounded transaction timeout applied to EVERY rawCypher call
@@ -50,6 +52,20 @@ function projectScopeWhere(alias: string): string {
   return `(${alias}.scope = $projectScope OR $projectScope IN ${alias}.tags)`;
 }
 
+/** Exact project authority for non-Semantic graph endpoints. Every available
+ * project identity must collapse to one canonical value matching the request. */
+export function endpointProjectScopeWhere(alias: string, projectExpression = '$projectScope'): string {
+  const identities = `[candidate IN [
+      toLower(toString(${alias}.project_scope)),
+      toLower(toString(${alias}.scope))
+    ] + [tag IN coalesce(${alias}.tags, [])
+         WHERE toLower(toString(tag)) STARTS WITH 'project:' | toLower(toString(tag))]
+    WHERE candidate STARTS WITH 'project:']`;
+  const unique = `reduce(scopes = [], candidate IN ${identities} |
+    CASE WHEN candidate IN scopes THEN scopes ELSE scopes + candidate END)`;
+  return `(size(${unique}) = 1 AND head(${unique}) = ${projectExpression})`;
+}
+
 /**
  * MEM-006: WHERE fragment excluding lifecycle-archived memory from retrieval.
  * `archived` is a reversible boolean with no backfill, so the coalesce form is
@@ -59,6 +75,76 @@ function projectScopeWhere(alias: string): string {
  */
 export function archivedWhere(alias: string): string {
   return `coalesce(${alias}.archived, false) = false`;
+}
+
+/**
+ * Canonical project identity for supersession checks. New rows persist a
+ * lower-case `scope`; legacy rows may only carry a project:* tag. Keeping the
+ * fallback here prevents a foreign-project SUPERSEDES edge from suppressing an
+ * otherwise-authorized candidate.
+ */
+function semanticProjectScope(alias: string): string {
+  return `coalesce(toLower(toString(${alias}.scope)), head([tag IN coalesce(${alias}.tags, []) WHERE toLower(toString(tag)) STARTS WITH 'project:' | toLower(toString(tag))]), '')`;
+}
+
+/** A Semantic may have no project identity, or exactly one consistently
+ * represented identity. Conflicting legacy project tags fail closed. */
+function semanticProjectScopeIsUnambiguous(alias: string): string {
+  const projectTags = `[tag IN coalesce(${alias}.tags, []) WHERE toLower(toString(tag)) STARTS WITH 'project:' | toLower(toString(tag))]`;
+  const uniqueProjectTags = `reduce(scopes = [], projectTag IN ${projectTags} | CASE WHEN projectTag IN scopes THEN scopes ELSE scopes + projectTag END)`;
+  return `size(${uniqueProjectTags}) <= 1
+    AND (${alias}.scope IS NULL OR (trim(toString(${alias}.scope)) <> ''
+      AND all(projectTag IN ${projectTags} WHERE projectTag = toLower(toString(${alias}.scope)))))`;
+}
+
+/** Persisted UTC timestamp contract shared by semantic readers and writers.
+ * Calendar-invalid strings throw during conversion, failing the transaction
+ * closed; lexical impostors and missing timestamps return false. */
+export function semanticTimestampValidWhere(value: string): string {
+  return `CASE WHEN toString(${value}) =~ '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z'
+    THEN datetime(${value}) IS NOT NULL ELSE false END`;
+}
+
+/**
+ * Authoritative Semantic-node eligibility for current and point-in-time reads.
+ *
+ * The node interval is half-open: [valid_at, invalid_at). `created_at` is the
+ * compatibility start for legacy rows that predate valid_at; rows with neither
+ * timestamp are unknown and fail closed. A caller-authorized successor
+ * suppresses its predecessor from its original effective start, even after the
+ * successor is itself superseded or archived. Both nodes need the same canonical
+ * project scope. This makes legacy SUPERSEDES edges effective without allowing
+ * a cross-tenant or cross-project edge to hide authorized evidence.
+ *
+ * Callers must bind the selected timestamp parameter and $tenantId.
+ */
+export function semanticEligibilityWhere(
+  alias: string,
+  tenantId: string,
+  asOfParam = 'semanticAsOf',
+): string {
+  const at = `$${asOfParam}`;
+  const successor = 'eligibleSuccessor';
+  const start = `coalesce(${alias}.valid_at, ${alias}.created_at)`;
+  const successorStart = `coalesce(${successor}.valid_at, ${successor}.created_at)`;
+  // UTC string timestamps are the persisted contract. Reject lexical impostors
+  // before converting; impossible calendar dates raise an authority-read error,
+  // which the serving adapters treat as unavailable rather than active evidence.
+  const validTimestamp = semanticTimestampValidWhere;
+  return `${archivedWhere(alias)}
+    AND ${semanticProjectScopeIsUnambiguous(alias)}
+    AND CASE WHEN ${validTimestamp(start)}
+      THEN datetime(${start}) <= datetime(${at}) ELSE false END
+    AND (${alias}.invalid_at IS NULL OR CASE WHEN ${validTimestamp(`${alias}.invalid_at`)}
+      THEN datetime(${alias}.invalid_at) > datetime(${at}) ELSE false END)
+    AND NOT EXISTS {
+      MATCH (${successor}:Semantic)-[:SUPERSEDES]->(${alias})
+      WHERE ${tenantWhere(successor, tenantId)}
+        AND ${semanticProjectScopeIsUnambiguous(successor)}
+        AND ${semanticProjectScope(successor)} = ${semanticProjectScope(alias)}
+        AND CASE WHEN ${validTimestamp(successorStart)}
+          THEN datetime(${successorStart}) <= datetime(${at}) ELSE true END
+    }`;
 }
 
 // ─── Cypher read-only validation ─────────────────────────────────────────────
@@ -178,6 +264,9 @@ function normalizeRawCypherLimit(limit: number): number {
 }
 
 const MAX_RESOLVED_ENTITY_IDS = 32;
+const MAX_SEMANTIC_ELIGIBILITY_IDS = 128;
+const MAX_VECTOR_FALLBACK_NODES = 1000;
+const MAX_VECTOR_FALLBACK_DIMENSIONS = 12_288;
 const MAX_ENTITY_ID_LENGTH = 200;
 const SAFE_ENTITY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const QUERY_SCOPE_KEYS = new Set([
@@ -238,10 +327,136 @@ function normalizeResolvedEntityIds(value: unknown): readonly string[] | undefin
   return Object.freeze(ids);
 }
 
-export class ScopedQuery {
-  constructor(private driver: Driver) {}
+function normalizeSemanticEligibilityIds(value: unknown): readonly string[] {
+  if (isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new Error('semantic_eligibility_ids_invalid');
+  }
+  if (value.length < 1 || value.length > MAX_SEMANTIC_ELIGIBILITY_IDS) {
+    throw new Error('semantic_eligibility_ids_invalid');
+  }
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const id of value) {
+    if (typeof id !== 'string' || id.length === 0 || id.length > MAX_ENTITY_ID_LENGTH || !SAFE_ENTITY_ID.test(id)) {
+      throw new Error('semantic_eligibility_ids_invalid');
+    }
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return Object.freeze(ids);
+}
 
-  async byEntity(entityName: string, limit: number, asOf?: string, tenantId?: string): Promise<SemanticNode[]> {
+function cosineSimilarity(left: unknown, right: readonly number[]): number | null {
+  if (!Array.isArray(left) || left.length !== right.length || left.length === 0
+    || left.length > MAX_VECTOR_FALLBACK_DIMENSIONS) return null;
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (typeof a !== 'number' || !Number.isFinite(a) || !Number.isFinite(b)) return null;
+    dot += a * b;
+    leftNorm += a * a;
+    rightNorm += b * b;
+  }
+  if (leftNorm === 0 || rightNorm === 0) return null;
+  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+}
+
+export interface SemanticEligibilityInput {
+  semanticIds: unknown;
+  tenantId?: string;
+  projectScope?: string;
+  asOf?: string;
+}
+
+export interface SemanticEligibilityResult {
+  id: string;
+  status: 'eligible' | 'ineligible' | 'unknown';
+}
+
+export interface QueryGenerationContext {
+  readonly store: EmbeddingGenerationStore;
+  readonly descriptor: EmbeddingDescriptor;
+}
+
+export class ScopedQuery {
+  /** Dense reads fail closed unless a generation or explicit legacy fixture opt-in is supplied. */
+  generationStatus = 'embedding_generation_unavailable';
+  private readonly legacyUnqualified: boolean;
+  private readonly generation?: QueryGenerationContext;
+
+  constructor(private driver: Driver, generation?: QueryGenerationContext | { legacyUnqualified: true }) {
+    this.legacyUnqualified = !!generation && !('store' in generation) && !('descriptor' in generation)
+      && 'legacyUnqualified' in generation && generation.legacyUnqualified === true;
+    if (this.legacyUnqualified) this.generationStatus = 'unqualified-legacy';
+    if (generation && 'store' in generation) {
+      this.generation = { store: generation.store, descriptor: parseEmbeddingDescriptor(generation.descriptor) };
+      this.generationStatus = 'not-read';
+    }
+  }
+
+  /**
+   * Bounded authoritative batch check for the final pre-render gate. Missing or
+   * unauthorized IDs are deliberately indistinguishable (`unknown`) so this API
+   * cannot be used as a cross-scope existence oracle.
+   */
+  async evaluateActiveEligibility(input: SemanticEligibilityInput): Promise<SemanticEligibilityResult[]> {
+    const semanticIds = normalizeSemanticEligibilityIds(input.semanticIds);
+    const tenant = resolveTenant(input.tenantId);
+    const asOfParam = input.asOf ? 'asOf' : 'semanticAsOf';
+    const params: Record<string, unknown> = {
+      semanticIds,
+      [TENANT_PARAM]: tenant,
+      [asOfParam]: input.asOf ?? new Date().toISOString(),
+    };
+    let projectFilter = '';
+    if (input.projectScope) {
+      params.projectScope = input.projectScope.toLowerCase();
+      projectFilter = ` AND ${projectScopeWhere('s')}`;
+    }
+
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `UNWIND range(0, size($semanticIds) - 1) AS ordinal
+         WITH ordinal, $semanticIds[ordinal] AS id
+         OPTIONAL MATCH (s:Semantic {id: id})
+         WHERE ${tenantWhere('s', tenant)}${projectFilter}
+         RETURN id,
+           CASE
+             WHEN s IS NULL THEN 'unknown'
+             WHEN ${semanticEligibilityWhere('s', tenant, asOfParam)} THEN 'eligible'
+             ELSE 'ineligible'
+           END AS status
+         ORDER BY ordinal`,
+        params,
+      );
+      const statuses = new Map<string, SemanticEligibilityResult['status']>();
+      for (const record of result.records) {
+        const id = record.get('id');
+        const status = record.get('status');
+        if (typeof id === 'string' && semanticIds.includes(id)
+          && (status === 'eligible' || status === 'ineligible' || status === 'unknown')) {
+          statuses.set(id, status);
+        }
+      }
+      return semanticIds.map((id) => ({ id, status: statuses.get(id) ?? 'unknown' }));
+    } finally {
+      await session.close();
+    }
+  }
+
+  async byEntity(
+    entityName: string,
+    limit: number,
+    asOf?: string,
+    tenantId?: string,
+    projectScope?: string,
+  ): Promise<SemanticNode[]> {
     const session = this.driver.session();
     try {
       const relFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
@@ -250,13 +465,20 @@ export class ScopedQuery {
       // output-identical single-tenant). $tenantId is a bound parameter.
       const tenant = resolveTenant(tenantId);
       const params: Record<string, unknown> = { entityName, limit: neo4j.int(limit), [TENANT_PARAM]: tenant };
-      if (asOf) params.asOf = asOf;
+      const semanticTimeParam = asOf ? 'asOf' : 'semanticAsOf';
+      params[semanticTimeParam] = asOf ?? new Date().toISOString();
+      const projectFilter = projectScope
+        ? ` AND ${projectScopeWhere('s')} AND ${endpointProjectScopeWhere('e')}`
+        : '';
+      if (projectScope) params.projectScope = projectScope.toLowerCase();
 
       const result = await session.run(
         `MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {name: $entityName})
          WHERE ${relFilter}
            AND ${tenantWhere('s', tenant)}
-           AND ${archivedWhere('s')}
+           AND ${tenantWhere('e', tenant)}
+           AND ${semanticEligibilityWhere('s', tenant, semanticTimeParam)}
+           ${projectFilter}
          RETURN s { .*, embedding: null } AS s
          ORDER BY s.confidence DESC, s.updated_at DESC
          LIMIT $limit`,
@@ -274,15 +496,16 @@ export class ScopedQuery {
       // Semantic is tenant-scoped — AND tenantWhere (bound $tenantId); default
       // tenant matches legacy/null-tenant nodes → output-identical single-tenant.
       const tenant = resolveTenant(tenantId);
+      const semanticAsOf = new Date().toISOString();
       const result = await session.run(
         `MATCH (s:Semantic)
          WHERE $tag IN s.tags
            AND ${tenantWhere('s', tenant)}
-           AND ${archivedWhere('s')}
+           AND ${semanticEligibilityWhere('s', tenant)}
          RETURN s { .*, embedding: null } AS s
          ORDER BY s.confidence DESC, s.updated_at DESC
          LIMIT $limit`,
-        { tag, limit: neo4j.int(limit), [TENANT_PARAM]: tenant },
+        { tag, limit: neo4j.int(limit), [TENANT_PARAM]: tenant, semanticAsOf },
       );
       return result.records.map((r) => mapSemanticNode(nodeProps(r.get('s'))));
     } finally {
@@ -301,12 +524,13 @@ export class ScopedQuery {
       let cypher: string;
       const tenantId = resolveTenant(scope.tenantId);
       const params: Record<string, unknown> = { limit: neo4j.int(limit), [TENANT_PARAM]: tenantId };
-      if (asOf) params.asOf = asOf;
+      const semanticTimeParam = asOf ? 'asOf' : 'semanticAsOf';
+      params[semanticTimeParam] = asOf ?? new Date().toISOString();
 
       const relFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
-      // Mandatory tenant isolation + MEM-006 archived exclusion; chained here so
-      // every one of the six byScope branches carries both predicates.
-      const tFilter = `${tenantWhere('s', tenantId)} AND ${archivedWhere('s')}`;
+      // Mandatory tenant isolation + authoritative lifecycle/supersession
+      // eligibility; chained here so all six byScope branches stay identical.
+      const tFilter = `${tenantWhere('s', tenantId)} AND ${semanticEligibilityWhere('s', tenantId, semanticTimeParam)}`;
 
       // Structural tenancy: project scope is a hard predicate, never advisory.
       let pFilter = '';
@@ -314,6 +538,8 @@ export class ScopedQuery {
         params.projectScope = scope.projectScope.toLowerCase();
         pFilter = ` AND ${projectScopeWhere('s')}`;
       }
+      const entityEndpointFilter = ` AND ${tenantWhere('e', tenantId)}`
+        + (scope.projectScope ? ` AND ${endpointProjectScopeWhere('e')}` : '');
 
       if (entityIds !== undefined && tags.length > 0) {
         params.entityIds = entityIds;
@@ -321,7 +547,7 @@ export class ScopedQuery {
         cypher = `
           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
           WHERE e.id IN $entityIds AND ANY(t IN $tags WHERE toLower(t) IN [x IN s.tags | toLower(x)])
-            AND ${relFilter} AND ${tFilter}${pFilter}
+            AND ${relFilter} AND ${tFilter}${pFilter}${entityEndpointFilter}
           WITH s, head(collect(e.id)) AS entityId
           RETURN entityId, s { .id, .content, .confidence, .signal_count, .created_at, .updated_at,
             .decay_class, .memory_type, .tags, .scope, .tenant_id, embedding: null } AS s
@@ -332,7 +558,7 @@ export class ScopedQuery {
         cypher = `
           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
           WHERE e.id IN $entityIds
-            AND ${relFilter} AND ${tFilter}${pFilter}
+            AND ${relFilter} AND ${tFilter}${pFilter}${entityEndpointFilter}
           WITH s, head(collect(e.id)) AS entityId
           RETURN entityId, s { .id, .content, .confidence, .signal_count, .created_at, .updated_at,
             .decay_class, .memory_type, .tags, .scope, .tenant_id, embedding: null } AS s
@@ -344,7 +570,7 @@ export class ScopedQuery {
         cypher = `
           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
           WHERE e.name IN $entities AND ANY(t IN $tags WHERE toLower(t) IN [x IN s.tags | toLower(x)])
-            AND ${relFilter} AND ${tFilter}${pFilter}
+            AND ${relFilter} AND ${tFilter}${pFilter}${entityEndpointFilter}
           RETURN DISTINCT s { .*, embedding: null } AS s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
@@ -353,7 +579,7 @@ export class ScopedQuery {
         cypher = `
           MATCH (s:Semantic)-[r:ABOUT]->(e:Entity)
           WHERE e.name IN $entities
-            AND ${relFilter} AND ${tFilter}${pFilter}
+            AND ${relFilter} AND ${tFilter}${pFilter}${entityEndpointFilter}
           RETURN DISTINCT s { .*, embedding: null } AS s
           ORDER BY s.confidence DESC, s.updated_at DESC
           LIMIT $limit`;
@@ -393,18 +619,41 @@ export class ScopedQuery {
     limit: number,
     tenantId?: string,
     projectScope?: string,
+    queryDescriptorFingerprint?: string,
   ): Promise<Array<SemanticNode & { score: number }>> {
+    if (!this.generation && !this.legacyUnqualified) return [];
+    if (this.generation) {
+      if (queryDescriptorFingerprint !== embeddingDescriptorFingerprint(this.generation.descriptor)) {
+        this.generationStatus = 'embedding_query_descriptor_mismatch';
+        return [];
+      }
+      try {
+        const result = await this.generation.store.search({
+          tenantId: resolveTenant(tenantId), projectScope: projectScope?.toLowerCase() ?? null,
+        }, {
+          descriptorFingerprint: embeddingDescriptorFingerprint(this.generation.descriptor),
+          vector: validateEmbeddingVector(embedding, this.generation.descriptor),
+          kind: 'semantic', limit: Math.min(100, Math.max(1, Math.floor(limit))),
+        });
+        this.generationStatus = result.degradedReason ?? (result.generationId ? 'ready' : 'embedding_generation_unavailable');
+        if (!result.generationId || result.degradedReason) return [];
+        return result.results.map((row) => ({ ...mapSemanticNode(row.properties), score: row.score }));
+      } catch {
+        this.generationStatus = 'embedding_generation_unavailable';
+        return [];
+      }
+    }
     const session = this.driver.session();
     try {
       const tenant = resolveTenant(tenantId);
-      // The vector index returns the K nearest BEFORE filtering, so whenever a
-      // post-filter applies (non-default tenant, or a project scope) we
-      // over-fetch and then filter, otherwise the scope could be starved by
-      // another project's nearer neighbours.
-      const filtered = !isDefaultTenant(tenant) || !!projectScope;
-      const fetch = filtered ? Math.min(limit * 5, 200) : limit;
+      // The vector index returns the K nearest BEFORE filtering. Lifecycle and
+      // supersession eligibility now applies to every query, so always
+      // over-fetch within the existing hard cap; otherwise a high-similarity
+      // obsolete predecessor could starve its eligible successor.
+      const fetch = Math.min(limit * 5, 200);
       const params: Record<string, unknown> = {
         fetch: neo4j.int(fetch), limit: neo4j.int(limit), embedding, [TENANT_PARAM]: tenant,
+        semanticAsOf: new Date().toISOString(),
       };
       // Structural tenancy: the vector channel enforces project scope too —
       // similarity alone must never cross a project boundary.
@@ -417,15 +666,74 @@ export class ScopedQuery {
         `CALL db.index.vector.queryNodes('semantic_embedding', $fetch, $embedding)
          YIELD node, score
          WHERE ${tenantWhere('node', tenant)}${pFilter}
-           AND ${archivedWhere('node')}
+           AND ${semanticEligibilityWhere('node', tenant)}
          RETURN node { .*, embedding: null } AS node, score
          LIMIT $limit`,
         params,
       );
-      return result.records.map((r) => ({
+      const indexed = result.records.map((r) => ({
         ...mapSemanticNode(nodeProps(r.get('node'))),
         score: r.get('score') as number,
       }));
+      if (indexed.length >= limit || embedding.length === 0
+        || embedding.length > MAX_VECTOR_FALLBACK_DIMENSIONS
+        || embedding.some((value) => !Number.isFinite(value))) return indexed;
+
+      // A filtered vector-index query can underfill when obsolete rows occupy
+      // its K nearest slots. Fall back to an eligibility-filtered bounded scan
+      // and compute cosine locally. If the eligible scan exceeds the hard cap,
+      // use a source-filtered deterministic recall fallback. That fallback is
+      // intentionally scored at zero: it preserves active-memory availability
+      // without pretending that a truncated scan produced a vector ranking.
+      const fallbackParams = {
+        ...params,
+        fallbackScanLimit: neo4j.int(MAX_VECTOR_FALLBACK_NODES + 1),
+      };
+      const fallback = await session.run(
+        `MATCH (node:Semantic)
+         WHERE ${tenantWhere('node', tenant)}${pFilter}
+           AND ${semanticEligibilityWhere('node', tenant)}
+           AND node.embedding IS NOT NULL
+         RETURN node { .*, embedding: null } AS node, node.embedding AS embedding
+         ORDER BY node.id ASC
+         LIMIT $fallbackScanLimit`,
+        fallbackParams,
+      );
+      if (fallback.records.length > MAX_VECTOR_FALLBACK_NODES) {
+        const safeFallback = await session.run(
+          `MATCH (node:Semantic)
+           WHERE ${tenantWhere('node', tenant)}${pFilter}
+             AND ${semanticEligibilityWhere('node', tenant)}
+           RETURN node { .*, embedding: null } AS node
+           ORDER BY coalesce(node.confidence, 0) DESC,
+                    coalesce(node.updated_at, node.created_at, '') DESC,
+                    node.id ASC
+           LIMIT $limit`,
+          params,
+        );
+        const merged = new Map<string, SemanticNode & { score: number }>(
+          indexed.map((node) => [node.id, node]),
+        );
+        for (const record of safeFallback.records) {
+          const node = mapSemanticNode(nodeProps(record.get('node')));
+          if (!merged.has(node.id)) merged.set(node.id, { ...node, score: 0 });
+        }
+        return [...merged.values()].slice(0, limit);
+      }
+
+      const merged = new Map<string, SemanticNode & { score: number }>(
+        indexed.map((node) => [node.id, node]),
+      );
+      for (const record of fallback.records) {
+        const node = mapSemanticNode(nodeProps(record.get('node')));
+        const score = cosineSimilarity(record.get('embedding'), embedding);
+        if (score === null) continue;
+        const current = merged.get(node.id);
+        if (!current || score > current.score) merged.set(node.id, { ...node, score });
+      }
+      return [...merged.values()]
+        .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+        .slice(0, limit);
     } finally {
       await session.close();
     }
@@ -447,7 +755,36 @@ export class ScopedQuery {
     limit: number,
     tenantId?: string,
     projectScope?: string,
+    queryDescriptorFingerprint?: string,
   ): Promise<Array<EpisodicNode & { score: number }>> {
+    if (!this.generation && !this.legacyUnqualified) return [];
+    if (this.generation) {
+      if (queryDescriptorFingerprint !== embeddingDescriptorFingerprint(this.generation.descriptor)) {
+        this.generationStatus = 'embedding_query_descriptor_mismatch';
+        return [];
+      }
+      try {
+        const result = await this.generation.store.search({
+          tenantId: resolveTenant(tenantId), projectScope: projectScope?.toLowerCase() ?? null,
+        }, {
+          descriptorFingerprint: embeddingDescriptorFingerprint(this.generation.descriptor),
+          vector: validateEmbeddingVector(embedding, this.generation.descriptor),
+          kind: 'episodic', limit: Math.min(100, Math.max(1, Math.floor(limit))),
+        });
+        this.generationStatus = result.degradedReason ?? (result.generationId ? 'ready' : 'embedding_generation_unavailable');
+        if (!result.generationId || result.degradedReason) return [];
+        return result.results.map((row) => ({
+          ...mapEpisodicNode(row.properties),
+          ...(row.properties.scope != null && { scope: row.properties.scope as string }),
+          tags: Array.isArray(row.properties.tags) ? row.properties.tags as string[] : [],
+          tenant_id: (row.properties.tenant_id as string | undefined) ?? DEFAULT_TENANT,
+          score: row.score,
+        }));
+      } catch {
+        this.generationStatus = 'embedding_generation_unavailable';
+        return [];
+      }
+    }
     const session = this.driver.session();
     try {
       const tenant = resolveTenant(tenantId);
@@ -487,7 +824,12 @@ export class ScopedQuery {
     }
   }
 
-  async byFacts(entityName: string, options?: TemporalOptions, tenantId?: string): Promise<FactNode[]> {
+  async byFacts(
+    entityName: string,
+    options?: TemporalOptions,
+    tenantId?: string,
+    projectScope?: string,
+  ): Promise<FactNode[]> {
     const session = this.driver.session();
     try {
       const timeMode = options?.time_mode ?? 'current';
@@ -495,13 +837,18 @@ export class ScopedQuery {
       const tFilter = tenantWhere('f', tenant); // tenant isolation
       let cypher: string;
       const params: Record<string, unknown> = { entityName, [TENANT_PARAM]: tenant };
+      const endpointFilter = ` AND ${tenantWhere('e', tenant)}` + (projectScope
+        ? ` AND ${endpointProjectScopeWhere('f')} AND ${endpointProjectScopeWhere('e')}`
+        : '');
+      if (projectScope) params.projectScope = projectScope.toLowerCase();
 
       switch (timeMode) {
         case 'current':
           cypher = `
             MATCH (f:Fact)-[:FACT_ABOUT]->(e:Entity {name: $entityName})
-            WHERE f.status = 'active' AND f.invalid_at IS NULL
+            WHERE f.status IN ['active', 'disputed'] AND f.invalid_at IS NULL
               AND ${tFilter}
+              ${endpointFilter}
             RETURN f
             ORDER BY f.confidence DESC, f.valid_at DESC`;
           break;
@@ -512,6 +859,7 @@ export class ScopedQuery {
             MATCH (f:Fact)-[:FACT_ABOUT]->(e:Entity {name: $entityName})
             WHERE f.valid_at <= $as_of AND (f.invalid_at IS NULL OR f.invalid_at > $as_of)
               AND ${tFilter}
+              ${endpointFilter}
             RETURN f
             ORDER BY f.confidence DESC, f.valid_at DESC`;
           break;
@@ -523,6 +871,7 @@ export class ScopedQuery {
             MATCH (f:Fact)-[:FACT_ABOUT]->(e:Entity {name: $entityName})
             WHERE f.valid_at <= $to AND (f.invalid_at IS NULL OR f.invalid_at > $from)
               AND ${tFilter}
+              ${endpointFilter}
             RETURN f
             ORDER BY f.confidence DESC, f.valid_at DESC`;
           break;
@@ -532,6 +881,7 @@ export class ScopedQuery {
             cypher = `
               MATCH (f:Fact)-[:FACT_ABOUT]->(e:Entity {name: $entityName})
               WHERE ${tFilter}
+                ${endpointFilter}
               RETURN f
               ORDER BY f.valid_at ASC`;
           } else {
@@ -539,6 +889,7 @@ export class ScopedQuery {
               MATCH (f:Fact)-[:FACT_ABOUT]->(e:Entity {name: $entityName})
               WHERE f.status <> 'invalidated'
                 AND ${tFilter}
+                ${endpointFilter}
               RETURN f
               ORDER BY f.valid_at ASC`;
           }
@@ -561,6 +912,7 @@ export class ScopedQuery {
     entityName: string,
     options?: TemporalOptions,
     tenantId?: string,
+    projectScope?: string,
   ): Promise<{ semantics: SemanticNode[]; facts: FactNode[]; episodes: EpisodicNode[] }> {
     let semantics: SemanticNode[];
     let episodes: EpisodicNode[];
@@ -577,13 +929,20 @@ export class ScopedQuery {
     try {
       const aboutFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
       const semParams: Record<string, unknown> = { entityName, [TENANT_PARAM]: tenant };
-      if (asOf) semParams.asOf = asOf;
+      const semanticTimeParam = asOf ? 'asOf' : 'semanticAsOf';
+      semParams[semanticTimeParam] = asOf ?? new Date().toISOString();
+      const semanticProjectFilter = projectScope
+        ? ` AND ${projectScopeWhere('s')} AND ${endpointProjectScopeWhere('e')}`
+        : '';
+      if (projectScope) semParams.projectScope = projectScope.toLowerCase();
 
       const semanticResult = await session.run(
         `MATCH (s:Semantic)-[r:ABOUT]->(e:Entity {name: $entityName})
          WHERE ${aboutFilter}
            AND ${tenantWhere('s', tenant)}
-           AND ${archivedWhere('s')}
+           AND ${tenantWhere('e', tenant)}
+           AND ${semanticEligibilityWhere('s', tenant, semanticTimeParam)}
+           ${semanticProjectFilter}
          RETURN s { .*, embedding: null } AS s
          ORDER BY s.confidence DESC, s.updated_at DESC`,
         semParams,
@@ -595,12 +954,18 @@ export class ScopedQuery {
       const refFilter = activeRelationshipFilter('r', asOf ? 'asOf' : undefined);
       const epParams: Record<string, unknown> = { entityName, [TENANT_PARAM]: tenant };
       if (asOf) epParams.asOf = asOf;
+      const episodeProjectFilter = projectScope
+        ? ` AND ${endpointProjectScopeWhere('ep')} AND ${endpointProjectScopeWhere('e')}`
+        : '';
+      if (projectScope) epParams.projectScope = projectScope.toLowerCase();
 
       const episodeResult = await session.run(
         `MATCH (ep:Episodic)-[r:REFERENCES]->(e:Entity {name: $entityName})
          WHERE ${refFilter}
            AND ${tenantWhere('ep', tenant)}
+           AND ${tenantWhere('e', tenant)}
            AND ${archivedWhere('ep')}
+           ${episodeProjectFilter}
          RETURN ep
          ORDER BY ep.created_at DESC`,
         epParams,
@@ -613,7 +978,7 @@ export class ScopedQuery {
     }
 
     // Query facts via byFacts (opens its own session)
-    const facts = await this.byFacts(entityName, options, tenantId);
+    const facts = await this.byFacts(entityName, options, tenantId, projectScope);
 
     return { semantics, facts, episodes };
   }
@@ -634,6 +999,7 @@ export class ScopedQuery {
     maxPerHop: number = 5,
     asOf?: string,
     tenantId?: string,
+    projectScope?: string,
   ): Promise<SemanticNode[]> {
     if (entityNames.length === 0) return [];
 
@@ -654,7 +1020,18 @@ export class ScopedQuery {
         maxPerHop: neo4j.int(maxPerHop),
         [TENANT_PARAM]: tenant,
       };
-      if (asOf) params.asOf = asOf;
+      const semanticTimeParam = asOf ? 'asOf' : 'semanticAsOf';
+      params[semanticTimeParam] = asOf ?? new Date().toISOString();
+      if (projectScope) params.projectScope = projectScope.toLowerCase();
+      const r2Filter = activeRelationshipFilter('r2', asOf ? 'asOf' : undefined);
+      const r3Filter = activeRelationshipFilter('r3', asOf ? 'asOf' : undefined);
+      const graphProjectFilter = projectScope
+        ? `
+             AND ${endpointProjectScopeWhere('e')}
+             AND ${projectScopeWhere('s')}
+             AND ${endpointProjectScopeWhere('e2')}
+             AND ${projectScopeWhere('s2')}`
+        : '';
 
       // Path 1: Semantic neighbors — find semantics ABOUT other entities connected
       // via shared semantic nodes to the seed entities
@@ -662,34 +1039,56 @@ export class ScopedQuery {
         ? `MATCH (e:Entity)<-[r:ABOUT]-(s:Semantic)-[r2:ABOUT]->(e2:Entity)<-[r3:ABOUT]-(s2:Semantic)
            WHERE toLower(e.name) IN $lowerNames
              AND ${relFilter}
-             AND r2.invalid_at IS NULL
-             AND r3.invalid_at IS NULL
+             AND ${r2Filter}
+             AND ${r3Filter}
              AND NOT toLower(e2.name) IN $lowerNames
+             AND ${tenantWhere('e', tenant)}
+             AND ${tenantWhere('s', tenant)}
+             AND ${tenantWhere('e2', tenant)}
              AND ${tenantWhere('s2', tenant)}
-             AND ${archivedWhere('s2')}
+             AND ${semanticEligibilityWhere('s', tenant, semanticTimeParam)}
+             AND ${semanticEligibilityWhere('s2', tenant, semanticTimeParam)}
+             ${graphProjectFilter}
            RETURN DISTINCT s2 { .*, embedding: null } AS node, 0.2 AS hopScore
            ORDER BY node.confidence DESC
            LIMIT $maxPerHop`
         : `MATCH (e:Entity)<-[r:ABOUT]-(s:Semantic)-[r2:ABOUT]->(e2:Entity)<-[r3:ABOUT]-(s2:Semantic)
            WHERE toLower(e.name) IN $lowerNames
              AND ${relFilter}
-             AND r2.invalid_at IS NULL
-             AND r3.invalid_at IS NULL
+             AND ${r2Filter}
+             AND ${r3Filter}
              AND NOT toLower(e2.name) IN $lowerNames
+             AND ${tenantWhere('e', tenant)}
+             AND ${tenantWhere('s', tenant)}
+             AND ${tenantWhere('e2', tenant)}
              AND ${tenantWhere('s2', tenant)}
-             AND ${archivedWhere('s2')}
+             AND ${semanticEligibilityWhere('s', tenant, semanticTimeParam)}
+             AND ${semanticEligibilityWhere('s2', tenant, semanticTimeParam)}
+             ${graphProjectFilter}
            RETURN DISTINCT s2 { .*, embedding: null } AS node, 0.3 AS hopScore
            ORDER BY node.confidence DESC
            LIMIT $maxPerHop`;
 
       // Path 2: Co-extracted fact neighbors — traverse SAME_EPISODE edges on facts
       const factNeighborCypher =
-        `MATCH (e:Entity)<-[:FACT_ABOUT]-(f1:Fact)-[:SAME_EPISODE]-(f2:Fact)-[:FACT_ABOUT]->(e2:Entity)<-[r:ABOUT]-(s:Semantic)
+        `MATCH (e:Entity)<-[factAbout1:FACT_ABOUT]-(f1:Fact)-[sameEpisode:SAME_EPISODE]-(f2:Fact)-[factAbout2:FACT_ABOUT]->(e2:Entity)<-[r:ABOUT]-(s:Semantic)
          WHERE toLower(e.name) IN $lowerNames
            AND NOT toLower(e2.name) IN $lowerNames
+           AND ${activeRelationshipFilter('factAbout1', asOf ? 'asOf' : undefined)}
+           AND ${activeRelationshipFilter('sameEpisode', asOf ? 'asOf' : undefined)}
+           AND ${activeRelationshipFilter('factAbout2', asOf ? 'asOf' : undefined)}
            AND ${relFilter}
+           AND ${tenantWhere('e', tenant)}
+           AND ${tenantWhere('f1', tenant)}
+           AND ${tenantWhere('f2', tenant)}
+           AND ${tenantWhere('e2', tenant)}
            AND ${tenantWhere('s', tenant)}
-           AND ${archivedWhere('s')}
+           AND ${semanticEligibilityWhere('s', tenant, semanticTimeParam)}
+           ${projectScope ? `AND ${endpointProjectScopeWhere('e')}
+           AND ${endpointProjectScopeWhere('f1')}
+           AND ${endpointProjectScopeWhere('f2')}
+           AND ${endpointProjectScopeWhere('e2')}
+           AND ${projectScopeWhere('s')}` : ''}
          RETURN DISTINCT s { .*, embedding: null } AS node, 0.25 AS hopScore
          ORDER BY node.confidence DESC
          LIMIT $maxPerHop`;

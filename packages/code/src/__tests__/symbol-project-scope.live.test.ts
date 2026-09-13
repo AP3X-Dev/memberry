@@ -109,7 +109,7 @@ describe('Symbol project scoping (T5/gap-11, live Neo4j)', () => {
 
     const indexer = new CodeIndexer(driver);
     const store = new SymbolStore(driver);
-    const search = new CodeSearch(driver, disabledEmbedding());
+    const search = new CodeSearch(driver, disabledEmbedding(), undefined, undefined, { legacyUnqualified: true });
 
     // 1. Index file A under TAG_A and file B under TAG_B (same temp dir).
     await indexer.indexFile(fileA, 'typescript', TAG_A);

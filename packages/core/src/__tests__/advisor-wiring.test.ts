@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/advisor-wiring.test.ts
 //
 // MEM-008 gate wiring: proposals that fall through to the review queue are
@@ -96,7 +97,7 @@ describe('MEM-008 gate wiring (consolidation review-queue save site)', () => {
       makeStreamSignal('sem-target', 'correction'),
     ];
     const { port, stored } = makeProposalStore();
-    const engine = new ConsolidationEngine(makeRedis(signals, port), makeNeo4j(node), makeConfig(false));
+    const engine = new ConsolidationEngine(makeRedis(signals, port), makeNeo4j(node), makeConfig(false), undefined, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('test-scope');
 
@@ -119,7 +120,7 @@ describe('MEM-008 gate wiring (consolidation review-queue save site)', () => {
     const engine = new ConsolidationEngine(
       makeRedis([makeStreamSignal('sem-single', 'correction')], port),
       makeNeo4j(node),
-      makeConfig(false),
+      makeConfig(false), undefined, undefined, { legacyUnqualified: true },
     );
 
     await engine.run('test-scope');
@@ -139,7 +140,7 @@ describe('MEM-008 gate wiring (consolidation review-queue save site)', () => {
     ];
     const { port } = makeProposalStore();
     const neo4j = makeNeo4j(node);
-    const engine = new ConsolidationEngine(makeRedis(signals, port), neo4j, makeConfig(true));
+    const engine = new ConsolidationEngine(makeRedis(signals, port), neo4j, makeConfig(true), undefined, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('auto-scope');
 
@@ -158,7 +159,7 @@ describe('MEM-008 gate wiring (consolidation review-queue save site)', () => {
       makeStreamSignal('sem-review', 'correction'),
     ];
     const { port, stored } = makeProposalStore();
-    const engine = new ConsolidationEngine(makeRedis(signals, port), makeNeo4j(node), makeConfig(false));
+    const engine = new ConsolidationEngine(makeRedis(signals, port), makeNeo4j(node), makeConfig(false), undefined, undefined, { legacyUnqualified: true });
 
     await engine.run('test-scope');
     const saved = [...stored.values()][0];

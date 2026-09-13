@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/consolidation.regression.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { ConsolidationEngine } from '../consolidation.js';
@@ -62,7 +63,7 @@ describe('ConsolidationEngine regression', () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const redis = makeRedis();
     const neo4j = makeNeo4j();
-    const engine = new ConsolidationEngine(redis, neo4j, makeConfig());
+    const engine = new ConsolidationEngine(redis, neo4j, makeConfig(), undefined, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('test-scope');
 

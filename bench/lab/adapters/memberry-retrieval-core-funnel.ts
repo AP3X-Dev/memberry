@@ -33,7 +33,7 @@ import type {
   QueryResponse,
 } from '../contracts/adapter.js';
 import { InMemoryAdapter, inRequestedScope, isCurrent, namespaceKey } from './in-memory.js';
-import { fixtureVector, projectAssemblyResults } from './memberry-retrieval-core.js';
+import { fixtureVector, projectAssemblyResults, fixtureSemanticAuthority } from './memberry-retrieval-core.js';
 import {
   UnifiedAssembler,
   type AssemblerCodeLayer,
@@ -263,6 +263,7 @@ export class MemBerryRetrievalCoreFunnelAdapter extends InMemoryAdapter {
       FIXTURE_EMBEDDING,
       null,
       null,
+      fixtureSemanticAuthority(scoped, request),
     );
     // 'ranked', never 'auto' (see the core adapter). No tenantId is threaded, so
     // the assembler resolves its default tenant and keeps the code channel

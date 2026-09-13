@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/neo4j/src/__tests__/expand.tenant.opt113.test.ts
 //
 // OPT-113: ScopedQuery.expandByGraph is reachable via berry_load and previously
@@ -28,7 +29,7 @@ async function reachable(driver: ReturnType<typeof createNeo4jDriver>): Promise<
 
 describe('OPT-113: expandByGraph tenant isolation (adversarial)', () => {
   const driver = createNeo4jDriver(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
-  const query = new ScopedQuery(driver);
+  const query = new ScopedQuery(driver, { legacyUnqualified: true });
   let ok = false;
 
   beforeAll(async () => {
@@ -40,38 +41,60 @@ describe('OPT-113: expandByGraph tenant isolation (adversarial)', () => {
       `{id:'${id}', content:'${content}', confidence:${conf}, signal_count:0, created_at:'${now}', updated_at:'${now}', decay_class:'stable', tags:['${TAG}']${tenant ? `, tenant_id:'${tenant}'` : ''}}`;
     const s = driver.session();
     try {
-      // Path 1 (semantic-neighbor): (eX)<-[ABOUT]-(bridge)-[ABOUT]->(eY)<-[ABOUT]-(s2)
-      // s2 in three tenants; bridge is traversal-only (not returned).
+      // Path 1 uses separate tenant-owned copies of every endpoint.
       await s.run(
-        `CREATE (eX:Entity {name:$x, tags:[$tag]})
-         CREATE (eY:Entity {name:$y, tags:[$tag]})
-         CREATE (bridge:Semantic ${sem(`${TAG}-bridge`, 'bridge', 0.95)})
+        `CREATE (eXA:Entity {name:$x, tags:[$tag], tenant_id:'tenantA'})
+         CREATE (eYA:Entity {name:$y, tags:[$tag], tenant_id:'tenantA'})
+         CREATE (eXB:Entity {name:$x, tags:[$tag], tenant_id:'tenantB'})
+         CREATE (eYB:Entity {name:$y, tags:[$tag], tenant_id:'tenantB'})
+         CREATE (eXL:Entity {name:$x, tags:[$tag]})
+         CREATE (eYL:Entity {name:$y, tags:[$tag]})
+         CREATE (bridgeA:Semantic ${sem(`${TAG}-bridgeA`, 'bridge A', 0.95, 'tenantA')})
+         CREATE (bridgeB:Semantic ${sem(`${TAG}-bridgeB`, 'bridge B', 0.95, 'tenantB')})
+         CREATE (bridgeL:Semantic ${sem(`${TAG}-bridgeL`, 'bridge legacy', 0.95)})
          CREATE (sA:Semantic ${sem(`${TAG}-semA`, 'sem A secret', 0.9, 'tenantA')})
          CREATE (sB:Semantic ${sem(`${TAG}-semB`, 'sem B secret', 0.8, 'tenantB')})
          CREATE (sL:Semantic ${sem(`${TAG}-semL`, 'sem legacy', 0.7)})
-         CREATE (bridge)-[:ABOUT]->(eX)
-         CREATE (bridge)-[:ABOUT]->(eY)
-         CREATE (sA)-[:ABOUT]->(eY)
-         CREATE (sB)-[:ABOUT]->(eY)
-         CREATE (sL)-[:ABOUT]->(eY)`,
+         CREATE (bridgeA)-[:ABOUT]->(eXA)
+         CREATE (bridgeA)-[:ABOUT]->(eYA)
+         CREATE (bridgeB)-[:ABOUT]->(eXB)
+         CREATE (bridgeB)-[:ABOUT]->(eYB)
+         CREATE (bridgeL)-[:ABOUT]->(eXL)
+         CREATE (bridgeL)-[:ABOUT]->(eYL)
+         CREATE (sA)-[:ABOUT]->(eYA)
+         CREATE (sB)-[:ABOUT]->(eYB)
+         CREATE (sL)-[:ABOUT]->(eYL)`,
         { x: X, y: Y, tag: TAG },
       );
-      // Path 2 (fact-neighbor): (eW)<-[FACT_ABOUT]-(f1)-[SAME_EPISODE]-(f2)-[FACT_ABOUT]->(eZ)<-[ABOUT]-(s)
+      // Path 2 also gives every Entity/Fact/Semantic endpoint an authority lane.
       await s.run(
-        `CREATE (eW:Entity {name:$w, tags:[$tag]})
-         CREATE (eZ:Entity {name:$z, tags:[$tag]})
-         CREATE (f1:Fact {id:$f1, tags:[$tag]})
-         CREATE (f2:Fact {id:$f2, tags:[$tag]})
+        `CREATE (eWA:Entity {name:$w, tags:[$tag], tenant_id:'tenantA'})
+         CREATE (eZA:Entity {name:$z, tags:[$tag], tenant_id:'tenantA'})
+         CREATE (eWB:Entity {name:$w, tags:[$tag], tenant_id:'tenantB'})
+         CREATE (eZB:Entity {name:$z, tags:[$tag], tenant_id:'tenantB'})
+         CREATE (f1A:Fact {id:$f1a, tags:[$tag], tenant_id:'tenantA'})
+         CREATE (f2A:Fact {id:$f2a, tags:[$tag], tenant_id:'tenantA'})
+         CREATE (f1B:Fact {id:$f1b, tags:[$tag], tenant_id:'tenantB'})
+         CREATE (f2B:Fact {id:$f2b, tags:[$tag], tenant_id:'tenantB'})
          CREATE (fA:Semantic ${sem(`${TAG}-factA`, 'fact A secret', 0.9, 'tenantA')})
          CREATE (fB:Semantic ${sem(`${TAG}-factB`, 'fact B secret', 0.8, 'tenantB')})
-         CREATE (fL:Semantic ${sem(`${TAG}-factL`, 'fact legacy', 0.7)})
-         CREATE (f1)-[:FACT_ABOUT]->(eW)
-         CREATE (f2)-[:FACT_ABOUT]->(eZ)
-         CREATE (f1)-[:SAME_EPISODE]->(f2)
-         CREATE (fA)-[:ABOUT]->(eZ)
-         CREATE (fB)-[:ABOUT]->(eZ)
-         CREATE (fL)-[:ABOUT]->(eZ)`,
-        { w: W, z: Z, f1: `${TAG}-f1`, f2: `${TAG}-f2`, tag: TAG },
+         CREATE (f1A)-[:FACT_ABOUT]->(eWA)
+         CREATE (f2A)-[:FACT_ABOUT]->(eZA)
+         CREATE (f1A)-[:SAME_EPISODE]->(f2A)
+         CREATE (f1B)-[:FACT_ABOUT]->(eWB)
+         CREATE (f2B)-[:FACT_ABOUT]->(eZB)
+         CREATE (f1B)-[:SAME_EPISODE]->(f2B)
+         CREATE (fA)-[:ABOUT]->(eZA)
+         CREATE (fB)-[:ABOUT]->(eZB)`,
+        {
+          w: W,
+          z: Z,
+          f1a: `${TAG}-f1a`,
+          f2a: `${TAG}-f2a`,
+          f1b: `${TAG}-f1b`,
+          f2b: `${TAG}-f2b`,
+          tag: TAG,
+        },
       );
     } finally { await s.close(); }
   });

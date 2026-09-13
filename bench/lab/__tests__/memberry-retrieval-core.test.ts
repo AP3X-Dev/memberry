@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { LabMemory, LabNamespace, LabQueryResult } from '../contracts/adapter.js';
 import { MemBerryProxyAdapter } from '../adapters/memberry-proxy.js';
-import { fixtureVector, MemBerryRetrievalCoreAdapter, projectAssemblyResults } from '../adapters/memberry-retrieval-core.js';
+import { fixtureVector, MemBerryRetrievalCoreAdapter, projectAssemblyResults, fixtureSemanticAuthority } from '../adapters/memberry-retrieval-core.js';
 import { loadG2HoldoutScenarioInputs } from '../datasets/load-suite.js';
 import { TEMPORAL_ISOLATION_SCENARIOS } from '../fixtures/temporal-isolation.js';
 import { auditAdapterDependencies, compareRegisteredAdapters } from '../registered-adapters.js';
@@ -355,5 +355,37 @@ describe('LAB-010 production retrieval adapter', () => {
     }
 
     expect(comparedBoundaries).toBeGreaterThan(0);
+  });
+});
+
+
+describe('lab corpus lifecycle authority', () => {
+  const namespace = { runId: 'authority-test', tenant: 'tenant-a', project: 'project-a' };
+  const request = { namespace, query: 'synthetic', limit: 10 };
+  const memories: LabMemory[] = [
+    { id: 'active', content: 'current', recordedAt: '2026-01-01T00:00:00.000Z', tenant: 'tenant-a', project: 'project-a' },
+    { id: 'expired', content: 'old', recordedAt: '2026-01-01T00:00:00.000Z', validTo: '2026-02-01T00:00:00.000Z' },
+    { id: 'foreign', content: 'foreign', recordedAt: '2026-01-01T00:00:00.000Z', tenant: 'tenant-b' },
+  ];
+
+  it('admits only corpus-backed evidence in the bound scope and temporal frame', async () => {
+    const authority = fixtureSemanticAuthority(memories, request);
+    expect(await authority.evaluateActiveEligibility({ semanticIds: ['active', 'expired', 'foreign', 'missing'], tenantId: 'default' }))
+      .toEqual([
+        { id: 'active', status: 'eligible' }, { id: 'expired', status: 'ineligible' },
+        { id: 'foreign', status: 'ineligible' }, { id: 'missing', status: 'unknown' },
+      ]);
+    const historical = fixtureSemanticAuthority(memories, { ...request, asOf: '2026-01-15T00:00:00.000Z' });
+    expect(await historical.evaluateActiveEligibility({ semanticIds: ['expired'] }))
+      .toEqual([{ id: 'expired', status: 'eligible' }]);
+  });
+
+  it('does not invent authority for ambiguous identity or a different assembler scope', async () => {
+    const duplicate = fixtureSemanticAuthority([memories[0]!, memories[0]!], request);
+    expect(await duplicate.evaluateActiveEligibility({ semanticIds: ['active'] }))
+      .toEqual([{ id: 'active', status: 'unknown' }]);
+    const authority = fixtureSemanticAuthority(memories, request);
+    expect(await authority.evaluateActiveEligibility({ semanticIds: ['active'], tenantId: 'other' }))
+      .toEqual([{ id: 'active', status: 'unknown' }]);
   });
 });

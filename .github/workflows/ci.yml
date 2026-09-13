@@ -32,25 +32,51 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        id: install
         run: npm ci
 
+      - name: Verify release-gate contract
+        id: gate_contract
+        run: npm run test:release-gate
+
+      - name: Check formatting
+        id: format
+        run: npm run format:check
+
+      - name: Lint with the existing warning ratchet
+        id: lint
+        run: npm run lint:ci
+
       - name: Build all packages
+        id: build
         run: npm run build
 
       - name: Validate MemBerry agent guidance
+        id: guidance
         run: npm run validate:memberry-guidance
 
       - name: Run unit tests
-        run: npm test
+        id: workspace
+        run: npm run test --workspaces --if-present
         env:
           REDIS_URL: ""
           NEO4J_URI: ""
 
       - name: Run full evaluation-lab unit tests
+        id: lab
         run: npm run bench:lab:test
 
       - name: Type-check evaluation lab
+        id: lab_typecheck
         run: npm run bench:lab:typecheck
+
+      - name: Validate evaluation-lab registry
+        id: lab_validate
+        run: npm run bench:lab:validate
+
+      - name: Verify immutable historical baseline
+        id: baseline
+        run: npm run bench:lab:baseline:verify
 
       # Required deterministic lab gate: validates the pinned registries and immutable
       # baseline, runs the legacy quality control, then compares the proxy candidate
@@ -82,6 +108,248 @@ jobs:
           path: ${{ steps.ret010_finalize.outputs.upload_path }}
           if-no-files-found: error
           include-hidden-files: true
+          retention-days: 14
+
+      - name: Verify current-source binding
+        id: source_binding
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Generate release-candidate manifest
+        if: ${{ always() }}
+        shell: bash
+        env:
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          GATE_CONTRACT_OUTCOME: ${{ steps.gate_contract.outcome }}
+          FORMAT_OUTCOME: ${{ steps.format.outcome }}
+          LINT_OUTCOME: ${{ steps.lint.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          GUIDANCE_OUTCOME: ${{ steps.guidance.outcome }}
+          WORKSPACE_OUTCOME: ${{ steps.workspace.outcome }}
+          LAB_OUTCOME: ${{ steps.lab.outcome }}
+          LAB_TYPECHECK_OUTCOME: ${{ steps.lab_typecheck.outcome }}
+          LAB_VALIDATE_OUTCOME: ${{ steps.lab_validate.outcome }}
+          BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
+          LAB_CI_OUTCOME: ${{ steps.ret010_development_gate.outcome }}
+          SOURCE_BINDING_OUTCOME: ${{ steps.source_binding.outcome }}
+        run: |
+          set -euo pipefail
+          status_file="$RUNNER_TEMP/release-gate-status"
+          : >"$status_file"
+          record() {
+            local stage="$1"
+            local outcome="$2"
+            if [[ "$outcome" == "success" ]]; then
+              printf '%s_EXIT=0\n' "$stage" >>"$status_file"
+            else
+              printf '%s_EXIT=1\n' "$stage" >>"$status_file"
+            fi
+          }
+          record INSTALL "$INSTALL_OUTCOME"
+          record GATE_CONTRACT "$GATE_CONTRACT_OUTCOME"
+          record FORMAT "$FORMAT_OUTCOME"
+          record LINT "$LINT_OUTCOME"
+          record BUILD "$BUILD_OUTCOME"
+          record GUIDANCE "$GUIDANCE_OUTCOME"
+          record WORKSPACE "$WORKSPACE_OUTCOME"
+          record LAB "$LAB_OUTCOME"
+          record LAB_TYPECHECK "$LAB_TYPECHECK_OUTCOME"
+          record LAB_VALIDATE "$LAB_VALIDATE_OUTCOME"
+          record BASELINE "$BASELINE_OUTCOME"
+          record LAB_CI "$LAB_CI_OUTCOME"
+          record SOURCE_BINDING "$SOURCE_BINDING_OUTCOME"
+          node scripts/release-candidate-manifest.mjs \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP/release-candidate-manifest.json" "$status_file"
+
+      - name: Upload release-candidate manifest
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: memberry-release-candidate-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-candidate-manifest.json
+          if-no-files-found: error
+          retention-days: 14
+
+  # PR-01/02 authority proof uses its own empty database in each matrix arm.
+  # GitHub owns service teardown; no production stores or credentials are used.
+  pr0102-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    env:
+      PR0102_EVIDENCE: ${{ runner.temp }}/memberry-pr0102-live
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      neo4j:
+        image: neo4j:5-community
+        ports:
+          - 7687:7687
+        env:
+          NEO4J_AUTH: neo4j/pr0102-disposable-password
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p pr0102-disposable-password 'RETURN 1'"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Bind disposable live run to checked-out source and image
+        id: identity
+        shell: bash
+        env:
+          NEO4J_CONTAINER_ID: ${{ job.services.neo4j.id }}
+          REDIS_CONTAINER_ID: ${{ job.services.redis.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PR0102_EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          export SOURCE_TREE="$(git rev-parse HEAD^{tree})"
+          export NEO4J_IMAGE_ID="$(docker inspect --format='{{.Image}}' "$NEO4J_CONTAINER_ID")"
+          export REDIS_IMAGE_ID="$(docker inspect --format='{{.Image}}' "$REDIS_CONTAINER_ID")"
+          [[ "$NEO4J_CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$NEO4J_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$REDIS_CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$REDIS_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          const e = process.env;
+          writeFileSync(`${e.PR0102_EVIDENCE}/identity.json`, JSON.stringify({
+            repository: e.GITHUB_REPOSITORY, sha: e.GITHUB_SHA, tree: e.SOURCE_TREE,
+            runId: e.GITHUB_RUN_ID, runAttempt: e.GITHUB_RUN_ATTEMPT,
+            node: process.version, neo4jContainerId: e.NEO4J_CONTAINER_ID,
+            neo4jImageId: e.NEO4J_IMAGE_ID, disposable: true,
+            redisContainerId: e.REDIS_CONTAINER_ID, redisImageId: e.REDIS_IMAGE_ID,
+            pr01Mode: 'required', pr02Mode: 'required'
+          }, null, 2));
+          NODE
+
+      - name: Install dependencies with evidence
+        id: install
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci 2>&1 | tee "$PR0102_EVIDENCE/install.log"
+
+      - name: Build current source with evidence
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build 2>&1 | tee "$PR0102_EVIDENCE/build.log"
+          node --test scripts/__tests__/verify-pr0102-live-report.test.mjs 2>&1 | tee "$PR0102_EVIDENCE/report-contract.log"
+
+      - name: Required semantic eligibility, supersession and epoch live tests
+        id: live
+        shell: bash
+        env:
+          MEMBERRY_PR01_LIVE: required
+          MEMBERRY_PR02_LIVE: required
+          MEMBERRY_PR0102_DISPOSABLE: "1"
+          NEO4J_URI: bolt://127.0.0.1:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: pr0102-disposable-password
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          set -euo pipefail
+          test -n "$NEO4J_URI" && test -n "$NEO4J_USER" && test -n "$NEO4J_PASSWORD"
+          npx --no-install vitest run --config packages/neo4j/vitest.config.ts \
+            packages/neo4j/src/__tests__/semantic-eligibility.live.test.ts \
+            packages/neo4j/src/__tests__/semantic.supersession.live.test.ts \
+            packages/neo4j/src/__tests__/knowledge-epoch.live.test.ts \
+            packages/core/src/__tests__/service.delivery.live.test.ts \
+            packages/code/src/__tests__/knowledge-mutation.live.test.ts \
+            --reporter=default --reporter=json --outputFile="$PR0102_EVIDENCE/tests.json" \
+            2>&1 | sed 's/pr0102-disposable-password/[REDACTED]/g' | tee "$PR0102_EVIDENCE/live.log"
+          node scripts/verify-pr0102-live-report.mjs "$PR0102_EVIDENCE/tests.json"
+
+      - name: Required legacy supersession reconciliation live proof
+        id: reconciliation
+        shell: bash
+        env:
+          MEMBERRY_PR01_LIVE: required
+          MEMBERRY_PR02_LIVE: required
+          MEMBERRY_PR0102_DISPOSABLE: "1"
+          NEO4J_URI: bolt://127.0.0.1:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: pr0102-disposable-password
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          set -euo pipefail
+          node --test scripts/__tests__/reconcile-semantic-supersession.live.test.mjs \
+            2>&1 | sed 's/pr0102-disposable-password/[REDACTED]/g' | tee "$PR0102_EVIDENCE/reconciliation.log"
+
+      - name: Verify unchanged current-source binding
+        id: source_binding
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Finalize PR-01/02 evidence manifest
+        if: ${{ always() }}
+        env:
+          IDENTITY_OUTCOME: ${{ steps.identity.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          LIVE_OUTCOME: ${{ steps.live.outcome }}
+          RECONCILIATION_OUTCOME: ${{ steps.reconciliation.outcome }}
+          SOURCE_BINDING_OUTCOME: ${{ steps.source_binding.outcome }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          const dir = process.env.PR0102_EVIDENCE;
+          mkdirSync(dir, { recursive: true });
+          const stages = Object.fromEntries(['IDENTITY', 'INSTALL', 'BUILD', 'LIVE', 'RECONCILIATION', 'SOURCE_BINDING']
+            .map(name => [name, process.env[`${name}_OUTCOME`] || 'missing']));
+          const files = Object.fromEntries(readdirSync(dir).map(name => {
+            const path = `${dir}/${name}`;
+            const sanitized = readFileSync(path, 'utf8').replaceAll('pr0102-disposable-password', '[REDACTED]');
+            writeFileSync(path, sanitized);
+            return [name, createHash('sha256').update(sanitized).digest('hex')];
+          }));
+          const passed = Object.values(stages).every(outcome => outcome === 'success');
+          writeFileSync(`${dir}/manifest.json`, JSON.stringify({
+            schemaVersion: 1, sha: process.env.GITHUB_SHA, node: process.version,
+            passed, stages, sha256: files
+          }, null, 2));
+          if (!passed) process.exitCode = 1;
+          NODE
+
+      - name: Upload PR-01/02 live build and test evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: memberry-pr0102-live-node-${{ matrix.node-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memberry-pr0102-live
+          if-no-files-found: error
           retention-days: 14
 
   # Full job: integration tests with Redis + Neo4j service containers

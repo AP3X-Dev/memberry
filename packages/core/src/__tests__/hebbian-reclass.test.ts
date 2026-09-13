@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/hebbian-reclass.test.ts
 //
 // MEM-006H 'reclass' promotion proposals (lifecycle-decay harness style):
@@ -122,7 +123,7 @@ function makeHarness(nodes: FakeNode[], overrides: Partial<LifecycleConfig> = {}
       cache: { invalidateByNodeId: async () => 0 },
     },
     { semantic: graph } as never,
-    { consolidation: { autoApply, signalThreshold: 3 } } as unknown as AMPConfig,
+    { consolidation: { autoApply, signalThreshold: 3 } } as unknown as AMPConfig, undefined, undefined, { legacyUnqualified: true },
   );
   return {
     graph, proposals, engine, consolidation, artifacts,

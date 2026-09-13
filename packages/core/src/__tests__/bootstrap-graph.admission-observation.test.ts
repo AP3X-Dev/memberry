@@ -44,14 +44,21 @@ describe('BootstrapGraphService semantic lifecycle stamping (RET-005B-AUTH-001B6
   it('T9: stamps valid_at ON CREATE only and never inside ON MATCH SET', async () => {
     const run = vi.fn(async (_query: string, params?: Record<string, unknown>) => ({
       records: [{ get: (key: string) => (
-        key === 'isNew' ? true
+        key === 'knowledgeEpoch' ? '1'
+          : key === 'isNew' ? true
           : key === 'linked' ? 0
           : key === 'storedProjectScope' ? params?.projectScope ?? null
+          : key === 'storedScope' ? params?.scope
+          : key === 'storedTenantId' ? params?.tenantId
           : 'mock-id'
       ) }],
     }));
     const driver = {
-      session: vi.fn(() => ({ run, close: vi.fn(async () => undefined) })),
+      session: vi.fn(() => ({
+        run,
+        executeWrite: vi.fn(async (work) => work({ run })),
+        close: vi.fn(async () => undefined),
+      })),
     } as unknown as Driver;
 
     await new BootstrapGraphService(driver).bootstrap({

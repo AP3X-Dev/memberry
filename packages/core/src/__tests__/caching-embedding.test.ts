@@ -1,103 +1,79 @@
-// packages/core/src/__tests__/caching-embedding.test.ts
-//
-// RED-before-green coverage for the read-through embedding cache (OPT-20 / OPT-65).
-// Fully deterministic: the inner provider and the cache are in-memory mocks, so
-// no Redis or OpenAI is touched.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { CachingEmbeddingProvider, type EmbeddingCachePort } from '../caching-embedding.js';
-import type { EmbeddingProvider } from '../types.js';
-
-/** A trivial in-memory EmbeddingCache that records calls via vi.fn spies. */
-function makeMemoryCache() {
-  const store = new Map<string, number[]>();
-  const get = vi.fn(async (content: string): Promise<number[] | null> => store.get(content) ?? null);
-  const set = vi.fn(async (content: string, vec: number[]): Promise<void> => {
-    store.set(content, vec);
-  });
-  const cache: EmbeddingCachePort = { get, set };
-  return { cache, get, set, store };
+import type { EmbeddingProvider, EmbeddingDescriptor, EmbeddingCacheAddress } from '../types.js';
+const scope = { tenantId: 'tenant-a', projectScope: 'project:a' };
+const descriptor: EmbeddingDescriptor = { schemaVersion:1,provider:'fixture',model:'a',revision:'r1',dimensions:2,normalization:'none',preprocessingVersion:'raw-v1' };
+function fixture(d: EmbeddingDescriptor = descriptor) {
+  const values = new Map<string, number[]>();
+  const get = vi.fn(async (a: EmbeddingCacheAddress) => values.get(JSON.stringify(a)) ?? null);
+  const set = vi.fn(async (a: EmbeddingCacheAddress,v:number[]) => { values.set(JSON.stringify(a),v); });
+  const cache: EmbeddingCachePort = {get,set};
+  const embed = vi.fn(async (t:string) => [t.length,1]);
+  const embedBatch = vi.fn(async (ts:string[]) => ts.map(t => [t.length,1]));
+  const inner: EmbeddingProvider = {descriptor:d,available:true,embed,embedBatch};
+  return { values,get,set,cache,inner,embed,embedBatch,provider:new CachingEmbeddingProvider(inner,cache) };
 }
-
-/** Inner provider whose embed/embedBatch return a deterministic vector per text. */
-function makeInnerProvider() {
-  // Encode the text length as a 1-element vector so each text maps to a stable vec.
-  const embed = vi.fn(async (text: string): Promise<number[]> => [text.length, 1]);
-  const embedBatch = vi.fn(async (texts: string[]): Promise<number[][]> => texts.map((t) => [t.length, 1]));
-  const inner: EmbeddingProvider = { embed, embedBatch, available: true };
-  return { inner, embed, embedBatch };
-}
-
-describe('CachingEmbeddingProvider', () => {
-  let mem: ReturnType<typeof makeMemoryCache>;
-  let prov: ReturnType<typeof makeInnerProvider>;
-  let caching: CachingEmbeddingProvider;
-
-  beforeEach(() => {
-    mem = makeMemoryCache();
-    prov = makeInnerProvider();
-    caching = new CachingEmbeddingProvider(prov.inner, mem.cache);
+describe('scoped descriptor-qualified embedding cache', () => {
+  it('serves a repeated scoped call from cache', async () => {
+    const f=fixture();
+    expect(await f.provider.embed('hello',scope)).toEqual(await f.provider.embed('hello',scope));
+    expect(f.embed).toHaveBeenCalledTimes(1); expect(f.set).toHaveBeenCalledTimes(1);
   });
-
-  it('embed(): second identical call is served from cache; inner called ONCE, set ONCE', async () => {
-    const first = await caching.embed('hello world');
-    const second = await caching.embed('hello world');
-
-    expect(prov.embed).toHaveBeenCalledTimes(1); // miss then HIT — inner not re-called
-    expect(mem.set).toHaveBeenCalledTimes(1); // cached on the miss only
-    expect(second).toEqual(first); // same vector returned from cache
+  it('preserves mixed hit/miss and duplicate input order',async()=>{
+    const f=fixture(); await f.provider.embed('a',scope);
+    expect(await f.provider.embedBatch(['bb','a','ccc','bb'],scope)).toEqual([[2,1],[1,1],[3,1],[2,1]]);
+    expect(f.embedBatch).toHaveBeenCalledWith(['bb','ccc','bb'],scope);
+    f.embedBatch.mockClear();
+    await f.provider.embedBatch(['a','bb'],scope); expect(f.embedBatch).not.toHaveBeenCalled();
   });
-
-  it('embedBatch(): only the cache MISSES are sent to inner.embedBatch', async () => {
-    // Pre-cache "a" so it is a HIT; "bb" and "ccc" are misses.
-    await caching.embed('a');
-    prov.embed.mockClear();
-    prov.embedBatch.mockClear();
-
-    const out = await caching.embedBatch(['a', 'bb', 'ccc']);
-
-    // inner.embedBatch must be called exactly once, with ONLY the misses.
-    expect(prov.embedBatch).toHaveBeenCalledTimes(1);
-    expect(prov.embedBatch).toHaveBeenCalledWith(['bb', 'ccc']);
-    // Order preserved relative to input, hits spliced back into place.
-    expect(out).toEqual([
-      [1, 1], // "a" from cache
-      [2, 1], // "bb" fetched
-      [3, 1], // "ccc" fetched
-    ]);
+  it('isolates tenants, projects, explicit unscoped calls and descriptor identities',async()=>{
+    const f=fixture(); await f.provider.embed('same',scope);
+    await f.provider.embed('same',{...scope,tenantId:'b'});
+    await f.provider.embed('same',{...scope,projectScope:'project:b'});
+    await f.provider.embed('same',{...scope,projectScope:null});
+    for(const change of [{model:'b'},{revision:'r2'},{preprocessingVersion:'raw-v2'}]){
+      const p=new CachingEmbeddingProvider({...f.inner,descriptor:{...descriptor,...change}},f.cache);
+      await p.embed('same',scope);
+    }
+    expect(f.set).toHaveBeenCalledTimes(7); expect(f.values.size).toBe(7);
   });
-
-  it('embedBatch(): fully-cached batch never calls inner.embedBatch', async () => {
-    await caching.embed('x');
-    await caching.embed('yy');
-    prov.embedBatch.mockClear();
-
-    const out = await caching.embedBatch(['x', 'yy']);
-    expect(prov.embedBatch).not.toHaveBeenCalled();
-    expect(out).toEqual([[1, 1], [2, 1]]);
+  it('bypasses cache when scope or provider descriptor is absent',async()=>{
+    const f=fixture(); await f.provider.embed('x'); await f.provider.embedBatch(['x']);
+    const legacy=new CachingEmbeddingProvider({embed:f.embed,embedBatch:f.embedBatch},f.cache);
+    await legacy.embed('x',scope); await legacy.embedBatch(['x'],scope);
+    expect(f.get).not.toHaveBeenCalled(); expect(f.set).not.toHaveBeenCalled();
   });
-
-  it('cache.get error falls through to the inner provider (no throw)', async () => {
-    mem.get.mockRejectedValueOnce(new Error('redis down'));
-
-    const vec = await caching.embed('resilient');
-    expect(vec).toEqual([9, 1]); // 'resilient'.length === 9 — inner used
-    expect(prov.embed).toHaveBeenCalledTimes(1);
+  it('preserves disabled-provider behavior without caching fake vectors',async()=>{
+    const f=fixture();const p=new CachingEmbeddingProvider({...f.inner,available:false},f.cache);
+    expect(p.available).toBe(false); await p.embed('x',scope); await p.embedBatch(['x'],scope);
+    expect(f.get).not.toHaveBeenCalled();expect(f.set).not.toHaveBeenCalled();
   });
-
-  it('cache.set error does not break embed (result still returned)', async () => {
-    mem.set.mockRejectedValueOnce(new Error('redis write failed'));
-
-    const vec = await caching.embed('still works');
-    expect(vec).toEqual(['still works'.length, 1]);
-    expect(prov.embed).toHaveBeenCalledTimes(1);
+  it('validates explicit request even for empty batches and bypass providers',async()=>{
+    const f=fixture();
+    await expect(f.provider.embedBatch([],{tenantId:'*',projectScope:null})).rejects.toThrow();
+    expect(await f.provider.embedBatch([],scope)).toEqual([]);
+    expect(f.get).not.toHaveBeenCalled();expect(f.embedBatch).not.toHaveBeenCalled();
   });
-
-  it('mirrors the inner provider availability flag', () => {
-    const degraded = new CachingEmbeddingProvider(
-      { embed: async () => [0], embedBatch: async () => [[0]], available: false },
-      mem.cache,
-    );
-    expect(degraded.available).toBe(false);
-    expect(caching.available).toBe(true);
+  it('rejects mutable inner provider identity',async()=>{
+    const f=fixture(); Object.defineProperty(f.inner,'descriptor',{value:{...descriptor,model:'changed'}});
+    await expect(f.provider.embed('x',scope)).rejects.toThrow('provider_changed');
+    expect(f.get).not.toHaveBeenCalled();
+  });
+  it('treats corrupt hits as misses and tolerates cache outages',async()=>{
+    const f=fixture();f.get.mockResolvedValueOnce([NaN,0]);
+    expect(await f.provider.embed('x',scope)).toEqual([1,1]);
+    f.get.mockRejectedValueOnce(new Error('untrusted text'));
+    f.set.mockRejectedValueOnce(new Error('untrusted text'));
+    const log=vi.spyOn(console,'error').mockImplementation(()=>{});
+    try{expect(await f.provider.embed('secret input',scope)).toEqual([12,1]);expect(JSON.stringify(log.mock.calls)).not.toContain('untrusted');expect(JSON.stringify(log.mock.calls)).not.toContain('secret input');}finally{log.mockRestore();}
+  });
+  it.each([[[1,0]],[[1,0],[NaN,0]],[[1,0],[1]],[[1,0],[1,0],[1,0]]])('publishes no partial malformed batch %#',async vectors=>{
+    const f=fixture();f.embedBatch.mockResolvedValueOnce(vectors);
+    await expect(f.provider.embedBatch(['a','b'],scope)).rejects.toThrow();expect(f.set).not.toHaveBeenCalled();
+  });
+  it('validates fetched output even when cache is bypassed',async()=>{
+    const f=fixture();f.embed.mockResolvedValueOnce([Infinity,0]);
+    await expect(f.provider.embed('x')).rejects.toThrow('nonfinite');
+    expect(f.set).not.toHaveBeenCalled();
   });
 });

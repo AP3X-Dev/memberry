@@ -25,6 +25,36 @@ evidence that corrected it does not live only in someone's head.
 
 ## Open
 
+### RL-029 — Release evidence must be bound to a clean current source and fail-closed gate
+**Evidence:** code-verified and locally measured · **Status:** PR-00A implemented, clean-source qualification pending · **Opened:** 2026-09-09
+
+At inspected source `60cf9757e5ec7aefdc94d785b4a5dd075ed89d1a`, `scripts/gate.sh`
+recorded individual exit codes but never aggregated them; its Docker invocation ended with
+`|| true`. A required-stage failure could therefore leave readable failure logs while the gate
+itself returned success. CI ran build, workspace/lab tests, and disposable integration, but did not
+invoke the repository's formatting floor or the documented 469-warning lint ratchet.
+
+PR-00A adds a closed stage-receipt contract, makes every nonzero, missing, duplicate, malformed, or
+unexpected receipt fail the aggregate, keeps later stages running for inspectable logs, and binds a
+successful result to an unchanged clean full SHA. The release-candidate manifest records all 101
+declared Memberry settings without secret values, preserves the historical baseline as
+`recorded-elsewhere`, and cannot label a dirty worktree as `reproduced-at-this-commit`.
+
+Evidence reproduced in the uncommitted PR-00A worktree: release-gate/manifest tests 23/23, clean
+TypeScript build, format check, lint at exactly 469 warnings and zero errors, registry validation,
+immutable baseline verification, and canonical MemBerry guidance validation. These are development
+checks, not a clean-commit release result. The immutable `memberry-7a31231` numbers remain historical;
+they were verified against their lock but were not rerun at `60cf975`. The full Node 20/22 container
+gate, hosted CI, live integration, repository protection, and production runtime remain not run for
+this candidate.
+
+**Revisit when:** PR-00A is committed on a clean review head. Run the full gate serially on Node 20
+and 22, inspect the generated manifests/logs, and require hosted unit plus disposable integration
+results on that same SHA before changing this entry to qualified. Never infer qualification from
+the historical baseline lock alone.
+
+---
+
 ### RL-026 — The bounded Cerebro local-model backfill produced zero usable extractions
 **Evidence:** measured · **Status:** closed-negative for IDX-001A production activation · **Opened:** 2026-08-30
 

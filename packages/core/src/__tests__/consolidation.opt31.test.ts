@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/consolidation.opt31.test.ts
 //
 // OPT-31: gate extraction-driven fact INVALIDATION during (auto-applied)
@@ -138,7 +139,7 @@ async function applyWith(existingConfidence: number, contenderConfidence: number
   const node = makeSemanticNode('sem-old', 0.8);
   const factLayer = makeFactLayer([makeExistingFact(existingConfidence)]);
   mockExtractFacts.mockResolvedValue([contradictingInput(contenderConfidence)] as never);
-  const engine = new ConsolidationEngine(makeRedis(supersedeProposal(node)), makeNeo4j(factLayer, node), makeConfig());
+  const engine = new ConsolidationEngine(makeRedis(supersedeProposal(node)), makeNeo4j(factLayer, node), makeConfig(), undefined, undefined, { legacyUnqualified: true });
   await engine.apply('prop-1', 'approve');
   return factLayer;
 }
@@ -193,7 +194,7 @@ describe('OPT-31: consolidation fact-invalidation confidence gate', () => {
     mockExtractFacts.mockResolvedValue([
       { ...contradictingInput(0.5), object: 'bcrypt' },
     ] as never);
-    const engine = new ConsolidationEngine(makeRedis(supersedeProposal(node)), makeNeo4j(factLayer, node), makeConfig());
+    const engine = new ConsolidationEngine(makeRedis(supersedeProposal(node)), makeNeo4j(factLayer, node), makeConfig(), undefined, undefined, { legacyUnqualified: true });
     await engine.apply('prop-1', 'approve');
 
     expect(factLayer.invalidate).not.toHaveBeenCalled();
@@ -226,7 +227,7 @@ describe('twin creation: consolidation reconciles against TENTATIVE facts', () =
     mockExtractFacts.mockResolvedValue([
       { ...contradictingInput(0.5), object: contenderObject },
     ] as never);
-    const engine = new ConsolidationEngine(makeRedis(supersedeProposal(node)), makeNeo4j(factLayer, node), makeConfig());
+    const engine = new ConsolidationEngine(makeRedis(supersedeProposal(node)), makeNeo4j(factLayer, node), makeConfig(), undefined, undefined, { legacyUnqualified: true });
     await engine.apply('prop-1', 'approve');
     return factLayer;
   }

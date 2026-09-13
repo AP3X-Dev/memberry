@@ -2,6 +2,7 @@
 import { type Driver } from 'neo4j-driver';
 import type { MemoryBlock, MemoryTier } from '@memberry/core';
 import { tenantWhere, resolveTenant, TENANT_PARAM } from './tenant.js';
+import { bumpKnowledgeEpoch, projectKnowledgeScope } from './knowledge-epoch.js';
 
 export class BlockStore {
   constructor(private driver: Driver) {}
@@ -18,7 +19,8 @@ export class BlockStore {
         ? '{scope: $scope, name: $name, session_id: $session_id, tenant_id: $tenantId}'
         : '{scope: $scope, name: $name, tenant_id: $tenantId}';
 
-      await session.run(
+      await session.executeWrite(async (tx) => {
+        await tx.run(
         `MERGE (b:MemoryBlock ${mergeKey})
          SET b.id = $id,
              b.tier = $tier,
@@ -42,7 +44,12 @@ export class BlockStore {
           created_at: block.created_at,
           updated_at: block.updated_at,
         },
-      );
+        );
+        await bumpKnowledgeEpoch(tx, {
+          tenantId: tenant,
+          projectScope: projectKnowledgeScope(block.scope),
+        });
+      });
     } finally {
       await session.close();
     }
@@ -104,8 +111,16 @@ export class BlockStore {
         conditions.push('b.session_id IS NULL');
       }
       const query =
-        `MATCH (b:MemoryBlock {scope: $scope, name: $name}) WHERE ${conditions.join(' AND ')} DETACH DELETE b`;
-      await session.run(query, params);
+        `MATCH (b:MemoryBlock {scope: $scope, name: $name}) WHERE ${conditions.join(' AND ')} DETACH DELETE b RETURN count(*) AS changed`;
+      await session.executeWrite(async (tx) => {
+        const deleted = await tx.run(query, params);
+        if (Number(deleted.records[0]?.get('changed') ?? 0) > 0) {
+          await bumpKnowledgeEpoch(tx, {
+            tenantId: tenant,
+            projectScope: projectKnowledgeScope(scope),
+          });
+        }
+      });
     } finally {
       await session.close();
     }

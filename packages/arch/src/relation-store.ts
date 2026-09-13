@@ -1,3 +1,4 @@
+import { runArchMutation } from './knowledge-mutation.js';
 // packages/arch/src/relation-store.ts
 // Typed structural relationships between entities.
 
@@ -31,7 +32,7 @@ export class StructuralRelationStore {
     try {
       // Relationship types cannot be parameterized in Cypher — validated against enum above.
       // Properties are passed via Neo4j parameters to prevent injection.
-      const result = await session.run(
+      const result = await runArchMutation(session,
         `MATCH (a:Entity {name: $from}), (b:Entity {name: $to})
          WHERE ${entityProjectFilter('a')}
            AND ${entityProjectFilter('b')}
@@ -53,7 +54,7 @@ export class StructuralRelationStore {
     try {
       // Invalidate rather than delete — preserves temporal history
       const now = new Date().toISOString();
-      await session.run(
+      await runArchMutation(session,
         `MATCH (a:Entity {name: $from})-[r:${type}]->(b:Entity {name: $to})
          WHERE r.invalid_at IS NULL
            AND ${entityProjectFilter('a')}

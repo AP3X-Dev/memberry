@@ -485,7 +485,15 @@ describe('BootstrapGraphService OPT-8 (one bad seed must not abort bootstrap)', 
           throw new Error('simulated transient MERGE contention on poison seed');
         }
         state.semanticClaims.push(content);
-        return { records: [rec({ id: `sem-${++idCounter}`, isNew: true })] };
+        return { records: [rec({
+          id: `sem-${++idCounter}`,
+          isNew: true,
+          storedScope: params?.scope,
+          storedTenantId: params?.tenantId,
+        })] };
+      }
+      if (query.includes('KnowledgeEpoch')) {
+        return { records: [rec({ knowledgeEpoch: '1' })] };
       }
       // mergeEntity MERGE.
       if (query.includes('MERGE (e:Entity')) {
@@ -493,6 +501,7 @@ describe('BootstrapGraphService OPT-8 (one bad seed must not abort bootstrap)', 
           id: `ent-${++idCounter}`,
           isNew: true,
           storedProjectScope: params?.projectScope ?? null,
+          storedTenantId: params?.tenantId,
         })] };
       }
       // mergeAgent MERGE.
@@ -513,7 +522,11 @@ describe('BootstrapGraphService OPT-8 (one bad seed must not abort bootstrap)', 
       }
       return { records: [] };
     };
-    const session = { run, close: async () => {} };
+    const session = {
+      run,
+      executeWrite: async (work: (tx: { run: typeof run }) => unknown) => work({ run }),
+      close: async () => {},
+    };
     return { session: () => session, close: async () => {} } as unknown as Driver;
   }
 
@@ -564,6 +577,15 @@ describe('BootstrapGraphService OPT-8 (one bad seed must not abort bootstrap)', 
               throw new Error('simulated hard entity-merge failure');
             }
             return origRun(query, params);
+          },
+          executeWrite: async (work: (tx: { run: typeof origRun }) => unknown) => {
+            const run = async (query: string, params?: Record<string, unknown>) => {
+              if (query.includes('MERGE (e:Entity')) {
+                throw new Error('simulated hard entity-merge failure');
+              }
+              return origRun(query, params);
+            };
+            return work({ run });
           },
           close: async () => {},
         };

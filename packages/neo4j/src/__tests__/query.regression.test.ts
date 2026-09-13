@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/neo4j/src/__tests__/query.regression.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import neo4j from 'neo4j-driver';
@@ -16,7 +17,7 @@ describe('ScopedQuery.rawCypher regression', () => {
       close: vi.fn().mockResolvedValue(undefined),
     };
     const mockDriver = { session: vi.fn().mockReturnValue(session) };
-    const query = new ScopedQuery(mockDriver as never);
+    const query = new ScopedQuery(mockDriver as never, { legacyUnqualified: true });
     let thrown: unknown;
 
     await query.rawCypher('MATCH (n) RETURN n', 10);
@@ -60,7 +61,7 @@ describe('ScopedQuery.rawCypher regression', () => {
       session: vi.fn().mockReturnValue(session),
     };
 
-    const query = new ScopedQuery(mockDriver as never);
+    const query = new ScopedQuery(mockDriver as never, { legacyUnqualified: true });
     await query.rawCypher('MATCH (s:Semantic) RETURN s LIMIT 1000000', 25);
 
     expect(session.run).toHaveBeenCalledWith(
@@ -80,7 +81,7 @@ describe('ScopedQuery.rawCypher regression', () => {
       session: vi.fn().mockReturnValue(session),
     };
 
-    const query = new ScopedQuery(mockDriver as never);
+    const query = new ScopedQuery(mockDriver as never, { legacyUnqualified: true });
     await query.rawCypher('MATCH (s:Semantic) RETURN s', 1000000);
 
     expect(session.run).toHaveBeenCalledWith(
@@ -100,7 +101,7 @@ describe('ScopedQuery.rawCypher regression', () => {
     };
     const params = { grepPatternLower: "jwt' or 1=1", grepScope: "project:amp' or true" };
 
-    const query = new ScopedQuery(mockDriver as never);
+    const query = new ScopedQuery(mockDriver as never, { legacyUnqualified: true });
     await query.rawCypher(
       'MATCH (s:Semantic) WHERE toLower(s.content) CONTAINS $grepPatternLower AND $grepScope IN s.tags RETURN s',
       10,
@@ -126,7 +127,7 @@ describe('ScopedQuery.rawCypher regression', () => {
       session: vi.fn().mockReturnValue(session),
     };
 
-    const query = new ScopedQuery(mockDriver as never);
+    const query = new ScopedQuery(mockDriver as never, { legacyUnqualified: true });
     await query.rawCypher('MATCH (s:Semantic) WHERE s.content =~ $rx RETURN s', 10, { rx: '(?i).*x.*' }, 5000);
 
     expect(session.run).toHaveBeenCalledWith(
@@ -153,7 +154,7 @@ describe('ScopedQuery.rawCypher regression', () => {
       };
       const mockDriver = { session: vi.fn().mockReturnValue(session) };
 
-      const query = new ScopedQuery(mockDriver as never);
+      const query = new ScopedQuery(mockDriver as never, { legacyUnqualified: true });
       await query.rawCypher('MATCH (s:Semantic) RETURN s', 10);
 
       expect(session.run).toHaveBeenCalledTimes(1);
@@ -175,7 +176,7 @@ describe('ScopedQuery.rawCypher regression', () => {
       close: vi.fn().mockResolvedValue(undefined),
     };
     const mockDriver = { session: vi.fn().mockReturnValue(session) };
-    const query = new ScopedQuery(mockDriver as never);
+    const query = new ScopedQuery(mockDriver as never, { legacyUnqualified: true });
     await query.rawCypher('MATCH (s:Semantic) WHERE s.content =~ $rx RETURN s', 10, { rx: '.*' }, 2000);
 
     expect(session.run).toHaveBeenCalledWith(
@@ -195,7 +196,7 @@ describe('ScopedQuery.rawCypher regression', () => {
       session: vi.fn(),
     };
 
-    const query = new ScopedQuery(mockDriver as never);
+    const query = new ScopedQuery(mockDriver as never, { legacyUnqualified: true });
 
     // Destructive: wipe database
     await expect(query.rawCypher('MATCH (n) DETACH DELETE n', 10)).rejects.toThrow(

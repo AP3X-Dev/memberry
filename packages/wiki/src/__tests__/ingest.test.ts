@@ -14,7 +14,7 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 // Import after mock is declared (vitest hoists vi.mock above imports)
-import { IngestionService, initWikiSchema } from '../ingest.js';
+import { IngestionService, initWikiSchema, wikiMutationSession } from '../ingest.js';
 
 // ─── Mock helpers ────────────────────────────────────────────────────────────
 
@@ -39,6 +39,8 @@ function createMockDriver(): { driver: Driver; getCalls: () => RunCall[] } {
   const mockSession = {
     run: vi.fn(async (query: string, params?: unknown) => {
       calls.push({ query, params });
+      if (query.includes('AS foreignCount')) return { records: [{ get: () => 0 }] } as unknown as Result;
+      if (query.includes('AS knowledgeEpoch')) return { records: [{ get: () => '1' }] } as unknown as Result;
       // Default responses for specific query patterns
       if (query.includes('MERGE (e:Entity')) {
         return mockResult([mockRecord({ id: 'ent-mock123', created: true })]);
@@ -56,6 +58,7 @@ function createMockDriver(): { driver: Driver; getCalls: () => RunCall[] } {
     close: vi.fn(async () => {}),
   } as unknown as Session;
 
+  (mockSession as unknown as { executeWrite: (work: (tx: { run: Session['run'] }) => Promise<unknown>) => Promise<unknown> }).executeWrite = async (work) => work({ run: mockSession.run.bind(mockSession) });
   const driver = {
     session: vi.fn(() => mockSession),
   } as unknown as Driver;
@@ -67,6 +70,57 @@ function createMockDriver(): { driver: Driver; getCalls: () => RunCall[] } {
 
 beforeEach(() => {
   mockReadFile.mockReset();
+});
+
+describe('wiki mutation epoch transaction', () => {
+  function transactionalDriver(failEpoch = false, foreignCount = 0) {
+    const committed: string[] = [];
+    const calls: Array<{ query: string; params: Record<string, unknown> }> = [];
+    const driver = { session: () => ({
+      close: async () => {},
+      executeWrite: async (work: (tx: unknown) => Promise<unknown>) => {
+        const pending: string[] = [];
+        const result = await work({ run: async (query: string, params: Record<string, unknown>) => {
+          calls.push({ query, params });
+          if (query.includes('AS foreignCount')) return mockResult([mockRecord({ foreignCount })]);
+          if (query.includes('AS knowledgeEpoch')) {
+            if (failEpoch) throw new Error('authority unavailable');
+            pending.push(String(params.epochProjectScope));
+            return mockResult([mockRecord({ knowledgeEpoch: '1' })]);
+          }
+          pending.push('mutation');
+          return mockResult([]);
+        } });
+        committed.push(...pending);
+        return result;
+      },
+    }) } as unknown as Driver;
+    return { driver, committed, calls };
+  }
+
+  it('commits the mutation, exact project epoch, and tenant aggregate together', async () => {
+    const fixture = transactionalDriver();
+    await wikiMutationSession(fixture.driver, 'project:test').run('CREATE (s:Semantic)', { id: 's1' });
+    expect(fixture.committed).toEqual(['mutation', 'project:test', '_unscoped']);
+    const epochs = fixture.calls.filter(({ query }) => query.includes('AS knowledgeEpoch'));
+    expect(epochs.every(({ params }) => params.epochTenantId === 'default')).toBe(true);
+  });
+
+  it('rolls back the graph mutation when authority advancement fails', async () => {
+    const fixture = transactionalDriver(true);
+    await expect(wikiMutationSession(fixture.driver, 'project:test').run('CREATE (s:Semantic)'))
+      .rejects.toThrow('authority unavailable');
+    expect(fixture.committed).toEqual([]);
+  });
+
+  it('refuses foreign ownership before mutation and rejects ambiguous scope', async () => {
+    const fixture = transactionalDriver(false, 1);
+    await expect(wikiMutationSession(fixture.driver, 'project:test').run('CREATE (s:Semantic)', { id: 'foreign' }))
+      .rejects.toThrow('default_tenant_ownership_required');
+    expect(fixture.calls).toHaveLength(1);
+    expect(fixture.committed).toEqual([]);
+    expect(() => wikiMutationSession(fixture.driver, 'project:*')).toThrow('canonical_project_scope_required');
+  });
 });
 
 // ─── initWikiSchema ──────────────────────────────────────────────────────────
@@ -404,6 +458,8 @@ describe('IngestionService', () => {
 
       const mockSession = {
         run: vi.fn(async (query: string, params?: unknown) => {
+          if (query.includes('AS foreignCount')) return mockResult([mockRecord({ foreignCount: 0 })]);
+          if (query.includes('AS knowledgeEpoch')) return mockResult([mockRecord({ knowledgeEpoch: '1' })]);
           if (query.includes('MERGE (e:Entity')) {
             entityCallCount++;
             // First entity is "created", second is "existing"
@@ -418,6 +474,7 @@ describe('IngestionService', () => {
         close: vi.fn(async () => {}),
       } as unknown as Session;
 
+      (mockSession as unknown as { executeWrite: (work: (tx: { run: Session['run'] }) => Promise<unknown>) => Promise<unknown> }).executeWrite = async (work) => work({ run: mockSession.run.bind(mockSession) });
       const driver = {
         session: vi.fn(() => mockSession),
       } as unknown as Driver;
@@ -552,7 +609,7 @@ describe('IngestionService createRelation identifier guard', () => {
     for (const [al, bl, rel] of legitimate) {
       await relation(service)('a', al, 'b', bl, rel);
     }
-    const queries = getCalls().map((c) => c.query);
+    const queries = getCalls().map((c) => c.query).filter((q) => q.includes('MATCH (a:'));
     expect(queries).toHaveLength(legitimate.length);
     expect(queries[0]).toContain('MATCH (a:Semantic');
     expect(queries[0]).toContain('MATCH (b:Source');

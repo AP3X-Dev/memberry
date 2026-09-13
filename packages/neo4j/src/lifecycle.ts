@@ -8,12 +8,13 @@
 // cooldown stamp. Memory nodes are NEVER hard-deleted here; only sidecar rows
 // are, and never protected-tier ones.
 //
-// Batched mutations clone the tenant-admin precedent:
-// CALL { WITH n ... } IN TRANSACTIONS OF <n> ROWS (implicit transaction via
-// session.run — IN TRANSACTIONS is rejected inside executeWrite).
+// Sidecar hard-deletes retain the tenant-admin IN TRANSACTIONS precedent.
+// Visibility-changing archive/re-link writes use explicit executeWrite units
+// so their knowledge-epoch bump commits or rolls back with the graph mutation.
 
 import { type Driver } from 'neo4j-driver';
 import { DEFAULT_TENANT } from '@memberry/core';
+import { bumpKnowledgeEpoch, projectKnowledgeScope } from './knowledge-epoch.js';
 
 /** The two write-only admission sidecar labels subject to retention. */
 export const SIDECAR_LABELS = ['AdmissionObservation', 'AdmissionRoutingRecommendation'] as const;
@@ -353,17 +354,34 @@ export class LifecycleStore {
     const rows = assertBatchRows(batchRows);
     const session = this.driver.session();
     try {
-      const result = await session.run(
-        `MATCH (n)
-         WHERE (n:Episodic OR n:Semantic) AND n.id IN $ids
-         CALL { WITH n
-           SET n.archived = $archived,
-               n.archived_at = CASE WHEN $archived THEN $now ELSE n.archived_at END
-         } IN TRANSACTIONS OF ${rows} ROWS
-         RETURN count(n) AS c`,
-        { ids, archived, now },
-      );
-      return toInt(result.records[0]?.get('c') ?? 0);
+      let changedCount = 0;
+      for (let offset = 0; offset < ids.length; offset += rows) {
+        const batch = ids.slice(offset, offset + rows);
+        changedCount += await session.executeWrite(async (tx) => {
+          const result = await tx.run(
+            `UNWIND $ids AS id
+             MATCH (n {id: id})
+             WHERE (n:Episodic OR n:Semantic)
+               AND coalesce(n.archived, false) <> $archived
+             SET n.archived = $archived,
+                 n.archived_at = CASE WHEN $archived THEN $now ELSE n.archived_at END
+             RETURN coalesce(n.tenant_id, $defaultTenant) AS tenantId,
+                    n.scope AS projectScope`,
+            { ids: batch, archived, now, defaultTenant: DEFAULT_TENANT },
+          );
+          const scopes = new Map<string, { tenantId: string; projectScope: string | null }>();
+          for (const record of result.records) {
+            const scope = {
+              tenantId: record.get('tenantId') as string,
+              projectScope: projectKnowledgeScope(record.get('projectScope') as string | null),
+            };
+            scopes.set(`${scope.tenantId}\u0000${scope.projectScope ?? ''}`, scope);
+          }
+          for (const scope of scopes.values()) await bumpKnowledgeEpoch(tx, scope);
+          return result.records.length;
+        });
+      }
+      return changedCount;
     } finally {
       await session.close();
     }
@@ -501,16 +519,27 @@ export class LifecycleStore {
     const taskTag = `[project:${projectName}]`;
     const session = this.driver.session();
     try {
-      const result = await session.run(
+      const result = await session.executeWrite(async (tx) => {
+        const linked = await tx.run(
         `MATCH (ep:Episodic)
          WHERE (ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag)
            AND NOT (ep)-[:REFERENCES]->(:Entity {name: $projectName, type: 'project'})
          WITH ep LIMIT toInteger($batch)
          MATCH (proj:Entity {name: $projectName, type: 'project'})
          MERGE (ep)-[:REFERENCES]->(proj)
-         RETURN count(ep) AS linked, collect(ep.id) AS ids`,
-        { canonTag, taskTag, projectName, batch },
-      );
+         RETURN count(ep) AS linked, collect(ep.id) AS ids,
+                collect(DISTINCT coalesce(ep.tenant_id, $defaultTenant)) AS tenantIds`,
+        { canonTag, taskTag, projectName, batch, defaultTenant: DEFAULT_TENANT },
+        );
+        const tenantIds = (linked.records[0]?.get('tenantIds') as string[] | undefined) ?? [];
+        for (const tenantId of tenantIds) {
+          await bumpKnowledgeEpoch(tx, {
+            tenantId,
+            projectScope: projectKnowledgeScope(canonTag),
+          });
+        }
+        return linked;
+      });
       const rec = result.records[0];
       return {
         linked: toInt(rec?.get('linked') ?? 0),

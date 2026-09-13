@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // packages/research/src/__tests__/campaign.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CampaignStore } from '../campaign.js';
@@ -13,7 +14,7 @@ function mockSession(runResult: unknown = { records: [] }) {
 }
 
 function mockDriver(session: ReturnType<typeof mockSession>) {
-  return { session: vi.fn(() => session) } as any;
+  return { session: vi.fn(() => withKnowledgeTransactions(session)) } as any;
 }
 
 function makeCampaign(overrides: Partial<CampaignNode> = {}): CampaignNode {

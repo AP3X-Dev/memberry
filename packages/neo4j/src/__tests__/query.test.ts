@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/neo4j/src/__tests__/query.test.ts
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { createNeo4jDriver } from '../driver.js';
@@ -141,7 +142,7 @@ describe('ScopedQuery', () => {
       return;
     }
     await seedData(driver);
-    query = new ScopedQuery(driver);
+    query = new ScopedQuery(driver, { legacyUnqualified: true });
   });
 
   afterAll(async () => {

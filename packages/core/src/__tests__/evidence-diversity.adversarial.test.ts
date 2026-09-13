@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/evidence-diversity.adversarial.test.ts
 //
 // MEM-004 / MEM-FR-4 corroboration adversarial suite: the hardened text
@@ -229,7 +230,7 @@ describe('consolidation promote pipeline with the hardened gate', () => {
     ];
     const neo4j = neo4jWith(vi.fn().mockResolvedValue(parroted));
     const llm = llmReturning({ content: 'Should never be proposed.', confidence: 0.9, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('project:test');
 
@@ -248,7 +249,7 @@ describe('consolidation promote pipeline with the hardened gate', () => {
     ];
     const neo4j = neo4jWith(vi.fn().mockResolvedValue(genuine));
     const llm = llmReturning({ content: 'The engine owns validation.', confidence: 0.8, decay_class: 'stable' });
-    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never);
+    const engine = new ConsolidationEngine(emptyRedis() as never, neo4j as never, CONFIG, llm as never, undefined, { legacyUnqualified: true });
 
     const result = await engine.run('project:test');
 

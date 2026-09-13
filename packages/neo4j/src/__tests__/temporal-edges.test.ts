@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/neo4j/src/__tests__/temporal-edges.test.ts
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { createNeo4jDriver } from '../driver.js';
@@ -88,6 +89,9 @@ describe('invalidateRelationship relType validation (no Neo4j)', () => {
     expect(run).toHaveBeenCalledTimes(1);
     const [query, params] = run.mock.calls[0];
     expect(query).toContain('[r:ABOUT]');
+    expect(query).toContain('MERGE (epoch:KnowledgeEpoch');
+    expect(query).toContain('[projectScope, $unscopedProject]');
+    expect(query.indexOf('SET r.invalid_at')).toBeLessThan(query.indexOf('MERGE (epoch:KnowledgeEpoch'));
     expect(params).toMatchObject({ fromId: 'a', toId: 'b', now: '2026-01-01T00:00:00.000Z' });
   });
 });
@@ -117,7 +121,7 @@ describe('Temporal edges integration', () => {
     await initSchema(driver);
     episodicStore = new EpisodicStore(driver);
     semanticStore = new SemanticStore(driver);
-    query = new ScopedQuery(driver);
+    query = new ScopedQuery(driver, { legacyUnqualified: true });
 
     // Seed: Entity, Episodic, Semantic nodes
     const session = driver.session();

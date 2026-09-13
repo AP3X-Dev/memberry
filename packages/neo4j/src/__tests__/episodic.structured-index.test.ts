@@ -23,6 +23,9 @@ function driverWithAuthorized(ids: string[], projectCount = 1) {
     if (query.includes('RETURN collect(entityId) AS ids')) {
       return { records: [{ get: () => ids }] };
     }
+    if (query.includes('KnowledgeEpoch')) {
+      return { records: [{ get: () => '1' }] };
+    }
     return { records: [{ get: () => 'ep1' }] };
   });
   const tx = { run };

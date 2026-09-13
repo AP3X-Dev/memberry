@@ -1,5 +1,7 @@
 // Type-only import (erased at runtime) — no import cycle with advisor.ts.
 import type { AdvisorRecommendationV1 } from './advisor.js';
+import type { EmbeddingDescriptor, EmbeddingRequest } from './embedding-descriptor.js';
+export type { EmbeddingDescriptor, EmbeddingRequest, EmbeddingCacheAddress } from './embedding-descriptor.js';
 
 // === Node Types ===
 
@@ -120,6 +122,10 @@ export interface LoadScope {
    * task. Excluded from the load cache key (hashScope) — it's derived from `task`.
    */
   queryVector?: number[];
+  /** Identity of a shared vector; mismatched or absent identity is recomputed. */
+  queryDescriptorFingerprint?: string;
+  /** Cooperative cancellation for request deadlines. */
+  signal?: AbortSignal;
 }
 
 export interface MemoryContext {
@@ -127,6 +133,12 @@ export interface MemoryContext {
   tokens: number;
   sources: string[];
   assembled_at: string;
+  /** Safe-load status when authoritative cache validity cannot be established. */
+  degraded?: { code:
+    | 'knowledge-epoch-unavailable'
+    | 'knowledge-epoch-changed'
+    | 'request-aborted'
+    | 'load-capacity-exceeded' };
 }
 
 // === STORE ===
@@ -183,8 +195,15 @@ export interface SessionState {
 export interface AMPConfig {
   redis: { url: string };
   neo4j: { uri: string; user: string; password: string };
-  embedding: { provider: 'openai'; apiKey: string };
-  cache: { defaultTTL: number; contextTTL: number; embeddingTTL: number };
+  embedding: { provider: 'openai'; apiKey: string; descriptor?: EmbeddingDescriptor };
+  cache: {
+    defaultTTL: number;
+    contextTTL: number;
+    embeddingTTL: number;
+    /** Rendered contexts remain off until the authoritative epoch port is wired. */
+    renderedContextMode?: 'disabled' | 'versioned';
+    embeddingGeneration?: string;
+  };
   consolidation: {
     autoApply: boolean;
     signalThreshold: number;
@@ -225,8 +244,9 @@ export interface AMPConfig {
 // === Embedding ===
 
 export interface EmbeddingProvider {
-  embed(text: string): Promise<number[]>;
-  embedBatch(texts: string[]): Promise<number[][]>;
+  embed(text: string, request?: EmbeddingRequest): Promise<number[]>;
+  embedBatch(texts: string[], request?: EmbeddingRequest): Promise<number[][]>;
+  readonly descriptor?: Readonly<EmbeddingDescriptor>;
   /**
    * Whether semantic vector search is usable with this provider.
    * `false` signals a degraded/no-key provider whose vectors are meaningless

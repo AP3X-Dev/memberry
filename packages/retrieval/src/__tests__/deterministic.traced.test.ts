@@ -212,9 +212,14 @@ describe('UnifiedAssembler.assembleTraced deterministic runtime', () => {
 
       expect(traced.trace.requestShape.temporalFilterApplied).toBe(applied);
       expect(semanticCall).toBeDefined();
-      expect(semanticCall![0].includes('s.created_at <= $asOf')).toBe(applied);
+      expect(semanticCall![0]).toContain('datetime(coalesce(s.valid_at, s.created_at)) <= datetime($semanticAsOf)');
+      expect(semanticCall![0]).toContain('NOT EXISTS {');
       expect(Object.hasOwn(semanticCall![1], 'asOf')).toBe(applied);
-      if (applied) expect(semanticCall![1].asOf).toBe(asOf);
+      expect(typeof semanticCall![1].semanticAsOf).toBe('string');
+      if (applied) {
+        expect(semanticCall![1].asOf).toBe(asOf);
+        expect(semanticCall![1].semanticAsOf).toBe(asOf);
+      }
     }
   });
 

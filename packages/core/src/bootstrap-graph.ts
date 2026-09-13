@@ -6,7 +6,8 @@
 import { type Driver } from 'neo4j-driver';
 import { nanoid } from 'nanoid';
 import { createHash } from 'crypto';
-import type { EmbeddingProvider } from './types.js';
+import { bumpKnowledgeEpoch } from '@memberry/neo4j';
+import { DEFAULT_TENANT, type EmbeddingProvider } from './types.js';
 
 /**
  * Stable content-addressed key for a bootstrap seed Semantic. Hashing
@@ -92,6 +93,33 @@ function canonicalBootstrapProjectScope(projectTag: string): string {
 // else is rejected before a query string is built.
 const BOOTSTRAP_RELATION_TYPES: ReadonlySet<string> = new Set(['CONTAINS']);
 
+type QueryRunner = {
+  run(query: string, parameters?: Record<string, unknown>): Promise<{
+    records: Array<{ get(key: string): unknown }>;
+  }>;
+};
+
+function emptyBootstrapResult(): BootstrapResult {
+  return {
+    entities_created: 0,
+    entities_existing: 0,
+    agents_created: 0,
+    agents_existing: 0,
+    semantics_created: 0,
+    relationships_created: 0,
+    project_entity_id: '',
+  };
+}
+
+function addBootstrapCounts(target: BootstrapResult, source: BootstrapResult): void {
+  target.entities_created += source.entities_created;
+  target.entities_existing += source.entities_existing;
+  target.agents_created += source.agents_created;
+  target.agents_existing += source.agents_existing;
+  target.semantics_created += source.semantics_created;
+  target.relationships_created += source.relationships_created;
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 export class BootstrapGraphService {
@@ -108,63 +136,54 @@ export class BootstrapGraphService {
    */
   async bootstrap(input: BootstrapInput): Promise<BootstrapResult> {
     const projectScope = canonicalBootstrapProjectScope(input.project_tag);
-    const result: BootstrapResult = {
-      entities_created: 0,
-      entities_existing: 0,
-      agents_created: 0,
-      agents_existing: 0,
-      semantics_created: 0,
-      relationships_created: 0,
-      project_entity_id: '',
-    };
+    const result = emptyBootstrapResult();
 
     const session = this.driver.session();
     try {
-      // 1. Create the project entity (always first)
-      const projectId = await this.mergeEntity(session, {
-        name: input.project_name,
-        type: 'project',
-        description: input.description,
-      }, result, projectScope);
-      result.project_entity_id = projectId;
+      // Entities, their project/parent relationships, agents, and the authority
+      // epoch are one commit. A failed epoch bump therefore rolls the graph work
+      // back, and executeWrite retries cannot inflate the externally returned
+      // counters because the transaction-local result is merged only on commit.
+      const foundation = await session.executeWrite(async (tx) => {
+        const local = emptyBootstrapResult();
+        const projectId = await this.mergeEntity(tx, {
+          name: input.project_name,
+          type: 'project',
+          description: input.description,
+        }, local, projectScope);
+        local.project_entity_id = projectId;
 
-      // 2. Create all entities FIRST (parent-linking is a separate pass below).
-      //    OPT-21: the parent CONTAINS link used to run inline in this loop, so a
-      //    module naming a parent that appears LATER in `entities` got no parent
-      //    edge — the parent wasn't MERGEd yet when the child looked it up. MERGE
-      //    every entity before any parent link so order in the array no longer
-      //    matters. Remember each entity's id for the linking pass.
-      const entityIds: string[] = [];
-      for (const entity of input.entities) {
-        const entityId = await this.mergeEntity(session, entity, result);
-        entityIds.push(entityId);
-
-        // Link to project (all entities belong to the project)
-        if (entity.type !== 'project') {
-          await this.mergeRelationship(session, projectId, entityId, 'CONTAINS', result);
+        const entityIds: string[] = [];
+        const entityIdByName = new Map<string, string>([[input.project_name, projectId]]);
+        for (const entity of input.entities) {
+          const entityId = await this.mergeEntity(tx, entity, local);
+          entityIds.push(entityId);
+          entityIdByName.set(entity.name, entityId);
+          if (entity.type !== 'project') {
+            await this.mergeRelationship(tx, projectId, entityId, 'CONTAINS', local);
+          }
         }
-      }
 
-      // 2b. Parent-linking pass — now that ALL entities exist, a parent listed
-      //     later than its child still resolves. `LIMIT 1` makes the match
-      //     deterministic when several entities share a name (one CONTAINS edge).
-      for (let i = 0; i < input.entities.length; i++) {
-        const entity = input.entities[i];
-        if (!entity.parent) continue;
-        const parentResult = await session.run(
-          'MATCH (e:Entity {name: $parent}) RETURN e.id AS id LIMIT 1',
-          { parent: entity.parent },
-        );
-        if (parentResult.records.length > 0) {
-          const parentId = parentResult.records[0].get('id') as string;
-          await this.mergeRelationship(session, parentId, entityIds[i], 'CONTAINS', result);
+        // Resolve parents only from this bootstrap's concrete project inventory.
+        // A same-named entity in another project must never become an authority
+        // edge merely because it happened to match first in the graph.
+        for (let i = 0; i < input.entities.length; i++) {
+          const entity = input.entities[i];
+          if (!entity.parent) continue;
+          const parentId = entityIdByName.get(entity.parent);
+          if (parentId) {
+            await this.mergeRelationship(tx, parentId, entityIds[i], 'CONTAINS', local);
+          }
         }
-      }
 
-      // 3. Create agents
-      for (const agent of input.agents) {
-        await this.mergeAgent(session, agent, result);
-      }
+        for (const agent of input.agents) {
+          await this.mergeAgent(tx, agent, local);
+        }
+        await bumpKnowledgeEpoch(tx, { tenantId: DEFAULT_TENANT, projectScope });
+        return { local, projectId, entityIdByName };
+      });
+      addBootstrapCounts(result, foundation.local);
+      result.project_entity_id = foundation.projectId;
 
       // 4. Create semantic seeds
       //    OPT-8: each seed's work (createSemantic + its ABOUT links) is wrapped in
@@ -175,24 +194,26 @@ export class BootstrapGraphService {
       //    still reflects exactly the seeds that succeeded.
       for (const seed of input.semantic_seeds) {
         try {
-          const semId = await this.createSemantic(session, seed, input.project_tag, result);
+          const embedding = await this.embedSeed(seed, projectScope);
+          const seedResult = await session.executeWrite(async (tx) => {
+            const local = emptyBootstrapResult();
+            const semId = await this.createSemantic(tx, seed, projectScope, local, embedding);
 
-          // Link ABOUT relationships to named entities
-          for (const entityName of seed.about ?? []) {
-            const entityResult = await session.run(
-              'MATCH (e:Entity {name: $name}) RETURN e.id AS id',
-              { name: entityName },
-            );
-            if (entityResult.records.length > 0) {
-              const entityId = entityResult.records[0].get('id') as string;
-              await session.run(
+            for (const entityName of seed.about ?? []) {
+              const entityId = foundation.entityIdByName.get(entityName);
+              if (entityId) {
+                await tx.run(
                 `MATCH (s:Semantic {id: $semId}), (e:Entity {id: $entityId})
                  MERGE (s)-[:ABOUT]->(e)`,
                 { semId, entityId },
-              );
-              result.relationships_created++;
+                );
+                local.relationships_created++;
+              }
             }
-          }
+            await bumpKnowledgeEpoch(tx, { tenantId: DEFAULT_TENANT, projectScope });
+            return local;
+          });
+          addBootstrapCounts(result, seedResult);
         } catch (err) {
           // Skip this seed and continue with the rest. A single failed seed must
           // not take down the whole bootstrap (and the phases that follow it).
@@ -219,21 +240,30 @@ export class BootstrapGraphService {
       //    fold. The task fallback uses a BRACKETED token, never a bare substring.
       const canonTag = projectScope;
       const taskTag = `[project:${input.project_name}]`;
-      const orphanResult = await session.run(
-        `MATCH (ep:Episodic)
-         WHERE (ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag)
-           AND NOT (ep)-[:REFERENCES]->(:Entity {name: $projectName})
-         WITH ep
-         MATCH (proj:Entity {name: $projectName})
-         CREATE (ep)-[:REFERENCES]->(proj)
-         RETURN count(ep) AS linked`,
-        { canonTag, taskTag, projectName: input.project_name },
-      );
-      const linked = orphanResult.records[0]?.get('linked');
-      if (linked) {
-        const count = typeof linked === 'number' ? linked : (linked as { toNumber(): number }).toNumber();
-        result.relationships_created += count;
-      }
+      const orphanCount = await session.executeWrite(async (tx) => {
+        const orphanResult = await tx.run(
+          `MATCH (ep:Episodic)
+           WHERE coalesce(ep.tenant_id, $tenantId) = $tenantId
+             AND (ep.scope = $canonTag OR $canonTag IN ep.tags OR ep.task CONTAINS $taskTag)
+             AND NOT (ep)-[:REFERENCES]->(:Entity {id: $projectId})
+           WITH ep
+           MATCH (proj:Entity {id: $projectId})
+           CREATE (ep)-[:REFERENCES]->(proj)
+           RETURN count(ep) AS linked`,
+          { canonTag, taskTag, projectId: foundation.projectId, tenantId: DEFAULT_TENANT },
+        );
+        const linked = orphanResult.records[0]?.get('linked');
+        const count = typeof linked === 'number'
+          ? linked
+          : linked && typeof linked === 'object' && 'toNumber' in linked
+            ? (linked as { toNumber(): number }).toNumber()
+            : 0;
+        if (count > 0) {
+          await bumpKnowledgeEpoch(tx, { tenantId: DEFAULT_TENANT, projectScope });
+        }
+        return count;
+      });
+      result.relationships_created += orphanCount;
 
       return result;
     } finally {
@@ -310,7 +340,7 @@ export class BootstrapGraphService {
   // ─── Private helpers ───────────────────────────────────────────────────────
 
   private async mergeEntity(
-    session: ReturnType<Driver['session']>,
+    session: QueryRunner,
     entity: BootstrapEntity,
     result: BootstrapResult,
     projectScope?: string,
@@ -328,21 +358,24 @@ export class BootstrapGraphService {
     const res = await session.run(
       `MERGE (e:Entity {name: $name})
        ON CREATE SET e.id = $id, e.type = $type, e.description = $description,
-                     e.created_at = $now, e.project_scope = $projectScope
+                     e.created_at = $now, e.project_scope = $projectScope,
+                     e.tenant_id = $tenantId
        ON MATCH SET e.description = CASE WHEN $description IS NOT NULL THEN $description ELSE e.description END,
                     e.type = CASE WHEN $type = 'project' THEN 'project' ELSE e.type END,
+                    e.tenant_id = coalesce(e.tenant_id, $tenantId),
                     e.project_scope = CASE
                       WHEN $projectScope IS NOT NULL AND e.project_scope IS NULL THEN $projectScope
                       ELSE e.project_scope
                     END${rootPathClause}${aliasClause}
        RETURN e.id AS id, e.created_at = $now AS isNew,
-              e.project_scope AS storedProjectScope`,
+              e.project_scope AS storedProjectScope, e.tenant_id AS storedTenantId`,
       {
         name: entity.name,
         id: nanoid(),
         type: entity.type,
         description: entity.description ?? null,
         projectScope: projectScope ?? null,
+        tenantId: DEFAULT_TENANT,
         now: new Date().toISOString(),
         ...(entity.root_path !== undefined ? { rootPath: entity.root_path } : {}),
         ...(aliasClause !== '' ? { aliases } : {}),
@@ -352,6 +385,10 @@ export class BootstrapGraphService {
     if (projectScope !== undefined && storedProjectScope !== projectScope) {
       throw new Error('bootstrap: project scope conflicts with existing project authority');
     }
+    const storedTenantId = res.records[0].get('storedTenantId');
+    if (storedTenantId !== undefined && storedTenantId !== null && storedTenantId !== DEFAULT_TENANT) {
+      throw new Error('bootstrap: entity tenant conflicts with bootstrap authority');
+    }
     const isNew = res.records[0].get('isNew') as boolean;
     if (isNew) result.entities_created++;
     else result.entities_existing++;
@@ -359,7 +396,7 @@ export class BootstrapGraphService {
   }
 
   private async mergeAgent(
-    session: ReturnType<Driver['session']>,
+    session: QueryRunner,
     agent: BootstrapAgent,
     result: BootstrapResult,
   ): Promise<void> {
@@ -375,10 +412,11 @@ export class BootstrapGraphService {
   }
 
   private async createSemantic(
-    session: ReturnType<Driver['session']>,
+    session: QueryRunner,
     seed: BootstrapSemantic,
     projectTag: string,
     result: BootstrapResult,
+    embedding?: number[],
   ): Promise<string> {
     const id = `sem-${nanoid(10)}`;
     const now = new Date().toISOString();
@@ -390,21 +428,6 @@ export class BootstrapGraphService {
     // Dedupe key is computed in JS (a short hash, not a long raw string) and used
     // as the MERGE anchor so re-ingesting the SAME seed does not duplicate it.
     const dedupeKey = semanticDedupeKey(scope, seed.about?.[0], seed.claim);
-
-    // Embed the claim so the seeded semantic is vector-recallable. Best-effort:
-    // a missing/degraded provider or an embed failure just yields a non-vector
-    // (still tag/scope-recallable) seed rather than failing the bootstrap.
-    let embedding: number[] | undefined;
-    if (this.embedding && this.embedding.available !== false && seed.claim) {
-      try {
-        embedding = await this.embedding.embed(seed.claim);
-      } catch (err: unknown) {
-        console.error(
-          '[bootstrap-graph] seed embedding failed; semantic will not be vector-recallable:',
-          err instanceof Error ? err.message : err,
-        );
-      }
-    }
 
     // MERGE (not CREATE) on the stable dedupe_key: ON CREATE seeds all props with
     // a fresh id; ON MATCH only touches updated_at (no new id, no signal_count
@@ -423,9 +446,12 @@ export class BootstrapGraphService {
                      s.updated_at = $now,
                      s.decay_class = 'stable',
                      s.tags = $tags,
-                     s.scope = $scope${embedding ? ',\n                     s.embedding = $embedding' : ''}
-       ON MATCH SET s.updated_at = $now${embedding ? ', s.embedding = coalesce(s.embedding, $embedding)' : ''}
-       RETURN s.id AS id, s.created_at = $now AS isNew`,
+                     s.scope = $scope,
+                     s.tenant_id = $tenantId${embedding ? ',\n                     s.embedding = $embedding' : ''}
+       ON MATCH SET s.updated_at = $now,
+                    s.tenant_id = coalesce(s.tenant_id, $tenantId)${embedding ? ', s.embedding = coalesce(s.embedding, $embedding)' : ''}
+       RETURN s.id AS id, s.created_at = $now AS isNew,
+              s.scope AS storedScope, coalesce(s.tenant_id, $tenantId) AS storedTenantId`,
       {
         dedupeKey,
         id,
@@ -434,16 +460,23 @@ export class BootstrapGraphService {
         now,
         tags,
         scope,
+        tenantId: DEFAULT_TENANT,
         ...(embedding ? { embedding } : {}),
       },
     );
+    const storedScope = res.records[0].get('storedScope');
+    const storedTenantId = res.records[0].get('storedTenantId');
+    if ((storedScope !== undefined && storedScope !== null && storedScope !== scope)
+      || (storedTenantId !== undefined && storedTenantId !== null && storedTenantId !== DEFAULT_TENANT)) {
+      throw new Error('bootstrap: semantic authority conflicts with bootstrap scope');
+    }
     const isNew = res.records[0].get('isNew') as boolean;
     if (isNew) result.semantics_created++;
     return res.records[0].get('id') as string;
   }
 
   private async mergeRelationship(
-    session: ReturnType<Driver['session']>,
+    session: QueryRunner,
     fromId: string,
     toId: string,
     relType: string,
@@ -460,5 +493,18 @@ export class BootstrapGraphService {
       { fromId, toId },
     );
     result.relationships_created++;
+  }
+
+  private async embedSeed(seed: BootstrapSemantic, projectScope: string): Promise<number[] | undefined> {
+    if (!this.embedding || this.embedding.available === false || !seed.claim) return undefined;
+    try {
+      return await this.embedding.embed(seed.claim, { tenantId: DEFAULT_TENANT, projectScope });
+    } catch (err: unknown) {
+      console.error(
+        '[bootstrap-graph] seed embedding failed; semantic will not be vector-recallable:',
+        err instanceof Error ? err.message : err,
+      );
+      return undefined;
+    }
   }
 }

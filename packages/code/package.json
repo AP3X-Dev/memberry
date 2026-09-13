@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@memberry/core": "*",
+    "@memberry/neo4j": "*",
     "@ast-grep/napi": "^0.43.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "nanoid": "^5.0.0",

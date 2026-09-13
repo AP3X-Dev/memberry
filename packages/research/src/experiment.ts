@@ -1,3 +1,4 @@
+import { runResearchMutation } from './knowledge-mutation.js';
 // packages/research/src/experiment.ts
 import neo4j, { type Driver } from 'neo4j-driver';
 import type { ExperimentNode, ExperimentStats } from './types.js';
@@ -9,9 +10,9 @@ export class ExperimentStore {
     const session = this.driver.session();
     try {
       // Create with dual labels: Episodic (for MemBerry compat) + Experiment (for research queries)
-      const result = await session.run(
+      const result = await runResearchMutation(session,
         `CREATE (e:Episodic:Experiment {
-          id: $id,
+          id: $id, tenant_id: 'default',
           session_id: $session_id,
           agent_id: $agent_id,
           campaign_id: $campaign_id,
@@ -64,15 +65,15 @@ export class ExperimentStore {
 
       // Store secondary_metrics as JSON string (Neo4j doesn't support map properties)
       if (Object.keys(node.secondary_metrics).length > 0) {
-        await session.run(
-          'MATCH (e:Experiment {id: $id}) SET e.secondary_metrics = $sm',
+        await runResearchMutation(session,
+          "MATCH (e:Experiment {id: $id}) WHERE coalesce(e.tenant_id, 'default') = 'default' SET e.secondary_metrics = $sm",
           { id: node.id, sm: JSON.stringify(node.secondary_metrics) },
         );
       }
 
       if (node.embedding) {
-        await session.run(
-          'MATCH (e:Experiment {id: $id}) SET e.embedding = $embedding',
+        await runResearchMutation(session,
+          "MATCH (e:Experiment {id: $id}) WHERE coalesce(e.tenant_id, 'default') = 'default' SET e.embedding = $embedding",
           { id: node.id, embedding: node.embedding },
         );
       }
@@ -86,8 +87,9 @@ export class ExperimentStore {
   async linkToParent(experimentId: string, parentId: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await runResearchMutation(session,
         `MATCH (e:Experiment {id: $experimentId}), (parent:Experiment {id: $parentId})
+         WHERE coalesce(e.tenant_id, 'default') = 'default' AND coalesce(parent.tenant_id, 'default') = 'default'
          MERGE (e)-[:DERIVED_FROM]->(parent)`,
         { experimentId, parentId },
       );
@@ -105,11 +107,13 @@ export class ExperimentStore {
     const session = this.driver.session();
     try {
       const componentName = componentPath.split('/').pop() ?? componentPath;
-      await session.run(
+      await runResearchMutation(session,
         `MATCH (e:Experiment {id: $experimentId})
+         WHERE coalesce(e.tenant_id, 'default') = 'default'
          MERGE (c:Entity:Component {path: $path})
-         ON CREATE SET c.id = randomUUID(), c.name = $name, c.type = 'component',
+         ON CREATE SET c.id = randomUUID(), c.tenant_id = 'default', c.name = $name, c.type = 'component',
                        c.domain = $domain, c.created_at = $now
+         WITH e, c WHERE coalesce(c.tenant_id, 'default') = 'default'
          CREATE (e)-[:MODIFIED {outcome: $outcome}]->(c)`,
         {
           experimentId,
@@ -128,8 +132,9 @@ export class ExperimentStore {
   async linkToCampaign(experimentId: string, campaignId: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await runResearchMutation(session,
         `MATCH (e:Experiment {id: $experimentId}), (c:Campaign {campaign_id: $campaignId})
+         WHERE coalesce(e.tenant_id, 'default') = 'default' AND coalesce(c.tenant_id, 'default') = 'default'
          MERGE (e)-[:BELONGS_TO]->(c)`,
         { experimentId, campaignId },
       );

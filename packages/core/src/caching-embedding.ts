@@ -1,114 +1,79 @@
-// packages/core/src/caching-embedding.ts
-//
-// A read-through caching decorator for any EmbeddingProvider.
-//
-// Retrieval, code-search and intent-classification hot paths embed the SAME
-// query strings over and over. Without a cache, every identical query re-hits
-// the OpenAI embeddings API (latency + $). A Redis-backed EmbeddingCache already
-// exists (@memberry/redis EmbeddingCache); this wrapper finally wires it in
-// front of the raw provider so repeated queries are served from cache.
-//
-// CORRECTNESS > CACHE: the cache is a pure optimization. A cache get/set failure
-// MUST NOT break embedding — on any cache error we log and fall through to the
-// inner provider. The wrapper also preserves input ordering for embedBatch.
+import type { EmbeddingProvider, EmbeddingRequest, EmbeddingDescriptor, EmbeddingCacheAddress } from './types.js';
+import { embeddingCacheAddress, parseEmbeddingDescriptor, parseEmbeddingRequest, validateEmbeddingVector,
+  validateEmbeddingBatch, embeddingDescriptorFingerprint } from './embedding-descriptor.js';
 
-import type { EmbeddingProvider } from './types.js';
-
-/**
- * Minimal cache port the wrapper needs. Matches @memberry/redis EmbeddingCache
- * (get(content) -> vec|null, set(content, vec, ttl?)). Declared structurally so
- * tests can inject a trivial mock without a real Redis client.
- */
 export interface EmbeddingCachePort {
-  get(content: string): Promise<number[] | null>;
-  set(content: string, embedding: number[], ttl?: number): Promise<void>;
+  get(address: EmbeddingCacheAddress): Promise<number[] | null>;
+  set(address: EmbeddingCacheAddress, embedding: number[], ttl?: number): Promise<void>;
 }
 
+/** Cache identity is explicit; omitted scope/descriptor always takes the uncached path. */
 export class CachingEmbeddingProvider implements EmbeddingProvider {
-  /** Mirror the inner provider so degraded (no-key) providers stay degraded. */
   readonly available?: boolean;
-
-  constructor(
-    private readonly inner: EmbeddingProvider,
-    private readonly cache: EmbeddingCachePort,
-  ) {
+  readonly descriptor?: Readonly<EmbeddingDescriptor>;
+  private readonly descriptorHash?: string;
+  constructor(private readonly inner: EmbeddingProvider, private readonly cache: EmbeddingCachePort) {
     this.available = inner.available;
+    this.descriptor = inner.descriptor === undefined ? undefined : parseEmbeddingDescriptor(inner.descriptor);
+    this.descriptorHash = this.descriptor && embeddingDescriptorFingerprint(this.descriptor);
   }
-
-  /**
-   * Read-through single embed: cache hit returns immediately; on miss the inner
-   * provider is called and the result is cached. Cache errors never propagate —
-   * they degrade to a direct inner call.
-   */
-  async embed(text: string): Promise<number[]> {
-    try {
-      const hit = await this.cache.get(text);
-      if (hit) return hit;
-    } catch (err: unknown) {
-      // Cache read failed — log and treat as a miss. Embedding still works.
-      console.error(`[caching-embedding] cache get failed, bypassing cache: ${errMsg(err)}`);
+  private scope(request?: EmbeddingRequest): EmbeddingRequest | undefined {
+    const parsed = request === undefined ? undefined : parseEmbeddingRequest(request);
+    if (this.descriptorHash !== undefined && (this.inner.descriptor === undefined
+      || embeddingDescriptorFingerprint(this.inner.descriptor) !== this.descriptorHash)) {
+      throw new Error('embedding_descriptor:provider_changed');
     }
-
-    const vec = await this.inner.embed(text);
-
-    try {
-      await this.cache.set(text, vec);
-    } catch (err: unknown) {
-      // Cache write failed — the embedding is already computed; just log.
-      console.error(`[caching-embedding] cache set failed, result not cached: ${errMsg(err)}`);
-    }
-
-    return vec;
+    return parsed;
   }
-
-  /**
-   * Read-through batch embed. Only the cache MISSES are sent to the inner
-   * provider's embedBatch; cached entries are spliced back into their original
-   * positions so the returned array matches the input order exactly.
-   */
-  async embedBatch(texts: string[]): Promise<number[][]> {
-    const results: (number[] | undefined)[] = new Array(texts.length);
-    const missIndices: number[] = [];
-    const missTexts: string[] = [];
-
-    // Probe the cache for each input, recording which positions miss.
+  private async read(address: EmbeddingCacheAddress): Promise<number[] | null> {
+    try {
+      const value = await this.cache.get(address);
+      return value === null ? null : validateEmbeddingVector(value, address);
+    } catch {
+      console.error('[caching-embedding] cache read unavailable or invalid; bypassing');
+      return null;
+    }
+  }
+  private async write(address: EmbeddingCacheAddress, vector: number[]): Promise<void> {
+    try { await this.cache.set(address, vector); }
+    catch { console.error('[caching-embedding] cache write unavailable; result not cached'); }
+  }
+  async embed(text: string, request?: EmbeddingRequest): Promise<number[]> {
+    const scope = this.scope(request);
+    const address = scope && this.descriptor && this.available !== false
+      ? embeddingCacheAddress(text, this.descriptor, scope) : undefined;
+    if (address) {
+      const hit = await this.read(address);
+      if (hit !== null) return hit;
+    }
+    const fetched = scope ? await this.inner.embed(text, scope) : await this.inner.embed(text);
+    const vector = this.descriptor && this.available !== false ? validateEmbeddingVector(fetched, this.descriptor) : fetched;
+    if (address) await this.write(address, vector);
+    return vector;
+  }
+  async embedBatch(texts: string[], request?: EmbeddingRequest): Promise<number[][]> {
+    const scope = this.scope(request);
+    if (texts.length === 0) return [];
+    if (!scope || !this.descriptor || this.available === false) {
+      const fetched = scope ? await this.inner.embedBatch(texts, scope) : await this.inner.embedBatch(texts);
+      return this.descriptor && this.available !== false ? validateEmbeddingBatch(fetched, texts.length, this.descriptor) : fetched;
+    }
+    const addresses = texts.map((text) => embeddingCacheAddress(text, this.descriptor!, scope));
+    const result: number[][] = new Array(texts.length);
+    const misses: number[] = [];
     for (let i = 0; i < texts.length; i++) {
-      let hit: number[] | null = null;
-      try {
-        hit = await this.cache.get(texts[i]);
-      } catch (err: unknown) {
-        // Treat a cache error as a miss for this entry.
-        console.error(`[caching-embedding] batch cache get failed for index ${i}, treating as miss: ${errMsg(err)}`);
-        hit = null;
-      }
-      if (hit) {
-        results[i] = hit;
-      } else {
-        missIndices.push(i);
-        missTexts.push(texts[i]);
+      const hit = await this.read(addresses[i]);
+      if (hit === null) misses.push(i); else result[i] = hit;
+    }
+    if (misses.length) {
+      const fetched = validateEmbeddingBatch(await this.inner.embedBatch(misses.map((i) => texts[i]), scope), misses.length, this.descriptor);
+      // Validate the whole batch before publishing any member.
+      for (let j = 0; j < misses.length; j++) {
+        const i = misses[j];
+        result[i] = fetched[j];
+        await this.write(addresses[i], fetched[j]);
       }
     }
-
-    // Fetch only the misses (preserving their relative order), then place each
-    // result back at its original input index.
-    if (missTexts.length > 0) {
-      const fetched = await this.inner.embedBatch(missTexts);
-      for (let j = 0; j < missIndices.length; j++) {
-        const vec = fetched[j];
-        results[missIndices[j]] = vec;
-        try {
-          await this.cache.set(missTexts[j], vec);
-        } catch (err: unknown) {
-          console.error(`[caching-embedding] batch cache set failed for "${missTexts[j].slice(0, 32)}…": ${errMsg(err)}`);
-        }
-      }
-    }
-
-    // Every slot is now filled (hits + freshly fetched misses), in input order.
-    return results as number[][];
+    return result;
   }
-}
-
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

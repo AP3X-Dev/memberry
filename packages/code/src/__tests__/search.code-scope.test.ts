@@ -152,7 +152,7 @@ async function searchWithScopeFlag(
       available: true,
       embed: vi.fn(async () => [0.1]),
       embedBatch: vi.fn(),
-    });
+    }, undefined, undefined, { legacyUnqualified: true });
     await search.search('rrf fusion', options);
     return calls;
   } finally {
@@ -198,7 +198,7 @@ describe('IDX-002B project scope', () => {
     expect(fulltextOf(calls).query).not.toContain('project_tag');
   });
 
-  it('B11 — default OFF is byte-identical to the shipped behaviour', async () => {
+  it('B11 — default OFF preserves symbol behaviour while semantic scope remains fail-closed', async () => {
     const options = { limit: 10, project_tag: 'project:memberry' };
     const off = await searchWithScopeFlag(undefined, options);
     const zero = await searchWithScopeFlag('0', options);
@@ -206,7 +206,7 @@ describe('IDX-002B project scope', () => {
 
     for (const calls of [off, zero, truthy]) {
       expect(fulltextOf(calls).query).toContain('s.project_tag IS NULL');
-      expect(semanticOf(calls).query).not.toContain('IN s.tags');
+      expect(semanticOf(calls).query).toContain('$project_tag IN s.tags');
     }
     // Sorted: the four channels fan out in parallel, so capture order is not
     // guaranteed. The SET of emitted queries is the contract, not their sequence.

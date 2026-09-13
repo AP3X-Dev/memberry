@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // packages/code/src/__tests__/indexer.write-scope.test.ts
 // Pins the indexer's write-path scoping (opt #8, A2 + A4):
 //   (a) `indexProject({ skipTests })` drops `isTestPath` files from the walk;
@@ -35,7 +36,7 @@ function makeDriver() {
     run: vi.fn(async () => ({ records: [{ get: () => 0 }] })),
     close: vi.fn(),
   };
-  return { driver: { session: vi.fn(() => session) }, session };
+  return { driver: { session: vi.fn(() => withKnowledgeTransactions(session)) }, session };
 }
 
 // Root-relative, forward-slash path for cross-platform assertions.

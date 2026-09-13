@@ -21,7 +21,7 @@ export interface CommunityNode {
 }
 
 export class GDSAlgorithms {
-  constructor(private driver: Driver) {}
+  constructor(private driver: Driver, private readonly compatibility?: { readonly legacyUnqualified: true }) {}
 
   /**
    * Pairwise cosine similarity on Semantic nodes scoped to an entity.
@@ -35,6 +35,9 @@ export class GDSAlgorithms {
     threshold = 0.7,
     limit = 200,
   ): Promise<SimilarPair[]> {
+    // This legacy entity-name-only API has no authenticated tenant/project or
+    // qualified generation identity. Keep raw cosine unavailable by default.
+    if (this.compatibility?.legacyUnqualified !== true) throw new Error('similarity_unavailable');
     const session = this.driver.session();
     try {
       const result = await session.run(

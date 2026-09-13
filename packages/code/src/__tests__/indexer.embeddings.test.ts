@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // IDX-003 acceptance gate — assertions C1-C8.
 //
 // THE DEFECT. CodeIndexer's constructor was `constructor(private driver: Driver)`.
@@ -71,7 +72,7 @@ function makeSymbol(overrides: Partial<SymbolNode>): SymbolNode {
 
 function makeDriver() {
   const session = { run: vi.fn(async () => ({ records: [{ get: () => 0 }] })), close: vi.fn() };
-  return { session: vi.fn(() => session) };
+  return { session: vi.fn(() => withKnowledgeTransactions(session)) };
 }
 
 /** A provider that returns a distinct deterministic 1536-vector per input. */
@@ -84,7 +85,7 @@ function makeProvider(over: Partial<{ available: boolean; embedBatch: unknown }>
   };
 }
 
-async function indexWith(provider: unknown, symbols: SymbolNode[]) {
+async function indexWith(provider: unknown, symbols: SymbolNode[], projectTag?: string) {
   const { CodeIndexer } = await import('../indexer.js');
   mocks.parseFile.mockResolvedValue({
     file_path: '/repo/src/sample.ts', language: 'typescript', symbols, imports: [], relations: [],
@@ -92,7 +93,7 @@ async function indexWith(provider: unknown, symbols: SymbolNode[]) {
   mocks.symbolStore.getHashesByFile.mockResolvedValue(new Set<string>());
   mocks.symbolStore.upsertSymbols.mockResolvedValue({ created: symbols.length, updated: 0 });
   const indexer = new CodeIndexer(makeDriver() as never, provider as never);
-  await indexer.indexFile('/repo/src/sample.ts', 'typescript');
+  await indexer.indexFile('/repo/src/sample.ts', 'typescript', projectTag);
   return (mocks.symbolStore.upsertSymbols.mock.calls[0]?.[0] ?? []) as SymbolNode[];
 }
 
@@ -103,6 +104,14 @@ describe('IDX-003 dense embeddings at index time', () => {
     mocks.resolveImportsBatch.mockResolvedValue(0);
     mocks.linkAllSymbolsToEntities.mockResolvedValue(0);
     mocks.symbolStore.getByFile.mockResolvedValue([]);
+  });
+
+  it('forwards explicit project authority and leaves watcher-preserved scope uncached', async () => {
+    const provider = makeProvider();
+    await indexWith(provider, [makeSymbol({ id: 'scoped', content_hash: 'scoped' })], 'project:memberry');
+    expect(provider.embedBatch).toHaveBeenLastCalledWith(expect.any(Array), { tenantId: 'default', projectScope: 'project:memberry' });
+    await indexWith(provider, [makeSymbol({ id: 'unscoped', content_hash: 'unscoped' })]);
+    expect(provider.embedBatch).toHaveBeenLastCalledWith(expect.any(Array));
   });
 
   it('C1 — with a provider, every stored symbol carries only the served dense vector', async () => {

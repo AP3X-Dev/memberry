@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import type { ExtractionProvider } from '@memberry/core';
 import { parseBoolFlag, readEnv, redactSecrets, semanticDedupeKey } from '@memberry/core';
+import { bumpKnowledgeEpoch, projectKnowledgeScope } from '@memberry/neo4j';
 import type { IngestInput, IngestResult } from './types.js';
 import { needsConversion, type DocumentConverter } from './document-converter.js';
 
@@ -77,6 +78,7 @@ export class IngestionService {
       ensure_project,
     } = input;
 
+    if (projectKnowledgeScope(project_tag) === null) throw new Error('wiki_mutation:project_scope_required');
     const projectName = project_tag.replace(/^project:/, '');
     const isHuman = author === 'human';
     const decayClass = decay_class ?? (isHuman ? 'stable' : 'volatile');
@@ -220,7 +222,7 @@ export class IngestionService {
       // matched re-ingest, the new id on create) — the random `semanticId` only
       // sticks when the MERGE actually creates. MERGE on the relation keeps
       // re-ingest from double-linking.
-      await this.createRelation(resolvedSemanticId, 'Semantic', sourceId, 'Source', 'CITES');
+      await this.createRelation(resolvedSemanticId, 'Semantic', sourceId, 'Source', 'CITES', scope);
       citationsCreated++;
 
       // Link ABOUT → Entities
@@ -234,7 +236,7 @@ export class IngestionService {
 
         const entityId = await this.getEntityId(entityName);
         if (entityId) {
-          await this.createRelation(resolvedSemanticId, 'Semantic', entityId, 'Entity', 'ABOUT');
+          await this.createRelation(resolvedSemanticId, 'Semantic', entityId, 'Entity', 'ABOUT', scope);
         }
       }
     }
@@ -265,7 +267,7 @@ export class IngestionService {
     path: string,
     projectTag: string,
   ): Promise<void> {
-    const session = this.driver.session();
+    const session = wikiMutationSession(this.driver, projectTag);
     try {
       // OPT-11: MERGE on the content-addressed id (derived in `ingest` from
       // source_path|source_type|project_tag) so re-ingesting the same source
@@ -277,7 +279,7 @@ export class IngestionService {
       // changes need separate sign-off).
       await session.run(
         `MERGE (s:Source {id: $id})
-         ON CREATE SET s.title = $title,
+         ON CREATE SET s.tenant_id = 'default', s.title = $title,
                        s.source_type = $sourceType,
                        s.path = $path,
                        s.project_tag = $projectTag,
@@ -300,7 +302,7 @@ export class IngestionService {
   }
 
   private async linkSourceToProject(sourceId: string, projectName: string): Promise<void> {
-    const session = this.driver.session();
+    const session = wikiMutationSession(this.driver, `project:${projectName}`);
     try {
       await session.run(
         // EXACT match: the project Entity is created under its EXACT name (see
@@ -318,11 +320,11 @@ export class IngestionService {
   }
 
   private async ensureEntity(name: string, type: string, projectName: string): Promise<boolean> {
-    const session = this.driver.session();
+    const session = wikiMutationSession(this.driver, `project:${projectName}`);
     try {
       const result = await session.run(
         `MERGE (e:Entity {name: $name})
-         ON CREATE SET e.id = $id, e.type = $type, e.created_at = $now
+         ON CREATE SET e.id = $id, e.tenant_id = 'default', e.type = $type, e.created_at = $now
          ON MATCH SET e.type = CASE WHEN $type = 'project' THEN 'project' ELSE e.type END
          RETURN e.id AS id, e.created_at = $now AS created`,
         {
@@ -371,12 +373,12 @@ export class IngestionService {
     dedupeKey?: string,
     scope?: string,
   ): Promise<{ created: boolean; id: string }> {
-    const session = this.driver.session();
+    const session = wikiMutationSession(this.driver, scope ?? null);
     try {
       const now = new Date().toISOString();
       const res = await session.run(
         `MERGE (s:Semantic {dedupe_key: $dedupeKey})
-         ON CREATE SET s.id = $id,
+         ON CREATE SET s.id = $id, s.tenant_id = 'default',
                        s.content = $content,
                        s.confidence = $confidence,
                        s.signal_count = 0,
@@ -412,7 +414,7 @@ export class IngestionService {
   /** Link an entity under the project via CONTAINS (skips self-linking the project). */
   private async linkEntityToProject(projectName: string, entityName: string): Promise<void> {
     if (entityName === projectName) return;
-    const session = this.driver.session();
+    const session = wikiMutationSession(this.driver, `project:${projectName}`);
     try {
       await session.run(
         // EXACT match (see linkSourceToProject): the project Entity is stored
@@ -430,11 +432,11 @@ export class IngestionService {
 
   /** Create the project Entity if missing (used by brain-dump ingestion). */
   private async ensureProjectEntity(projectName: string): Promise<void> {
-    const session = this.driver.session();
+    const session = wikiMutationSession(this.driver, `project:${projectName}`);
     try {
       await session.run(
         `MERGE (e:Entity {name: $name})
-         ON CREATE SET e.id = $id, e.type = 'project', e.created_at = $now
+         ON CREATE SET e.id = $id, e.tenant_id = 'default', e.type = 'project', e.created_at = $now
          ON MATCH SET e.type = 'project'`,
         { name: projectName, id: `ent-${nanoid(12)}`, now: new Date().toISOString() },
       );
@@ -449,6 +451,7 @@ export class IngestionService {
     targetId: string,
     targetLabel: string,
     relType: string,
+    projectScope: string,
   ): Promise<void> {
     // Value-free errors: the rejected string may be attacker-shaped.
     if (!RELATION_LABELS.has(sourceLabel) || !RELATION_LABELS.has(targetLabel)) {
@@ -457,7 +460,7 @@ export class IngestionService {
     if (!RELATION_TYPES.has(relType)) {
       throw new Error('invalid_relationship_type');
     }
-    const session = this.driver.session();
+    const session = wikiMutationSession(this.driver, projectScope);
     try {
       // Dynamic relationship types require APOC or string interpolation;
       // the allowlist checks above are what make interpolating them safe.
@@ -500,4 +503,44 @@ function extractTitle(content: string, path: string): string {
 
   // Fall back to filename
   return basename(path, extname(path)).replace(/[-_]/g, ' ');
+}
+
+/** Wiki is currently a default-tenant API. Every graph mutation and its scope
+ * epoch commit together; callers must not reuse this adapter for other tenants. */
+export function wikiMutationSession(driver: Driver, scope: string | null) {
+  const projectScope = projectKnowledgeScope(scope);
+  const session = driver.session();
+  return {
+    run: (query: string, parameters: Record<string, unknown> = {}) => session.executeWrite(async (tx) => {
+      // Existing IDs and global entity names may resolve legacy rows. Refuse
+      // foreign ownership before touching them; wiki has no tenant capability.
+      const ownership = await tx.run(
+        `MATCH (n) WHERE n.id IN $ids
+           OR (n:Entity AND n.name IN $names)
+           OR (n:Semantic AND n.dedupe_key = $dedupeKey)
+         RETURN count(CASE WHEN coalesce(n.tenant_id, 'default') <> 'default'
+           OR (n:Semantic AND $projectScope IS NOT NULL
+             AND coalesce(n.scope, $projectScope) <> $projectScope)
+           OR (n:Source AND $projectScope IS NOT NULL
+             AND coalesce(n.project_tag, $projectScope) <> $projectScope)
+           THEN 1 END) AS foreignCount`,
+        {
+          ids: [parameters.id, parameters.sourceId, parameters.targetId, parameters.semanticId,
+            ...(Array.isArray(parameters.entityIds) ? parameters.entityIds : [])]
+            .filter((value): value is string => typeof value === 'string'),
+          names: [parameters.name, parameters.projectName, parameters.entityName]
+            .filter((value): value is string => typeof value === 'string'),
+          dedupeKey: parameters.dedupeKey ?? null,
+          projectScope,
+        },
+      );
+      if (Number(ownership.records[0]?.get('foreignCount')) !== 0) {
+        throw new Error('wiki_mutation:default_tenant_ownership_required');
+      }
+      const result = await tx.run(query, parameters);
+      await bumpKnowledgeEpoch(tx, { tenantId: 'default', projectScope });
+      return result;
+    }),
+    close: () => session.close(),
+  };
 }

@@ -1,3 +1,4 @@
+import { withKnowledgeTransactions } from './knowledge-transaction.fixture.js';
 // packages/code/src/__tests__/symbol-identity.test.ts
 // Tests for composite-key symbol identity in the indexer and symbol store.
 //
@@ -47,7 +48,7 @@ function makeSession() {
 
 function makeDriver() {
   return {
-    session: vi.fn(() => makeSession()),
+    session: vi.fn(() => withKnowledgeTransactions(makeSession())),
   };
 }
 
@@ -64,7 +65,7 @@ describe('SymbolStore.findByCompositeKey', () => {
     const { SymbolStore } = await import('../symbol-store.js');
 
     const session = makeSession();
-    const driver = { session: vi.fn(() => session) } as any;
+    const driver = { session: vi.fn(() => withKnowledgeTransactions(session)) } as any;
     const store = new SymbolStore(driver);
 
     // With non-null parent
@@ -88,7 +89,7 @@ describe('SymbolStore.findByCompositeKey', () => {
     const { SymbolStore } = await import('../symbol-store.js');
 
     const session = makeSession();
-    const driver = { session: vi.fn(() => session) } as any;
+    const driver = { session: vi.fn(() => withKnowledgeTransactions(session)) } as any;
     const store = new SymbolStore(driver);
 
     await store.findByCompositeKey('get', '/src/test.ts', 'method', null);
@@ -124,7 +125,7 @@ describe('SymbolStore.findByCompositeKey', () => {
       run: vi.fn(async () => ({ records: [mockRecord] })),
       close: vi.fn(),
     };
-    const driver = { session: vi.fn(() => session) } as any;
+    const driver = { session: vi.fn(() => withKnowledgeTransactions(session)) } as any;
     const store = new SymbolStore(driver);
 
     const result = await store.findByCompositeKey('get', '/src/test.ts', 'method', 'sym-parent');
@@ -141,7 +142,7 @@ describe('SymbolStore.findByCompositeKey', () => {
       run: vi.fn(async () => ({ records: [] })),
       close: vi.fn(),
     };
-    const driver = { session: vi.fn(() => session) } as any;
+    const driver = { session: vi.fn(() => withKnowledgeTransactions(session)) } as any;
     const store = new SymbolStore(driver);
 
     const result = await store.findByCompositeKey('get', '/src/test.ts', 'method', null);
@@ -152,7 +153,7 @@ describe('SymbolStore.findByCompositeKey', () => {
     const { SymbolStore } = await import('../symbol-store.js');
 
     const session = makeSession();
-    const driver = { session: vi.fn(() => session) } as any;
+    const driver = { session: vi.fn(() => withKnowledgeTransactions(session)) } as any;
     const store = new SymbolStore(driver);
 
     await store.getCallers('helper', {
@@ -180,7 +181,7 @@ describe('SymbolStore.findByCompositeKey', () => {
     const { SymbolStore } = await import('../symbol-store.js');
 
     const session = makeSession();
-    const driver = { session: vi.fn(() => session) } as any;
+    const driver = { session: vi.fn(() => withKnowledgeTransactions(session)) } as any;
     const store = new SymbolStore(driver);
 
     await store.findSymbols({

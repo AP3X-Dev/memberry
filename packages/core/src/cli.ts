@@ -296,7 +296,7 @@ async function runIndexBackfill(positionals: string[], flags: Record<string, str
           const keys = buildEpisodeIndexKeysV1({
             episodeId: episode.id,
             structured,
-            embeddings: await core.embedding.embedBatch(texts),
+            embeddings: await core.embedding.embedBatch(texts, { tenantId, projectScope }),
             source: 'backfill', tenantId, projectScope, createdAt: new Date().toISOString(),
           });
           await store.replaceBackfillKeys(episode, keys);

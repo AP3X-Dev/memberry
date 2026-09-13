@@ -6,6 +6,7 @@ vi.mock('../wiki-autorefresh.js', () => ({ recompileWikiNow }));
 
 import {
   buildToolHandlers,
+  createServiceContainer,
   setServiceInstances,
   type IAMPService,
   type IConsolidationEngine,
@@ -35,6 +36,8 @@ const mockConsolidationEngine: IConsolidationEngine = {
 
 const mockScopedQuery: IScopedQuery = {
   rawCypher: vi.fn().mockResolvedValue([{ n: { id: 'sem-1', content: 'test' } }]),
+  evaluateActiveEligibility: vi.fn(async ({ semanticIds }) =>
+    semanticIds.map((id) => ({ id, status: 'eligible' as const }))),
 };
 
 const mockMemoryBlockService: IMemoryBlockService = {
@@ -658,7 +661,6 @@ describe('berry_grep handler', () => {
       entity: [{ ent: { id: 'ent-1', name: 'JWT', description: 'JSON Web Token standard', type: 'concept' } }],
     };
 
-    let callIndex = 0;
     vi.mocked(mockScopedQuery.rawCypher).mockImplementation(async (cypher: string) => {
       if (cypher.includes('Episodic')) return mockResults.episodic;
       if (cypher.includes('Semantic')) return mockResults.semantic;
@@ -711,8 +713,9 @@ describe('berry_grep handler', () => {
 
   it('supports case-sensitive matching', async () => {
     vi.mocked(mockScopedQuery.rawCypher).mockImplementation(async (cypher: string, _limit: number, params?: Record<string, unknown>) => {
-      // Case-sensitive should use CONTAINS directly with the parameter, without toLower.
-      if (cypher.includes('Semantic') && cypher.includes('CONTAINS $grepPattern') && !cypher.includes('toLower') && params?.grepPattern === 'JWT') {
+      // The content match stays case-sensitive even though lifecycle scope
+      // canonicalization independently uses toLower elsewhere in the query.
+      if (cypher.includes('Semantic') && cypher.includes('s.content CONTAINS $grepPattern') && params?.grepPattern === 'JWT') {
         return [{ s: { id: 'sem-1', content: 'Uses JWT tokens', confidence: 0.9 } }];
       }
       return [];
@@ -744,6 +747,145 @@ describe('berry_grep handler', () => {
     expect(text).not.toContain('### Facts');
     // Verify rawCypher was only called once (for semantic)
     expect(mockScopedQuery.rawCypher).toHaveBeenCalledTimes(1);
+  });
+
+  it('excludes the strongest obsolete semantic before grep serialization', async () => {
+    vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([
+      { s: { id: 'sem-v1', content: 'JWT obsolete policy', confidence: 0.99 } },
+      { s: { id: 'sem-v2', content: 'JWT current policy', confidence: 0.4 } },
+    ]);
+    vi.mocked(mockScopedQuery.evaluateActiveEligibility!).mockResolvedValueOnce([
+      { id: 'sem-v1', status: 'ineligible' },
+      { id: 'sem-v2', status: 'eligible' },
+    ]);
+
+    const result = await buildToolHandlers().berry_grep({
+      pattern: 'JWT',
+      node_types: ['semantic'],
+      scope: 'project:alpha',
+    });
+
+    const text = result.content[0].text;
+    expect(text).toContain('sem-v2');
+    expect(text).toContain('current policy');
+    expect(text).not.toContain('sem-v1');
+    expect(text).not.toContain('obsolete policy');
+    expect(mockScopedQuery.evaluateActiveEligibility).toHaveBeenCalledWith({
+      semanticIds: ['sem-v1', 'sem-v2'],
+      tenantId: 'default',
+      projectScope: 'project:alpha',
+    });
+    const [sourceCypher, , sourceParams] = vi.mocked(mockScopedQuery.rawCypher).mock.calls[0];
+    expect(sourceCypher).toContain(':SUPERSEDES');
+    expect(sourceCypher).toContain('datetime(coalesce(s.valid_at, s.created_at)) <= datetime($semanticAsOf)');
+    expect(sourceParams).toMatchObject({ tenantId: 'default' });
+    expect(Number.isNaN(Date.parse(sourceParams?.semanticAsOf as string))).toBe(false);
+  });
+
+  it('excludes unknown cross-scope semantics while preserving authorized facts', async () => {
+    vi.mocked(mockScopedQuery.rawCypher).mockImplementation(async (cypher: string) => {
+      if (cypher.includes('Semantic')) {
+        return [{ s: { id: 'sem-foreign', content: 'JWT foreign policy', confidence: 1 } }];
+      }
+      if (cypher.includes('Fact')) {
+        return [{ f: {
+          id: 'fact-safe', subject: 'JWT', predicate: 'status', object: 'current',
+          status: 'active', valid_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z',
+        } }];
+      }
+      return [];
+    });
+    vi.mocked(mockScopedQuery.evaluateActiveEligibility!).mockResolvedValueOnce([
+      { id: 'sem-foreign', status: 'unknown' },
+    ]);
+
+    const result = await buildToolHandlers().berry_grep({
+      pattern: 'JWT',
+      node_types: ['semantic', 'fact'],
+      scope: 'project:alpha',
+    });
+
+    const text = result.content[0].text;
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain('fact-safe');
+    expect(text).not.toContain('sem-foreign');
+    expect(text).not.toContain('foreign policy');
+  });
+
+  it('does not misapply a non-project grep scope as structural project authority', async () => {
+    vi.mocked(mockScopedQuery.rawCypher).mockResolvedValue([
+      { s: { id: 'sem-feature', content: 'JWT feature policy', confidence: 0.8 } },
+    ]);
+    vi.mocked(mockScopedQuery.evaluateActiveEligibility!).mockResolvedValueOnce([
+      { id: 'sem-feature', status: 'eligible' },
+    ]);
+
+    const result = await buildToolHandlers().berry_grep({
+      pattern: 'JWT',
+      node_types: ['semantic'],
+      scope: 'feature:auth',
+    });
+
+    expect(result.content[0].text).toContain('sem-feature');
+    expect(mockScopedQuery.evaluateActiveEligibility).toHaveBeenCalledWith({
+      semanticIds: ['sem-feature'],
+      tenantId: 'default',
+    });
+  });
+
+  it('fails malformed eligibility closed without dropping authorized nonsemantic results', async () => {
+    vi.mocked(mockScopedQuery.rawCypher).mockImplementation(async (cypher: string) => {
+      if (cypher.includes('Semantic')) {
+        return [{ s: { id: 'sem-1', content: 'JWT semantic', confidence: 1 } }];
+      }
+      if (cypher.includes('Entity')) {
+        return [{ ent: { id: 'entity-1', name: 'JWT', description: 'safe entity', type: 'concept' } }];
+      }
+      return [];
+    });
+    vi.mocked(mockScopedQuery.evaluateActiveEligibility!).mockResolvedValueOnce([
+      { id: 'unexpected-id', status: 'eligible' },
+    ]);
+
+    const result = await buildToolHandlers().berry_grep({
+      pattern: 'JWT',
+      node_types: ['semantic', 'entity'],
+    });
+
+    const text = result.content[0].text;
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain('entity-1');
+    expect(text).not.toContain('sem-1');
+    expect(text).toContain('semantic unavailable (eligibility-unavailable)');
+  });
+
+  it('fails unavailable eligibility closed without dropping authorized nonsemantic results', async () => {
+    const scopedQuery: IScopedQuery = {
+      rawCypher: vi.fn(async (cypher: string) => {
+        if (cypher.includes('Semantic')) {
+          return [{ s: { id: 'sem-1', content: 'JWT semantic', confidence: 1 } }];
+        }
+        if (cypher.includes('Fact')) {
+          return [{ f: {
+            id: 'fact-safe', subject: 'JWT', predicate: 'status', object: 'current',
+            status: 'active', valid_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z',
+          } }];
+        }
+        return [];
+      }),
+    };
+    const handlers = buildToolHandlers(createServiceContainer({ scopedQuery, tenantId: 'tenant-a' }));
+
+    const result = await handlers.berry_grep({
+      pattern: 'JWT',
+      node_types: ['semantic', 'fact'],
+    });
+
+    const text = result.content[0].text;
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain('fact-safe');
+    expect(text).not.toContain('sem-1');
+    expect(text).toContain('semantic unavailable (eligibility-unavailable)');
   });
 
   it('filters by scope', async () => {

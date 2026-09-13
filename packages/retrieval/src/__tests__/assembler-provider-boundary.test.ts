@@ -7,6 +7,7 @@ import {
   type AssemblerMemoryLayer,
   type TracedUnifiedContext,
 } from '../assembler.js';
+import { allowAllSemanticEligibility } from './semantic-eligibility.fixture.js';
 
 const MAX_STRING_BYTES = 65_536;
 const MAX_AGGREGATE_STRING_BYTES = 262_144;
@@ -98,6 +99,8 @@ function makeDependencies(input: {
     memoryLayer,
     embedding,
     input.llm as never,
+    undefined,
+    allowAllSemanticEligibility,
   );
   return { assembler, codeSearch, codeLayer, memoryLoad, memoryLayer, run, close, session, redis, embedding };
 }

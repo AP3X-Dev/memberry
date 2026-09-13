@@ -1,7 +1,7 @@
 import neo4j, { Record as Neo4jRecord, type Driver } from 'neo4j-driver';
 import { types as nodeUtilTypes } from 'node:util';
-import { FactStore } from '@memberry/neo4j';
-import { EMBEDDING_DIM, type FactNode } from '@memberry/core';
+import { FactStore, semanticEligibilityWhere, generationActivePointerMatch, generationProjectionMatch, generationReadParameters, type EmbeddingGenerationStore } from '@memberry/neo4j';
+import { EMBEDDING_DIM, embeddingDescriptorFingerprint, parseEmbeddingDescriptor, validateEmbeddingVector, type EmbeddingDescriptor, type FactNode } from '@memberry/core';
 
 import {
   CANDIDATE_CHANNEL_CONTRACT_ID,
@@ -25,6 +25,11 @@ import {
   createServedRerankerProviderV1,
 } from './served-reranker.js';
 import type { RetrievalResult } from './types.js';
+import {
+  filterSemanticEvidence,
+  neo4jSemanticEligibilityAuthority,
+  type SemanticEligibilityAuthority,
+} from './semantic-eligibility-adapter.js';
 
 const OWN_KEYS = Reflect.ownKeys;
 const GET_DESCRIPTOR = Object.getOwnPropertyDescriptor;
@@ -54,6 +59,7 @@ export const EPISODIC_STRUCTURED_INDEX_FLAG = 'MEMBERRY_EPISODIC_STRUCTURED_INDE
 const EXPECTED_FIELDS = FREEZE([
   'tenantId', 'projectScope', 'resolvedEntityId', 'evidenceId', 'title', 'content', 'score',
 ]);
+const SEMANTIC_ELIGIBILITY_PLACEHOLDER = '__SEMANTIC_ELIGIBILITY__';
 
 export interface RuntimeCandidateDriver {
   session(config?: unknown): {
@@ -72,6 +78,7 @@ export interface RuntimeCandidateExecuteOptions {
   readonly includeMemory: boolean;
   readonly queryText?: string;
   readonly queryVector?: readonly number[];
+  readonly queryDescriptorFingerprint?: string;
 }
 
 interface ReceiptState {
@@ -126,7 +133,7 @@ const SCOPE_QUERY = `${PROJECT_PROOF}
 MATCH (s:Semantic)
 WHERE (s.tenant_id = $tenantId OR (s.tenant_id IS NULL AND $tenantId = $defaultTenant))
   AND (s.scope = $projectScope OR $projectScope IN coalesce(s.tags, []))
-  AND coalesce(s.archived, false) = false
+  AND ${SEMANTIC_ELIGIBILITY_PLACEHOLDER}
 OPTIONAL MATCH (s)-[r:ABOUT]->(target)
 WITH root, target, s, r
 WHERE (r IS NOT NULL AND (($asOf IS NULL AND r.invalid_at IS NULL)
@@ -150,7 +157,7 @@ const SEMANTIC_VECTOR_QUERY = `${PROJECT_PROOF}
 MATCH (s:Semantic)
 WHERE (s.tenant_id = $tenantId OR (s.tenant_id IS NULL AND $tenantId = $defaultTenant))
   AND (s.scope = $projectScope OR $projectScope IN coalesce(s.tags, []))
-  AND coalesce(s.archived, false) = false
+  AND ${SEMANTIC_ELIGIBILITY_PLACEHOLDER}
   AND s.embedding IS NOT NULL
 OPTIONAL MATCH (s)-[r:ABOUT]->(target)
 WITH root, target, s, r
@@ -359,10 +366,10 @@ const SOURCES: readonly SourceSpec[] = FREEZE([
   FREEZE({ channel: 'arch.entity', sourceType: 'arch_entity', query: ARCH_QUERY }),
 ]);
 
-function snapshotQueryVector(input: readonly number[] | undefined): readonly number[] | undefined {
+function snapshotQueryVector(input: readonly number[] | undefined, dimensions = EMBEDDING_DIM): readonly number[] | undefined {
   if (input === undefined) return undefined;
   if (IS_PROXY(input) || !ARRAY_IS_ARRAY(input) || GET_PROTOTYPE(input) !== ARRAY_PROTOTYPE
-    || input.length !== EMBEDDING_DIM || OWN_KEYS(input).length !== input.length + 1) {
+    || input.length !== dimensions || OWN_KEYS(input).length !== input.length + 1) {
     throw new Error('candidate_runtime:invalid_query_vector');
   }
   const snapshot: number[] = [];
@@ -573,14 +580,69 @@ function overflowSerialized(channel: RetrievalTraceChannel): CandidateChannelSer
   return `{"contractId":"${CANDIDATE_CHANNEL_CONTRACT_ID}","contractVersion":"${CANDIDATE_CHANNEL_CONTRACT_VERSION}","channel":"${channel}","outcome":"success","candidateCount":${MAX_ROWS + 1},"candidates":[]}` as CandidateChannelSerializedResultV1;
 }
 
+/** Keep existing canonical scope/lifecycle joins, replacing every cosine operand. */
+function qualifiedVectorQuery(source: string): string {
+  let query = source.replace(/\n\s*AND (s|ep|key|neighbor|neighborKey)\.embedding IS NOT NULL/g, '');
+  // The active-pointer guard is scope-global, so it is evaluated once after project proof, in the
+  // same read snapshot as every projection join below; zero rows when no active generation serves.
+  const proofTail = 'WITH head(nodes(authorizedPath)) AS root, last(nodes(authorizedPath)) AS target';
+  if (query.split(proofTail).length !== 2) throw new Error('candidate_runtime:unqualified_project_proof');
+  query = query.replace(proofTail, `${proofTail}\n${generationActivePointerMatch()}\nWITH root, target`);
+  query = query.replace('OPTIONAL MATCH (s)-[r:ABOUT]->(target)',
+    `${generationProjectionMatch('semantic', 's', 'semanticProjection')}\nOPTIONAL MATCH (s)-[r:ABOUT]->(target)`)
+    .replace('WITH root, target, s, r', 'WITH root, target, s, r, semanticProjection')
+    .replace('s.embedding, $queryVector', 'semanticProjection.vector, $queryVector');
+  query = query.replace('WITH DISTINCT root, target, ep, vector.similarity.cosine(ep.embedding',
+    `${generationProjectionMatch('episodic', 'ep', 'episodeProjection')}\nWITH DISTINCT root, target, ep, vector.similarity.cosine(episodeProjection.vector`);
+  query = query.replace('WITH root, target, ep, originalScore,',
+    `${generationProjectionMatch('episodic-index-key', 'key', 'keyProjection', 'ep').replace(/^MATCH /, 'OPTIONAL MATCH ')}\nWITH root, target, ep, originalScore,`)
+    .replace('key.embedding, $queryVector', 'keyProjection.vector, $queryVector');
+  query = query.replace('WITH DISTINCT item, neighbor,\n       vector.similarity.cosine(neighbor.embedding',
+    `${generationProjectionMatch('episodic', 'neighbor', 'neighborProjection')}\nWITH DISTINCT item, neighbor,\n       vector.similarity.cosine(neighborProjection.vector`);
+  query = query.replace('WITH item, neighbor, neighborOriginalScore,',
+    `${generationProjectionMatch('episodic-index-key', 'neighborKey', 'neighborKeyProjection', 'neighbor').replace(/^MATCH /, 'OPTIONAL MATCH ')}\nWITH item, neighbor, neighborOriginalScore,`)
+    .replace('neighborKey.embedding, $queryVector', 'neighborKeyProjection.vector, $queryVector');
+  if (/\.embedding\b/.test(query)) throw new Error('candidate_runtime:unqualified_vector_operand');
+  return query;
+}
+
+export interface RuntimeCandidateGenerationContext {
+  readonly store: EmbeddingGenerationStore;
+  readonly descriptor: EmbeddingDescriptor;
+}
+
 export class RuntimeCandidateChannelService {
-  constructor(private readonly driver: RuntimeCandidateDriver) {}
+  private readonly semanticEligibility: SemanticEligibilityAuthority;
+  private readonly generation?: RuntimeCandidateGenerationContext;
+  generationStatus = 'embedding_generation_unavailable';
+  private readonly legacyUnqualified: boolean;
+
+  constructor(
+    private readonly driver: RuntimeCandidateDriver,
+    semanticEligibility?: SemanticEligibilityAuthority,
+    generation?: RuntimeCandidateGenerationContext | { legacyUnqualified: true },
+  ) {
+    this.semanticEligibility = semanticEligibility
+      ?? neo4jSemanticEligibilityAuthority(driver as unknown as Driver);
+    this.legacyUnqualified = !!generation && !('store' in generation) && !('descriptor' in generation)
+      && 'legacyUnqualified' in generation && generation.legacyUnqualified === true;
+    if (this.legacyUnqualified) this.generationStatus = 'unqualified-legacy';
+    if (generation && 'store' in generation) {
+      this.generation = { store: generation.store, descriptor: parseEmbeddingDescriptor(generation.descriptor) };
+      this.generationStatus = 'not-read';
+    }
+  }
 
   async execute(
     receipt: RuntimeQueryPlannerResolvedReceiptV1,
     options: RuntimeCandidateExecuteOptions,
   ): Promise<CandidateChannelExecutionResultV1> {
-    const queryVector = snapshotQueryVector(options.queryVector);
+    const descriptorMatches = !this.generation
+      || options.queryDescriptorFingerprint === embeddingDescriptorFingerprint(this.generation.descriptor);
+    const queryVector = descriptorMatches
+      ? snapshotQueryVector(options.queryVector, this.generation?.descriptor.dimensions) : undefined;
+    if (!descriptorMatches && options.queryVector !== undefined) this.generationStatus = 'embedding_query_descriptor_mismatch';
+    if (queryVector && this.generation) validateEmbeddingVector(queryVector, this.generation.descriptor);
     let authority: ReturnType<typeof readRuntimeQueryPlannerAuthorityV1>;
     try { authority = readRuntimeQueryPlannerAuthorityV1(receipt); }
     catch { throw new Error('candidate_runtime:invalid_receipt'); }
@@ -591,6 +653,18 @@ export class RuntimeCandidateChannelService {
       ...(authority.temporalFrame.mode === 'as-of' ? { asOf: authority.temporalFrame.asOf } : {}),
     });
     const temporalFrame = authority.temporalFrame;
+    let generationParameters: Record<string, unknown> | undefined;
+    if (this.generation && queryVector) {
+      try {
+        const fingerprint = embeddingDescriptorFingerprint(this.generation.descriptor);
+        const generationScope = { tenantId: state.tenantId, projectScope: state.projectScope };
+        const compatible = await this.generation.store.compatible(generationScope, fingerprint);
+        if (compatible) {
+          generationParameters = generationReadParameters(generationScope, fingerprint, compatible.id);
+          this.generationStatus = 'ready';
+        } else this.generationStatus = 'embedding_generation_unavailable';
+      } catch { this.generationStatus = 'embedding_generation_unavailable'; }
+    }
     const request: CandidateChannelRequestV1 = Object.freeze({
       contractId: CANDIDATE_CHANNEL_CONTRACT_ID,
       contractVersion: CANDIDATE_CHANNEL_CONTRACT_VERSION,
@@ -611,6 +685,7 @@ export class RuntimeCandidateChannelService {
       const isFact = channel === 'memory.fact';
       const enabled = (spec || isFact)
         && (!spec?.requiresVector || queryVector !== undefined)
+        && (!spec?.requiresVector || this.legacyUnqualified || generationParameters !== undefined)
         && (channel === 'arch.entity' ? options.includeArchitecture : options.includeMemory);
       if ((!spec && !isFact) || !enabled) {
         roster.push(Object.freeze({ channel, run: () => failure(channel, 'unavailable') }));
@@ -636,23 +711,43 @@ export class RuntimeCandidateChannelService {
             } else {
               session = this.driver.session({ defaultAccessMode: 'READ' });
               tx = session.beginTransaction({ timeout: QUERY_TIMEOUT_MS });
-              const sourceQuery = channel === 'memory.episodic-vector'
+              let sourceQuery = channel === 'memory.episodic-vector'
                 && process.env[EPISODIC_STRUCTURED_INDEX_FLAG] === '1'
                 ? EPISODIC_STRUCTURED_VECTOR_QUERY
                 : spec!.query;
+              if (spec!.sourceType === 'semantic') {
+                sourceQuery = sourceQuery.replace(
+                  SEMANTIC_ELIGIBILITY_PLACEHOLDER,
+                  semanticEligibilityWhere('s', state.tenantId, 'semanticAsOf'),
+                );
+              }
+              if (spec!.requiresVector && this.generation) sourceQuery = qualifiedVectorQuery(sourceQuery);
               const raw = await bounded(tx.run(sourceQuery, {
                 tenantId: state.tenantId,
                 defaultTenant: DEFAULT_TENANT,
                 projectScope: state.projectScope,
                 entityId: state.resolvedEntityId,
                 asOf: state.asOf ?? null,
+                semanticAsOf: state.asOf ?? new Date().toISOString(),
                 // The sealed contract caps every channel at MAX_ROWS. Bound the database query
                 // at that cap instead of requesting N+1 and discarding the entire channel when
                 // additional authorized rows exist.
                 rowLimit: neo4j.int(MAX_ROWS),
                 ...(spec!.requiresVector ? { queryVector } : {}),
+                ...(spec!.requiresVector && this.generation ? generationParameters : {}),
               }), QUERY_TIMEOUT_MS);
               candidates = parseRows(raw, state, spec!);
+              if (spec!.sourceType === 'semantic') {
+                const eligible = await filterSemanticEvidence(
+                  candidates,
+                  this.semanticEligibility,
+                  { tenantId: state.tenantId, projectScope: state.projectScope, asOf: state.asOf },
+                  (candidate) => candidate.sourceType,
+                  (candidate) => candidate.evidenceId,
+                );
+                candidates = FREEZE(eligible.map((candidate, index) =>
+                  FREEZE({ ...candidate, rank: index + 1 })));
+              }
               await bounded(tx.commit(), CLOSE_TIMEOUT_MS);
               committed = true;
             }

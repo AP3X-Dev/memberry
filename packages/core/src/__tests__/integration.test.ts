@@ -1,3 +1,4 @@
+// Explicit legacy vector fixtures below are unqualified historical compatibility evidence.
 // packages/core/src/__tests__/integration.test.ts
 //
 // Full integration smoke test: STORE → LOAD → cache pipeline.
@@ -99,7 +100,7 @@ describe.runIf(RUN_LIVE)('Integration: LOAD and STORE flow', () => {
 
   // Neo4j layer objects
   const episodicStore = new EpisodicStore(neo4jDriver);
-  const scopedQuery = new ScopedQuery(neo4jDriver);
+  const scopedQuery = new ScopedQuery(neo4jDriver, { legacyUnqualified: true });
 
   const config: AMPConfig = {
     redis: { url: REDIS_URL },

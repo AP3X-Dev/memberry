@@ -47,7 +47,15 @@ function fixture() {
       signals: { publish: vi.fn() },
       queue: { incrementScore: vi.fn() },
     } as never,
-    { episodic: {} as never, query: { byScope, byVector } } as never,
+    {
+      episodic: {} as never,
+      query: {
+        byScope,
+        byVector,
+        evaluateActiveEligibility: vi.fn(async ({ semanticIds }: { semanticIds: readonly string[] }) =>
+          semanticIds.map((id) => ({ id, status: 'eligible' as const }))),
+      },
+    } as never,
     { available: true, embed: vi.fn(async () => [0.1]), embedBatch: vi.fn() },
     config,
   );
@@ -151,12 +159,12 @@ describe('AMPService.loadFreshObserved', () => {
     ]));
   });
 
-  it('leaves ordinary load cache and single-flight behavior on the existing path', async () => {
+  it('keeps single-flight while omitted cache mode stays disabled', async () => {
     const { service, cache } = fixture();
     const scope = { task: 'ordinary', tags: ['project:test'] };
     await Promise.all([service.load(scope), service.load(scope)]);
-    expect(cache.get).toHaveBeenCalledTimes(2);
-    expect(cache.set).toHaveBeenCalledTimes(1);
+    expect(cache.get).not.toHaveBeenCalled();
+    expect(cache.set).not.toHaveBeenCalled();
   });
 
   it('waits for concurrent source settlement and carries closed channel accounting on failure', async () => {
@@ -217,7 +225,7 @@ describe('AMPService.loadFreshObserved', () => {
     }
 
     expect(directAssemblyMaps).toBe(1);
-    expect(events).toEqual(['cache:get', 'scope', 'vector', 'cache:set']);
+    expect(events).toEqual(['scope', 'vector']);
   });
 
   it('keeps core settlement wrappers and candidate provenance behind observation guards', () => {
@@ -279,6 +287,8 @@ describe('RL-010 — a raw episode enters at the neutral prior, not as ground tr
           // same relevance as the episode, so only confidence differs
           byVector: vi.fn(async () => [{ ...corroborated, score: 0.8 }]),
           byVectorEpisodic: vi.fn(async () => [rawEpisode]),
+          evaluateActiveEligibility: vi.fn(async ({ semanticIds }: { semanticIds: readonly string[] }) =>
+            semanticIds.map((id) => ({ id, status: 'eligible' as const }))),
         },
       } as never,
       { available: true, embed: vi.fn(async () => [0.1]), embedBatch: vi.fn() },

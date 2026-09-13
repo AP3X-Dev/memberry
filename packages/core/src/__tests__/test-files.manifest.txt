@@ -74,6 +74,7 @@ packages/arch/src/__tests__/context.test.ts
 packages/arch/src/__tests__/drift.regression.test.ts
 packages/arch/src/__tests__/entity-store.regression.test.ts
 packages/arch/src/__tests__/impact.test.ts
+packages/arch/src/__tests__/knowledge-mutation.test.ts
 packages/arch/src/__tests__/project-scope.regression.test.ts
 packages/arch/src/__tests__/relation-store.regression.test.ts
 packages/arch/src/__tests__/tools.regression.test.ts
@@ -85,6 +86,8 @@ packages/code/src/__tests__/indexer.project.live.test.ts
 packages/code/src/__tests__/indexer.relations.live.test.ts
 packages/code/src/__tests__/indexer.relations.test.ts
 packages/code/src/__tests__/indexer.write-scope.test.ts
+packages/code/src/__tests__/knowledge-mutation.live.test.ts
+packages/code/src/__tests__/knowledge-mutation.test.ts
 packages/code/src/__tests__/parser.assigned-functions.test.ts
 packages/code/src/__tests__/parser.calls.test.ts
 packages/code/src/__tests__/parser.class-fields.test.ts
@@ -105,6 +108,7 @@ packages/code/src/__tests__/search.language-filter.test.ts
 packages/code/src/__tests__/search.no-embedding.test.ts
 packages/code/src/__tests__/search.observed.test.ts
 packages/code/src/__tests__/search.rerank.test.ts
+packages/code/src/__tests__/search.semantic-eligibility.test.ts
 packages/code/src/__tests__/structural-search.test.ts
 packages/code/src/__tests__/symbol-identity.test.ts
 packages/code/src/__tests__/symbol-project-scope.live.test.ts
@@ -158,7 +162,9 @@ packages/core/src/__tests__/consolidation.scheduling.test.ts
 packages/core/src/__tests__/consolidation.test.ts
 packages/core/src/__tests__/doctor.test.ts
 packages/core/src/__tests__/dream.test.ts
+packages/core/src/__tests__/embedding-descriptor.test.ts
 packages/core/src/__tests__/embedding.bug0009.regression.test.ts
+packages/core/src/__tests__/embedding.contract.test.ts
 packages/core/src/__tests__/embedding.regression.test.ts
 packages/core/src/__tests__/embedding.test.ts
 packages/core/src/__tests__/evidence-diversity.adversarial.test.ts
@@ -208,9 +214,12 @@ packages/core/src/__tests__/run.test.ts
 packages/core/src/__tests__/scope-bleed.repro.test.ts
 packages/core/src/__tests__/serial-queue.test.ts
 packages/core/src/__tests__/service.admission-shadow.test.ts
+packages/core/src/__tests__/service.context-cache-epoch.test.ts
+packages/core/src/__tests__/service.delivery.live.test.ts
 packages/core/src/__tests__/service.observed.test.ts
 packages/core/src/__tests__/service.regression.test.ts
 packages/core/src/__tests__/service.security.test.ts
+packages/core/src/__tests__/service.semantic-eligibility.test.ts
 packages/core/src/__tests__/service.test.ts
 packages/core/src/__tests__/services-factory.consolidation-config.test.ts
 packages/core/src/__tests__/setup.test.ts
@@ -267,6 +276,8 @@ packages/neo4j/src/__tests__/anti-entropy-graph.test.ts
 packages/neo4j/src/__tests__/archived-exclusion.test.ts
 packages/neo4j/src/__tests__/blocks.test.ts
 packages/neo4j/src/__tests__/driver.test.ts
+packages/neo4j/src/__tests__/embedding-generation.live.test.ts
+packages/neo4j/src/__tests__/embedding-generation.test.ts
 packages/neo4j/src/__tests__/entity-resolver.test.ts
 packages/neo4j/src/__tests__/episodic-index.live.test.ts
 packages/neo4j/src/__tests__/episodic-index.test.ts
@@ -287,6 +298,8 @@ packages/neo4j/src/__tests__/fact.test.ts
 packages/neo4j/src/__tests__/gds.test.ts
 packages/neo4j/src/__tests__/hebbian-store.test.ts
 packages/neo4j/src/__tests__/injection-log.test.ts
+packages/neo4j/src/__tests__/knowledge-epoch.live.test.ts
+packages/neo4j/src/__tests__/knowledge-epoch.test.ts
 packages/neo4j/src/__tests__/lifecycle-sidecar-indexes.test.ts
 packages/neo4j/src/__tests__/lifecycle-store.test.ts
 packages/neo4j/src/__tests__/migrations.empty-vectors.test.ts
@@ -294,13 +307,17 @@ packages/neo4j/src/__tests__/migrations.test.ts
 packages/neo4j/src/__tests__/provenance.test.ts
 packages/neo4j/src/__tests__/query-scope-enforcement.test.ts
 packages/neo4j/src/__tests__/query.embedding-projection.test.ts
+packages/neo4j/src/__tests__/query.generation.test.ts
 packages/neo4j/src/__tests__/query.regression.test.ts
 packages/neo4j/src/__tests__/query.tenant.opt114.test.ts
 packages/neo4j/src/__tests__/query.test.ts
 packages/neo4j/src/__tests__/ret002c-stable-id.test.ts
 packages/neo4j/src/__tests__/schema.test.ts
+packages/neo4j/src/__tests__/semantic-eligibility.live.test.ts
+packages/neo4j/src/__tests__/semantic-eligibility.test.ts
 packages/neo4j/src/__tests__/semantic-signal-count.test.ts
 packages/neo4j/src/__tests__/semantic.idempotency.test.ts
+packages/neo4j/src/__tests__/semantic.supersession.live.test.ts
 packages/neo4j/src/__tests__/semantic.test.ts
 packages/neo4j/src/__tests__/temporal-edges.test.ts
 packages/neo4j/src/__tests__/tenant-admin.test.ts
@@ -312,6 +329,7 @@ packages/redis/src/__tests__/anti-entropy-streams.test.ts
 packages/redis/src/__tests__/blocks.test.ts
 packages/redis/src/__tests__/cache.test.ts
 packages/redis/src/__tests__/client.test.ts
+packages/redis/src/__tests__/embeddings.live.test.ts
 packages/redis/src/__tests__/embeddings.test.ts
 packages/redis/src/__tests__/extraction.test.ts
 packages/redis/src/__tests__/locks.test.ts
@@ -327,6 +345,7 @@ packages/research/src/__tests__/context.test.ts
 packages/research/src/__tests__/contradictions.test.ts
 packages/research/src/__tests__/experiment.test.ts
 packages/research/src/__tests__/hypothesis.test.ts
+packages/research/src/__tests__/knowledge-mutation.test.ts
 packages/research/src/__tests__/research-integration.test.ts
 packages/research/src/__tests__/research-log-schema.opt40.test.ts
 packages/research/src/__tests__/tools.regression.test.ts
@@ -368,6 +387,7 @@ packages/retrieval/src/__tests__/retrieval-explanation-view.test.ts
 packages/retrieval/src/__tests__/retrieval-explanation-wiring.test.ts
 packages/retrieval/src/__tests__/retrieval-fault-policy.test.ts
 packages/retrieval/src/__tests__/retrieval-trace-summary.test.ts
+packages/retrieval/src/__tests__/runtime-candidate-channel.generation.live.test.ts
 packages/retrieval/src/__tests__/runtime-candidate-channel.structured.live.test.ts
 packages/retrieval/src/__tests__/runtime-candidate-channel.test.ts
 packages/retrieval/src/__tests__/runtime-query-planner.live-contract.test.ts

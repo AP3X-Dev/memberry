@@ -15,10 +15,13 @@ describe('RET-002C2 required live-mode contract', () => {
         MEMBERRY_RET002C2_DISPOSABLE_OPT_IN: '',
       },
       encoding: 'utf8',
-      timeout: 30_000,
+      // This nested Vitest preflight can share a saturated worker host with the
+      // retrieval stress suite. Keep the assertion fail-fast at the database
+      // boundary while allowing process startup enough wall-clock headroom.
+      timeout: 120_000,
     });
     expect(result.status).not.toBe(0);
     expect(`${result.stdout}${result.stderr}`).toContain('ret002c2_live:disposable_opt_in_required');
     expect(`${result.stdout}${result.stderr}`).not.toContain('database connection attempted');
-  }, 30_000);
+  }, 120_000);
 });

@@ -1,8 +1,11 @@
+import { runResearchMutation } from './knowledge-mutation.js';
 // packages/research/src/campaign.ts
 import neo4j, { type Driver } from 'neo4j-driver';
 import type { CampaignNode } from './types.js';
 
 const SAFE_PROPERTY_KEY = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const STAT_KEYS = new Set(['total_experiments', 'total_keeps', 'total_discards', 'best_metric',
+  'best_commit', 'best_experiment_id', 'baseline_metric']);
 
 export class CampaignStore {
   constructor(private driver: Driver) {}
@@ -10,9 +13,9 @@ export class CampaignStore {
   async create(node: CampaignNode): Promise<string> {
     const session = this.driver.session();
     try {
-      const result = await session.run(
+      const result = await runResearchMutation(session,
         `CREATE (c:Entity:Campaign {
-          id: $id,
+          id: $id, tenant_id: 'default',
           campaign_id: $campaign_id,
           name: $name,
           type: 'campaign',
@@ -103,7 +106,7 @@ export class CampaignStore {
 
       for (const [key, value] of Object.entries(updates)) {
         if (value !== undefined) {
-          if (!SAFE_PROPERTY_KEY.test(key)) {
+          if (!SAFE_PROPERTY_KEY.test(key) || !STAT_KEYS.has(key)) {
             throw new Error(`Invalid property key: ${key}`);
           }
           setClauses.push(`c.${key} = $${key}`);
@@ -111,8 +114,8 @@ export class CampaignStore {
         }
       }
 
-      await session.run(
-        `MATCH (c:Campaign {campaign_id: $campaignId}) SET ${setClauses.join(', ')}`,
+      await runResearchMutation(session,
+        `MATCH (c:Campaign {campaign_id: $campaignId}) WHERE coalesce(c.tenant_id, 'default') = 'default' SET ${setClauses.join(', ')}`,
         params,
       );
     } finally {
@@ -123,8 +126,9 @@ export class CampaignStore {
   async incrementConsolidation(campaignId: string): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await runResearchMutation(session,
         `MATCH (c:Campaign {campaign_id: $campaignId})
+         WHERE coalesce(c.tenant_id, 'default') = 'default'
          SET c.consolidation_count = c.consolidation_count + 1,
              c.last_consolidation_at = $now,
              c.updated_at = $now`,
@@ -138,8 +142,9 @@ export class CampaignStore {
   async setStatus(campaignId: string, status: CampaignNode['status']): Promise<void> {
     const session = this.driver.session();
     try {
-      await session.run(
+      await runResearchMutation(session,
         `MATCH (c:Campaign {campaign_id: $campaignId})
+         WHERE coalesce(c.tenant_id, 'default') = 'default'
          SET c.status = $status, c.updated_at = $now`,
         { campaignId, status, now: new Date().toISOString() },
       );

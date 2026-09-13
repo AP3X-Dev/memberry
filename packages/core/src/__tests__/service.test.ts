@@ -1,9 +1,9 @@
 // packages/core/src/__tests__/service.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createHash } from 'node:crypto';
 import { AMPService } from '../service.js';
 import type { RedisLayer, Neo4jLayer, FactLayer, BlocksLayer } from '../service.js';
 import type { AMPConfig, LoadScope, EpisodeInput, SemanticNode, FactNode, MemoryBlock } from '../types.js';
+import { embeddingDescriptorFingerprint, type EmbeddingDescriptor } from '../embedding-descriptor.js';
 
 // Mock extractFacts — we test the wiring, not the OpenAI call.
 // Preserve isTransientError from the real module for retry logic.
@@ -75,6 +75,13 @@ function makeRedis(overrides: Partial<RedisLayer> = {}): RedisLayer {
 }
 
 function makeNeo4j(overrides: Partial<Neo4jLayer> = {}): Neo4jLayer {
+  const query: Neo4jLayer['query'] = {
+    byScope: vi.fn().mockResolvedValue([]),
+    byVector: vi.fn().mockResolvedValue([]),
+    evaluateActiveEligibility: vi.fn().mockImplementation(async ({ semanticIds }: { semanticIds: readonly string[] }) =>
+      semanticIds.map((id) => ({ id, status: 'eligible' as const }))),
+    ...overrides.query,
+  };
   return {
     episodic: {
       create: vi.fn().mockResolvedValue('ep-1'),
@@ -83,11 +90,8 @@ function makeNeo4j(overrides: Partial<Neo4jLayer> = {}): Neo4jLayer {
       linkToModel: vi.fn().mockResolvedValue(undefined),
       linkSignal: vi.fn().mockResolvedValue(undefined),
     },
-    query: {
-      byScope: vi.fn().mockResolvedValue([]),
-      byVector: vi.fn().mockResolvedValue([]),
-    },
     ...overrides,
+    query,
   };
 }
 
@@ -101,7 +105,23 @@ function makeEmbedding() {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('AMPService.load', () => {
-  it('returns cached context on cache hit', async () => {
+  it.each(['missing', 'different', 'matching'])('checks %s identity before reusing a shared query vector', async mode => {
+    const descriptor: EmbeddingDescriptor = { schemaVersion: 1, provider: 'fixture', model: 'a', revision: '1',
+      dimensions: 2, normalization: 'none', preprocessingVersion: 'raw-v1' };
+    const fingerprint = embeddingDescriptorFingerprint(descriptor);
+    const embedding = { descriptor, embed: vi.fn().mockResolvedValue([1, 0]), embedBatch: vi.fn() };
+    const graph = makeNeo4j();
+    graph.query.byVectorEpisodic = vi.fn().mockResolvedValue([]);
+    const service = new AMPService(makeRedis(), graph, embedding, makeConfig());
+    await service.load({ task: 'query', tenantId: 'default', tags: ['project:a'], queryVector: [0, 1],
+      ...(mode === 'missing' ? {} : { queryDescriptorFingerprint: mode === 'matching' ? fingerprint : 'f'.repeat(64) }) });
+    const expected = mode === 'matching' ? [0, 1] : [1, 0];
+    expect(graph.query.byVector).toHaveBeenCalledWith(expected, 20, 'default', 'project:a', fingerprint);
+    expect(graph.query.byVectorEpisodic).toHaveBeenCalledWith(expected, 20, 'default', 'project:a', fingerprint);
+    if (mode === 'matching') expect(embedding.embed).not.toHaveBeenCalled();
+    else expect(embedding.embed).toHaveBeenCalled();
+  });
+  it('treats omitted cache mode as disabled and ignores legacy cached context', async () => {
     const cachedCtx = {
       markdown: '# Memory Context\n',
       tokens: 100,
@@ -125,11 +145,9 @@ describe('AMPService.load', () => {
     const scope: LoadScope = { task: 'test task', max_tokens: 2000 };
     const result = await service.load(scope);
 
-    expect(result).toBe(cachedCtx);
-    expect(redis.cache.get).toHaveBeenCalledOnce();
-    // Neo4j should NOT be queried on cache hit
-    expect(neo4j.query.byScope).not.toHaveBeenCalled();
-    expect(neo4j.query.byVector).not.toHaveBeenCalled();
+    expect(result).not.toBe(cachedCtx);
+    expect(redis.cache.get).not.toHaveBeenCalled();
+    expect(neo4j.query.byScope).toHaveBeenCalledOnce();
   });
 
   it('queries Neo4j on cache miss and caches result', async () => {
@@ -156,8 +174,7 @@ describe('AMPService.load', () => {
     expect(result.sources).toContain('sem-1');
     expect(result.markdown).toContain('# Memory Context');
     expect(result.tokens).toBeGreaterThan(0);
-    // Should cache the result
-    expect(redis.cache.set).toHaveBeenCalledOnce();
+    expect(redis.cache.set).not.toHaveBeenCalled();
   });
 
   it('tracks both tag and entity keys for targeted cache invalidation', async () => {
@@ -175,9 +192,7 @@ describe('AMPService.load', () => {
     };
     await service.load(scope);
 
-    expect(redis.cache.set).toHaveBeenCalledOnce();
-    const cacheScopeKeys = vi.mocked(redis.cache.set).mock.calls[0][4];
-    expect(cacheScopeKeys).toEqual(expect.arrayContaining(['project:test', 'auth-module']));
+    expect(redis.cache.set).not.toHaveBeenCalled();
   });
 
   it('merges byScope and byVector results, deduplicating by id', async () => {
@@ -350,6 +365,80 @@ describe('AMPService.load', () => {
     expect(result.markdown).toContain('FALLBACKMARK');
   });
 
+  it('renders balanced current conflicts deterministically and excludes obsolete facts', async () => {
+    const currentA = { ...makeFact('JWT'), status: 'disputed' as const };
+    const currentB = { ...makeFact('session-cookies'), confidence: 0.8 };
+    const obsolete = {
+      ...makeFact('basic-auth'), id: 'f-obsolete', status: 'invalidated' as const,
+      invalid_at: '2025-01-01T00:00:00.000Z',
+    };
+    const load = async (facts: FactNode[]) => {
+      const factLayer = {
+        getActive: vi.fn(), getActiveBatch: vi.fn().mockResolvedValue([facts]),
+        create: vi.fn(), findBySubjectPredicate: vi.fn(), invalidate: vi.fn(),
+      } as unknown as FactLayer;
+      const service = new AMPService(
+        makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig(),
+      );
+      return service.load({ task: 'current auth', entities: ['auth'], max_tokens: 4000 });
+    };
+
+    const forward = await load([currentA, obsolete, currentB]);
+    const reverse = await load([currentB, obsolete, currentA]);
+
+    expect(forward.markdown).toBe(reverse.markdown);
+    expect(forward.sources).toEqual(reverse.sources);
+    expect(forward.markdown.match(/Unresolved conflict/g)).toHaveLength(1);
+    expect(forward.markdown).toContain('**JWT**');
+    expect(forward.markdown).toContain('**session-cookies**');
+    expect(forward.markdown).not.toContain('basic-auth');
+    expect(forward.sources).toEqual(['f-JWT', 'f-session-cookies']);
+  });
+
+  it.each(['uses', 'depends on', 'owns', 'implements', 'located_at', 'custom_relation'])(
+    'preserves multiple current %s values without inventing a conflict', async (predicate) => {
+      const facts = [makeFact('Redis'), makeFact('Neo4j')].map(fact => ({ ...fact, predicate }));
+      const factLayer = {
+        getActive: vi.fn().mockResolvedValue(facts),
+        create: vi.fn(), findBySubjectPredicate: vi.fn(), invalidate: vi.fn(),
+      } as unknown as FactLayer;
+      const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+      const result = await service.load({ task: 'dependencies', entities: ['auth'], max_tokens: 4000 });
+      expect(result.sources).toHaveLength(2);
+      expect(result.markdown).not.toContain('Unresolved conflict');
+    },
+  );
+
+  it('does not merge equal display labels from different canonical entities into a conflict', async () => {
+    const facts = [makeFact('1'), makeFact('2')].map((fact, index) => ({
+      ...fact, predicate: 'version_is', entity_id: `entity-${index}`,
+    }));
+    const factLayer = { getActive: vi.fn().mockResolvedValue(facts) } as unknown as FactLayer;
+    const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+    const result = await service.load({ task: 'versions', entities: ['auth'], max_tokens: 4000 });
+    expect(result.sources).toHaveLength(2);
+    expect(result.markdown).not.toContain('Unresolved conflict');
+  });
+
+  it('budgets a current conflict atomically instead of rendering only one side', async () => {
+    const facts = [makeFact('a'.repeat(20)), makeFact('b'.repeat(20))]
+      .map(fact => ({ ...fact, predicate: 'version_is' }));
+    const factLayer = {
+      getActive: vi.fn(), getActiveBatch: vi.fn().mockResolvedValue([facts]),
+      create: vi.fn(), findBySubjectPredicate: vi.fn(), invalidate: vi.fn(),
+    } as unknown as FactLayer;
+    const service = new AMPService(
+      makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig(),
+    );
+
+    const result = await service.load({ task: 'tiny current frame', entities: ['auth'], max_tokens: 30 });
+
+    expect(result.markdown).not.toContain('Unresolved conflict');
+    expect(result.markdown).not.toContain('a'.repeat(20));
+    expect(result.markdown).not.toContain('b'.repeat(20));
+    expect(result.sources).toEqual([]);
+  });
+
   it.each(['ordinary', 'observed'] as const)('RET-002C: preserves exact legacy vector calls in %s mode when stable IDs are absent', async (mode) => {
     const byScope = vi.fn().mockResolvedValue([]);
     const byVector = vi.fn().mockResolvedValue([]);
@@ -460,28 +549,21 @@ describe('AMPService.load', () => {
     ]));
   });
 
-  it('RET-002C: registers normalized stable IDs as cache invalidation keys', async () => {
+  it('RET-002C: omitted cache mode does not publish stable-ID contexts', async () => {
     const redis = makeRedis();
     const service = new AMPService(redis, makeNeo4j(), makeEmbedding(), makeConfig());
     await service.load({ task: 'stable cache keys', resolvedEntityIds: ['entity-b', 'entity-a', 'entity-b'] });
-    expect(vi.mocked(redis.cache.set).mock.calls[0]![4]).toEqual(['entity-b', 'entity-a']);
+    expect(redis.cache.set).not.toHaveBeenCalled();
   });
 
-  it('RET-002C: stable-ID order participates in cache identity while absent scope hashing is byte-exact', async () => {
+  it('RET-002C: omitted cache mode never probes legacy cache identity', async () => {
     const redis = makeRedis();
     const service = new AMPService(redis, makeNeo4j(), makeEmbedding(), makeConfig());
     await service.load({ task: 'legacy-cache' });
-    const expectedLegacy = createHash('sha256').update(JSON.stringify({
-      tenant: 'default', task: 'legacy-cache', entities: [], tags: [], max_tokens: 4096, temporal: null,
-    })).digest('hex').slice(0, 16);
-    expect(vi.mocked(redis.cache.get).mock.calls[0]![0]).toBe(expectedLegacy);
-
     await service.load({ task: 'stable-cache', resolvedEntityIds: ['entity-a', 'entity-b', 'entity-a'] } as LoadScope);
     await service.load({ task: 'stable-cache', resolvedEntityIds: ['entity-a', 'entity-b'] } as LoadScope);
     await service.load({ task: 'stable-cache', resolvedEntityIds: ['entity-b', 'entity-a'] } as LoadScope);
-    const hashes = vi.mocked(redis.cache.get).mock.calls.slice(1).map((call) => call[0]);
-    expect(hashes[0]).toBe(hashes[1]);
-    expect(hashes[2]).not.toBe(hashes[0]);
+    expect(redis.cache.get).not.toHaveBeenCalled();
   });
 
   it('RET-002C: rejects hostile stable-ID containers before cache or dependency hooks', async () => {
@@ -531,6 +613,30 @@ describe('AMPService.load', () => {
     }
     expect(hooks).not.toHaveBeenCalled();
   });
+
+  it('RET-002C: accepts a genuine AbortSignal without adding it to cache identity', async () => {
+    const controller = new AbortController();
+    const neo4j = makeNeo4j();
+    const service = new AMPService(makeRedis(), neo4j, makeEmbedding(), makeConfig());
+    await expect(service.load({
+      task: 'stable signal', resolvedEntityIds: ['entity-a'], signal: controller.signal,
+    })).resolves.toBeDefined();
+    expect(neo4j.query.byScope).toHaveBeenCalledOnce();
+  });
+
+  it('RET-002C: rejects spoofed and accessor AbortSignals without invoking hooks', async () => {
+    const hooks = vi.fn();
+    const spoof = Object.create(AbortSignal.prototype) as AbortSignal;
+    const accessor = { task: 'hostile', resolvedEntityIds: ['entity-a'] } as Record<string, unknown>;
+    Object.defineProperty(accessor, 'signal', { get: () => { hooks(); return new AbortController().signal; } });
+    for (const candidate of [
+      { task: 'hostile', resolvedEntityIds: ['entity-a'], signal: spoof }, accessor,
+    ]) {
+      const service = new AMPService(makeRedis(), makeNeo4j(), makeEmbedding(), makeConfig());
+      await expect(service.load(candidate as never)).rejects.toThrow('load_scope_invalid');
+    }
+    expect(hooks).not.toHaveBeenCalled();
+  });
 });
 
 describe('AMPService.store', () => {
@@ -551,6 +657,7 @@ describe('AMPService.store', () => {
     const input: EpisodeInput = {
       session_id: 'sess-1',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'This content was already stored',
     };
@@ -573,6 +680,7 @@ describe('AMPService.store', () => {
     const input: EpisodeInput = {
       session_id: 'sess-1',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'New unique content to store',
     };
@@ -657,6 +765,7 @@ describe('AMPService.store', () => {
     const input: EpisodeInput = {
       session_id: 'sess-3',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'Content with entities',
       entities: ['entity-a', 'entity-b'],
@@ -684,6 +793,7 @@ describe('AMPService.store', () => {
     const input: EpisodeInput = {
       session_id: 'sess-4',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test',
       content: 'Content already embedded',
     };
@@ -712,6 +822,7 @@ describe('AMPService.store — atomic episode persistence (OPT-53)', () => {
 
     await service.store({
       session_id: 's', agent_id: 'agent-1', task: 't', content: 'c',
+      tags: ['project:test'],
       entities: ['ent-1', 'ent-2'], model_id: 'model-9',
     });
 
@@ -733,6 +844,7 @@ describe('AMPService.store — atomic episode persistence (OPT-53)', () => {
 
     await service.store({
       session_id: 's', agent_id: 'agent-1', task: 't', content: 'c',
+      tags: ['project:test'],
       entities: ['ent-1'], model_id: 'model-9',
     });
 
@@ -763,7 +875,7 @@ describe('AMPService.store — atomic episode persistence (OPT-53)', () => {
     expect(embedding.embed).toHaveBeenCalledWith('Sensor Gale is maintained by Team Nimbus.');
     expect(embedding.embedBatch).toHaveBeenCalledWith([
       'Sensor Gale is maintained by Team Nimbus.', 'Gale',
-    ]);
+    ], { tenantId: 'default', projectScope: 'project:memberry' });
     const [node, links, keys] = createWithLinks.mock.calls[0]!;
     expect(node.content).toBe('Sensor Gale is maintained by Team Nimbus.');
     expect(links).toEqual({ agentId: 'agent-1', entityIds: ['entity-gale'] });
@@ -809,6 +921,7 @@ describe('AMPService.store — dedup rollback on persistence failure', () => {
     const input: EpisodeInput = {
       session_id: 'sess-rollback-1',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'Content whose persistence fails',
     };
@@ -857,6 +970,7 @@ describe('AMPService.store — dedup rollback on persistence failure', () => {
     const input: EpisodeInput = {
       session_id: 'sess-rollback-2',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'Same content stored twice',
     };
@@ -895,6 +1009,7 @@ describe('AMPService.store — dedup rollback on persistence failure', () => {
     const input: EpisodeInput = {
       session_id: 'sess-happy-dedup',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'Identical content stored twice on the happy path',
     };
@@ -1250,6 +1365,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     const input: EpisodeInput = {
       session_id: 'sess-fact-1',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'The auth module uses JWT for authentication',
     };
@@ -1288,7 +1404,10 @@ describe('AMPService.store — real-time fact extraction', () => {
     ]);
 
     const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
-    await service.store({ session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT' });
+    await service.store({
+      session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT',
+      tags: ['project:test'],
+    });
     await flushAsync();
 
     expect(factLayer.corroborate).toHaveBeenCalledWith('fact-dream', expect.any(Number), 'deductive');
@@ -1313,7 +1432,10 @@ describe('AMPService.store — real-time fact extraction', () => {
     ]);
 
     const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
-    await service.store({ session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT and runs on node' });
+    await service.store({
+      session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT and runs on node',
+      tags: ['project:test'],
+    });
     await flushAsync();
 
     expect(updateConfidenceBatch).toHaveBeenCalledTimes(1);
@@ -1332,7 +1454,10 @@ describe('AMPService.store — real-time fact extraction', () => {
     ]);
 
     const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
-    await service.store({ session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT and runs on node' });
+    await service.store({
+      session_id: 's', agent_id: 'a', task: 't', content: 'auth uses JWT and runs on node',
+      tags: ['project:test'],
+    });
     await flushAsync();
 
     expect(factLayer.updateConfidence).toHaveBeenCalledWith('stale', 0.45);
@@ -1477,6 +1602,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
     const result = await service.store({
       session_id: 'sess-fact-2', agent_id: 'agent-1', task: 'refactor auth',
+      tags: ['project:test'],
       content: 'Migrated auth module to use JWT instead of session cookies',
     });
     await flushAsync(); // Wait for fire-and-forget extraction
@@ -1490,20 +1616,37 @@ describe('AMPService.store — real-time fact extraction', () => {
     expect(createdFact.supersedes_fact_id).toBeNull();
   });
 
+  it.each(['uses', 'owns', 'implements', 'custom_relation'])(
+    'corroborating another %s value does not invalidate the established value', async (predicate) => {
+      const established = makeFactNode({ id: 'fact-old', predicate, object: 'Redis' });
+      const contender = makeFactNode({ id: 'fact-new', predicate, object: 'Neo4j',
+        status: 'tentative', inference_type: 'deductive', source_episode_ids: ['ep-old'] });
+      const factLayer = makeFactLayer();
+      (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([established, contender]);
+      mockExtractFacts.mockResolvedValue([
+        { subject: 'auth-module', predicate, object: 'Neo4j', source_episode_ids: [] },
+      ]);
+      const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
+      await service.processExtraction('independent evidence', 'ep-new', 'default');
+      expect(factLayer.corroborate).toHaveBeenCalledWith('fact-new', expect.any(Number), 'deductive');
+      expect(factLayer.invalidate).not.toHaveBeenCalled();
+    },
+  );
+
   it('OPT-70b: an INDEPENDENT episode promotes the tentative contender AND supersedes the conflicting active fact', async () => {
     // An established active fact (session-cookies) plus a tentative deductive
     // contender (JWT) minted by a prior independent episode. A new, distinct
     // episode extracts JWT → corroborate the contender to active, THEN supersede
     // the established fact (corroborate-before-invalidate).
-    const established = makeFactNode({ id: 'fact-old', object: 'session-cookies', status: 'active' });
+    const established = makeFactNode({ predicate: 'version_is', id: 'fact-old', object: 'session-cookies', status: 'active' });
     const contender = makeFactNode({
-      id: 'fact-jwt', object: 'JWT', status: 'tentative',
+      predicate: 'version_is', id: 'fact-jwt', object: 'JWT', status: 'tentative',
       inference_type: 'deductive', confidence: 0.5, source_episode_ids: ['ep-old'],
     });
     const factLayer = makeFactLayer();
     (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([established, contender]);
     mockExtractFacts.mockResolvedValue([
-      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+      { subject: 'auth-module', predicate: 'version_is', object: 'JWT', source_episode_ids: [] },
     ]);
 
     const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
@@ -1529,9 +1672,9 @@ describe('AMPService.store — real-time fact extraction', () => {
     // the contender is already active (persisted since its earlier creation) →
     // both facts active (recoverable), never "old invalidated with no successor"
     // (permanent data loss). OPT-21's data-loss invariant, relocated + strengthened.
-    const established = makeFactNode({ id: 'fact-old', object: 'session-cookies', status: 'active' });
+    const established = makeFactNode({ predicate: 'version_is', id: 'fact-old', object: 'session-cookies', status: 'active' });
     const contender = makeFactNode({
-      id: 'fact-jwt', object: 'JWT', status: 'tentative',
+      predicate: 'version_is', id: 'fact-jwt', object: 'JWT', status: 'tentative',
       inference_type: 'deductive', confidence: 0.5, source_episode_ids: ['ep-old'],
     });
     const factLayer = makeFactLayer();
@@ -1540,7 +1683,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     (factLayer.invalidate as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('neo4j tx aborted mid-supersession'));
 
     mockExtractFacts.mockResolvedValue([
-      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+      { subject: 'auth-module', predicate: 'version_is', object: 'JWT', source_episode_ids: [] },
     ]);
 
     const service = new AMPService(makeRedis(), makeNeo4j({ fact: factLayer }), makeEmbedding(), makeConfig());
@@ -1548,6 +1691,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     // the background extraction swallows the invalidate rejection.
     await service.store({
       session_id: 'sess-fact-2b', agent_id: 'agent-1', task: 'refactor auth',
+      tags: ['project:test'],
       content: 'Migrated auth module to use JWT instead of session cookies',
     });
     await flushAsync(); // Wait for fire-and-forget extraction (it will reject internally)
@@ -1570,16 +1714,16 @@ describe('AMPService.store — real-time fact extraction', () => {
     // time: a pre-existing tentative contender, confirmed by an independent
     // episode, is promoted to active and the conflicting old fact is invalidated
     // with the SUPERSEDES_FACT linkage pointing at the (now-active) contender.
-    const established = makeFactNode({ id: 'fact-old', object: 'session-cookies', status: 'active' });
+    const established = makeFactNode({ predicate: 'version_is', id: 'fact-old', object: 'session-cookies', status: 'active' });
     const contender = makeFactNode({
-      id: 'fact-jwt', object: 'JWT', status: 'tentative',
+      predicate: 'version_is', id: 'fact-jwt', object: 'JWT', status: 'tentative',
       inference_type: 'deductive', confidence: 0.5, source_episode_ids: ['ep-old'],
     });
     const factLayer = makeFactLayer();
     (factLayer.findBySubjectPredicate as ReturnType<typeof vi.fn>).mockResolvedValue([established, contender]);
 
     mockExtractFacts.mockResolvedValue([
-      { subject: 'auth-module', predicate: 'uses', object: 'JWT', source_episode_ids: [] },
+      { subject: 'auth-module', predicate: 'version_is', object: 'JWT', source_episode_ids: [] },
     ]);
 
     const redis = makeRedis();
@@ -1588,6 +1732,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     await service.store({
       session_id: 'sess-fact-2c',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'refactor auth',
       content: 'Migrated auth module to use JWT instead of session cookies',
     });
@@ -1621,6 +1766,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     const input: EpisodeInput = {
       session_id: 'sess-fact-3',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'verify auth',
       content: 'Confirmed auth module uses JWT',
     };
@@ -1646,6 +1792,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     const input: EpisodeInput = {
       session_id: 'sess-fact-4',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'Content without fact extraction',
     };
@@ -1672,6 +1819,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     const input: EpisodeInput = {
       session_id: 'sess-fact-5',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'Content without fact layer',
     };
@@ -1700,6 +1848,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     const input: EpisodeInput = {
       session_id: 'sess-fact-6',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'Content where extraction fails',
     };
@@ -1743,6 +1892,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     const input: EpisodeInput = {
       session_id: 'sess-retry',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test task',
       content: 'Content that needs retries',
     };
@@ -1793,6 +1943,7 @@ describe('AMPService.store — real-time fact extraction', () => {
     const input: EpisodeInput = {
       session_id: 'sess-fact-7',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'document auth',
       content: 'Auth module uses JWT and depends on Redis for session caching',
     };
@@ -1831,6 +1982,7 @@ describe('AMPService.store — co-extracted fact linkage', () => {
     const input: EpisodeInput = {
       session_id: 'sess-co-1',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'document api',
       content: 'API module uses Express, implements REST, and has rate-limiting',
     };
@@ -1858,6 +2010,7 @@ describe('AMPService.store — co-extracted fact linkage', () => {
     const input: EpisodeInput = {
       session_id: 'sess-co-2',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'note',
       content: 'API uses Express',
     };
@@ -1885,6 +2038,7 @@ describe('AMPService.store — co-extracted fact linkage', () => {
     const input: EpisodeInput = {
       session_id: 'sess-co-3',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'note',
       content: 'API uses Express and has middleware',
     };
@@ -1904,12 +2058,14 @@ describe('AMPService.load — graph expansion', () => {
     const expandedNode = makeSemanticNode({
       id: 'sem-expanded',
       content: 'Related knowledge from graph neighbor',
-      tags: ['related-entity'],
+      tags: ['project:test', 'related-entity'],
+      scope: 'project:test',
     });
     const directNode = makeSemanticNode({
       id: 'sem-direct',
       content: 'Direct match for **auth-module** usage',
-      tags: ['auth-module'],
+      tags: ['project:test', 'auth-module'],
+      scope: 'project:test',
     });
 
     const expandByGraph = vi.fn().mockResolvedValue([expandedNode]);
@@ -1924,10 +2080,15 @@ describe('AMPService.load — graph expansion', () => {
     const embedding = makeEmbedding();
 
     const service = new AMPService(redis, neo4j, embedding, makeConfig());
-    const scope: LoadScope = { task: 'test expansion', max_tokens: 4000 };
+    const scope: LoadScope = {
+      task: 'test expansion', tags: ['project:test'], tenantId: 'tenant-a', max_tokens: 4000,
+    };
     const result = await service.load(scope);
 
     expect(expandByGraph).toHaveBeenCalledOnce();
+    expect(expandByGraph).toHaveBeenCalledWith(
+      ['auth-module'], 1, 5, undefined, 'tenant-a', 'project:test',
+    );
     // The expanded node should be included in the results
     expect(result.sources).toContain('sem-expanded');
     expect(result.sources).toContain('sem-direct');
@@ -2045,6 +2206,7 @@ describe('AMPService.store — staleness detection', () => {
     const input: EpisodeInput = {
       session_id: 'sess-stale-1',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'update auth docs',
       content: 'Auth module uses JWT and implements OAuth2',
     };
@@ -2084,6 +2246,7 @@ describe('AMPService.store — staleness detection', () => {
     const input: EpisodeInput = {
       session_id: 'sess-stale-2',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'note auth',
       content: 'Auth module uses JWT',
     };
@@ -2120,6 +2283,7 @@ describe('AMPService.store — staleness detection', () => {
     const input: EpisodeInput = {
       session_id: 'sess-stale-3',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'update auth',
       content: 'Auth uses JWT and implements OAuth2',
     };
@@ -2151,6 +2315,7 @@ describe('AMPService.store — staleness detection', () => {
     const input: EpisodeInput = {
       session_id: 'sess-stale-4',
       agent_id: 'agent-1',
+      tags: ['project:test'],
       task: 'test',
       content: 'Auth uses JWT and has tokens',
     };
@@ -2161,4 +2326,23 @@ describe('AMPService.store — staleness detection', () => {
     // Should not throw — facts still created
     expect(factLayer.create).toHaveBeenCalledTimes(2);
   });
+});
+
+
+it('forwards explicit load authority to both dense channels and reuses supplied vectors', async () => {
+  const embedding = makeEmbedding();
+  const neo4j = makeNeo4j();
+  neo4j.query.byVectorEpisodic = vi.fn().mockResolvedValue([]);
+  const service = new AMPService(makeRedis(), neo4j, embedding, makeConfig());
+  const scope = { task: 'scope-forwarding', tenantId: 'tenant-a', tags: ['project:memberry'] };
+  await service.load(scope);
+  expect(embedding.embed).toHaveBeenCalledTimes(2);
+  expect(embedding.embed).toHaveBeenNthCalledWith(1, scope.task, { tenantId: 'tenant-a', projectScope: 'project:memberry' });
+  expect(embedding.embed).toHaveBeenNthCalledWith(2, scope.task, { tenantId: 'tenant-a', projectScope: 'project:memberry' });
+  embedding.embed.mockClear();
+  await service.load({ ...scope, tags: ['project:one', 'project:two'] });
+  expect(embedding.embed).toHaveBeenLastCalledWith(scope.task);
+  embedding.embed.mockClear();
+  await service.load({ ...scope, queryVector: [0.1, 0.2] });
+  expect(embedding.embed).not.toHaveBeenCalled();
 });
